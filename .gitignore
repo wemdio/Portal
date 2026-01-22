@@ -36,3 +36,5 @@ app/next-env.d.ts
 
 # docs
 docs/*.xlsx
+
+.cursorrules
