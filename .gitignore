@@ -1,0 +1,38 @@
+# dependencies
+app/node_modules
+app/.pnp
+app/.pnp.*
+app/.yarn/*
+!app/.yarn/patches
+!app/.yarn/plugins
+!app/.yarn/releases
+!app/.yarn/versions
+
+# next.js
+app/.next/
+app/out/
+
+# production
+app/build
+
+# misc
+.DS_Store
+*.pem
+app/npm-debug.log*
+app/yarn-debug.log*
+app/yarn-error.log*
+app/.pnpm-debug.log*
+
+# env files (NEVER commit these in a real project, but for now we have hardcoded keys in code anyway)
+app/.env*
+app/env.local
+
+# vercel
+app/.vercel
+
+# typescript
+app/*.tsbuildinfo
+app/next-env.d.ts
+
+# docs
+docs/*.xlsx
