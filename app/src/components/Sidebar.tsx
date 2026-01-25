@@ -3,12 +3,13 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle } from 'lucide-react';
+import { Home, LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle, FileText } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
 const navItems = [
   { name: 'Проекты', href: '/', icon: FolderKanban },
   { name: 'Команда', href: '/team', icon: Users },
+  { name: 'Регламент', href: '/reglament', icon: FileText },
   { name: 'Админ', href: '/admin', icon: ShieldCheck, role: 'manager' }, // Only managers see this
   { name: 'Настройки', href: '/settings', icon: Settings },
 ];
