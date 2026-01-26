@@ -2423,74 +2423,125 @@ export default function ReglamentPage() {
             <h2 className="text-2xl font-bold text-gray-900">7. Создание кампаний</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                <strong>Видео про создание кампаний в Instantly:</strong><br />
-                <a href="https://youtu.be/Y-J2HEjtl1E" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://youtu.be/Y-J2HEjtl1E</a>
-              </p>
-              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mb-4">
-                <p className="text-gray-700">
-                  <strong>Поправка к видео:</strong> по поводу времени работы кампании - лучше всегда делать с 9 утра до 18 вечера, чтобы instantly точно успел отправить необходимое количество писем. (если в базе сборная солянка из городов, то лучше поставить до 3х дня по мск)
-                </p>
+          <div className="space-y-5">
+            {/* Видео */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
+                  <FileText className="h-5 w-5 text-indigo-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Видео про создание кампаний в Instantly</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    <a href="https://youtu.be/Y-J2HEjtl1E" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
+                      https://youtu.be/Y-J2HEjtl1E
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </p>
+                  <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4">
+                    <p className="text-sm text-amber-900">
+                      <span className="font-semibold">Поправка к видео:</span> по поводу времени работы кампании - лучше всегда делать с 9 утра до 18 вечера, чтобы instantly точно успел отправить необходимое количество писем. (если в базе сборная солянка из городов, то лучше поставить до 3х дня по мск)
+                    </p>
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                После того как мы добавили почты в instantly (пункт 5 в работе с почтами), собрали базу и написали цепочку, мы приступаем к созданию кампаний в instantly. Для этого переходим в соответствующую вкладку на сайте, нажимаем «+ADD NEW» и называем кампанию. Нас перебросит в окно «Leads», где нам необходимо импортировать базу емэйлов. Для этого жмем синюю кнопку «Import» → Emails Manually, вставляем список спарсеных емэйлов и жмем на кнопку «Import Emails».
-              </p>
-              <p className="text-gray-700 mb-3">
-                При добавлении контактов из Гугл Таблиц, выбираем google sheets (мы сейчас всегда импортируем через гугл таблицы)
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-import-options.png"
-                  alt="Опции импорта в Instantly"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 1: Создание кампании */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-indigo-200 transition-colors">1</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Создание кампании и импорт базы</h3>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    После того как мы добавили почты в instantly (пункт 5 в работе с почтами), собрали базу и написали цепочку, мы приступаем к созданию кампаний в instantly. Для этого переходим в соответствующую вкладку на сайте, нажимаем «+ADD NEW» и называем кампанию. Нас перебросит в окно «Leads», где нам необходимо импортировать базу емэйлов. Для этого жмем синюю кнопку «Import» → Emails Manually, вставляем список спарсеных емэйлов и жмем на кнопку «Import Emails».
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    При добавлении контактов из Гугл Таблиц, выбираем google sheets (мы сейчас всегда импортируем через гугл таблицы)
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-import-options.png"
+                      alt="Опции импорта в Instantly"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                После добавления базы емэйлов переходим во вкладку «Sequences», вписываем тему письма: Краткий запрос, вставляем и форматируем текст (добавляем ссылки в слова, выделяем жирным и убираем форматирование), затем нажимаем на шестеренку и вписываем количество дней ожидания. Обычно связка дней строится по системе: 1/3/5/7. Жмем «Save». В следующих письмах добавлять название темы не нужно. Чтобы добавить новое письмо жмем «Add step».
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-sequences-editor.png"
-                  alt="Редактор цепочки писем в Instantly"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 2: Sequences */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-indigo-200 transition-colors">2</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Настройка цепочки писем (Sequences)</h3>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    После добавления базы емэйлов переходим во вкладку «Sequences», вписываем тему письма: Краткий запрос, вставляем и форматируем текст (добавляем ссылки в слова, выделяем жирным и убираем форматирование), затем нажимаем на шестеренку и вписываем количество дней ожидания. Обычно связка дней строится по системе: 1/3/5/7. Жмем «Save». В следующих письмах добавлять название темы не нужно. Чтобы добавить новое письмо жмем «Add step».
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-sequences-editor.png"
+                      alt="Редактор цепочки писем в Instantly"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Чтобы убрать форматирование текста выделяем его и нажимаем как показано на скриншоте ниже:
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/3">
+                    <img 
+                      src="/images/clear-formatting-button.png"
+                      alt="Кнопка очистки форматирования"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Чтобы убрать форматирование текста выделяем его и нажимаем как показано на скриншоте ниже:
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
-                <img 
-                  src="/images/clear-formatting-button.png"
-                  alt="Кнопка очистки форматирования"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 3: Schedule */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-indigo-200 transition-colors">3</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Настройка расписания (Schedule)</h3>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    После того как все письма добавлены и сохранены переходим ко следующей вкладке «Schedule». Выбираем дни рассылки без выходных, устанавливаем временной пояс получателя и жмем «Save».
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-schedule-settings.png"
+                      alt="Настройки расписания в Instantly"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                После того как все письма добавлены и сохранены переходим ко следующей вкладке «Schedule». Выбираем дни рассылки без выходных, устанавливаем временной пояс получателя и жмем «Save».
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-schedule-settings.png"
-                  alt="Настройки расписания в Instantly"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700 mb-3">
-                В следующей вкладке «Options» выбираем аккаунты для рассылки, которые мы создали и добавили. В самом низу страницы не забываем сохранить. После того как все проделано, можно запускать по кнопке «Launch».
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-accounts-select.png"
-                  alt="Выбор аккаунтов для рассылки"
-                  className="w-full h-auto"
-                />
-              </div>
-              <div className="bg-red-50 border-l-4 border-red-500 p-4">
-                <p className="text-gray-700">
-                  <strong>Важный момент!</strong> Если пользователь отвечает на нашу рассылку, то он больше не будет получать письма из нее.
-                </p>
+            </div>
+
+            {/* Шаг 4: Options и запуск */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-green-200 transition-colors">4</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Выбор аккаунтов и запуск (Options)</h3>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    В следующей вкладке «Options» выбираем аккаунты для рассылки, которые мы создали и добавили. В самом низу страницы не забываем сохранить. После того как все проделано, можно запускать по кнопке «Launch».
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-accounts-select.png"
+                      alt="Выбор аккаунтов для рассылки"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <div className="bg-red-50 border-l-4 border-red-500 rounded-r-md p-4">
+                    <p className="text-sm text-red-900">
+                      <span className="font-semibold">Важный момент!</span> Если пользователь отвечает на нашу рассылку, то он больше не будет получать письма из нее.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2505,37 +2556,45 @@ export default function ReglamentPage() {
             <h2 className="text-2xl font-bold text-gray-900">7.1 Улучшение и проверка письма через инструменты instantly</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                Используйте эти функции, чтобы увеличить доставляемость и уменьшить фактор спама.
-              </p>
-              <p className="text-gray-700 mb-3">
-                Сделать это можно с помощью автоматической рандомизации частей письма
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-ai-tools.png"
-                  alt="AI Tools в Instantly"
-                  className="w-full h-auto"
-                />
+          <div className="space-y-5">
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-cyan-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-cyan-100 rounded-lg group-hover:bg-cyan-200 transition-colors">
+                  <CheckCircle2 className="h-5 w-5 text-cyan-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">AI Spintax Writer</h3>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    Используйте эти функции, чтобы увеличить доставляемость и уменьшить фактор спама. Сделать это можно с помощью автоматической рандомизации частей письма.
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-ai-tools.png"
+                      alt="AI Tools в Instantly"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-4">
+                    Выберите &quot;Ai spintax writer&quot;, эта функция автоматически найдёт части письма, которые можно разбавить несколькими синонимичными фразами, что очень снижает фактор спама.
+                  </p>
+                  <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4 mb-4">
+                    <p className="text-sm text-amber-900">
+                      <span className="font-semibold">ОБЯЗАТЕЛЬНО</span> перечитайте что вышло в итоге и удалите неграмотные варианты.
+                    </p>
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">Как выглядит в итоге:</p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-spintax-result.png"
+                      alt="Результат работы AI Spintax Writer"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed">
+                    И при отправлении будут случайным образом использоваться разные части синонимичных фраз, через кнопку preview можете посмотреть на результат, при каждом новом нажатии будет по сути новое сообщение.
+                  </p>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Выберите &quot;Ai spintax writer&quot;, эта функция автоматически найдёт части письма, которые можно разбавить несколькими синонимичными фразами, что очень снижает фактор спама. <strong>ОБЯЗАТЕЛЬНО</strong> перечитайте что вышло в итоге и удалите неграмотные варианты.
-              </p>
-              <p className="text-gray-700 mb-3">
-                Как выглядит в итоге:
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-spintax-result.png"
-                  alt="Результат работы AI Spintax Writer"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700">
-                И при отправлении будут случайным образом использоваться разные части синонимичных фраз, через кнопку preview можете посмотреть на результат, при каждом новом нажатии будет по сути новое сообщение.
-              </p>
             </div>
           </div>
         </section>
@@ -2549,70 +2608,97 @@ export default function ReglamentPage() {
             <h2 className="text-2xl font-bold text-gray-900">8. Добавление картинок в письмо в Instantly (через imgur)</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                Зайти в <a href="https://imgur.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://imgur.com</a>
-              </p>
-              <p className="text-gray-700 mb-3">
-                Можно залогинится через гугл со своей почтой или sorichev@polzaagency.ru
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/4">
-                <img 
-                  src="/images/imgur-login.png"
-                  alt="Вход в Imgur"
-                  className="w-full h-auto"
-                />
+          <div className="space-y-5">
+            {/* Шаг 1: Вход в Imgur */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-green-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-green-200 transition-colors">1</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Вход в Imgur</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Зайти в <a href="https://imgur.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://imgur.com <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Можно залогинится через гугл со своей почтой или sorichev@polzaagency.ru
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/4">
+                    <img 
+                      src="/images/imgur-login.png"
+                      alt="Вход в Imgur"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Загрузить изображение. Для этого нажимаем New post
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/imgur-new-post.png"
-                  alt="Кнопка New post в Imgur"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 2: Загрузка изображения */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-green-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-green-200 transition-colors">2</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Загрузка изображения</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Загрузить изображение. Для этого нажимаем New post
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/imgur-new-post.png"
+                      alt="Кнопка New post в Imgur"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Загрузите любым удобным способом изображение. После того как изображение будет загружено, копируйте ссылку на это изображение через нажатие по картинке правой кнопкой мыши, после чего &quot;скопировать адрес изображения&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/imgur-copy-link.png"
+                      alt="Копирование ссылки на изображение"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Загрузите любым удобным способом изображение. После того как изображение будет загружено, копируйте ссылку на это изображение через нажатие по картинке правой кнопкой мыши, после чего &quot;скопировать адрес изображения&quot;
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/imgur-copy-link.png"
-                  alt="Копирование ссылки на изображение"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700 mb-3">
-                Для того, чтобы добавить картинку в письмо, откройте more rich
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-more-rich.png"
-                  alt="Кнопка More rich в Instantly"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700 mb-3">
-                И выберете специальную функцию вставки изображения
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-insert-image-button.png"
-                  alt="Кнопка вставки изображения"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700 mb-3">
-                И вставьте ссылку
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
-                <img 
-                  src="/images/instantly-insert-image-url.png"
-                  alt="Вставка ссылки на изображение"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 3: Вставка в Instantly */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-green-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-green-200 transition-colors">3</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Вставка в письмо Instantly</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Для того, чтобы добавить картинку в письмо, откройте more rich
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-more-rich.png"
+                      alt="Кнопка More rich в Instantly"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    И выберете специальную функцию вставки изображения
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-insert-image-button.png"
+                      alt="Кнопка вставки изображения"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    И вставьте ссылку
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/3">
+                    <img 
+                      src="/images/instantly-insert-image-url.png"
+                      alt="Вставка ссылки на изображение"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2622,40 +2708,65 @@ export default function ReglamentPage() {
         <section id="instantly-unibox" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-violet-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <Mail className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">9. Проверка входящих и использование готовых шаблонов в Instantly</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                Чтобы проверять входящие можно использовать Unibox, но лучше скачать и настроить почтовый клиент (например Thunderbird), т.к. некоторые письма могут не доходить до юнибокса.
-              </p>
-              <p className="text-gray-700 mb-4">
-                Как создавать, сохранять шаблоны ответов в unibox, как отвечать на сообщения показали и рассказали в этом видео.
-              </p>
-              
-              <h4 className="font-semibold text-gray-700 mb-3">Какие могут примеры шаблонов:</h4>
-              
-              <div className="space-y-4">
-                <div className="bg-white border border-gray-200 rounded-lg p-4">
-                  <p className="text-gray-700">
-                    <strong>1.</strong> Когда мы отвечаем на первое письмо и меняем первую часть сообщения, например, вам ответили &quot;Что вы хотели предложить?/Что вы хотели?&quot; и т.п., и вы отвечаете не &quot;спасибо за ответ&quot; и дальше предложение, а &quot;Хочу рассказать подробнее о своем предложении, чтобы у вас осталась эта информация&quot; и после этого предложение идёт. То есть персонализируем как нам нужно, делаем пару таких вариантов и сохраняем такой шаблон.
-                  </p>
+          <div className="space-y-5">
+            {/* Общая информация */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-violet-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-violet-100 rounded-lg group-hover:bg-violet-200 transition-colors">
+                  <Mail className="h-5 w-5 text-violet-600" />
                 </div>
-                
-                <div className="bg-white border border-gray-200 rounded-lg p-4">
-                  <p className="text-gray-700">
-                    <strong>2.</strong> Когда нужно уточнить, какая информация нам нужна, например, вместо почты в ответ на первое письмо, вам прислали только номер телефона, в таком случае лучше сохранить себе такой шаблон: &quot;Можете, пожалуйста, прислать мне актуальную почту, чтобы я мог отправить свое предложение в текстовом формате? Заранее спасибо)&quot; - и не забываем подпись &quot;С уважением, ФИО&quot;
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Unibox и почтовые клиенты</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Чтобы проверять входящие можно использовать Unibox, но лучше скачать и настроить почтовый клиент (например Thunderbird), т.к. некоторые письма могут не доходить до юнибокса.
+                  </p>
+                  <p className="text-gray-700 leading-relaxed">
+                    Как создавать, сохранять шаблоны ответов в unibox, как отвечать на сообщения показали и рассказали в этом видео.
                   </p>
                 </div>
               </div>
+            </div>
 
-              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mt-4">
-                <p className="text-gray-700">
-                  <strong>Важный момент перед отправкой сообщения лиду:</strong> в переменную <span className="font-mono bg-gray-100 px-1 rounded">{"{{companyName}}"}</span> автоматически не подставляется название компании, его нужно менять вручную или вообще убирать и оставлять формулировку, например, &quot;в вашей компании&quot;, &quot;для вашей компании&quot; и т.п. (для экономии времени и удобства использования шаблонов лучше использовать второй вариант).
-                </p>
+            {/* Примеры шаблонов */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-violet-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-violet-100 rounded-lg group-hover:bg-violet-200 transition-colors">
+                  <FileText className="h-5 w-5 text-violet-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Какие могут быть примеры шаблонов:</h3>
+                  
+                  <div className="space-y-3">
+                    <div className="bg-white border border-gray-200 rounded-lg p-4 hover:border-violet-200 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-sm font-semibold">1</span>
+                        <p className="text-gray-700 leading-relaxed">
+                          Когда мы отвечаем на первое письмо и меняем первую часть сообщения, например, вам ответили &quot;Что вы хотели предложить?/Что вы хотели?&quot; и т.п., и вы отвечаете не &quot;спасибо за ответ&quot; и дальше предложение, а &quot;Хочу рассказать подробнее о своем предложении, чтобы у вас осталась эта информация&quot; и после этого предложение идёт. То есть персонализируем как нам нужно, делаем пару таких вариантов и сохраняем такой шаблон.
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="bg-white border border-gray-200 rounded-lg p-4 hover:border-violet-200 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-sm font-semibold">2</span>
+                        <p className="text-gray-700 leading-relaxed">
+                          Когда нужно уточнить, какая информация нам нужна, например, вместо почты в ответ на первое письмо, вам прислали только номер телефона, в таком случае лучше сохранить себе такой шаблон: &quot;Можете, пожалуйста, прислать мне актуальную почту, чтобы я мог отправить свое предложение в текстовом формате? Заранее спасибо)&quot; - и не забываем подпись &quot;С уважением, ФИО&quot;
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4 mt-4">
+                    <p className="text-sm text-amber-900">
+                      <span className="font-semibold">Важный момент перед отправкой сообщения лиду:</span> в переменную <span className="font-mono bg-white px-1 rounded border border-amber-200">{"{{companyName}}"}</span> автоматически не подставляется название компании, его нужно менять вручную или вообще убирать и оставлять формулировку, например, &quot;в вашей компании&quot;, &quot;для вашей компании&quot; и т.п. (для экономии времени и удобства использования шаблонов лучше использовать второй вариант).
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2665,27 +2776,35 @@ export default function ReglamentPage() {
         <section id="instantly-warmup-settings" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-pink-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <BarChart3 className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">10. Настройки прогрева в instantly для улучшения прогрева</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <div className="grid grid-cols-2 gap-4 mb-3">
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
-                  <img 
-                    src="/images/instantly-warmup-settings-1.png"
-                    alt="Настройки прогрева 1"
-                    className="w-full h-auto"
-                  />
+          <div className="space-y-5">
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-pink-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-pink-100 rounded-lg group-hover:bg-pink-200 transition-colors">
+                  <BarChart3 className="h-5 w-5 text-pink-600" />
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
-                  <img 
-                    src="/images/instantly-warmup-settings-2.png"
-                    alt="Настройки прогрева 2"
-                    className="w-full h-auto"
-                  />
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Рекомендуемые настройки прогрева</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img 
+                        src="/images/instantly-warmup-settings-1.png"
+                        alt="Настройки прогрева 1"
+                        className="w-full h-auto"
+                      />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img 
+                        src="/images/instantly-warmup-settings-2.png"
+                        alt="Настройки прогрева 2"
+                        className="w-full h-auto"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2695,80 +2814,130 @@ export default function ReglamentPage() {
         {/* Отложенный старт кампаний */}
         <section id="delayed-start" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-gray-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+            <div className="p-2 bg-slate-600 rounded-lg">
+              <Calendar className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">11. Отложенный старт кампаний</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                Как поставить кампании на паузу, например на время праздников, чтобы они автоматически начали работать утром нужного дня?
-              </p>
-              <p className="text-gray-700 mb-3">
-                В первую очередь ставим кампанию на паузу.
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-pause-campaign.png"
-                  alt="Пауза кампании"
-                  className="w-full h-auto"
-                />
+          <div className="bg-slate-50 rounded-lg p-4 mb-5 border border-slate-200">
+            <p className="text-gray-700 leading-relaxed">
+              Как поставить кампании на паузу, например на время праздников, чтобы они автоматически начали работать утром нужного дня?
+            </p>
+          </div>
+
+          <div className="space-y-5">
+            {/* Шаг 1 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-slate-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-slate-100 text-slate-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-slate-200 transition-colors">1</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Поставить кампанию на паузу</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    В первую очередь ставим кампанию на паузу.
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-pause-campaign.png"
+                      alt="Пауза кампании"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Далее во вкладке &quot;Schedule&quot; нажимаем &quot;Now&quot; напротив &quot;🗓Start&quot;
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-schedule-start.png"
-                  alt="Выбор даты старта"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 2 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-slate-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-slate-100 text-slate-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-slate-200 transition-colors">2</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Открыть настройки расписания</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Далее во вкладке &quot;Schedule&quot; нажимаем &quot;Now&quot; напротив &quot;🗓Start&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-schedule-start.png"
+                      alt="Выбор даты старта"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Ставим нужную дату запуска и жмём &quot;Apply&quot;
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
-                <img 
-                  src="/images/instantly-select-date.png"
-                  alt="Выбор даты в календаре"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 3 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-slate-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-slate-100 text-slate-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-slate-200 transition-colors">3</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Выбрать дату запуска</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Ставим нужную дату запуска и жмём &quot;Apply&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/3">
+                    <img 
+                      src="/images/instantly-select-date.png"
+                      alt="Выбор даты в календаре"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Теперь напротив &quot;Start&quot; стоит дата автоматического запуска
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-date-set.png"
+                      alt="Дата запуска установлена"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Теперь напротив &quot;Start&quot; стоит дата автоматического запуска
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-date-set.png"
-                  alt="Дата запуска установлена"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 4 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-slate-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-slate-100 text-slate-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-slate-200 transition-colors">4</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Сохранить настройки</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    После этого нужно сохранить кампанию (нажать Save внизу страницы)
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/3">
+                    <img 
+                      src="/images/instantly-save-schedule.png"
+                      alt="Сохранение настроек расписания"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                После этого нужно сохранить кампанию (нажать Save внизу страницы)
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
-                <img 
-                  src="/images/instantly-save-schedule.png"
-                  alt="Сохранение настроек расписания"
-                  className="w-full h-auto"
-                />
+            </div>
+
+            {/* Шаг 5 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-green-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-green-200 transition-colors">5</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Возобновить кампанию</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    И последнее: нужно нажать &quot;Resume campaign&quot; сверху справа страницы. Кампания запустится, но письма не будут отправляться до даты отложенного старта.
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-resume-campaign.png"
+                      alt="Возобновление кампании"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <div className="bg-green-50 border-l-4 border-green-500 rounded-r-md p-3">
+                    <p className="text-sm text-green-800 font-medium">Готово!</p>
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                И последнее: нужно нажать &quot;Resume campaign&quot; сверху справа страницы. Кампания запустится, но письма не будут отправляться до даты отложенного старта.
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-resume-campaign.png"
-                  alt="Возобновление кампании"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700">
-                Готово!
-              </p>
             </div>
           </div>
         </section>
@@ -2777,50 +2946,70 @@ export default function ReglamentPage() {
         <section id="spam-check" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-orange-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <Shield className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">12. Проверка заспамленности новых аккаунтов</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <h3 className="text-lg font-semibold mb-3 text-gray-800">Analytics в Instantly</h3>
-              <p className="text-gray-700 mb-3">
-                Заходим во вкладку Analytics в Instantly, снизу графиков нажимаем на Account Analytics
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/4">
-                <img 
-                  src="/images/instantly-analytics-menu.png"
-                  alt="Меню Account Analytics"
-                  className="w-full h-auto"
-                />
+          <div className="space-y-5">
+            {/* Analytics в Instantly */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-orange-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-orange-100 rounded-lg group-hover:bg-orange-200 transition-colors">
+                  <BarChart3 className="h-5 w-5 text-orange-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Analytics в Instantly</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Заходим во вкладку Analytics в Instantly, снизу графиков нажимаем на Account Analytics
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/4">
+                    <img 
+                      src="/images/instantly-analytics-menu.png"
+                      alt="Меню Account Analytics"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Справа над графиком выбираем время за которое хотим сравнивать аналитику аккаунтов. Обычно 7 дней достаточно чтобы сравнить пользователей по одному проекту, рассылки по которому активно работали последнее время.
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/instantly-analytics-period.png"
+                      alt="Выбор периода аналитики"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Дальше можно сравнить по параметрам почты с разных доменов которые работают в одинаковых кампаниях. Если параметры примерно одинаковые - значит здоровье (спамность) доменов близки друг к другу.
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/instantly-analytics-comparison.png"
+                      alt="Сравнение параметров почт"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
               </div>
-              <p className="text-gray-700 mb-3">
-                Справа над графиком выбираем время за которое хотим сравнивать аналитику аккаунтов. Обычно 7 дней достаточно чтобы сравнить пользователей по одному проекту, рассылки по которому активно работали последнее время.
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
-                <img 
-                  src="/images/instantly-analytics-period.png"
-                  alt="Выбор периода аналитики"
-                  className="w-full h-auto"
-                />
-              </div>
-              <p className="text-gray-700 mb-3">
-                Дальше можно сравнить по параметрам почты с разных доменов которые работают в одинаковых кампаниях. Если параметры примерно одинаковые - значит здоровье (спамность) доменов близки друг к другу.
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-4 w-1/2">
-                <img 
-                  src="/images/instantly-analytics-comparison.png"
-                  alt="Сравнение параметров почт"
-                  className="w-full h-auto"
-                />
-              </div>
+            </div>
 
-              <h3 className="text-lg font-semibold mb-3 text-gray-800">Postmaster</h3>
-              <p className="text-gray-700">
-                <a href="https://postmaster.mail.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://postmaster.mail.ru/</a> <br />
-                С помощью этого сервиса можно оценить доставляемость на почты mail.ru в абсолютных значениях, и просматривать статистику по доменам.
-              </p>
+            {/* Postmaster */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-orange-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-orange-100 rounded-lg group-hover:bg-orange-200 transition-colors">
+                  <Globe className="h-5 w-5 text-orange-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Postmaster</h3>
+                  <p className="text-gray-700 leading-relaxed">
+                    <a href="https://postmaster.mail.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://postmaster.mail.ru/ <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mt-2">
+                    С помощью этого сервиса можно оценить доставляемость на почты mail.ru в абсолютных значениях, и просматривать статистику по доменам.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -2829,13 +3018,13 @@ export default function ReglamentPage() {
         <section id="linkedin" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-blue-700 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <Users className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">LinkedIn</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
+          <div className="space-y-5">
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-blue-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <p className="text-gray-700 mb-3">
                 В начале регистрируем на сайте линкедин новый аккаунт (либо запрашиваем у заказчика доступы в его уже существующий аккаунт). Если аккаунт новый - его необходимо “прогреть” хотя бы 5 дней (прогрев - это просто количество дней, которое аккаунт существует). Регистрация там обычная, как в любой другой соц сети.
               </p>
@@ -2872,47 +3061,51 @@ export default function ReglamentPage() {
         <section id="linkedin-personalization" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-blue-500 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <User className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Персонализация LinkedIn</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-gray-700 mb-3">
-                Если у вас есть таблица с данными от Sales Navigator, то можно сделать личные персонализированные письма. Для этого чистим информацию в таблице от лишних технических колонок (id, даты, метки, теги, пустые колонки) и оставляем самые важные:
-              </p>
-              <ul className="list-disc list-inside text-gray-700 mb-3 pl-4 font-mono text-sm">
-                <li>profile_url</li>
-                <li>current_company</li>
-                <li>first_name</li>
-                <li>last_name</li>
-                <li>email</li>
-                <li>location_name</li>
-                <li>summary</li>
-                <li>current_company_position</li>
-                <li>skills</li>
-              </ul>
-              <p className="text-gray-700 mb-3">
-                Можно оставить и больше информации о человеке. Теперь открываем ChatGPT и вставляем вот такой промпт:
-              </p>
-              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
-                <code className="text-sm text-gray-800 whitespace-pre-wrap">
-                  Write a little compliment based on the person&apos;s latest linkedin profile information. Write in a more human way in my first person and in a more conversational style. Use &quot;you&quot; to refer to him. No more than 30 words. Example of a compliment: &quot;Hey! I&apos;ve been following your work for quite a while with XYZ company, loved the article you shared regarding your expansion to the US.&quot;
+          <div className="space-y-5">
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-blue-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-blue-100 rounded-lg group-hover:bg-blue-200 transition-colors">
+                  <User className="h-5 w-5 text-blue-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание персонализированных писем</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Если у вас есть таблица с данными от Sales Navigator, то можно сделать личные персонализированные письма. Для этого чистим информацию в таблице от лишних технических колонок (id, даты, метки, теги, пустые колонки) и оставляем самые важные:
+                  </p>
+                  <div className="bg-white border border-gray-200 rounded-lg p-3 mb-4">
+                    <div className="grid grid-cols-3 gap-2 font-mono text-sm">
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">profile_url</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">current_company</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">first_name</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">last_name</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">email</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">location_name</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">summary</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">current_company_position</span>
+                      <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">skills</span>
+                    </div>
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Можно оставить и больше информации о человеке. Теперь открываем ChatGPT и вставляем вот такой промпт:
+                  </p>
+                  <div className="bg-slate-800 rounded-lg p-4 mb-4 overflow-x-auto">
+                    <code className="text-sm text-slate-100 whitespace-pre-wrap">Write a little compliment based on the person&apos;s latest linkedin profile information. Write in a more human way in my first person and in a more conversational style. Use &quot;you&quot; to refer to him. No more than 30 words. Example of a compliment: &quot;Hey! I&apos;ve been following your work for quite a while with XYZ company, loved the article you shared regarding your expansion to the US.&quot;
 
-                  Here&apos;s the profile of the person you want to compliment:
-                  [место для информации о лиде]
-                </code>
-              </div>
-              <p className="text-gray-700 mb-3">
-                Теперь в нашей таблице копируем целую строку со всеми данными о человеке (только не копируем саму ячейку куда будет выводится ответ, иначе будет бесконечно по кругу обновляться) и вставляем ее в конец нашего промпта в «место для информации о лиде». От результата можно убрать приветствие и самое последнее предложение по типу: «Keep up the great work!». Записываем его в новую колонку «Personalization» нашей таблицы. Должно получиться примерно так:
-              </p>
-              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-full">
-                <img 
-                  src="/images/linkedin-personalization-table.png"
-                  alt="Пример таблицы с персонализацией"
-                  className="w-full h-auto"
-                />
+Here&apos;s the profile of the person you want to compliment:
+[место для информации о лиде]</code>
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Теперь в нашей таблице копируем целую строку со всеми данными о человеке (только не копируем саму ячейку куда будет выводится ответ, иначе будет бесконечно по кругу обновляться) и вставляем ее в конец нашего промпта в «место для информации о лиде». От результата можно убрать приветствие и самое последнее предложение по типу: «Keep up the great work!». Записываем его в новую колонку «Personalization» нашей таблицы. Должно получиться примерно так:
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-full">
+                    <img src="/images/linkedin-personalization-table.png" alt="Пример таблицы с персонализацией" className="w-full h-auto" />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2922,102 +3115,534 @@ export default function ReglamentPage() {
         <section id="english-sources" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-indigo-700 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              <Globe className="h-6 w-6 text-white" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Работа с англ источниками в целом</h2>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-gray-50 rounded-lg p-4">
-              <div className="space-y-2 mb-6">
-                <p className="text-gray-700">
-                  <strong>Регламент по аполло:</strong> <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro</a>
-                </p>
-                <p className="text-gray-700">
-                  <strong>Видео про работу с аполло и аутскрепер (сбор баз с гугл карт):</strong> <a href="https://drive.google.com/file/d/1Fk03xRGx6sywRU4S-WysmZEqfqB9SwIk/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">2024-10-28 17.47.12.mp4</a>
-                </p>
-                <p className="text-gray-700">
-                  <strong>Регламент по цепочкам (Notion, нужен VPN):</strong> <a href="https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0</a>
-                </p>
-                <p className="text-gray-700">
-                  <strong>Примеры цепочек на англ рынок:</strong> <a href="https://docs.google.com/document/d/1UfMvEW5XH1SaV_5YMtIFc_BCCdpvEX6ZCcjPZUP0BTA/edit#heading=h.mj8nf2lc976n" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Примеры заруб. офферов</a>
-                </p>
+          <div className="space-y-5">
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
+                  <FileText className="h-5 w-5 text-indigo-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Полезные материалы</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
+                      <p className="text-gray-700"><strong>Регламент по аполло:</strong> <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть документ <ExternalLink className="h-3 w-3" /></a></p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
+                      <p className="text-gray-700"><strong>Видео про работу с аполло и аутскрепер:</strong> <a href="https://drive.google.com/file/d/1Fk03xRGx6sywRU4S-WysmZEqfqB9SwIk/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Смотреть видео <ExternalLink className="h-3 w-3" /></a></p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
+                      <p className="text-gray-700"><strong>Регламент по цепочкам (Notion, нужен VPN):</strong> <a href="https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть в Notion <ExternalLink className="h-3 w-3" /></a></p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
+                      <p className="text-gray-700"><strong>Примеры цепочек на англ рынок:</strong> <a href="https://docs.google.com/document/d/1UfMvEW5XH1SaV_5YMtIFc_BCCdpvEX6ZCcjPZUP0BTA/edit#heading=h.mj8nf2lc976n" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Примеры заруб. офферов <ExternalLink className="h-3 w-3" /></a></p>
+                    </div>
+                  </div>
+                  <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4 mt-4">
+                    <p className="text-sm text-amber-900">
+                      <span className="font-semibold">Внимание!</span> У аполло изменился интерфейс! Основные принципы работы с фильтрами остались те же - изменился процесс сохранения поисковой выборки и расположение некоторых элементов.
+                    </p>
+                  </div>
+                </div>
               </div>
+            </div>
 
-              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mb-4">
-                <p className="text-gray-700 font-bold">
-                  !У аполло изменился интерфейс!
-                </p>
-                <p className="text-gray-700">
-                  (основные принципы работы с фильтрами остались те же - изменился процесс сохранения поисковой выборки и расположение некоторых элементов)
-                </p>
-              </div>
+            {/* Как сохранять новый поиск */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
+                  <Database className="h-5 w-5 text-indigo-600" />
+                </div>
+                <div className="flex-1">
 
-              <h3 className="text-lg font-semibold mb-3 text-gray-800">Как сохранять новый поиск:</h3>
+              <h3 className="font-semibold text-gray-900 mb-3 text-lg">Как сохранять новый поиск</h3>
               <p className="text-gray-700 mb-3">
                 Когда вы зайдете в аполло и перейдете в поиск, там сразу откроется какой-то из уже сохраненных поисков. Его редактировать нельзя, так как это чья-то выборка. Сначала нужно нажать на название выборки наверху. Выпадет список всех сохраненных поисков, там нужно будет нажать на кнопку “create saved search”, справа откроется окно настроек. Там нужно ввести название новой выборки (лучше название проекта и какие-то детали, по тому же принципу, как мы называем базы). Затем удалить существующие фильтры в новом поиске, чтобы он был без предыдущих настроек. После этого новый поиск создастся.
               </p>
               
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-search-dropdown.png" alt="Выпадающее меню поиска Apollo" className="w-full h-auto" />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-create-search.png" alt="Создание нового поиска в Apollo" className="w-full h-auto" />
+                    </div>
+                  </div>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img src="/images/apollo-search-settings.png" alt="Настройки поиска Apollo" className="w-full h-auto" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Как сохранять выборки в листы */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
+                  <FileText className="h-5 w-5 text-indigo-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Как теперь сохранять выборки в листы</h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-select-number.png" alt="Выбор количества контактов" className="w-full h-auto" />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-save-button.png" alt="Кнопка сохранения" className="w-full h-auto" />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-save-dialog.png" alt="Диалог сохранения" className="w-full h-auto" />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow">
+                      <img src="/images/apollo-save-confirmation.png" alt="Подтверждение сохранения" className="w-full h-auto" />
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white hover:shadow-md transition-shadow md:col-span-2 w-1/2">
+                      <img src="/images/apollo-lists-view.png" alt="Просмотр списков" className="w-full h-auto" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Установка анонимного браузера (для подключения к chat gpt) */}
+        <section id="adspower-setup" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="p-2 bg-blue-500 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Установка анонимного браузера (для подключения к chat gpt)</h2>
+          </div>
+
+          <div className="space-y-8">
+            
+            {/* Шаг 1 */}
+            <div className="flex gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold text-lg">1</div>
+              <div className="flex-grow pt-1">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Регистрация и скачивание</h3>
+                <p className="text-gray-700 mb-3">
+                  Перейдите по ссылке на регистрацию и скачивания браузера <a href="https://www.adspower.com/ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://www.adspower.com/ru/</a>
+                </p>
+                <p className="text-gray-700 mb-4">
+                  Нажмите “Регистрация”. Пройдите регистрацию.
+                </p>
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
                   <img 
-                    src="/images/apollo-search-dropdown.png"
-                    alt="Выпадающее меню поиска Apollo"
+                    src="/images/adspower-registration.png"
+                    alt="Регистрация в AdsPower"
                     className="w-full h-auto"
                   />
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                <p className="text-gray-700">
+                  После того, как вы зарегистрировали аккаунт скачайте браузер <a href="https://www.adspower.com/ru/download" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">по этой ссылке</a>. Установите его и войдите под своими данными.
+                </p>
+              </div>
+            </div>
+
+            {/* Шаг 2 */}
+            <div className="flex gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold text-lg">2</div>
+              <div className="flex-grow pt-1">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Настройка прокси</h3>
+                <p className="text-gray-700 mb-3">
+                  Войдя в браузер выберите вкладку <strong>“Прокси”</strong>.
+                </p>
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
                   <img 
-                    src="/images/apollo-create-search.png"
-                    alt="Создание нового поиска в Apollo"
+                    src="/images/adspower-proxy-tab.png"
+                    alt="Вкладка Прокси в AdsPower"
                     className="w-full h-auto"
                   />
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white md:col-span-2 w-1/2">
+                <p className="text-gray-700 mb-3">
+                  Нажмите <strong>“Добавить прокси”</strong>. Вставьте следующие данные:
+                </p>
+                
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-4">
+                  <div className="font-mono text-sm text-slate-800 mb-2 bg-white p-2 rounded border border-slate-100">
+                    154.81.199.122:63310:VtVmt51R:7GnJr2Yb
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm text-gray-600">
+                    <div className="flex justify-between border-b border-slate-200 pb-1">
+                      <span>IP:</span> <span className="font-mono text-slate-800">154.81.199.122</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-200 pb-1">
+                      <span>Порт:</span> <span className="font-mono text-slate-800">63310</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-200 pb-1">
+                      <span>Логин:</span> <span className="font-mono text-slate-800">VtVmt51R</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-200 pb-1">
+                      <span>Пароль:</span> <span className="font-mono text-slate-800">7GnJr2Yb</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
                   <img 
-                    src="/images/apollo-search-settings.png"
-                    alt="Настройки поиска Apollo"
+                    src="/images/adspower-add-proxy.png"
+                    alt="Добавление прокси в AdsPower"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <p className="text-gray-700">
+                  После ввода данных нажмите <strong>“ОК”</strong>.
+                </p>
+              </div>
+            </div>
+
+            {/* Шаг 3 */}
+            <div className="flex gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold text-lg">3</div>
+              <div className="flex-grow pt-1">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Создание профиля</h3>
+                <p className="text-gray-700 mb-3">
+                  Нажмите <strong>“Новый профиль”</strong>.
+                </p>
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <img 
+                    src="/images/adspower-new-profile.png"
+                    alt="Создание нового профиля в AdsPower"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <p className="text-gray-700 mb-3">
+                  Пролистните чуть ниже и в поле выбора прокси выберите <strong>“сохраненные прокси”</strong>, а затем выберите тот прокси, который вы только что добавили.
+                </p>
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <img 
+                    src="/images/adspower-select-proxy.png"
+                    alt="Выбор прокси в AdsPower"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <p className="text-gray-700">
+                  После выбора прокси нажмите <strong>“Ок”</strong> для создания профиля.
+                </p>
+              </div>
+            </div>
+
+            {/* Шаг 4 */}
+            <div className="flex gap-4">
+              <div className="flex-shrink-0 w-8 h-8 bg-green-100 text-green-600 rounded-full flex items-center justify-center font-bold text-lg">4</div>
+              <div className="flex-grow pt-1">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Запуск</h3>
+                <p className="text-gray-700 mb-3">
+                  Чтобы запустить браузер, нажмите кнопку <strong>“Открыть”</strong> напротив созданного профиля.
+                </p>
+                <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <img 
+                    src="/images/adspower-open-profile.png"
+                    alt="Запуск профиля в AdsPower"
                     className="w-full h-auto"
                   />
                 </div>
               </div>
+            </div>
 
-              <h3 className="text-lg font-semibold mb-3 text-gray-800">Как теперь сохранять выборки в листы:</h3>
-              <div className="space-y-4">
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
-                  <img 
-                    src="/images/apollo-select-number.png"
-                    alt="Выбор количества контактов"
-                    className="w-full h-auto"
-                  />
+          </div>
+        </section>
+
+        {/* Как обойти запрет ВПН в РФ */}
+        <section id="vpn-bypass" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-emerald-600 rounded-lg">
+              <Shield className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Как обойти запрет ВПН в РФ</h2>
+          </div>
+
+          <div className="space-y-5">
+            {/* Шаг 1 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-emerald-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-emerald-200 transition-colors">1</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Скачать расширение</h3>
+                  <p className="text-gray-700 leading-relaxed">
+                    Скачайте расширение <a href="https://chromewebstore.google.com/detail/proxycontrol-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80-%D0%B4%D0%BB%D1%8F/hjocpjdeacglfchomobaagbmipeggnjg" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">ProxyControl <ExternalLink className="h-3 w-3" /></a>
+                  </p>
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
-                  <img 
-                    src="/images/apollo-save-button.png"
-                    alt="Кнопка сохранения"
-                    className="w-full h-auto"
-                  />
+              </div>
+            </div>
+
+            {/* Шаг 2 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-emerald-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-emerald-200 transition-colors">2</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Найти свой прокси</h3>
+                  <p className="text-gray-700 leading-relaxed">
+                    Найдите в этой таблице своё имя и скопируйте содержимое столбца &quot;Информация о Прокси&quot; в <a href="https://docs.google.com/spreadsheets/d/14EJWqsVsikR2agW2c-Z66J1IHK5Ep05u5uR3Wy1cwBc/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Таблица прокси <ExternalLink className="h-3 w-3" /></a>
+                  </p>
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
-                  <img 
-                    src="/images/apollo-save-dialog.png"
-                    alt="Диалог сохранения"
-                    className="w-full h-auto"
-                  />
+              </div>
+            </div>
+
+            {/* Шаг 3 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-emerald-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-emerald-200 transition-colors">3</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Открыть настройки</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Откройте расширение и нажмите на &quot;Перейти к настройкам&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/proxy-settings.png"
+                      alt="Настройки прокси расширения"
+                      className="w-full h-auto"
+                    />
+                  </div>
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
-                  <img 
-                    src="/images/apollo-save-confirmation.png"
-                    alt="Подтверждение сохранения"
-                    className="w-full h-auto"
-                  />
+              </div>
+            </div>
+
+            {/* Шаг 4 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-emerald-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-emerald-200 transition-colors">4</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Добавить прокси</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    На появившейся странице вставьте скопированные данные о прокси в &quot;добавить новый прокси&quot; и нажмите кнопку &quot;добавить новый прокси&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-1/2">
+                    <img 
+                      src="/images/proxy-add.png"
+                      alt="Добавление нового прокси"
+                      className="w-full h-auto"
+                    />
+                  </div>
                 </div>
-                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
-                  <img 
-                    src="/images/apollo-lists-view.png"
-                    alt="Просмотр списков"
-                    className="w-full h-auto"
-                  />
+              </div>
+            </div>
+
+            {/* Шаг 5 */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-emerald-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center font-bold text-lg group-hover:bg-emerald-200 transition-colors">5</div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Выбрать и включить прокси</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Выберите добавленный прокси
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-1/2">
+                    <img 
+                      src="/images/proxy-select.png"
+                      alt="Выбор прокси"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Нажмите &quot;включить прокси&quot;
+                  </p>
+                  <p className="text-gray-700 leading-relaxed">
+                    Проверьте работает ли прокси зайдя на заблокированный в рф сайт или проверьте айпи в <a href="https://2ip.ru" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://2ip.ru <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Рекомендации по оптимизации рабочих процессов */}
+        <section id="workflow-optimization" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-purple-600 rounded-lg">
+              <CheckCircle2 className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Рекомендации по оптимизации рабочих процессов</h2>
+          </div>
+
+          <div className="space-y-5">
+            {/* Общая рекомендация */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <AlertCircle className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Используйте нейросети</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Общая рекомендация - не стесняйтесь обращаться к нейросетям за ЛЮБОЙ ПОМОЩЬЮ, помните, если какую-то задачу можно автоматизировать нейросети ваш лучший друг.
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-blue-600 hover:text-blue-800 hover:border-blue-300 transition-colors font-medium text-sm">ChatGPT <ExternalLink className="h-3 w-3" /></a>
+                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-blue-600 hover:text-blue-800 hover:border-blue-300 transition-colors font-medium text-sm">Google AI Studio <ExternalLink className="h-3 w-3" /></a>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Помощник по работе */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <BookOpen className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Помощник по работе</h3>
+                  <p className="text-gray-700 leading-relaxed">
+                    Вы можете воспользоваться промтом, в который загружен регламент + этот промт подскажет как возможно решить вашу проблему. <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%2211rLQ7FGpT1lY8SH8U3IDj9_neuCMXdiG%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт помощника <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Чистка базы */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <Database className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Чистка базы: Очистка сайтов до доменов</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Выделите столбец с сайтами, который нужно обработать в домены. И примените скрипт:
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                    <img 
+                      src="/images/domain-cleanup-script.png"
+                      alt="Скрипт для очистки сайтов до доменов"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Сопоставление компаний */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <FileText className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Сопоставление названий компаний с email по сайтам</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Чтобы быстро сопоставить email с названиями, поместите в:
+                  </p>
+                  <ul className="space-y-1 mb-4">
+                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец A - названия</li>
+                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец B - ссылки</li>
+                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец D - почты, полученные после парсинга</li>
+                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец E - домены на которых были найдены почты при парсинге</li>
+                  </ul>
+                  <p className="text-gray-700 leading-relaxed mb-3">Вот как это должно выглядеть:</p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/company-email-table.png" alt="Пример таблицы для сопоставления" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    После, примените скрипт для сопоставления, он перенесет названия из столбца A в столбец F в соответствии с доменами из столбцов B и E
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/matching-script.png" alt="Скрипт для сопоставления компаний" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">Итог работы скрипта:</p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                    <img src="/images/matching-result.png" alt="Результат работы скрипта" className="w-full h-auto" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Сокращение названий */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <FileText className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Сокращение названий</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Чтобы быстро сократить названия и привести их нужный формат для рассылки используйте этот промт gemini - сейчас работает очень круто! (если работает плохо, или названия это длинное описание, то вставляйте по 300 строк за раз)
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221Vqgv-oZNratrt5i07UVoMprUEAC2wbx2%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт для сокращения названий <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Для использования поставьте модель Gemini 2.0 flash (также можете экспериментировать с другими версиями языковой модели)
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                    <img src="/images/name-shortening.png" alt="Настройка модели Gemini для сокращения названий" className="w-full h-auto" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Написание оффера */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <Mail className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Написание оффера</h3>
+                  <p className="text-sm text-gray-500 mb-3">Обновленный промт джемини для написания цепочки</p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Сейчас нейросети могут практически за вас написать оффер, или дать основу для оффера и идеи для него. В этом промте вы также можете просить модель улучшить или что-то переработать.
+                  </p>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221nuzMhi8pHPInt8QXomt9AO3g-aeVG053%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт для написания оффера <ExternalLink className="h-3 w-3" /></a>
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/offer-writing.png" alt="Интерфейс написания оффера в Gemini" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Полученный оффер вы также можете попробовать улучшить через <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">ChatGPT <ExternalLink className="h-3 w-3" /></a> использовав новую модель o-1 (но число запросов ограничено так что используйте 1-2 запроса на o-1, а потом переходите на модель 4о), запросив: &quot;Изучи бриф и улучши мои письма для цепочки аутрич писем&quot; и приложите бриф с вашей цепочкой
+                  </p>
+                  <p className="text-gray-700 leading-relaxed">
+                    Также можете запросить нейросети предложить идеи для вашего оффера
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Ответы на письма */}
+            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+              <div className="flex items-start gap-4">
+                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
+                  <Mail className="h-5 w-5 text-purple-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Ответы на письма: Использование макросов</h3>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    Для того, чтобы быстро и эффективно отвечать на письма, пользуйтесь функцией макросов
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/reply-macro-button.png" alt="Кнопка Reply Macro в интерфейсе Unibox" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    И нажмите создать, &quot;create&quot;
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/reply-macros-create.png" alt="Окно создания макроса" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    В сообщении можете использовать переменные и email, куда должна идти пересылка, чтобы постоянно не указывать её. Можете сделать несколько шаблонов, например, один на обычные ответы, второй для пересылки, НО обязательно перепроверяйте правильно встали ваши переменные, такие как названия компании, имя и т.д
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                    <img src="/images/create-macro.png" alt="Создание нового макроса с переменными" className="w-full h-auto" />
+                  </div>
+                  <p className="text-gray-700 leading-relaxed mb-3">
+                    После нажимайте, &quot;Save&quot; и можете использовать ваш макрос, найдя его в общем поиске
+                  </p>
+                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                    <img src="/images/macro-list.png" alt="Список макросов для использования" className="w-full h-auto" />
+                  </div>
                 </div>
               </div>
             </div>
