@@ -2495,6 +2495,534 @@ export default function ReglamentPage() {
             </div>
           </div>
         </section>
+
+        {/* Улучшение и проверка письма через инструменты instantly */}
+        <section id="instantly-ai-tools" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-cyan-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">7.1 Улучшение и проверка письма через инструменты instantly</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Используйте эти функции, чтобы увеличить доставляемость и уменьшить фактор спама.
+              </p>
+              <p className="text-gray-700 mb-3">
+                Сделать это можно с помощью автоматической рандомизации частей письма
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-ai-tools.png"
+                  alt="AI Tools в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Выберите &quot;Ai spintax writer&quot;, эта функция автоматически найдёт части письма, которые можно разбавить несколькими синонимичными фразами, что очень снижает фактор спама. <strong>ОБЯЗАТЕЛЬНО</strong> перечитайте что вышло в итоге и удалите неграмотные варианты.
+              </p>
+              <p className="text-gray-700 mb-3">
+                Как выглядит в итоге:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-spintax-result.png"
+                  alt="Результат работы AI Spintax Writer"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700">
+                И при отправлении будут случайным образом использоваться разные части синонимичных фраз, через кнопку preview можете посмотреть на результат, при каждом новом нажатии будет по сути новое сообщение.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* Добавление картинок в письмо в Instantly (через imgur) */}
+        <section id="instantly-images" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-green-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">8. Добавление картинок в письмо в Instantly (через imgur)</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Зайти в <a href="https://imgur.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://imgur.com</a>
+              </p>
+              <p className="text-gray-700 mb-3">
+                Можно залогинится через гугл со своей почтой или sorichev@polzaagency.ru
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/4">
+                <img 
+                  src="/images/imgur-login.png"
+                  alt="Вход в Imgur"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Загрузить изображение. Для этого нажимаем New post
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/imgur-new-post.png"
+                  alt="Кнопка New post в Imgur"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Загрузите любым удобным способом изображение. После того как изображение будет загружено, копируйте ссылку на это изображение через нажатие по картинке правой кнопкой мыши, после чего &quot;скопировать адрес изображения&quot;
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/imgur-copy-link.png"
+                  alt="Копирование ссылки на изображение"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Для того, чтобы добавить картинку в письмо, откройте more rich
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-more-rich.png"
+                  alt="Кнопка More rich в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                И выберете специальную функцию вставки изображения
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-insert-image-button.png"
+                  alt="Кнопка вставки изображения"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                И вставьте ссылку
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/instantly-insert-image-url.png"
+                  alt="Вставка ссылки на изображение"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Проверка входящих и использование готовых шаблонов в Instantly */}
+        <section id="instantly-unibox" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-violet-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">9. Проверка входящих и использование готовых шаблонов в Instantly</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Чтобы проверять входящие можно использовать Unibox, но лучше скачать и настроить почтовый клиент (например Thunderbird), т.к. некоторые письма могут не доходить до юнибокса.
+              </p>
+              <p className="text-gray-700 mb-4">
+                Как создавать, сохранять шаблоны ответов в unibox, как отвечать на сообщения показали и рассказали в этом видео.
+              </p>
+              
+              <h4 className="font-semibold text-gray-700 mb-3">Какие могут примеры шаблонов:</h4>
+              
+              <div className="space-y-4">
+                <div className="bg-white border border-gray-200 rounded-lg p-4">
+                  <p className="text-gray-700">
+                    <strong>1.</strong> Когда мы отвечаем на первое письмо и меняем первую часть сообщения, например, вам ответили &quot;Что вы хотели предложить?/Что вы хотели?&quot; и т.п., и вы отвечаете не &quot;спасибо за ответ&quot; и дальше предложение, а &quot;Хочу рассказать подробнее о своем предложении, чтобы у вас осталась эта информация&quot; и после этого предложение идёт. То есть персонализируем как нам нужно, делаем пару таких вариантов и сохраняем такой шаблон.
+                  </p>
+                </div>
+                
+                <div className="bg-white border border-gray-200 rounded-lg p-4">
+                  <p className="text-gray-700">
+                    <strong>2.</strong> Когда нужно уточнить, какая информация нам нужна, например, вместо почты в ответ на первое письмо, вам прислали только номер телефона, в таком случае лучше сохранить себе такой шаблон: &quot;Можете, пожалуйста, прислать мне актуальную почту, чтобы я мог отправить свое предложение в текстовом формате? Заранее спасибо)&quot; - и не забываем подпись &quot;С уважением, ФИО&quot;
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mt-4">
+                <p className="text-gray-700">
+                  <strong>Важный момент перед отправкой сообщения лиду:</strong> в переменную <span className="font-mono bg-gray-100 px-1 rounded">{"{{companyName}}"}</span> автоматически не подставляется название компании, его нужно менять вручную или вообще убирать и оставлять формулировку, например, &quot;в вашей компании&quot;, &quot;для вашей компании&quot; и т.п. (для экономии времени и удобства использования шаблонов лучше использовать второй вариант).
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Настройки прогрева в instantly для улучшения прогрева */}
+        <section id="instantly-warmup-settings" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-pink-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">10. Настройки прогрева в instantly для улучшения прогрева</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <div className="grid grid-cols-2 gap-4 mb-3">
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                  <img 
+                    src="/images/instantly-warmup-settings-1.png"
+                    alt="Настройки прогрева 1"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                  <img 
+                    src="/images/instantly-warmup-settings-2.png"
+                    alt="Настройки прогрева 2"
+                    className="w-full h-auto"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Отложенный старт кампаний */}
+        <section id="delayed-start" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-gray-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">11. Отложенный старт кампаний</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Как поставить кампании на паузу, например на время праздников, чтобы они автоматически начали работать утром нужного дня?
+              </p>
+              <p className="text-gray-700 mb-3">
+                В первую очередь ставим кампанию на паузу.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-pause-campaign.png"
+                  alt="Пауза кампании"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Далее во вкладке &quot;Schedule&quot; нажимаем &quot;Now&quot; напротив &quot;🗓Start&quot;
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-schedule-start.png"
+                  alt="Выбор даты старта"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Ставим нужную дату запуска и жмём &quot;Apply&quot;
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/instantly-select-date.png"
+                  alt="Выбор даты в календаре"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь напротив &quot;Start&quot; стоит дата автоматического запуска
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-date-set.png"
+                  alt="Дата запуска установлена"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                После этого нужно сохранить кампанию (нажать Save внизу страницы)
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/instantly-save-schedule.png"
+                  alt="Сохранение настроек расписания"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                И последнее: нужно нажать &quot;Resume campaign&quot; сверху справа страницы. Кампания запустится, но письма не будут отправляться до даты отложенного старта.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-resume-campaign.png"
+                  alt="Возобновление кампании"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700">
+                Готово!
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* Проверка заспамленности новых аккаунтов */}
+        <section id="spam-check" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-orange-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">12. Проверка заспамленности новых аккаунтов</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <h3 className="text-lg font-semibold mb-3 text-gray-800">Analytics в Instantly</h3>
+              <p className="text-gray-700 mb-3">
+                Заходим во вкладку Analytics в Instantly, снизу графиков нажимаем на Account Analytics
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/4">
+                <img 
+                  src="/images/instantly-analytics-menu.png"
+                  alt="Меню Account Analytics"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Справа над графиком выбираем время за которое хотим сравнивать аналитику аккаунтов. Обычно 7 дней достаточно чтобы сравнить пользователей по одному проекту, рассылки по которому активно работали последнее время.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-analytics-period.png"
+                  alt="Выбор периода аналитики"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Дальше можно сравнить по параметрам почты с разных доменов которые работают в одинаковых кампаниях. Если параметры примерно одинаковые - значит здоровье (спамность) доменов близки друг к другу.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-4 w-1/2">
+                <img 
+                  src="/images/instantly-analytics-comparison.png"
+                  alt="Сравнение параметров почт"
+                  className="w-full h-auto"
+                />
+              </div>
+
+              <h3 className="text-lg font-semibold mb-3 text-gray-800">Postmaster</h3>
+              <p className="text-gray-700">
+                <a href="https://postmaster.mail.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://postmaster.mail.ru/</a> <br />
+                С помощью этого сервиса можно оценить доставляемость на почты mail.ru в абсолютных значениях, и просматривать статистику по доменам.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* LinkedIn */}
+        <section id="linkedin" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-blue-700 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">LinkedIn</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                В начале регистрируем на сайте линкедин новый аккаунт (либо запрашиваем у заказчика доступы в его уже существующий аккаунт). Если аккаунт новый - его необходимо “прогреть” хотя бы 5 дней (прогрев - это просто количество дней, которое аккаунт существует). Регистрация там обычная, как в любой другой соц сети.
+              </p>
+              <p className="text-gray-700 mb-3">
+                <strong>Линкедин не работает без впн!</strong> Также при регистрации линк запросит номер телефона - нужен обязательно иностранный. Купить одноразовый номер можно на сайте - <a href="https://onlinesim.io/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">OnlineSim</a>. После введения кода вводим необходимые данные - должность и место работы. Потом он предложит добавить кого-то в друзья, зафолловить какие-то компании - все пропускаем.
+              </p>
+              <p className="text-gray-700 mb-3">
+                После создания аккаунта отдаем его заказчику на заполнение - чем больше информации заполнено в профиле - тем вероятнее лиды примут запрос на добавление в друзья.
+              </p>
+              <p className="text-gray-700 mb-3">
+                Также на аккаунт необходимо купить премиум подписку. Покупает либо заказчик, либо мы (если у заказчика нет иностранной карты, с которой он может оплатить). Ему нужна самая дешевая подписка - career.
+              </p>
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mb-4">
+                <p className="text-gray-700">
+                  <strong>Как правильно покупать подписку:</strong> При оплате необходимо выставить регион Турции - так будет значительно дешевле. Местоположение профиля ставится Турция прям в настройках, делается покупка, потом можно менять обратно (на тот регион который вы ставили изначально при регистрации). Карту после покупки важно отвязать, чтобы деньги не списывались автоматически.
+                </p>
+              </div>
+              
+              <h4 className="font-semibold text-gray-700 mb-2">Актуальное видео по работе с линкедин в фантомбустере:</h4>
+              <p className="text-gray-700 mb-4">
+                <a href="https://drive.google.com/file/d/1qU8nZdg0oBvsaNUimd1tGktCd33hFt7M/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Работа с линкедин: сбор контактов из СН и фантомбустер.mp4</a>
+              </p>
+
+              <h4 className="font-semibold text-gray-700 mb-2">Примеры цепочек линкедин:</h4>
+              <ul className="list-disc list-inside text-gray-700 space-y-2 mb-4 pl-4">
+                <li><a href="https://docs.google.com/document/d/1vXF6RmwmeXjOLlrfwyU5uPrmrSX3lVRVFevxHiyRb-Y/edit?tab=t.0#heading=h.j7ysc8se2644" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Оффер польза линкедин</a></li>
+                <li><a href="https://docs.google.com/document/d/1-qL6PQ4nEdouJOqjMFBTzN3xNanA2yWDqW6qGQ-grYU/edit?tab=t.0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Цепочка для Linkedin Hostkey</a></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        {/* Персонализация LinkedIn */}
+        <section id="linkedin-personalization" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-blue-500 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Персонализация LinkedIn</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Если у вас есть таблица с данными от Sales Navigator, то можно сделать личные персонализированные письма. Для этого чистим информацию в таблице от лишних технических колонок (id, даты, метки, теги, пустые колонки) и оставляем самые важные:
+              </p>
+              <ul className="list-disc list-inside text-gray-700 mb-3 pl-4 font-mono text-sm">
+                <li>profile_url</li>
+                <li>current_company</li>
+                <li>first_name</li>
+                <li>last_name</li>
+                <li>email</li>
+                <li>location_name</li>
+                <li>summary</li>
+                <li>current_company_position</li>
+                <li>skills</li>
+              </ul>
+              <p className="text-gray-700 mb-3">
+                Можно оставить и больше информации о человеке. Теперь открываем ChatGPT и вставляем вот такой промпт:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800 whitespace-pre-wrap">
+                  Write a little compliment based on the person&apos;s latest linkedin profile information. Write in a more human way in my first person and in a more conversational style. Use &quot;you&quot; to refer to him. No more than 30 words. Example of a compliment: &quot;Hey! I&apos;ve been following your work for quite a while with XYZ company, loved the article you shared regarding your expansion to the US.&quot;
+
+                  Here&apos;s the profile of the person you want to compliment:
+                  [место для информации о лиде]
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь в нашей таблице копируем целую строку со всеми данными о человеке (только не копируем саму ячейку куда будет выводится ответ, иначе будет бесконечно по кругу обновляться) и вставляем ее в конец нашего промпта в «место для информации о лиде». От результата можно убрать приветствие и самое последнее предложение по типу: «Keep up the great work!». Записываем его в новую колонку «Personalization» нашей таблицы. Должно получиться примерно так:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-full">
+                <img 
+                  src="/images/linkedin-personalization-table.png"
+                  alt="Пример таблицы с персонализацией"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Работа с англ источниками в целом */}
+        <section id="english-sources" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-indigo-700 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Работа с англ источниками в целом</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <div className="space-y-2 mb-6">
+                <p className="text-gray-700">
+                  <strong>Регламент по аполло:</strong> <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro</a>
+                </p>
+                <p className="text-gray-700">
+                  <strong>Видео про работу с аполло и аутскрепер (сбор баз с гугл карт):</strong> <a href="https://drive.google.com/file/d/1Fk03xRGx6sywRU4S-WysmZEqfqB9SwIk/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">2024-10-28 17.47.12.mp4</a>
+                </p>
+                <p className="text-gray-700">
+                  <strong>Регламент по цепочкам (Notion, нужен VPN):</strong> <a href="https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0</a>
+                </p>
+                <p className="text-gray-700">
+                  <strong>Примеры цепочек на англ рынок:</strong> <a href="https://docs.google.com/document/d/1UfMvEW5XH1SaV_5YMtIFc_BCCdpvEX6ZCcjPZUP0BTA/edit#heading=h.mj8nf2lc976n" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Примеры заруб. офферов</a>
+                </p>
+              </div>
+
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mb-4">
+                <p className="text-gray-700 font-bold">
+                  !У аполло изменился интерфейс!
+                </p>
+                <p className="text-gray-700">
+                  (основные принципы работы с фильтрами остались те же - изменился процесс сохранения поисковой выборки и расположение некоторых элементов)
+                </p>
+              </div>
+
+              <h3 className="text-lg font-semibold mb-3 text-gray-800">Как сохранять новый поиск:</h3>
+              <p className="text-gray-700 mb-3">
+                Когда вы зайдете в аполло и перейдете в поиск, там сразу откроется какой-то из уже сохраненных поисков. Его редактировать нельзя, так как это чья-то выборка. Сначала нужно нажать на название выборки наверху. Выпадет список всех сохраненных поисков, там нужно будет нажать на кнопку “create saved search”, справа откроется окно настроек. Там нужно ввести название новой выборки (лучше название проекта и какие-то детали, по тому же принципу, как мы называем базы). Затем удалить существующие фильтры в новом поиске, чтобы он был без предыдущих настроек. После этого новый поиск создастся.
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                  <img 
+                    src="/images/apollo-search-dropdown.png"
+                    alt="Выпадающее меню поиска Apollo"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                  <img 
+                    src="/images/apollo-create-search.png"
+                    alt="Создание нового поиска в Apollo"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white md:col-span-2 w-1/2">
+                  <img 
+                    src="/images/apollo-search-settings.png"
+                    alt="Настройки поиска Apollo"
+                    className="w-full h-auto"
+                  />
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold mb-3 text-gray-800">Как теперь сохранять выборки в листы:</h3>
+              <div className="space-y-4">
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
+                  <img 
+                    src="/images/apollo-select-number.png"
+                    alt="Выбор количества контактов"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
+                  <img 
+                    src="/images/apollo-save-button.png"
+                    alt="Кнопка сохранения"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
+                  <img 
+                    src="/images/apollo-save-dialog.png"
+                    alt="Диалог сохранения"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
+                  <img 
+                    src="/images/apollo-save-confirmation.png"
+                    alt="Подтверждение сохранения"
+                    className="w-full h-auto"
+                  />
+                </div>
+                <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
+                  <img 
+                    src="/images/apollo-lists-view.png"
+                    alt="Просмотр списков"
+                    className="w-full h-auto"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );
