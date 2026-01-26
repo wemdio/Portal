@@ -5,19 +5,21 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Home, LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle, FileText } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
+import { UserRole } from '@/types';
+import { ROLE_LABELS, isAdmin } from '@/lib/roles';
 
 const navItems = [
   { name: 'Проекты', href: '/', icon: FolderKanban },
   { name: 'Команда', href: '/team', icon: Users },
   { name: 'Регламент', href: '/reglament', icon: FileText },
-  { name: 'Админ', href: '/admin', icon: ShieldCheck, role: 'manager' }, // Only managers see this
+  { name: 'Админ', href: '/admin', icon: ShieldCheck, adminOnly: true },
   { name: 'Настройки', href: '/settings', icon: Settings },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const [userRole, setUserRole] = useState<string | null>(null);
+  const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
   useEffect(() => {
@@ -28,14 +30,13 @@ export function Sidebar() {
     const { data: { session } } = await supabase.auth.getSession();
     if (session) {
       setUserEmail(session.user.email);
-      // Fetch role from profiles
       const { data } = await supabase
         .from('profiles')
         .select('role')
         .eq('id', session.user.id)
         .single();
       
-      setUserRole(data?.role || 'employee');
+      setUserRole(data?.role as UserRole | null);
     }
   }
 
@@ -56,8 +57,7 @@ export function Sidebar() {
       </div>
       <nav className="flex-1 space-y-1 px-2 py-4">
         {navItems.map((item) => {
-          // Hide items if role doesn't match (if role is specified)
-          if (item.role && item.role !== userRole) return null;
+          if (item.adminOnly && !isAdmin(userRole)) return null;
 
           const isActive = pathname === item.href;
           return (
@@ -83,7 +83,7 @@ export function Sidebar() {
             <p className="text-sm font-medium text-white truncate" title={userEmail || ''}>
               {userEmail?.split('@')[0] || 'User'}
             </p>
-            <p className="text-xs text-gray-400 capitalize">{userRole || 'Loading...'}</p>
+            <p className="text-xs text-gray-400">{userRole ? ROLE_LABELS[userRole] : 'Загрузка...'}</p>
           </div>
         </div>
         <button 

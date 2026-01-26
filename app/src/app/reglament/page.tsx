@@ -1674,7 +1674,7 @@ export default function ReglamentPage() {
                           <p className="text-gray-700 mb-3">
                             Как только бот получит всю информацию, он отправит вас ссылку на всю дополнительную информацию, которую он собрал
                           </p>
-                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3">
+                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
                             <img 
                               src="/images/tg-bot-results-example.png"
                               alt="Пример результатов работы ТГ бота"
@@ -1709,7 +1709,7 @@ export default function ReglamentPage() {
                           <p className="text-gray-700 mb-3">
                             Бот пишет только по одному письму за раз по вашему запросу. Т.е если вы хотите чтобы бот написал первое письмо, то напишите "Напиши первое письмо"
                           </p>
-                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3">
+                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
                             <img 
                               src="/images/tg-bot-first-email.png"
                               alt="Пример запроса первого письма боту"
@@ -1719,7 +1719,7 @@ export default function ReglamentPage() {
                           <p className="text-gray-700 mb-3">
                             Если вы хотите сгенерировать письмо по другому, то напишите о своем желании поменять письмо, НО ГЛАВНОЕ даже при повторном запросе уточните какое письмо вы хотите редактировать.
                           </p>
-                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white">
+                          <div className="border border-gray-300 rounded-lg overflow-hidden bg-white w-1/2">
                             <img 
                               src="/images/tg-bot-edit-email.png"
                               alt="Пример редактирования письма ботом"
@@ -1831,6 +1831,666 @@ export default function ReglamentPage() {
                     </code>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Как достать данные для персонализации? */}
+        <section id="data-extraction" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-blue-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">8. Как достать данные для персонализации?</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="border-l-4 border-blue-500 pl-6 py-2">
+              <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
+                1. Персонализация с HH
+              </h3>
+              <div className="space-y-4">
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-gray-700 mb-3">
+                    Если мы используем парсера hh, то нам нужно изначально очистить полученную от него базу от дубликатов (Выделяем все столбцы → Данные → Удалить дубликаты). Затем копируем в экстрактор (про него в разделе экстрактор) ссылки на компании, ждем от него документ с ами и затем вставляем в изначальную таблицу, которую прислал парсер, колонки email_1 и query. Сравниваем по колонкам со ссылками все ли ровно встало.
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/personalization-hh-example.png"
+                      alt="Пример таблицы с данными для персонализации"
+                      className="w-full h-auto"
+                    />
+                  </div>
+
+                  <p className="text-gray-700 mb-3">
+                    Если все стоит ровно, то просто удаляем столбец query, он нам был нужен только для того чтобы отследить верность расположения .
+                    Теперь выделяем столбец emai_1 и нажимаем на главной вкладке «Сортировка и фильтры» → Фильтр.
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/filter-button-example.png"
+                      alt="Кнопка Сортировка и фильтры"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Теперь нажимаем на стрелку около email_1, мотаем в самый низ и снимаем галочку с (пустые).
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                    <img 
+                      src="/images/filter-menu-example.png"
+                      alt="Меню фильтрации"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Назовем новую колонку firstName, она нам еще понадобится.
+                    Теперь следует быстро почистить названия компаний. Для этого выделяем колонку с названиями и нажимаем ctrl+f. 
+                    Ищем данные по следующим критериям:
+                  </p>
+                  <ul className="list-disc list-inside text-gray-700 mb-3 pl-4">
+                    <li>ИП</li>
+                    <li>ООО</li>
+                    <li>ТОО</li>
+                    <li>,</li>
+                    <li>«</li>
+                    <li>»</li>
+                    <li>Группа компаний</li>
+                    <li>ГК</li>
+                    <li>ТМ</li>
+                    <li>ТД</li>
+                  </ul>
+                  <p className="text-gray-700 mb-3">
+                    Жмем “найти все”
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/find-replace-example.png"
+                      alt="Поиск и замена"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Двигаем в конец ползунок результата и ищем значения, к примеру ИП [ФИО].
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/search-results-example.png"
+                      alt="Результаты поиска"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Жмем на нее и удаляем из ячейки всю лишнюю информацию, а имя записываем в колонку firstName.
+                    Далее по 4-ый пункт делаем тоже самое по всем критериям, чтобы оставить только название компаний.
+                    С 5-го пункта можно воспользоваться вкладкой заменить и моментально очистить колонку от ненужной инфы. Не забываем ставить галочку «учитывать регистр»!
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/replace-all-example.png"
+                      alt="Замена с учетом регистра"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Следующим шагом в очистке нам нужно быстро просмотреть базу на наличие ФИО. Если замечаем такие ячейки, то удаляем их и переносим эти данные в колонку firstName, оставляем только имя.
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/firstname-move-example.png"
+                      alt="Перенос имени в firstName"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Последним пунктом по очистке будет просмотр ячеек с длинным названием. Например:
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/long-name-example.png"
+                      alt="Пример длинного названия"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Такое название можно сократить вручную до НИИДПО. Либо же если в названии много лишней информации, то просто удаляем ее и оставляем только название. Ручной труд, но не нужно сильно вглядываться в каждую ячейку, достаточно просто включить перенос строк и тогда искать станет легче.
+                  </p>
+                  <p className="text-gray-700">
+                    В целом такая очистка занимает около 15 минут.
+                    После того как мы все сделали, переименовываем соответствующие колонки в website, companyName, email. Если имеется уникальная информация для каждого лида, то можно создать колонку Personalization, в которую ее вписать.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-l-4 border-blue-500 pl-6 py-2">
+              <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
+                2. Персонализация с карты
+              </h3>
+              <div className="space-y-4">
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <p className="text-gray-700 mb-3">
+                    Тут все проще. После получения базы с парсера переносим колонку «Веб-сайт 1» ближе к «E-mail 1» для удобства. Должно получится так:
+                  </p>
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                    <img 
+                      src="/images/website-column-arrangement.png"
+                      alt="Расположение колонок Веб-сайт 1 рядом с E-mail 1"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                  <p className="text-gray-700 mb-3">
+                    Теперь выделяем эти 3 колонки и удаляем дубликаты. После этого создаем на колонке «Веб-сайт 1» фильтр, и убираем пустые ячейки. Копируем ссылки и отправляем их в экстрактор. После выгрузки базы из экстрактора просто вставляем две колонки «query» и «email_1» в нашу изначальную базу и также как с базой из HH.ru мы сравниваем чтобы все стояло ровно. Если все стоит как надо удаляем лишний столбец «query» и старый столбец «E-mail 1». На выходе должны быть только 3 столбца данных, это:
+                  </p>
+                  <ul className="list-disc list-inside text-gray-700 mb-3 pl-4">
+                    <li>«Наименование»</li>
+                    <li>«Веб-сайт 1»</li>
+                    <li>«email_1»</li>
+                  </ul>
+                  <p className="text-gray-700">
+                    Пробегаем глазами по названиям и чистим при необходимости согласно предыдущему пункту «Персонализация с HH».
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Импорт персонализированной базы в Instantly */}
+        <section id="instantly-import" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-blue-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">9. Импорт персонализированной базы в Instantly</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Создаем таблицу в Google Sheets и импортируем туда нашу очищенную базу. Теперь нам нужно открыть доступ для просмотра таблицы и скопировать ссылку на нее. Открываем нужную кампанию в Instantly, заходим во вкладку Leads → Import → Google Sheets и вставляем нашу ссылку. Теперь смотрим на правильность определения колонок, если все окей жмем Upload All.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-import-mapping.png"
+                  alt="Проверка определения колонок в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Нехватка места для лидов в instantly */}
+        <section id="instantly-space" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-orange-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">Нехватка места для лидов в instantly</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-4">
+                Если при загрузке лидов в instantly возникает ошибка нехватки места, то необходимо освободить место под лиды в своих кампаниях. Или попросить других специалистов очистить место в их кампаниях.
+              </p>
+              <p className="text-gray-700 mb-4">
+                Чтобы очистить место под лиды нужно:
+              </p>
+              <ol className="list-decimal list-inside text-gray-700 mb-4 pl-4 space-y-3">
+                <li>
+                  Заходим во вкладку лиды в кампании
+                </li>
+                <li>
+                  Если кампания ещё не завершена на 100% - вместо "All statuses" выбираем "Completed". Если кампания уже полностью проработала - можно сразу переходить к следующему пункту (3)
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 mt-3 w-1/2">
+                    <img 
+                      src="/images/instantly-completed-filter.png"
+                      alt="Выбор статуса Completed в фильтре"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </li>
+                <li>
+                  Выбираем все "Completed" контакты, нажав на верхнюю "галочку", затем "Select all"
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 mt-3 w-1/2">
+                    <img 
+                      src="/images/instantly-select-all.png"
+                      alt="Выбор всех контактов через Select all"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </li>
+                <li>
+                  Чтобы выгрузить контакты файлом нажимаем кнопку Download
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 mt-3 w-1/2">
+                    <img 
+                      src="/images/instantly-download-leads.png"
+                      alt="Кнопка Download для выгрузки контактов"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </li>
+                <li>
+                  Затем нужно будет загрузить полученный файл на диск (выберете нужную папку по нише и переименуйте файл, чтобы был понятен источник базы и её логика сбора или сфера) <a href="https://drive.google.com/drive/folders/1AuBbUIeTEBJk3vsABSgWUdlcm0Zzn62k?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://drive.google.com/drive/folders/1AuBbUIeTEBJk3vsABSgWUdlcm0Zzn62k?usp=sharing</a>
+                  <p className="text-gray-700 text-sm mt-2">
+                    В такой базе будет статус отработавших контактов, и в будущем можно будет повторно взять базу в работу без bounced контактов, что существенно улучшит эффективность кампании.
+                  </p>
+                </li>
+                <li>
+                  Затем как выгрузили удаляем из старой кампании в instantly базу лидов, тем самым освобождая место под новые.
+                  <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 mt-3 w-1/2">
+                    <img 
+                      src="/images/instantly-delete-leads.png"
+                      alt="Удаление лидов из кампании"
+                      className="w-full h-auto"
+                    />
+                  </div>
+                </li>
+              </ol>
+            </div>
+          </div>
+        </section>
+
+        {/* Проверка персонализации */}
+        <section id="personalization-check" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-green-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">10. Проверка персонализации</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Чтобы узнать как будет выглядеть персонализация и все ли в ней правильно нажимаем на значок глаза внутри редактора цепочки писем кампании.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/preview-email-icon.png"
+                  alt="Значок глаза для предпросмотра письма"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь мы можем вписать значение для проверки в окно персонализации, например, companyName. Выбираем получателя тестового письма, например, личную почту. Выбираем почту отправителя и нажимаем синюю кнопку «Send test email».
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/test-email-preview.png"
+                  alt="Предпросмотр тестового письма с персонализацией"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Также имеется возможность проверить как будет выглядеть письмо при открытии или не открытии его лидом (если мы используем эту формулу). Для этого переключаем значения False и True в соответствующем окне слева.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/last-email-opened-toggle.png"
+                  alt="Переключение значений last_email_opened"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Шаблон первого письма в GPT для зарубежных проектов */}
+        <section id="gpt-template" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-purple-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">11. Шаблон первого письма в GPT для зарубежных проектов</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Чтобы GPT понимал лучше суть проекта необходимо установить плагин WebPilot для чтения ссылок из интернета.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/webpilot-plugin.png"
+                  alt="Установка плагина WebPilot в GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь даем GPT - ссылку на сайт нашего проекта с промптом:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  Pull all the information from the website and explain it here:<br />
+                  [ссылка на сайт]
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                После того как мы получили ответ, мы должны скормить GPT наш бриф. Изначально представляемся, даем несколько подробностей про себя и нашу компанию, чтобы GPT понимал от чьего лица писать. Дальше начинаем идти по пунктам из брифа прям в этом же промпте.
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800 whitespace-pre-wrap">
+                  Here&apos;s some information about me and my project. Your job is to memorize everything and write &quot;I memorized&quot;:
+
+                  My name [имя], I am [должность] at [название компании], [описание деятельности компании]
+
+                  Our target audience: …
+
+                  Description of our service: …
+
+                  5 advantages of our service: …
+
+                  Impressive numbers: …
+
+                  Our customers&apos; problems and pains: …
+
+                  Special offer: …
+
+                  Warranties: …
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3 text-sm">
+                5 проблем при работе с нашими клиентами обычно не даю GPT, чтобы он по ошибке не спутал их с нашими проблемами в компании.
+              </p>
+              <p className="text-gray-700 mb-3">
+                Вот как это примерно выглядит:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/gpt-brief-example.png"
+                  alt="Пример брифа для GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь нам нужно достать боли и проблемы потенциальных клиентов. Для этого можно обратить внимание на блок «Проблемы, с которыми к вам приходят ваши клиенты» из брифа. Но этого зачастую недостаточно, поэтому обращаемся к GPT.
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  Write the 10 most frequent pains and problems of [наша ЦА] that we can solve. For each problem, write how we solve it.
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                После того как мы получили список болей, проверяем и изучаем их, чтобы самим лучше понимать с чем сталкиваются клиенты. Выделяем для себя 4-5 основных проблемы аудитории, которые кажутся нам наиболее сильными.
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/gpt-pains-problems.png"
+                  alt="Список болей и проблем от GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь переходим к написанию самого первого письма. Копируем и отправляем GPT следующий промпт:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800 whitespace-pre-wrap">
+                  According to the information about my company and the pains and problems solved by my company that I have sent above, write the first message for my WhatsApp message, strictly following the structure below. Self-identify the &quot;pains&quot; of our target audience, think in advance about objections and how my company can benefit them/what I will benefit them. Write in a slightly conversational form, as close to human interaction as possible. It shouldn&apos;t come across as a sales pitch, the letter should build on the benefit to the client. Try to write more naturally so that the letter is more personalized and doesn&apos;t look like spam. The test should be strictly no more than 110 words or 620 characters.
+                  The call to action should make the person want to respond to the letter, addressing his needs but not committing to anything. He should see how he will benefit by responding to the letter. We must give something in return for his response. For example, advice on an issue he cares about. The message should be aimed at relieving the client of certain pains, solving his problems. That is, to hit the client&apos;s existing exact problems. Don&apos;t use curly braces {"{{"} {"}}"}  in your reply.
+
+                  Be sure to follow a paragraph structure, you don&apos;t have to write in solid text
+
+                  Message structure:
+
+                  {"{{greeting}}"}
+
+                  {"{{In one sentence introduce yourself. Say what company I'm from, what it does and for who, use Impressive figures, talk briefly and factually about our benefits and hit on our target audience area. Don't ask any questions of the person in the paragraph. Do a spunk before the next abaz}}"}
+
+                  {"{{In one sentence we say what we can give to our client and what they will get from our offer, what is the benefit to them, mention what problem of the client we are solving with our offer. Don't ask any questions to the person in this paragraph. Do a spunk before the next abaz}}"}
+
+                  {"{{In one sentence, talk about Special offer if any and also mention guarantees. Do not ask any questions to the person in this paragraph. Do a spook before the next abazzer}}"}
+
+                  {"{{Call to action. In one sentence ask a question in which we describe his pains, problems that won't be and ask if he would be interested. You can also describe the benefit the person will receive}}"}
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                В результате получаем практически готовое сообщение, которое требует минимальных доработок (иногда необходимо подкорректировать call to action, чтобы он был более разговорным, добавить уточнение по должностям нашей ЦА, убрать воду и лишние прилагательные).
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/gpt-first-message-result.png"
+                  alt="Результат генерации первого письма от GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Продвинутый шаблон первого письма в GPT */}
+        <section id="gpt-advanced-template" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-purple-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">12. Продвинутый шаблон первого письма в GPT</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                Для того чтобы написать качественное первое письмо в GPT, необходимо перейти в соответствующий тред: <a href="https://chat.openai.com/share/eda115e4-defc-4ff7-8807-5a12eeb89c7d" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://chat.openai.com/share/eda115e4-defc-4ff7-8807-5a12eeb89c7d</a>
+              </p>
+              <p className="text-gray-700 mb-3">
+                Теперь первым делом нам необходимо вытащить информацию из сайта клиента. Если сайт не относится к сегменту / теме нашего письма, то можно использовать информацию из брифа, а именно:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800 whitespace-pre-wrap">
+                  My name [имя], I am [должность] at [название компании], [описание деятельности компании]
+                  Our target audience: …
+                  Description of our service/good:: …
+                  Our 5 benefits: …
+                  Unique selling proposition: …
+                  Impressive numbers: …
+                  Our customers&apos; problems and pains: …
+                  Special offer: …
+                  Warranties: …
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Если сайт нам подходит, то чтобы вытащить информацию с него, корректируем следующее сообщение и заменяем ссылку на нужную:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/gpt-extract-website-info.png"
+                  alt="Извлечение информации с сайта через GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                После этого мы можем отправить информацию из брифа, если еще этого не сделали:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  Here&apos;s a bit of information about me and my project based on the brief. Your job is to memorize everything and write &quot;I memorized&quot;:
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Чтобы GPT мог лучше понимать боли нашей ЦА при написании письма, просим его написать список из 10 проблем.
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  Write the 10 most frequent pains and problems of [наша ЦА] that we can solve. For each problem, write how we solve it.
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Теперь можно отправлять промпт на написание 1-го письма:
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  Write the first Cold Email Outreach letter for our target audience [наша ЦА], based on all the information above, the structure you sent, the examples of my letters, the information from my company&apos;s website and the information from my company&apos;s brief. Important clarification, don&apos;t write useless sentences, you don&apos;t need to write a bunch of different adjectives. Speak in facts and keep it to no more than 130 words. Also, in the last sentence with a question, try to hit as specific as possible painful customer problems that we can solve.
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Как результат получаем компактное сообщение без особой воды, требующее минимальных корректировок:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/gpt-advanced-result.png"
+                  alt="Результат продвинутого промпта GPT"
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Написание RU цепочек с помощью ChatGPT */}
+        <section id="chatgpt-ru-chains" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-red-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">13. Написание RU цепочек с помощью ChatGPT</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                <strong>Старое видео:</strong><br />
+                <a href="https://www.youtube.com/watch?v=NzGNX1LUymo" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://www.youtube.com/watch?v=NzGNX1LUymo</a>
+              </p>
+              <p className="text-gray-700">
+                <strong>Новое видео:</strong><br />
+                <a href="https://drive.google.com/file/d/1atsZSUUulEIK_V16T68x29XzpfIeSh2f/view" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Написание оффера в GPT.mp4</a>
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* UTM метки в ссылки в письмах */}
+        <section id="utm-tags" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-teal-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">14. UTM метки в ссылки в письмах</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                <strong>Шаблон UTM метки:</strong>
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  /?utm_source=polzaagency&amp;utm_medium=outreach&amp;utm_campaign=name
+                </code>
+              </div>
+              <p className="text-gray-700 mb-3">
+                Добавляется к ссылке и меняется только последнее слово [name] на название кампании / базы одним словом и на английском
+              </p>
+              <p className="text-gray-700 mb-3">
+                <strong>Пример:</strong>
+              </p>
+              <div className="bg-gray-100 rounded-lg p-4 border border-gray-300 mb-3">
+                <code className="text-sm text-gray-800">
+                  https://polzaagency.ru/?utm_source=polzaagency&amp;utm_medium=outreach&amp;utm_campaign=b2bsales
+                </code>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Настройка мощности для именных почт */}
+        <section id="email-power-settings" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-yellow-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">6.1 Настройка мощности для именных почт</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700">
+                Начальную мощность ставить - 20 писем в день, и каждую неделю повышать на 10 писем в день. Максимальное количество писем в день - 80 для гугловских (наши и именные), 40 - для наших не именных почт (с почтовых серверов)
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* Создание кампаний */}
+        <section id="campaign-creation" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="p-2 bg-indigo-600 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">7. Создание кампаний</h2>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-gray-700 mb-3">
+                <strong>Видео про создание кампаний в Instantly:</strong><br />
+                <a href="https://youtu.be/Y-J2HEjtl1E" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">https://youtu.be/Y-J2HEjtl1E</a>
+              </p>
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mb-4">
+                <p className="text-gray-700">
+                  <strong>Поправка к видео:</strong> по поводу времени работы кампании - лучше всегда делать с 9 утра до 18 вечера, чтобы instantly точно успел отправить необходимое количество писем. (если в базе сборная солянка из городов, то лучше поставить до 3х дня по мск)
+                </p>
+              </div>
+              <p className="text-gray-700 mb-3">
+                После того как мы добавили почты в instantly (пункт 5 в работе с почтами), собрали базу и написали цепочку, мы приступаем к созданию кампаний в instantly. Для этого переходим в соответствующую вкладку на сайте, нажимаем «+ADD NEW» и называем кампанию. Нас перебросит в окно «Leads», где нам необходимо импортировать базу емэйлов. Для этого жмем синюю кнопку «Import» → Emails Manually, вставляем список спарсеных емэйлов и жмем на кнопку «Import Emails».
+              </p>
+              <p className="text-gray-700 mb-3">
+                При добавлении контактов из Гугл Таблиц, выбираем google sheets (мы сейчас всегда импортируем через гугл таблицы)
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-import-options.png"
+                  alt="Опции импорта в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                После добавления базы емэйлов переходим во вкладку «Sequences», вписываем тему письма: Краткий запрос, вставляем и форматируем текст (добавляем ссылки в слова, выделяем жирным и убираем форматирование), затем нажимаем на шестеренку и вписываем количество дней ожидания. Обычно связка дней строится по системе: 1/3/5/7. Жмем «Save». В следующих письмах добавлять название темы не нужно. Чтобы добавить новое письмо жмем «Add step».
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-sequences-editor.png"
+                  alt="Редактор цепочки писем в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                Чтобы убрать форматирование текста выделяем его и нажимаем как показано на скриншоте ниже:
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/3">
+                <img 
+                  src="/images/clear-formatting-button.png"
+                  alt="Кнопка очистки форматирования"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                После того как все письма добавлены и сохранены переходим ко следующей вкладке «Schedule». Выбираем дни рассылки без выходных, устанавливаем временной пояс получателя и жмем «Save».
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-schedule-settings.png"
+                  alt="Настройки расписания в Instantly"
+                  className="w-full h-auto"
+                />
+              </div>
+              <p className="text-gray-700 mb-3">
+                В следующей вкладке «Options» выбираем аккаунты для рассылки, которые мы создали и добавили. В самом низу страницы не забываем сохранить. После того как все проделано, можно запускать по кнопке «Launch».
+              </p>
+              <div className="border border-gray-300 rounded-lg overflow-hidden bg-white mb-3 w-1/2">
+                <img 
+                  src="/images/instantly-accounts-select.png"
+                  alt="Выбор аккаунтов для рассылки"
+                  className="w-full h-auto"
+                />
+              </div>
+              <div className="bg-red-50 border-l-4 border-red-500 p-4">
+                <p className="text-gray-700">
+                  <strong>Важный момент!</strong> Если пользователь отвечает на нашу рассылку, то он больше не будет получать письма из нее.
+                </p>
               </div>
             </div>
           </div>
