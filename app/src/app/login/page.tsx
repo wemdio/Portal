@@ -37,6 +37,23 @@ export default function LoginPage() {
         
         if (error) throw error;
 
+        // Create profile entry if user was created
+        if (data.user) {
+          const { error: profileError } = await supabase
+            .from('profiles')
+            .upsert({
+              id: data.user.id,
+              email: email,
+              full_name: email.split('@')[0],
+              role: null, // Default role - can be set by admin later
+            });
+
+          if (profileError) {
+            console.error('Error creating profile:', profileError);
+            // Don't throw - user is already created in auth, profile can be created later
+          }
+        }
+
         // Check if session was created immediately (meaning email confirmation is off)
         if (data.session) {
              setMessage('Регистрация успешна! Входим...');
