@@ -2,10 +2,15 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { 
-  CheckCircle2, Clock, Database, Mail, FileText, Pin, Globe, 
+  CheckCircle2, CheckCircle, Clock, Database, Mail, FileText, Pin, Globe, 
   BarChart3, AlertCircle, User, Calendar, MessageSquare, 
   Users, Shield, BookOpen, ExternalLink, ArrowRight, PenTool, 
-  Video, Book, CheckSquare, Image as ImageIcon, Search
+  Video, Book, CheckSquare, Image as ImageIcon, Search,
+  Zap, ShieldAlert, XCircle, UserCheck, Sparkles, Server, Ban,
+  HardDrive, Monitor, Map, Briefcase, MessageCircle, Link, Download,
+  Table, Code, Bot, Wand2, Copy, Trash2, Filter, Calculator, 
+  ClipboardList, Plane, Target, FileImage, DollarSign, Megaphone,
+  Settings, MousePointer, LineChart
 } from 'lucide-react';
 
 interface SearchResult {
@@ -3459,61 +3464,88 @@ Here&apos;s the profile of the person you want to compliment:
         </section>
 
         {/* Рекомендации по оптимизации рабочих процессов */}
-        <section id="workflow-optimization" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-purple-600 rounded-lg">
-              <CheckCircle2 className="h-6 w-6 text-white" />
+        <section id="workflow-optimization" className="relative overflow-hidden rounded-2xl shadow-xl border border-purple-200">
+          {/* Декоративный градиентный фон */}
+          <div className="absolute inset-0 bg-gradient-to-br from-purple-50 via-white to-indigo-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-purple-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          <div className="absolute bottom-0 left-0 w-64 h-64 bg-gradient-to-tr from-indigo-200/30 to-transparent rounded-full blur-3xl translate-y-1/2 -translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            {/* Заголовок секции */}
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-purple-600 to-indigo-600 rounded-xl shadow-lg">
+                  <CheckCircle2 className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-purple-700 to-indigo-700 bg-clip-text text-transparent">
+                  Рекомендации по оптимизации рабочих процессов
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Советы для повышения эффективности вашей работы</p>
+              </div>
             </div>
-            <h2 className="text-2xl font-bold text-gray-900">Рекомендации по оптимизации рабочих процессов</h2>
-          </div>
 
-          <div className="space-y-5">
+            <div className="space-y-4">
             {/* Общая рекомендация */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <AlertCircle className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <AlertCircle className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Используйте нейросети</h3>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="px-2 py-0.5 text-xs font-semibold bg-purple-100 text-purple-700 rounded-full">Важно</span>
+                    <h3 className="font-semibold text-gray-900 text-lg">Используйте нейросети</h3>
+                  </div>
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     Общая рекомендация - не стесняйтесь обращаться к нейросетям за ЛЮБОЙ ПОМОЩЬЮ, помните, если какую-то задачу можно автоматизировать нейросети ваш лучший друг.
                   </p>
-                  <div className="flex flex-wrap gap-3">
-                    <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-blue-600 hover:text-blue-800 hover:border-blue-300 transition-colors font-medium text-sm">ChatGPT <ExternalLink className="h-3 w-3" /></a>
-                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-blue-600 hover:text-blue-800 hover:border-blue-300 transition-colors font-medium text-sm">Google AI Studio <ExternalLink className="h-3 w-3" /></a>
+                  <div className="flex flex-wrap gap-2">
+                    <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">ChatGPT <ExternalLink className="h-3.5 w-3.5" /></a>
+                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Google AI Studio <ExternalLink className="h-3.5 w-3.5" /></a>
                   </div>
                 </div>
               </div>
             </div>
 
             {/* Помощник по работе */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <BookOpen className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <BookOpen className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Помощник по работе</h3>
-                  <p className="text-gray-700 leading-relaxed">
-                    Вы можете воспользоваться промтом, в который загружен регламент + этот промт подскажет как возможно решить вашу проблему. <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%2211rLQ7FGpT1lY8SH8U3IDj9_neuCMXdiG%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт помощника <ExternalLink className="h-3 w-3" /></a>
+                  <p className="text-gray-600 leading-relaxed">
+                    Вы можете воспользоваться промтом, в который загружен регламент + этот промт подскажет как возможно решить вашу проблему. <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%2211rLQ7FGpT1lY8SH8U3IDj9_neuCMXdiG%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 mt-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт помощника <ExternalLink className="h-3.5 w-3.5" /></a>
                   </p>
                 </div>
               </div>
             </div>
 
             {/* Чистка базы */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <Database className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <Database className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Чистка базы: Очистка сайтов до доменов</h3>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     Выделите столбец с сайтами, который нужно обработать в домены. И примените скрипт:
                   </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white w-2/3 group-hover:shadow-lg transition-shadow">
                     <img 
                       src="/images/domain-cleanup-script.png"
                       alt="Скрипт для очистки сайтов до доменов"
@@ -3525,34 +3557,39 @@ Here&apos;s the profile of the person you want to compliment:
             </div>
 
             {/* Сопоставление компаний */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <FileText className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <FileText className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Сопоставление названий компаний с email по сайтам</h3>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Сопоставление названий компаний с email по сайтам</h3>
+                  <p className="text-gray-600 leading-relaxed mb-3">
                     Чтобы быстро сопоставить email с названиями, поместите в:
                   </p>
-                  <ul className="space-y-1 mb-4">
-                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец A - названия</li>
-                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец B - ссылки</li>
-                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец D - почты, полученные после парсинга</li>
-                    <li className="flex items-center gap-2 text-gray-700"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full"></span>столбец E - домены на которых были найдены почты при парсинге</li>
-                  </ul>
-                  <p className="text-gray-700 leading-relaxed mb-3">Вот как это должно выглядеть:</p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="bg-gradient-to-r from-purple-50/50 to-indigo-50/50 rounded-lg p-4 mb-4 border border-purple-100">
+                    <ul className="space-y-2">
+                      <li className="flex items-center gap-3 text-gray-700"><span className="w-6 h-6 flex items-center justify-center bg-purple-500 text-white text-xs font-bold rounded-md">A</span>названия</li>
+                      <li className="flex items-center gap-3 text-gray-700"><span className="w-6 h-6 flex items-center justify-center bg-purple-500 text-white text-xs font-bold rounded-md">B</span>ссылки</li>
+                      <li className="flex items-center gap-3 text-gray-700"><span className="w-6 h-6 flex items-center justify-center bg-purple-500 text-white text-xs font-bold rounded-md">D</span>почты, полученные после парсинга</li>
+                      <li className="flex items-center gap-3 text-gray-700"><span className="w-6 h-6 flex items-center justify-center bg-purple-500 text-white text-xs font-bold rounded-md">E</span>домены на которых были найдены почты при парсинге</li>
+                    </ul>
+                  </div>
+                  <p className="text-gray-600 leading-relaxed mb-3">Вот как это должно выглядеть:</p>
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/company-email-table.png" alt="Пример таблицы для сопоставления" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <p className="text-gray-600 leading-relaxed mb-3">
                     После, примените скрипт для сопоставления, он перенесет названия из столбца A в столбец F в соответствии с доменами из столбцов B и E
                   </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/matching-script.png" alt="Скрипт для сопоставления компаний" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">Итог работы скрипта:</p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                  <p className="text-gray-600 leading-relaxed mb-3">Итог работы скрипта:</p>
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/matching-result.png" alt="Результат работы скрипта" className="w-full h-auto" />
                   </div>
                 </div>
@@ -3560,23 +3597,29 @@ Here&apos;s the profile of the person you want to compliment:
             </div>
 
             {/* Сокращение названий */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <FileText className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <FileText className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Сокращение названий</h3>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <p className="text-gray-600 leading-relaxed mb-3">
                     Чтобы быстро сократить названия и привести их нужный формат для рассылки используйте этот промт gemini - сейчас работает очень круто! (если работает плохо, или названия это длинное описание, то вставляйте по 300 строк за раз)
                   </p>
-                  <p className="text-gray-700 leading-relaxed mb-3">
-                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221Vqgv-oZNratrt5i07UVoMprUEAC2wbx2%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт для сокращения названий <ExternalLink className="h-3 w-3" /></a>
-                  </p>
-                  <p className="text-gray-700 leading-relaxed mb-3">
-                    Для использования поставьте модель Gemini 2.0 flash (также можете экспериментировать с другими версиями языковой модели)
-                  </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                  <div className="mb-4">
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221Vqgv-oZNratrt5i07UVoMprUEAC2wbx2%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для сокращения названий <ExternalLink className="h-3.5 w-3.5" /></a>
+                  </div>
+                  <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3 mb-4">
+                    <p className="text-amber-800 text-sm flex items-start gap-2">
+                      <span className="text-amber-500 mt-0.5">💡</span>
+                      Для использования поставьте модель Gemini 2.0 flash (также можете экспериментировать с другими версиями языковой модели)
+                    </p>
+                  </div>
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/name-shortening.png" alt="Настройка модели Gemini для сокращения названий" className="w-full h-auto" />
                   </div>
                 </div>
@@ -3584,27 +3627,35 @@ Here&apos;s the profile of the person you want to compliment:
             </div>
 
             {/* Написание оффера */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <Mail className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <Mail className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Написание оффера</h3>
-                  <p className="text-sm text-gray-500 mb-3">Обновленный промт джемини для написания цепочки</p>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h3 className="font-semibold text-gray-900 text-lg">Написание оффера</h3>
+                    <span className="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full">Обновлено</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mb-3">Обновленный промт джемини для написания цепочки</p>
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     Сейчас нейросети могут практически за вас написать оффер, или дать основу для оффера и идеи для него. В этом промте вы также можете просить модель улучшить или что-то переработать.
                   </p>
-                  <p className="text-gray-700 leading-relaxed mb-3">
-                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221nuzMhi8pHPInt8QXomt9AO3g-aeVG053%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Промт для написания оффера <ExternalLink className="h-3 w-3" /></a>
-                  </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="mb-4">
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221nuzMhi8pHPInt8QXomt9AO3g-aeVG053%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для написания оффера <ExternalLink className="h-3.5 w-3.5" /></a>
+                  </div>
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/offer-writing.png" alt="Интерфейс написания оффера в Gemini" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">
-                    Полученный оффер вы также можете попробовать улучшить через <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">ChatGPT <ExternalLink className="h-3 w-3" /></a> использовав новую модель o-1 (но число запросов ограничено так что используйте 1-2 запроса на o-1, а потом переходите на модель 4о), запросив: &quot;Изучи бриф и улучши мои письма для цепочки аутрич писем&quot; и приложите бриф с вашей цепочкой
-                  </p>
-                  <p className="text-gray-700 leading-relaxed">
+                  <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mb-3">
+                    <p className="text-gray-700 text-sm leading-relaxed">
+                      Полученный оффер вы также можете попробовать улучшить через <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="text-purple-700 font-medium hover:text-purple-800">ChatGPT</a> использовав новую модель o-1 (но число запросов ограничено так что используйте 1-2 запроса на o-1, а потом переходите на модель 4о), запросив: <span className="font-medium text-gray-800">&quot;Изучи бриф и улучши мои письма для цепочки аутрич писем&quot;</span> и приложите бриф с вашей цепочкой
+                    </p>
+                  </div>
+                  <p className="text-gray-600 leading-relaxed">
                     Также можете запросить нейросети предложить идеи для вашего оффера
                   </p>
                 </div>
@@ -3612,36 +3663,3560 @@ Here&apos;s the profile of the person you want to compliment:
             </div>
 
             {/* Ответы на письма */}
-            <div className="group border border-gray-200 rounded-lg p-5 hover:border-purple-300 hover:shadow-md transition-all duration-200 bg-gray-50">
+            <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-5 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+              <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <div className="flex items-start gap-4">
-                <div className="p-2 bg-purple-100 rounded-lg group-hover:bg-purple-200 transition-colors">
-                  <Mail className="h-5 w-5 text-purple-600" />
+                <div className="flex-shrink-0">
+                  <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                    <Mail className="h-5 w-5 text-purple-600" />
+                  </div>
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-semibold text-gray-900 mb-2 text-lg">Ответы на письма: Использование макросов</h3>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Ответы на письма: Использование макросов</h3>
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     Для того, чтобы быстро и эффективно отвечать на письма, пользуйтесь функцией макросов
                   </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/reply-macro-button.png" alt="Кнопка Reply Macro в интерфейсе Unibox" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     И нажмите создать, &quot;create&quot;
                   </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/reply-macros-create.png" alt="Окно создания макроса" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">
-                    В сообщении можете использовать переменные и email, куда должна идти пересылка, чтобы постоянно не указывать её. Можете сделать несколько шаблонов, например, один на обычные ответы, второй для пересылки, НО обязательно перепроверяйте правильно встали ваши переменные, такие как названия компании, имя и т.д
-                  </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white mb-4 w-2/3">
+                  <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mb-4">
+                    <p className="text-amber-800 text-sm leading-relaxed">
+                      <span className="font-semibold">Совет:</span> В сообщении можете использовать переменные и email, куда должна идти пересылка, чтобы постоянно не указывать её. Можете сделать несколько шаблонов, например, один на обычные ответы, второй для пересылки, <span className="font-medium">НО обязательно перепроверяйте правильно встали ваши переменные</span>, такие как названия компании, имя и т.д
+                    </p>
+                  </div>
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/create-macro.png" alt="Создание нового макроса с переменными" className="w-full h-auto" />
                   </div>
-                  <p className="text-gray-700 leading-relaxed mb-3">
+                  <p className="text-gray-600 leading-relaxed mb-4">
                     После нажимайте, &quot;Save&quot; и можете использовать ваш макрос, найдя его в общем поиске
                   </p>
-                  <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm bg-white w-2/3">
+                  <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/macro-list.png" alt="Список макросов для использования" className="w-full h-auto" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </section>
+
+        {/* Инстантли фишки */}
+        <section id="instantly-tips" className="relative overflow-hidden rounded-2xl shadow-xl border border-orange-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-orange-50 via-white to-amber-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-orange-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-orange-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl shadow-lg">
+                  <Zap className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-orange-600 to-amber-600 bg-clip-text text-transparent">
+                  Инстантли фишки
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Полезные функции и лайфхаки для работы с Instantly</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Увеличить открываемость */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-orange-500 to-amber-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <Sparkles className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Увеличить открываемость</h3>
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      Сделать это можно с помощью автоматической рандомизации частей письма.
+                    </p>
+                    
+                    <div className="rounded-xl overflow-hidden mb-4 border border-orange-200 shadow-sm">
+                      <img 
+                        src="/images/instantly-ai-spintax-menu.png" 
+                        alt="AI Tools меню в Instantly с выбором AI Spintax Writer"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mb-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Выберите &quot;AI Spintax Writer&quot;</span> — эта функция автоматически найдёт части письма, которые можно разбавить несколькими синонимичными фразами, что очень снижает фактор спама.
+                      </p>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mb-4">
+                      <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span><span className="font-semibold">ОБЯЗАТЕЛЬНО</span> перечитайте что вышло в итоге и удалите неграмотные варианты!</span>
+                      </p>
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed mb-4">Как выглядит в итоге:</p>
+                    
+                    <div className="rounded-xl overflow-hidden mb-4 border border-orange-200 shadow-sm">
+                      <img 
+                        src="/images/instantly-spintax-result-new.png" 
+                        alt="Результат работы AI Spintax Writer с вариантами текста"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed">
+                      При отправлении будут случайным образом использоваться разные части синонимичных фраз. Через кнопку <span className="font-medium text-gray-800">Preview</span> можете посмотреть на результат — при каждом новом нажатии будет по сути новое сообщение.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Проверка на доставляемость */}
+        <section id="deliverability-check" className="relative overflow-hidden rounded-2xl shadow-xl border border-emerald-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 via-white to-teal-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl shadow-lg">
+                  <ShieldAlert className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
+                  Проверка на доставляемость
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Инструменты диагностики проблем с отправкой писем</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Проверка домена на блок-листы */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6 hover:border-emerald-300 hover:shadow-lg hover:shadow-emerald-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-emerald-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl group-hover:from-emerald-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Shield className="h-5 w-5 text-emerald-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Проверка домена на наличие в блок-листах</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://dnschecker.org/ip-blacklist-checker.php" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-lg text-emerald-700 hover:from-emerald-100 hover:to-teal-100 hover:border-emerald-300 transition-all font-medium text-sm shadow-sm">
+                        dnschecker.org/ip-blacklist-checker <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      Вставьте почту или её домен, а затем нажмите <span className="font-medium text-gray-800">&quot;Check in Blacklist&quot;</span>
+                    </p>
+
+                    <div className="rounded-xl overflow-hidden mb-4 border border-emerald-200 shadow-sm">
+                      <img 
+                        src="/images/blacklist-checker.png" 
+                        alt="Проверка домена на блок-листы через DNSChecker"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      Затем нажмите на предложенный IP адрес — вам покажет список сервисов, в которых сервер числится в блок-листах.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+                      <p className="text-green-800 text-sm leading-relaxed">
+                        Если сервер находится только в блоке <span className="font-mono bg-green-100 px-1 rounded">dnsbl-3.uceprotect.net</span> — то ничего страшного. В остальных случаях пишите в поломки.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Проверка системных сообщений */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6 hover:border-emerald-300 hover:shadow-lg hover:shadow-emerald-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-emerald-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl group-hover:from-emerald-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Server className="h-5 w-5 text-emerald-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Проверка системных сообщений на почтовых ящиках</h3>
+                    
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      Для этого нужно узнать на каком сервере располагается почтовый ящик. Перейдите на dnschecker и посмотрите hostname — это и есть сервер.
+                    </p>
+
+                    <div className="rounded-xl overflow-hidden mb-4 border border-emerald-200 shadow-sm">
+                      <img 
+                        src="/images/hostname-check.png" 
+                        alt="Проверка hostname в DNS Checker"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed mb-3">Выберите из списка подходящий сервер:</p>
+                    
+                    <div className="bg-gradient-to-r from-emerald-50/50 to-teal-50/50 rounded-lg p-4 mb-4 border border-emerald-100">
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <a href="https://smtp.agencyplz.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.agencyplz.ru</a>
+                        <a href="https://smtp.solarcascade.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.solarcascade.ru</a>
+                        <a href="https://smtp.lunarquartz.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.lunarquartz.ru</a>
+                        <a href="https://smtp.trovena.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.trovena.ru</a>
+                        <a href="https://smtp.yoltina.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.yoltina.ru</a>
+                        <a href="https://smtp.zonvica.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.zonvica.ru</a>
+                        <a href="https://smtp.korluna.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.korluna.ru</a>
+                        <a href="https://smtp.inoutreach.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.inoutreach.ru</a>
+                        <a href="https://smtp.letoutreach.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.letoutreach.ru</a>
+                        <a href="https://smtp.outreachgo.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.outreachgo.ru</a>
+                        <a href="https://smtp.letsoutreach.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.letsoutreach.ru</a>
+                        <a href="https://smtp.polzagency.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.polzagency.ru</a>
+                        <a href="https://smtp.outreachhub.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.outreachhub.ru</a>
+                        <a href="https://smtp.outreachpros.ru/SOGo/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-800 hover:underline">smtp.outreachpros.ru</a>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm">
+                        <span className="font-semibold">Логин:</span> сама почта<br/>
+                        <span className="font-semibold">Пароль для всех:</span> <span className="font-mono bg-slate-100 px-1 rounded">rd&amp;F=n&amp;X%=6X3gJ%</span>
+                      </p>
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      В почтовом ящике вам нужно смотреть наличие писем <span className="font-medium text-gray-800">&quot;Mail Delivery System&quot;</span>
+                    </p>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
+                      <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span>Если таких писем очень много — сообщайте в поломки, это значит что письма в принципе не отправились.</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Низкая доставляемость и мало ответов */}
+        <section id="low-deliverability" className="relative overflow-hidden rounded-2xl shadow-xl border border-rose-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-rose-50 via-white to-pink-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-rose-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-rose-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl shadow-lg">
+                  <BarChart3 className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-rose-600 to-pink-600 bg-clip-text text-transparent">
+                  Низкая доставляемость и мало ответов
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Чек-лист для диагностики проблем</p>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-sm border border-rose-100 rounded-xl p-6">
+              <p className="text-gray-600 mb-6">Если у вас низкая доставляемость или мало ответов, проверьте следующее:</p>
+              
+              <div className="space-y-4">
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">1</div>
+                  <div>
+                    <p className="text-gray-700">Проверьте живой ли домен через <a href="https://dnschecker.org/all-dns-records-of-domain.php" target="_blank" rel="noopener noreferrer" className="text-rose-600 hover:text-rose-800 hover:underline font-medium">dnschecker.org</a></p>
+                    <p className="text-gray-500 text-sm mt-1">Проверьте наличие MX записи и TXT записей</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">2</div>
+                  <p className="text-gray-700">Проверьте не истёк ли срок аренды домена в <a href="https://reg.ru" target="_blank" rel="noopener noreferrer" className="text-rose-600 hover:text-rose-800 hover:underline font-medium">reg.ru</a></p>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">3</div>
+                  <p className="text-gray-700">Проверьте стоит ли зелёный огонёк у почты, проверьте не ниже ли <span className="font-semibold">85</span> здоровье почты</p>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">4</div>
+                  <p className="text-gray-700">Проверьте не заблокировали ли почту в Google Workspace воспользовавшись поиском</p>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">5</div>
+                  <p className="text-gray-700">Проверьте валидирована ли база в LetsExtract <span className="text-rose-600 font-medium">или в нашей собственной программе (результат лучше)</span></p>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">6</div>
+                  <p className="text-gray-700">Перепроверьте источники базы — зачастую базы из Селеком, РБК и прочие могут оказаться не совсем свежими</p>
+                </div>
+
+                <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-rose-50/50 to-pink-50/50 rounded-lg border border-rose-100">
+                  <div className="w-6 h-6 flex items-center justify-center bg-rose-500 text-white text-xs font-bold rounded-md flex-shrink-0">7</div>
+                  <p className="text-gray-700">Проверьте письмо на наличие сломанных ссылок и прочих признаков спама через внутреннюю проверку письма в Instantly</p>
+                </div>
+              </div>
+
+              {/* Placeholder для картинки */}
+              <div className="border-2 border-dashed border-rose-200 rounded-xl p-8 my-6 bg-rose-50/50 text-center">
+                <ImageIcon className="h-8 w-8 text-rose-300 mx-auto mb-2" />
+                <p className="text-sm text-rose-400">Картинка: instantly-spam-check.png</p>
+              </div>
+
+              <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mb-4">
+                <p className="text-amber-800 text-sm leading-relaxed">
+                  <span className="font-semibold">Совет:</span> Если у вас маленький счёт, не переживайте — просто посмотрите за что вам его дали. Иногда Instantly ругается на домены <span className="font-mono">.online</span>, но они не влияют на рассылку.
+                </p>
+              </div>
+
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
+                <p className="text-blue-800 text-sm leading-relaxed">
+                  <span className="font-semibold">Лайфхак:</span> Иногда может быть такое, что в вашем письме много русских букв &quot;е&quot;, которые могут плохо восприниматься. В таком случае замените русские &quot;е&quot; на английские &quot;e&quot;.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Ошибки и чего нельзя делать */}
+        <section id="common-errors" className="relative overflow-hidden rounded-2xl shadow-xl border border-red-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-red-50 via-white to-orange-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-red-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-red-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-red-500 to-orange-500 rounded-xl shadow-lg">
+                  <Ban className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-red-600 to-orange-600 bg-clip-text text-transparent">
+                  Ошибки и чего нельзя делать
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Важные ограничения и запреты при работе</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              {/* Ошибка 1 */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-red-100 rounded-xl p-5 hover:border-red-300 hover:shadow-lg hover:shadow-red-100/50 transition-all duration-300">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 flex items-center justify-center bg-red-500 text-white font-bold rounded-lg flex-shrink-0">1</div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900 mb-2">Смена почтовых адресов во время рассылки</h3>
+                    <p className="text-gray-600 text-sm leading-relaxed">
+                      Нельзя изменять почтовые адреса во время начатой рассылки, т.к. заново начнут высылаться письма по уже отправленным лидам и система не сможет отслеживать тех, кто ответил, чтобы перестать отправлять дальше.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Ошибка 2 */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-red-100 rounded-xl p-5 hover:border-red-300 hover:shadow-lg hover:shadow-red-100/50 transition-all duration-300">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 flex items-center justify-center bg-red-500 text-white font-bold rounded-lg flex-shrink-0">2</div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900 mb-2">Загрузка на фотостоки запрещённых фото</h3>
+                    <p className="text-gray-600 text-sm leading-relaxed">
+                      Следует отслеживать, отправляются ли фотографии в отправленных сообщениях. Иногда сервисы, предоставляющие ссылки на картинки, могут удалять фотографии за несоблюдение правил. Например, за загрузку табачной продукции. Тогда следует загрузить фотографию на <span className="font-medium">imgur</span>.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Ошибка 3 */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-red-100 rounded-xl p-5 hover:border-red-300 hover:shadow-lg hover:shadow-red-100/50 transition-all duration-300">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 flex items-center justify-center bg-red-500 text-white font-bold rounded-lg flex-shrink-0">3</div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900 mb-2">Прикрепление ссылок к фотографии в Instantly</h3>
+                    <p className="text-gray-600 text-sm leading-relaxed">
+                      Нельзя добавлять ссылку в саму фотографию в редакторе цепочек сообщений. Вместо этого в письмах просто будет пустое место.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Ошибка 4 - Просит номер телефона */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-red-100 rounded-xl p-5 hover:border-red-300 hover:shadow-lg hover:shadow-red-100/50 transition-all duration-300">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 flex items-center justify-center bg-red-500 text-white font-bold rounded-lg flex-shrink-0">4</div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-2">Просит номер телефона при входе в аккаунт Google</h3>
+                    <p className="text-gray-600 text-sm leading-relaxed mb-4">
+                      Если при попытке входа в аккаунт высвечивается запрос на номер телефона <span className="text-gray-500">(после нескольких использований одного и того же номера он блокируется)</span>, необходимо:
+                    </p>
+                    
+                    <div className="space-y-3 text-sm">
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">1.</span>
+                        <p className="text-gray-700">Зайти в аккаунт Google Workspace во вкладку <span className="font-medium">Каталог → Организационные подразделения</span> и нажать кнопку <span className="font-medium">&quot;Создать подразделение&quot;</span></p>
+                      </div>
+                      
+                      {/* Placeholder для картинки */}
+                      <div className="border-2 border-dashed border-red-200 rounded-xl p-6 bg-red-50/50 text-center">
+                        <ImageIcon className="h-6 w-6 text-red-300 mx-auto mb-2" />
+                        <p className="text-xs text-red-400">Картинка: google-workspace-org.png</p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">2.</span>
+                        <p className="text-gray-700">Нажать на поисковую строку и вписать <span className="font-medium">&quot;Двухэтапная аутентификация&quot;</span></p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">3.</span>
+                        <p className="text-gray-700">Выбрать подразделение, <span className="font-medium">включить</span> двухэтапную аутентификацию и <span className="font-medium">сохранить</span></p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">4.</span>
+                        <p className="text-gray-700">Перейти во вкладку <span className="font-medium">Каталог → Пользователи</span>, найти пользователя, нажать <span className="font-medium">&quot;Ещё&quot;</span> → <span className="font-medium">&quot;Изменить орг. подразделение&quot;</span></p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">5.</span>
+                        <p className="text-gray-700">Нажать на пользователя → блок <span className="font-medium">&quot;Безопасность&quot;</span> → <span className="font-medium">&quot;Двухэтапная аутентификация&quot;</span> → карандаш</p>
+                      </div>
+
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">6.</span>
+                        <p className="text-gray-700">Нажать <span className="font-medium">&quot;Сгенерировать коды подтверждения&quot;</span> и скопировать любой код</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> Для быстрого входа можно привязать <span className="font-medium">Google Authenticator</span>. Войдите в аккаунт с кодом, перейдите в <span className="font-medium">Управление аккаунтом → Безопасность → Двухэтапная аутентификация</span>, введите номер телефона (тут его не забанят), включите и выберите <span className="font-medium">&quot;Authenticator&quot;</span>.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Работа с лидами */}
+        <section id="leads-work" className="relative overflow-hidden rounded-2xl shadow-xl border border-sky-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-sky-50 via-white to-blue-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-sky-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-sky-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-sky-500 to-blue-500 rounded-xl shadow-lg">
+                  <UserCheck className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-sky-600 to-blue-600 bg-clip-text text-transparent">
+                  Работа с лидами
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Кто считается лидом и как с ними работать</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Кто считается лидом */}
+              <div className="bg-white/80 backdrop-blur-sm border border-sky-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <span className="w-8 h-8 flex items-center justify-center bg-sky-500 text-white text-sm font-bold rounded-lg">?</span>
+                  Кто считается лидом?
+                </h3>
+                <p className="text-gray-600 leading-relaxed mb-4">
+                  Лидом считается человек, который непосредственно заинтересован в звонке / покупке / тесте и другом колл-ту-экшене, который мы закладывали в оффер.
+                </p>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  {/* НЕ передаём */}
+                  <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
+                    <h4 className="font-semibold text-red-700 mb-3 flex items-center gap-2">
+                      <XCircle className="h-5 w-5" />
+                      НЕ передаём
+                    </h4>
+                    <ul className="space-y-2 text-sm text-red-700">
+                      <li className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">•</span>
+                        Автоответы
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">•</span>
+                        Шаблонные запросы КП от менеджеров (если это на первое сообщение — высылаем наше второе)
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">•</span>
+                        Заполнение спец. формы на сайте для сотрудничества
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">•</span>
+                        Тех, кто подумает и сам свяжется
+                      </li>
+                    </ul>
+                  </div>
+
+                  {/* Передаём */}
+                  <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+                    <h4 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
+                      <CheckCircle2 className="h-5 w-5" />
+                      Передаём
+                    </h4>
+                    <ul className="space-y-2 text-sm text-green-700">
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Тех, кто запросил цену
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Готов созвониться
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Готов протестировать
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Сказал, что интересно, но просил связаться позже
+                      </li>
+                      <li className="flex items-start gap-2">
+                        <span className="text-green-400 mt-1">•</span>
+                        Уточняет вопросы к отделу продаж
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-r from-sky-50 to-blue-50 border border-sky-200 rounded-lg p-4 mt-4">
+                  <p className="text-sky-800 text-sm leading-relaxed">
+                    <span className="font-semibold">Правило:</span> Поставьте себя на место специалиста из отдела продаж и спросите себя: &quot;Готов ли этот человек купить? Смогу ли я ему продать?&quot;
+                  </p>
+                </div>
+              </div>
+
+              {/* Передача лидов клиенту */}
+              <div className="bg-white/80 backdrop-blur-sm border border-sky-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Передача лидов клиенту</h3>
+                <p className="text-gray-600 leading-relaxed mb-4">
+                  Для передачи лида уточняем у клиента кому мы будем их передавать. Нам нужно: <span className="font-medium">имя / должность / email сотрудника</span>. Для передачи ставим специалиста в копию и в обратный адрес письма (чтобы когда лид нажмёт &quot;ответить&quot;, ответ сразу шёл к клиенту).
+                </p>
+
+                <div className="rounded-xl overflow-hidden mb-4 border border-sky-200 shadow-sm">
+                  <img 
+                    src="/images/lead-transfer-example.png" 
+                    alt="Пример письма с передачей лида клиенту"
+                    className="w-full h-auto"
+                  />
+                </div>
+
+                <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                  <p className="text-gray-700 text-sm mb-2 font-medium">Пример сообщения при передаче от лица клиента:</p>
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 text-sm text-gray-600 italic">
+                    &quot;Добрый день! Я поставил в копию свою вторую почту, чтобы не пропустить от вас ответа. В ближайшее время свяжусь с вами и отвечу на все ваши вопросы. Уточните, пожалуйста, ваш телефон/вотсап/телеграм.&quot;
+                  </div>
+                </div>
+              </div>
+
+              {/* Взаимодействие с контактом */}
+              <div className="bg-white/80 backdrop-blur-sm border border-sky-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Взаимодействие с контактом</h3>
+                <p className="text-gray-600 leading-relaxed mb-4">
+                  Всё общение ведём осмысленно и не отвечаем шаблонно, игнорируя запросы человека. Отвечаем на его вопросы в пределах компетенций и подвязываем ответ к нашему офферу.
+                </p>
+
+                <div className="space-y-3">
+                  <div className="bg-gradient-to-r from-sky-50 to-blue-50 border border-sky-200 rounded-lg p-4">
+                    <p className="text-sky-800 text-sm mb-2 font-medium">Если человек сразу предлагает созвониться:</p>
+                    <div className="bg-white border border-sky-200 rounded-lg p-3 text-sm text-gray-600 italic">
+                      &quot;Добрый день, (имя)! Прежде чем созвониться, хочу рассказать вам о своём предложении...&quot;
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-r from-sky-50 to-blue-50 border border-sky-200 rounded-lg p-4">
+                    <p className="text-sky-800 text-sm mb-2 font-medium">Если передали контакт другого сотрудника:</p>
+                    <div className="bg-white border border-sky-200 rounded-lg p-3 text-sm text-gray-600 italic">
+                      &quot;Добрый день, (имя)! Прежде чем позвонить, хочу рассказать вам о своём предложении. Буду очень благодарен, если вы направите моё сообщение нужному специалисту!&quot;
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-r from-sky-50 to-blue-50 border border-sky-200 rounded-lg p-4">
+                    <p className="text-sky-800 text-sm mb-2 font-medium">Если нам передали email сотрудника:</p>
+                    <div className="bg-white border border-sky-200 rounded-lg p-3 text-sm text-gray-600 italic">
+                      &quot;Добрый день, (имя)! Ваш контакт мне передал сотрудник вашей компании - (имя сотрудника), поэтому сразу хочу рассказать вам о своём предложении...&quot;
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                  <p className="text-amber-800 text-sm leading-relaxed">
+                    <span className="font-semibold">Важно:</span> Если лид ответил с другой почты, чтобы письма из рассылки не отправлялись дальше — измените статус лида на &quot;Interested&quot; или &quot;Not interested&quot;. Статус изменится на Completed и письма больше не будут отправляться.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Работа с базами */}
+        <section id="databases-work" className="relative overflow-hidden rounded-2xl shadow-xl border border-violet-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-violet-50 via-white to-purple-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-violet-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-violet-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-violet-500 to-purple-500 rounded-xl shadow-lg">
+                  <Database className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-violet-600 to-purple-600 bg-clip-text text-transparent">
+                  Работа с базами
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Парсеры, сбор контактов и верификация</p>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <div className="bg-gradient-to-r from-violet-50 to-purple-50 border border-violet-200 rounded-lg p-4">
+                <p className="text-violet-800 text-sm leading-relaxed">
+                  Если вы сталкиваетесь с трудностями при генерации гипотез, используйте информацию из <a href="https://docs.google.com/document/d/1UqNVJRu9zE85A8VXzehjT3J3kB_IJfZjWdufSDQGn8A/edit#heading=h.hck8vy34qqsg" target="_blank" rel="noopener noreferrer" className="text-violet-700 font-medium hover:text-violet-900 underline">этого регламента</a>.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Удалённый рабочий стол для MacOS */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-violet-100 to-purple-100 rounded-xl group-hover:from-violet-200 group-hover:to-purple-200 transition-colors shadow-sm">
+                      <Monitor className="h-5 w-5 text-violet-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Удалённый рабочий стол для MacOS</h3>
+                    <p className="text-gray-600 leading-relaxed mb-4">
+                      Для использования <span className="font-medium">LetsExtract, 2Gis</span> и других Windows-программ с Mac необходимо скачать <span className="font-medium">Windows App</span> в App Store.
+                    </p>
+
+                    <div className="rounded-xl overflow-hidden mb-4 border border-violet-200 shadow-sm">
+                      <img 
+                        src="/images/windows-app-macos.png" 
+                        alt="Windows App на MacOS для запуска Windows-программ"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Настройки подключения:</p>
+                      <div className="space-y-1 text-sm">
+                        <p><span className="font-medium">PC name:</span> <span className="font-mono bg-slate-100 px-1 rounded">83.222.10.15</span></p>
+                        <p><span className="font-medium">Friendly name:</span> Administrator</p>
+                        <p><span className="font-medium">Username:</span> Administrator</p>
+                        <p><span className="font-medium">Password:</span> <span className="font-mono bg-slate-100 px-1 rounded">mG4nK-2Ze@Kr+U</span></p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
+                      <p className="text-blue-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Для Windows:</span> В поиске найдите &quot;Подключение к удалённому рабочему столу&quot;, введите IP <span className="font-mono bg-blue-100 px-1 rounded">94.198.218.179</span> и те же учётные данные.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсер Яндекс Директ */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-yellow-100 to-orange-100 rounded-xl group-hover:from-yellow-200 group-hover:to-orange-200 transition-colors shadow-sm">
+                      <Globe className="h-5 w-5 text-yellow-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсер рекламы Яндекс Директ</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://arsenkin.ru/tools/parser-ads/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-yellow-50 to-orange-50 border border-yellow-200 rounded-lg text-yellow-700 hover:from-yellow-100 hover:to-orange-100 hover:border-yellow-300 transition-all font-medium text-sm shadow-sm">
+                        arsenkin.ru/tools/parser-ads <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    </div>
+
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-violet-500 font-medium">1.</span>
+                        <p>Соберите <a href="https://wordstat.yandex.ru" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">ключевые фразы</a> и вставьте в поле, выберите регион, устройство и нажмите <span className="font-medium">&quot;Собрать данные&quot;</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-violet-500 font-medium">2.</span>
+                        <p>Скачайте данные в формате <span className="font-mono bg-slate-100 px-1 rounded">windows-1251</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-violet-500 font-medium">3.</span>
+                        <p>В <a href="https://docs.google.com/spreadsheets/u/0/" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">Google Таблицах</a> импортируйте файл: Файл → Импортировать → &quot;Добавить на эту страницу&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-violet-500 font-medium">4.</span>
+                        <p>Скопируйте ссылки на сайты на вторую страницу, затем импортируйте следующий файл с опцией &quot;Заменить текущий лист&quot;</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Яндекс.Карты Парсер */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-orange-100 rounded-xl group-hover:from-red-200 group-hover:to-orange-200 transition-colors shadow-sm">
+                      <Map className="h-5 w-5 text-red-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Яндекс.Карты Парсер</h3>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://drive.google.com/file/d/1hK2_KrQQ2g-uZeKCAm20tzBOLl1y8uwP/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-violet-50 to-purple-50 border border-violet-200 rounded-lg text-violet-700 hover:from-violet-100 hover:to-purple-100 hover:border-violet-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                      </a>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <h4 className="font-medium text-gray-800 mb-2">1. Подготовка и запуск</h4>
+                        <p className="text-gray-600 text-sm">Распакуйте архив и запустите <span className="font-mono bg-slate-100 px-1 rounded">YandexMapsParser.exe</span></p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <h4 className="font-medium text-gray-800 mb-2">2. Генерация ссылок (3 способа)</h4>
+                        <ul className="text-gray-600 text-sm space-y-2">
+                          <li><span className="font-medium text-violet-600">А)</span> Ручной ввод: город + ключевое слово → &quot;Сгенерировать URL поиска&quot;</li>
+                          <li><span className="font-medium text-violet-600">Б)</span> Массовая генерация: кнопка &quot;Генератор ссылок&quot; → выбор городов и рубрик</li>
+                          <li><span className="font-medium text-violet-600">В)</span> Через браузер: настройте фильтры на <a href="https://yandex.ru/maps" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">Яндекс.Картах</a> и скопируйте URL</li>
+                        </ul>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <h4 className="font-medium text-gray-800 mb-2">3. Сбор и парсинг</h4>
+                        <p className="text-gray-600 text-sm mb-2"><span className="font-medium">&quot;Собрать ссылки организаций&quot;</span> → <span className="font-medium">&quot;Начать парсинг организаций&quot;</span> → <span className="font-medium">&quot;Экспорт в Excel&quot;</span></p>
+                        <p className="text-gray-500 text-xs">Рекомендация: лимит не более 1000 организаций на одну ссылку</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-3">
+                        <p className="text-green-800 text-sm">
+                          <span className="font-semibold">Данные в Excel:</span> название, адрес, рейтинг, телефоны, сайт, email, соцсети, WhatsApp, категории, часы работы
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсер 2ГИС */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
+                      <Map className="h-5 w-5 text-green-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсер 2ГИС</h3>
+                    <p className="text-gray-500 text-sm mb-3">Скорость: 200 мест за 5 минут</p>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://drive.google.com/file/d/1W_gwgL2AdI6_JwxSOe5fzjotJYa5lIHQ/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 hover:border-green-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                      </a>
+                      <a href="https://www.google.ru/chrome/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Требуется Chrome <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-green-500 font-medium">1.</span>
+                        <p>Нажмите 3 точки напротив URL → &quot;Сгенерировать&quot; → &quot;Выделить все&quot; → введите запрос</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-green-500 font-medium">2.</span>
+                        <p>Выберите тип <span className="font-mono bg-slate-100 px-1 rounded">xlsx</span> и место сохранения</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-green-500 font-medium">3.</span>
+                        <p>Нажмите &quot;Запуск&quot; и дождитесь окончания</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Рекомендация:</span> Перед парсингом проверьте ссылки и выставьте фильтры на 2gis.ru (например, звёздность отелей). Можно попросить ChatGPT добавить фильтры в остальные ссылки.
+                      </p>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-3">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Настройки при ошибках:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <span className="font-medium">Лимит RAM:</span> меньше половины ОЗУ (например, 6000 МБ при 16 ГБ)</li>
+                        <li>• <span className="font-medium">Скрытый режим:</span> стабильнее и быстрее</li>
+                        <li>• <span className="font-medium">Лимит записей:</span> увеличьте, если &gt;3000 контактов из региона</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг с HH */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-pink-100 rounded-xl group-hover:from-red-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <Briefcase className="h-5 w-5 text-red-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг с HH.ru</h3>
+                    
+                    <p className="text-gray-600 text-sm mb-4">
+                      Зайдите на <a href="https://hh.ru" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">hh.ru</a>, введите ключевое слово и настройте фильтры.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Рекомендуемые фильтры:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <span className="font-medium">Уровень дохода</span> — отсечёт неподходящие должности (директор вряд ли получает до 55 000 руб.)</li>
+                        <li>• <span className="font-medium">Исключить ключевые слова</span> — уберёт крупных игроков, конкурентов и неподходящие вакансии</li>
+                        <li>• <span className="font-medium">Ключевые слова</span> — поиск по названиям компаний уточнит ЦА</li>
+                        <li>• <span className="font-medium">Временной промежуток</span> — свежие вакансии (например, за неделю)</li>
+                        <li>• <span className="font-medium">Специализации и отрасль</span> — хорошо сужают аудиторию, но могут сильно обрезать выборку</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Команды поиска:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <span className="font-mono bg-slate-100 px-1 rounded">|</span> — несколько запросов (маркетолог | smm)</li>
+                        <li>• <span className="font-mono bg-slate-100 px-1 rounded">&amp;</span> — точная фраза, слова рядом друг с другом</li>
+                      </ul>
+                      <a href="https://hh.ru/article/1175" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline text-xs mt-2 inline-block">Другие полезные команды →</a>
+                    </div>
+
+                    <div className="mb-4">
+                      <a href="https://t.me/polzaagency_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
+                        <MessageCircle className="h-3.5 w-3.5" /> @polzaagency_bot — отправьте ссылку на выборку
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
+                      <p className="text-red-700 text-sm leading-relaxed">
+                        <span className="font-semibold">Важно для бота:</span>
+                      </p>
+                      <ul className="text-red-700 text-sm mt-1 space-y-1">
+                        <li>• Должны быть выбраны <span className="font-medium">отрасли</span>!</li>
+                        <li>• Ссылка должна быть вида <span className="font-mono bg-red-100 px-1 rounded">https://hh.ru/se...</span> — <span className="font-medium">без города перед hh</span>!</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-3">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> Если результат слишком маленький — дополните выборку через символ <span className="font-mono bg-amber-100 px-1 rounded">|</span>. Перед отправкой клиенту удаляйте столбец с зарплатой и названиями вакансий (если не важно для проекта) — клиенты путаются.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг рейтинга на HH.ru */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-rose-100 rounded-xl group-hover:from-red-200 group-hover:to-rose-200 transition-colors shadow-sm">
+                      <BarChart3 className="h-5 w-5 text-red-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг рейтинга на HH.ru</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://drive.google.com/file/d/1Fwo_KtJ_fwPHIcMz1LRij6So8pRgldYr/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-rose-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-rose-100 hover:border-red-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Скачать парсер рейтинга
+                      </a>
+                    </div>
+
+                    <div className="space-y-2 text-sm text-gray-600 mb-4">
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">1.</span>
+                        <p>Скачайте архив и извлеките папку на ПК</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">2.</span>
+                        <p>Откройте папку <span className="font-mono bg-slate-100 px-1 rounded">Head Hunter Employers Rating Parser</span> → <span className="font-mono bg-slate-100 px-1 rounded">.build</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">3.</span>
+                        <p>Скопируйте столбец &quot;Ссылка на вакансию&quot; и вставьте в файл <span className="font-mono bg-slate-100 px-1 rounded">vacancies.txt</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">4.</span>
+                        <p>Сохраните файл и запустите <span className="font-mono bg-slate-100 px-1 rounded">Head Hunter Employers Rating Parser.exe</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-red-500 font-medium">5.</span>
+                        <p>Дождитесь окончания → результат в папке <span className="font-mono bg-slate-100 px-1 rounded">data</span></p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Проверка ссылок на работоспособность */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-green-100 rounded-xl group-hover:from-emerald-200 group-hover:to-green-200 transition-colors shadow-sm">
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Проверка ссылок на работоспособность</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://drive.google.com/file/d/1ys0r1EKA2kHVAp2Fe83xT36ib_Pit0P6/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg text-emerald-700 hover:from-emerald-100 hover:to-green-100 hover:border-emerald-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Sites Availability Checker.zip
+                      </a>
+                    </div>
+
+                    <div className="space-y-2 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-emerald-500 font-medium">1.</span>
+                        <p>Скачайте и разархивируйте программу</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-emerald-500 font-medium">2.</span>
+                        <p>Откройте папку <span className="font-mono bg-slate-100 px-1 rounded">.build</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-emerald-500 font-medium">3.</span>
+                        <p>Поместите в папку <span className="font-mono bg-slate-100 px-1 rounded">data</span> Excel таблицу с колонками: <span className="font-medium">Компания | Сайт</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-emerald-500 font-medium">4.</span>
+                        <p>Результат появится в папке <span className="font-mono bg-slate-100 px-1 rounded">data/output</span></p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг с ТГ каналов */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-cyan-100 rounded-xl group-hover:from-blue-200 group-hover:to-cyan-200 transition-colors shadow-sm">
+                      <MessageCircle className="h-5 w-5 text-blue-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг с Telegram каналов</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://t.me/parse_polza_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-cyan-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-cyan-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
+                        <MessageCircle className="h-3.5 w-3.5" /> @parse_polza_bot
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Как использовать:</p>
+                      <p className="text-gray-600 text-sm font-mono bg-slate-100 p-2 rounded">/scan https://t.me/devjobs</p>
+                      <p className="text-gray-500 text-xs mt-2">Бот не ответит на /start — сразу отправляйте /scan со ссылкой</p>
+                    </div>
+
+                    <p className="text-gray-600 text-sm mb-4">
+                      Бот собирает последние 10000 постов (5-15 минут). Результаты появятся в таблице в описании бота.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3">
+                      <p className="text-amber-800 text-sm">
+                        <span className="font-semibold">Важно:</span> Функции работать нескольким пользователям одновременно нет — после сбора информация обновляется на листе &quot;Названия вакансий&quot;.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Глаз Бога */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
+                      <Search className="h-5 w-5 text-slate-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Глаз Бога</h3>
+                    <p className="text-gray-600 text-sm">
+                      Бот для поиска информации о контактах. Позволяет найти дополнительные данные по номеру телефона, email или имени.
+                    </p>
+                    <a href="https://t.me/eyeofgod_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg text-slate-700 hover:from-slate-100 hover:to-gray-100 transition-all text-sm mt-3">
+                      <MessageCircle className="h-3.5 w-3.5" /> @eyeofgod_bot
+                    </a>
+                  </div>
+                </div>
+              </div>
+
+              {/* Selecom */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                      <Database className="h-5 w-5 text-blue-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Selecom</h3>
+                    <p className="text-gray-600 text-sm mb-3">
+                      Сервис для сбора баз контактов. <span className="text-amber-600">Учтите: базы из Selecom, РБК и прочих источников могут быть не совсем свежими.</span>
+                    </p>
+                    <a href="https://selecom.ru" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
+                      selecom.ru <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+              </div>
+
+              {/* PhantomBuster */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-fuchsia-100 rounded-xl group-hover:from-purple-200 group-hover:to-fuchsia-200 transition-colors shadow-sm">
+                      <Bot className="h-5 w-5 text-purple-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">PhantomBuster — парсинг Sales Navigator</h3>
+                    <p className="text-gray-600 text-sm mb-3">
+                      С его помощью можно собирать email с сайтов, искать домены по названиям и парсить Google Карты.
+                    </p>
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-3">
+                      <p className="text-gray-700 text-sm">
+                        <span className="font-medium">Доступы:</span> в документе с общими доступами
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Подключение к базе баз */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-teal-100 to-cyan-100 rounded-xl group-hover:from-teal-200 group-hover:to-cyan-200 transition-colors shadow-sm">
+                      <Database className="h-5 w-5 text-teal-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Подключение к базе баз</h3>
+                    <p className="text-gray-600 text-sm mb-3">
+                      Централизованное хранилище всех собранных баз компании. Доступы и инструкция по подключению в документе с общими доступами.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг с Habr */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Briefcase className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг с Habr Career</h3>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://t.me/habrcareer_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
+                        <MessageCircle className="h-3.5 w-3.5" /> @habrcareer_parser_bot
+                      </a>
+                      <a href="https://docs.google.com/spreadsheets/d/1EZ1refZQh_LJ20OhOYMcvQVYboY5CmpBF3zZTjrakQM/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Таблица результатов <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <p className="text-gray-600 text-sm">
+                      Нажмите <span className="font-mono bg-slate-100 px-1 rounded">/start</span> и отправьте ссылку на выборку.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг с Habr */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Briefcase className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг с Habr Career</h3>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://t.me/habrcareer_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
+                        <MessageCircle className="h-3.5 w-3.5" /> @habrcareer_parser_bot
+                      </a>
+                      <a href="https://docs.google.com/spreadsheets/d/1EZ1refZQh_LJ20OhOYMcvQVYboY5CmpBF3zZTjrakQM/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Таблица результатов <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <p className="text-gray-600 text-sm">
+                      Нажмите <span className="font-mono bg-slate-100 px-1 rounded">/start</span> и отправьте ссылку на выборку.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг LinkedIn */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                      <Link className="h-5 w-5 text-blue-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг LinkedIn</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">1.</span>
+                        <p>Войдите в LinkedIn и перейдите на <a href="https://www.linkedin.com/search/results/companies/" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">поиск компаний</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">2.</span>
+                        <p>Настройте фильтры (рекомендуется не более 600 компаний)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">3.</span>
+                        <p>Скопируйте URL и отправьте в бот <a href="https://t.me/polza_linkedin_company_bot" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">@polza_linkedin_company_bot</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">4.</span>
+                        <p>Парсинг может занять до часа. Результаты в таблице в описании бота</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсер RusProfile */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <HardDrive className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсер RusProfile</h3>
+                    
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Доступы к rusprofile.ru:</p>
+                      <p className="text-gray-600 text-sm">
+                        <span className="font-medium">Почта:</span> <span className="font-mono bg-slate-100 px-1 rounded">grid4ina.an@gmail.com</span><br/>
+                        <span className="font-medium">Пароль:</span> <span className="font-mono bg-slate-100 px-1 rounded">zasfam-xonxyj-6hYjky</span>
+                      </p>
+                    </div>
+
+                    <div className="mb-4">
+                      <a href="https://drive.google.com/file/d/1iVPb_7Ok-x9L6VE5Ef0auElUIt0YUgjj/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 hover:border-orange-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Настройка config.json:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <span className="font-medium">SAVE_FOLDER</span> — папка сохранения результатов</li>
+                        <li>• <span className="font-medium">PROXY</span> — формат http://логин:пароль@ip:порт (пусто если нет)</li>
+                        <li>• <span className="font-medium">MAX_PAGES</span> — сколько страниц собирать (0 = все, макс 20)</li>
+                        <li>• <span className="font-medium">MIN/MAX_SLEEP_TIME</span> — время между запросами в секундах</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Как заполнить filters.json:</p>
+                      <div className="space-y-1 text-sm text-gray-600">
+                        <p>1. Перейдите на <a href="https://www.rusprofile.ru/search-advanced" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">rusprofile.ru/search-advanced</a></p>
+                        <p>2. Нажмите <span className="font-medium">F12</span> → вкладка <span className="font-medium">Network (Сеть)</span> → фильтр <span className="font-medium">Fetch/XHR</span></p>
+                        <p>3. Установите фильтры на сайте</p>
+                        <p>4. Найдите последний запрос <span className="font-mono bg-slate-100 px-1 rounded text-xs">ajax_auth.php?action=search_advanced</span></p>
+                        <p>5. ПКМ → <span className="font-medium">Copy → Copy as cURL (bash)</span></p>
+                        <p>6. Вставьте на <a href="https://curlconverter.com/json/" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">curlconverter.com/json</a></p>
+                        <p>7. Скопируйте результат в filters.json и сохраните</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> Если программа пишет &quot;Подтвердите, что вы не робот&quot; — смените прокси или зайдите на <a href="https://www.rusprofile.ru/search-advanced" target="_blank" rel="noopener noreferrer" className="underline">rusprofile.ru</a> с основного браузера и полистайте пару страниц вручную.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Apollo */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-violet-100 rounded-xl group-hover:from-indigo-200 group-hover:to-violet-200 transition-colors shadow-sm">
+                      <Globe className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Apollo — парсинг зарубежных контактов</h3>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 rounded-lg text-indigo-700 hover:from-indigo-100 hover:to-violet-100 hover:border-indigo-300 transition-all font-medium text-sm shadow-sm">
+                        Полный регламент <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                      <a href="https://drive.google.com/file/d/1U6wykUwYIn-bUi7y6mGshROCUuVTOpgx/view?usp=drive_link" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
+                        <Video className="h-3.5 w-3.5" /> Видео-инструкция
+                      </a>
+                      <a href="https://t.me/Apollo_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
+                        <MessageCircle className="h-3.5 w-3.5" /> @Apollo_parser_bot
+                      </a>
+                    </div>
+
+                    <p className="text-gray-600 text-sm mb-4">
+                      Зайдите на <a href="https://apollo.io" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">apollo.io</a> → вкладка с лупой → <span className="font-medium">People</span>
+                    </p>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">1. Фильтрация выборки:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <span className="font-medium">Job Titles</span> — должности (можно исключить через &quot;Is not any&quot;)</li>
+                        <li>• <span className="font-medium">Employees</span> — размер компании (отсечь маленькие/крупные)</li>
+                        <li>• <span className="font-medium">Industry &amp; Keywords</span> — индустрии и ключевые слова</li>
+                        <li>• <span className="font-medium">Email Status</span> — ставить первые 2 пункта (verified)</li>
+                      </ul>
+                      <p className="text-gray-500 text-xs mt-2">Ключевые слова ищут по: названию компании, тэгам соцсетей, SEO описанию. Миксуйте фильтры!</p>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">2. Сохранение выборки:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• Нажмите чекбокс около списка</li>
+                        <li>• <span className="font-medium">Max people per company</span> — укажите 2-3 (не собирать 10+ из одной компании)</li>
+                        <li>• Введите общее кол-во контактов → <span className="font-medium">Apply selection</span></li>
+                        <li>• <span className="font-medium">List → Add to Lists</span> → название → сохранить</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">3. Скачивание через бот:</p>
+                      <p className="text-gray-600 text-sm">Загрузите ссылку на List в <span className="font-medium">@Apollo_parser_bot</span>. Если бот не пишет &quot;Начинаю парсинг!&quot;, попросите GPT адаптировать ссылку под формат:</p>
+                      <p className="text-gray-500 text-xs mt-1 font-mono bg-slate-100 p-1 rounded">https://app.apollo.io/#/people?finderViewId=...&amp;contactLabelIds[]=...</p>
+                      <p className="text-gray-500 text-xs mt-2">Результат забрать из таблицы в описании бота (лист с вашим ТГ-ником). В листе не работайте!</p>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+                      <p className="text-green-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> При сохранении используйте &quot;Max people per company&quot; = 2-3, чтобы не собирать 10+ контактов из одной компании.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* LetsExtract */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-pink-100 rounded-xl group-hover:from-purple-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <Mail className="h-5 w-5 text-purple-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">LetsExtract — парсинг контактов и верификация email</h3>
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://drive.google.com/file/d/1VwXMpskP0zA-kWED0bj2CTrM-hVOKTjR/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-pink-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Скачать (пиратская версия)
+                      </a>
+                      <a href="https://letsextract.com/ru/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Официальный сайт <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <p className="text-gray-600 text-sm mb-3">
+                      Программа для парсинга email с сайтов и верификации собранных контактов. Доступы к официальной версии — в файле с доступами (работает на 2 ПК одновременно).
+                    </p>
+
+                    {/* Placeholder для картинки */}
+                    <div className="border-2 border-dashed border-purple-200 rounded-xl p-6 bg-purple-50/50 text-center">
+                      <ImageIcon className="h-6 w-6 text-purple-300 mx-auto mb-2" />
+                      <p className="text-xs text-purple-400">Картинка: letsextract-interface.png</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* База баз */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
+                      <Database className="h-5 w-5 text-slate-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">База баз</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Большая база данных из Селеком и RusProfile, которая постоянно пополняется. Поиск по фильтрам с выгрузкой.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Доступ:</p>
+                      <p className="text-gray-600 text-sm">
+                        <a href="http://nikvasqt.beget.tech/dashboard/companies" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">nikvasqt.beget.tech/dashboard/companies</a><br/>
+                        <span className="font-medium">Email:</span> <span className="font-mono bg-slate-100 px-1 rounded">admin@example.com</span><br/>
+                        <span className="font-medium">Пароль:</span> <span className="font-mono bg-slate-100 px-1 rounded">secret</span>
+                      </p>
+                    </div>
+
+                    <p className="text-gray-600 text-sm">
+                      Фильтры: регион, ОКВЭД, выручка. После настройки нажмите &quot;Выгрузить данные&quot; — скачается xlsx файл.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Проверка ссылок */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-violet-100 rounded-xl p-6 hover:border-violet-300 hover:shadow-lg hover:shadow-violet-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-violet-500 to-purple-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-teal-100 to-cyan-100 rounded-xl group-hover:from-teal-200 group-hover:to-cyan-200 transition-colors shadow-sm">
+                      <Link className="h-5 w-5 text-teal-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Проверка ссылок на работоспособность</h3>
+                    
+                    <div className="mb-4">
+                      <a href="https://drive.google.com/file/d/1ys0r1EKA2kHVAp2Fe83xT36ib_Pit0P6/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-teal-50 to-cyan-50 border border-teal-200 rounded-lg text-teal-700 hover:from-teal-100 hover:to-cyan-100 hover:border-teal-300 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Sites Availability Checker
+                      </a>
+                    </div>
+
+                    <div className="space-y-2 text-sm text-gray-600">
+                      <p>1. Откройте папку <span className="font-mono bg-slate-100 px-1 rounded">.build</span></p>
+                      <p>2. В папку <span className="font-mono bg-slate-100 px-1 rounded">data</span> положите Excel таблицу с колонками: Компания | Сайт</p>
+                      <p>3. Результат появится в папке <span className="font-mono bg-slate-100 px-1 rounded">data/output</span></p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Работа с таблицами и базами */}
+        <section id="tables-work" className="relative overflow-hidden rounded-2xl shadow-xl border border-cyan-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-cyan-50 via-white to-teal-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-cyan-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-cyan-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-cyan-500 to-teal-500 rounded-xl shadow-lg">
+                  <Table className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-cyan-600 to-teal-600 bg-clip-text text-transparent">
+                  Работа с таблицами и базами
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Скрипты, макросы и автоматизация в Google Sheets</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mb-6">
+              <p className="text-amber-800 text-sm leading-relaxed">
+                <span className="font-semibold">К сведению:</span> Вы всегда можете попросить ChatGPT написать нужный скрипт под вашу задачу!
+              </p>
+            </div>
+
+            <div className="space-y-6">
+              {/* Удаление повторов */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-cyan-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Trash2 className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Удаление повторов в Google Таблице</h3>
+                    
+                    <div className="space-y-2 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">1.</span>
+                        <p>Выделите всю таблицу</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">2.</span>
+                        <p><span className="font-medium">Данные → Очистка данных → Удалить повторы</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">3.</span>
+                        <p>Выберите столбец для поиска повторов (сайты, email или названия компаний)</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Поиск дублей */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-cyan-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Copy className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Поиск дублей в нескольких базах</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Скрипт для сравнения данных между листами. Выделяет совпадения цветами: розовый — названия, жёлтый — email, синий — сайты.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Подготовка таблицы:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• Основной лист для сравнения должен называться <span className="font-mono bg-slate-100 px-1 rounded">Лист1</span></li>
+                        <li>• <span className="font-medium">Столбец A:</span> email-адреса</li>
+                        <li>• <span className="font-medium">Столбец B:</span> названия компаний</li>
+                        <li>• <span className="font-medium">Столбец C:</span> сайты</li>
+                        <li>• Листы, не участвующие в сравнении, пометьте знаком <span className="font-mono bg-slate-100 px-1 rounded">!</span> в названии</li>
+                      </ul>
+                    </div>
+
+                    <div className="space-y-2 text-sm text-gray-600 mb-4">
+                      <p className="font-medium text-gray-700">Инструкция по использованию:</p>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">1.</span>
+                        <p>Откройте Google Таблицу → <span className="font-medium">Расширения → Apps Script</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">2.</span>
+                        <p>Если нужен новый проект: <span className="font-medium">Файл → Новый → Проект</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">3.</span>
+                        <p>Скопируйте скрипт и вставьте в редактор, заменив существующий код</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">4.</span>
+                        <p>Сохраните (иконка дискеты или <span className="font-medium">Файл → Сохранить</span>), введите название</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">5.</span>
+                        <p>Нажмите <span className="font-medium">Выполнить</span> (▶), при первом запуске дайте разрешения</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">6.</span>
+                        <p>Вернитесь в таблицу — ячейки с совпадениями будут выделены цветами</p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.h5noicqvgp4d" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
+                        <Code className="h-3.5 w-3.5" /> Скрипт по email
+                      </a>
+                      <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.6dakluhnykvv" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
+                        <Code className="h-3.5 w-3.5" /> Скрипт по названиям
+                      </a>
+                      <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.92otwfh5rgd1" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
+                        <Code className="h-3.5 w-3.5" /> Скрипт по сайтам
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Как использовать скрипты */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-cyan-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Code className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Как использовать скрипты в Google Sheets</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">1.</span>
+                        <p>Загрузите таблицу → <span className="font-medium">Расширения → Apps Script</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">2.</span>
+                        <p>Скопируйте нужный скрипт и вставьте в поле кода (удалите стартовую заготовку)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">3.</span>
+                        <p>Сохраните код (💾) → вернитесь в таблицу → <span className="font-medium">Расширения → Макросы → Импортировать</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-500 font-medium">4.</span>
+                        <p>При первом запуске разрешите доступ скрипту</p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl overflow-hidden mt-4 border border-cyan-200 shadow-sm">
+                      <img 
+                        src="/images/apps-script-example.png" 
+                        alt="Apps Script для создания отчета по проекту"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      <a href="https://youtu.be/caG33Q4nkIc" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
+                        <Video className="h-3.5 w-3.5" /> Добавление макроса
+                      </a>
+                      <a href="https://youtu.be/UGW-dMFlqRE" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
+                        <Video className="h-3.5 w-3.5" /> Применение скрипта
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Полезные скрипты */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-cyan-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
+                      <Filter className="h-5 w-5 text-cyan-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Полезные скрипты</h3>
+                    
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Очистка email</p>
+                        <p className="text-gray-500 text-xs">После запятой, после пробела</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Очистка названий</p>
+                        <p className="text-gray-500 text-xs">RUS и ENG версии</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Оставить первое слово</p>
+                        <p className="text-gray-500 text-xs">Для firstName в Apollo</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Full name → First name</p>
+                        <p className="text-gray-500 text-xs">Разделение ФИО</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Очистка по ключевым словам</p>
+                        <p className="text-gray-500 text-xs">Фильтрация базы 2ГИС</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Достать текст с сайта</p>
+                        <p className="text-gray-500 text-xs">Для персонализации</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Сопоставление таблиц</p>
+                        <p className="text-gray-500 text-xs">Объединение двух баз</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-cyan-50/50 to-teal-50/50 rounded-lg p-3 border border-cyan-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Разделение email</p>
+                        <p className="text-gray-500 text-xs">Из одной строки в несколько</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
+                        <Code className="h-3.5 w-3.5" /> Все скрипты в документе
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Web Scraper */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-cyan-500 to-teal-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <Globe className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Web Scraper</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Расширение для браузера для сбора данных с сайтов. По состоянию на 2025 год удалено из Chrome, но доступно в Firefox.
+                    </p>
+
+                    <div className="flex flex-wrap gap-2">
+                      <a href="https://addons.mozilla.org/en-US/firefox/addon/web-scraper/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 transition-all font-medium text-sm shadow-sm">
+                        <Download className="h-3.5 w-3.5" /> Firefox Add-on
+                      </a>
+                      <a href="https://www.webscraper.io/documentation" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Документация <ExternalLink className="h-3 w-3" />
+                      </a>
+                      <a href="https://youtu.be/HUIlsrri72o" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
+                        <Video className="h-3.5 w-3.5" /> Видео-разбор
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Валидация email через нашу программу */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-green-500 to-emerald-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
+                      <CheckCircle className="h-5 w-5 text-green-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg flex items-center gap-2">
+                      Валидация email через нашу программу
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Рекомендуем</span>
+                    </h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Собственный валидатор с лучшими результатами чем LetsExtract. Требует открытый порт 25.
+                    </p>
+
+                    <a href="https://drive.google.com/file/d/11gXuXyWPHpfR8JOhLHlSMVbYc710EyH3/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 transition-all font-medium text-sm shadow-sm mb-4">
+                      <Download className="h-3.5 w-3.5" /> Скачать EmailValidator
+                    </a>
+
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4 mb-4">
+                      <p className="text-green-800 text-sm mb-2 font-medium">Как использовать:</p>
+                      <ol className="text-green-700 text-sm space-y-1 list-decimal list-inside">
+                        <li>Нажмите &quot;Загрузить файл&quot; для CSV/Excel</li>
+                        <li>Выберите колонку с email адресами</li>
+                        <li>Нажмите &quot;Запустить проверку&quot;</li>
+                        <li>Дождитесь завершения</li>
+                        <li>Нажмите &quot;Экспорт в CSV&quot; для сохранения</li>
+                      </ol>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Возможности:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• Проверка синтаксиса email по RFC 5322</li>
+                        <li>• Проверка существования домена</li>
+                        <li>• SMTP верификация через порт 25</li>
+                        <li>• Автокоррекция опечаток (gnail.com → gmail.com)</li>
+                        <li>• Определение одноразовых email</li>
+                        <li>• Детекция ролевых аккаунтов (info@, support@)</li>
+                      </ul>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3 mt-4">
+                      <p className="text-amber-800 text-sm">
+                        <span className="font-semibold">Важно:</span> Порт 25 должен быть открыт. Если не получается — используйте программу на удалённом рабочем столе.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Парсинг поисковой выдачи */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-cyan-100 rounded-xl p-6 hover:border-cyan-300 hover:shadow-lg hover:shadow-cyan-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-500 to-violet-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-violet-100 rounded-xl group-hover:from-indigo-200 group-hover:to-violet-200 transition-colors shadow-sm">
+                      <Search className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Парсинг поисковой выдачи (LetsExtract)</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Поисковую выдачу можно регулировать с помощью особых операторов для более точного поиска.
+                    </p>
+
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://journal.topvisor.com/ru/seo-kitchen/google-search-operators/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
+                        Список операторов <ExternalLink className="h-3 w-3" />
+                      </a>
+                      <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221BKXMbQTtHndPITAS9EFgjr4aHXAGw9g0%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 rounded-lg text-indigo-700 hover:from-indigo-100 hover:to-violet-100 transition-all text-sm">
+                        <Bot className="h-3.5 w-3.5" /> Промпт для Gemini
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Пример запроса:</p>
+                      <div className="bg-white border border-slate-200 rounded-lg p-3 font-mono text-xs text-gray-600 overflow-x-auto">
+                        intitle:магазин (смартфоны OR ноутбуки OR телевизоры) Москва -ремонт -сервис -обзор -отзывы -авито
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 rounded-lg p-4">
+                      <p className="text-indigo-800 text-sm mb-2 font-medium">Инструкция:</p>
+                      <ol className="text-indigo-700 text-sm space-y-1 list-decimal list-inside">
+                        <li>Составьте поисковой запрос с операторами</li>
+                        <li>Нажмите поиск в Google и скопируйте ссылку</li>
+                        <li>Откройте LetsExtract → &quot;Поиск по ключевым словам&quot;</li>
+                        <li>Выберите &quot;Стандартный поиск&quot; и вставьте ссылку</li>
+                        <li>Запустите парсинг</li>
+                      </ol>
+                    </div>
+
+                    <p className="text-gray-500 text-xs mt-3">
+                      Совет: Попросите ChatGPT или Gemini составить поисковый запрос по вашим указаниям.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Использование нейросетей */}
+        <section id="ai-tools" className="relative overflow-hidden rounded-2xl shadow-xl border border-fuchsia-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-fuchsia-50 via-white to-pink-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-fuchsia-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-fuchsia-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-fuchsia-500 to-pink-500 rounded-xl shadow-lg">
+                  <Bot className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-fuchsia-600 to-pink-600 bg-clip-text text-transparent">
+                  Использование нейросетей
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">ChatGPT, Gemini для персонализации и автоматизации</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Персонализация через GPT */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <Wand2 className="h-5 w-5 text-fuchsia-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Персонализация через ChatGPT в Google Таблицах</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Персонализация добавляет индивидуальности в письмо: упоминание конкурентов, комплимент о новости компании, полезный совет. Такие письма показывают намного большую результативность.
+                    </p>
+
+                    <div className="space-y-4">
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">1. Установите расширение:</p>
+                        <a href="https://workspace.google.com/marketplace/app/gpt_for_sheets_and_docs/677318054654" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-fuchsia-50 to-pink-50 border border-fuchsia-200 rounded-lg text-fuchsia-700 hover:from-fuchsia-100 hover:to-pink-100 transition-all text-sm">
+                          GPT for Sheets and Docs <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">2. Настройте API:</p>
+                        <p className="text-gray-600 text-sm">Расширения → GPT → Открыть → API Keys → Модель <span className="font-mono bg-slate-100 px-1 rounded">gpt-4o-mini</span> (дешевле)</p>
+                        <p className="text-gray-500 text-xs mt-1">API ключ запросите у Дениса или Никиты</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">3. Подготовьте таблицу:</p>
+                        <p className="text-gray-600 text-sm">Перед каждым столбцом с данными создайте столбец с названием категории (Наименование | [данные] | Описание | [данные] и т.д.)</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">4. Формула:</p>
+                        <p className="text-gray-600 text-sm font-mono bg-slate-100 p-2 rounded">=GPT($G$1; A2:F2)</p>
+                        <p className="text-gray-500 text-xs mt-1">$G$1 — ячейка с промптом, A2:F2 — данные организации</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
+                      <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span><span className="font-semibold">Важно:</span> После генерации сразу выделите столбец → Ctrl+C → Ctrl+Shift+V (вставить как текст). Это зафиксирует результат и не даст формулам обновляться (экономия токенов!).</span>
+                      </p>
+                    </div>
+
+                    <div className="mt-4">
+                      <a href="https://youtu.be/-kIZLuZd45Y" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
+                        <Video className="h-3.5 w-3.5" /> Видео от Данилы с примером
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Пример промпта */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <FileText className="h-5 w-5 text-fuchsia-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Пример промпта для персонализации</h3>
+                    
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 text-sm text-gray-700 leading-relaxed">
+                      <p className="mb-3"><span className="font-medium">Структура промпта:</span></p>
+                      <ol className="list-decimal list-inside space-y-2 mb-4">
+                        <li>Описание вашей компании (кто вы, какие услуги, какие проблемы решаете)</li>
+                        <li>Требования к генерации (формат, стиль, длина)</li>
+                        <li>Примеры хороших персонализаций</li>
+                      </ol>
+                      
+                      <div className="bg-white border border-slate-200 rounded-lg p-3 italic text-gray-600">
+                        &quot;Я генеральный директор компании X, которая предоставляет услуги Y. Напиши 2-3 коротких предложения не более 20 слов для email письма. В первом объясни, почему я решил связаться именно с этой компанией. Пиши от моего имени, сделай небольшой комплимент. Используй дружелюбный, но деловой стиль. Избегай рекламных предложений.&quot;
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4 mt-4">
+                      <p className="text-green-800 text-sm mb-2 font-medium">Пример хорошей персонализации:</p>
+                      <p className="text-green-700 text-sm italic">
+                        &quot;Заметила, что вы работаете в сфере недвижимости и, скорее всего, сталкиваетесь с необходимостью привлекать новых клиентов. Решила написать, так как моя команда может сделать работу с таргетированной рекламой максимально эффективной.&quot;
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Скрипты для корректировки */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <Code className="h-5 w-5 text-fuchsia-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Скрипты для корректировки базы перед GPT</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Базу из Apollo нужно откорректировать: упростить названия компаний, отделить имена от фамилий, укоротить должности.
+                    </p>
+
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div className="bg-gradient-to-r from-fuchsia-50/50 to-pink-50/50 rounded-lg p-3 border border-fuchsia-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Сокращение тайтлов</p>
+                        <p className="text-gray-500 text-xs">Vice President → VP, Chief Executive Officer → CEO</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-fuchsia-50/50 to-pink-50/50 rounded-lg p-3 border border-fuchsia-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Сокращение названий компаний</p>
+                        <p className="text-gray-500 text-xs">Убирает ltd, всё после запятой и тире</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-fuchsia-50/50 to-pink-50/50 rounded-lg p-3 border border-fuchsia-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Извлечение текста с сайта</p>
+                        <p className="text-gray-500 text-xs">Для персонализации по информации с сайта</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-fuchsia-50/50 to-pink-50/50 rounded-lg p-3 border border-fuchsia-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Персонализация через скрипт</p>
+                        <p className="text-gray-500 text-xs">Дешевле чем через расширение</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> Если название длиннее 3 слов — можно сократить по первым буквам. Всегда проверяйте результат работы скрипта!
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Стоимость токенов */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <BarChart3 className="h-5 w-5 text-fuchsia-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Стоимость токенов GPT</h3>
+                    
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                      <p className="text-gray-700 text-sm mb-3">Примерная стоимость (модель gpt-4o-mini):</p>
+                      <div className="grid grid-cols-3 gap-4 text-center">
+                        <div className="bg-white border border-slate-200 rounded-lg p-3">
+                          <p className="text-2xl font-bold text-fuchsia-600">~$0.01</p>
+                          <p className="text-gray-500 text-xs">1 строка</p>
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-lg p-3">
+                          <p className="text-2xl font-bold text-fuchsia-600">~$1</p>
+                          <p className="text-gray-500 text-xs">100 строк</p>
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-lg p-3">
+                          <p className="text-2xl font-bold text-fuchsia-600">~$5</p>
+                          <p className="text-gray-500 text-xs">500 строк</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
+                      <p className="text-red-700 text-sm leading-relaxed">
+                        <span className="font-semibold">Важно:</span> Не растягивайте сразу на всю базу! Сначала сделайте 5-10 строк и согласуйте с руководителем. За каждую строку снимается оплата.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Создание API ключа */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <Shield className="h-5 w-5 text-fuchsia-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание API-ключа OpenAI</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-fuchsia-500 font-medium">1.</span>
+                        <p>Включите VPN и перейдите на <a href="https://platform.openai.com/docs/overview" target="_blank" rel="noopener noreferrer" className="text-fuchsia-600 hover:underline">platform.openai.com</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-fuchsia-500 font-medium">2.</span>
+                        <p>Вкладка <span className="font-medium">&quot;API keys&quot;</span> → <span className="font-medium">&quot;Create new secret key&quot;</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-fuchsia-500 font-medium">3.</span>
+                        <p>Во вкладке <span className="font-medium">&quot;Usage&quot;</span> можно отслеживать траты</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Gemini */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-fuchsia-100 rounded-xl p-6 hover:border-fuchsia-300 hover:shadow-lg hover:shadow-fuchsia-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-fuchsia-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                      <Sparkles className="h-5 w-5 text-blue-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Gemini — бесплатная альтернатива для чистки баз</h3>
+                    
+                    <div className="space-y-4">
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">Шаг 1 — VPN:</p>
+                        <p className="text-gray-600 text-sm">Нужен VPN с США. Подойдёт <a href="https://chromewebstore.google.com/detail/%D0%B1%D0%B5%D1%81%D0%BF%D0%BB%D0%B0%D1%82%D0%BD%D1%8B%D0%B9-vpn-%D0%B4%D0%BB%D1%8F-chrome/majdfhpaihoncoakbjgbdhglocklcgno" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">VeePN</a></p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">Шаг 2 — Заходим на Gemini:</p>
+                        <p className="text-gray-600 text-sm mb-2">Регистрация не нужна — только вход в Google-аккаунт</p>
+                        <a href="https://aistudio.google.com/app/prompts/new_chat" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
+                          AI Studio <ExternalLink className="h-3 w-3" />
+                        </a>
+                        <p className="text-gray-500 text-xs mt-2">Рекомендуем модель: Gemini 1.5 PRO</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">Шаг 3 — Как чистить контакты:</p>
+                        <p className="text-gray-600 text-sm">Максимально подробно и с примерами объясните, что нужно сделать. Скопируйте названия и сайты компаний, нажмите Run.</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
+                        <p className="text-gray-700 text-sm mb-2 font-medium">Шаг 4 — Проверка:</p>
+                        <p className="text-gray-600 text-sm">Добавьте столбец в таблице, вставьте результат через <span className="font-mono bg-slate-100 px-1 rounded">Ctrl+Shift+V</span>. Проверьте количество строк!</p>
+                      </div>
+
+                      <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4">
+                        <p className="text-amber-800 text-sm leading-relaxed">
+                          <span className="font-semibold">Важно:</span> Нейросеть делает НЕ идеально — всегда проверяйте результат. Можно натренировать Gemini под любой запрос с помощью подробного промпта и примеров.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Калькулятор KPI */}
+        <section id="kpi-calculator" className="relative overflow-hidden rounded-2xl shadow-xl border border-lime-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-lime-50 via-white to-green-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-lime-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-lime-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-lime-500 to-green-500 rounded-xl shadow-lg">
+                  <Calculator className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-lime-600 to-green-600 bg-clip-text text-transparent">
+                  Калькулятор KPI проекта
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Расчёт ключевых показателей эффективности</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-lime-100 rounded-xl p-6 hover:border-lime-300 hover:shadow-lg hover:shadow-lime-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-lime-500 to-green-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-lime-100 to-green-100 rounded-xl group-hover:from-lime-200 group-hover:to-green-200 transition-colors shadow-sm">
+                      <BarChart3 className="h-5 w-5 text-lime-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Основные KPI для отслеживания</h3>
+                    
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <div className="bg-gradient-to-r from-lime-50/50 to-green-50/50 rounded-lg p-4 border border-lime-100">
+                        <p className="text-lime-700 font-medium text-sm mb-1">Open Rate (OR)</p>
+                        <p className="text-gray-600 text-xs">Процент открытий писем</p>
+                        <p className="text-lime-600 font-semibold mt-2">Норма: 40-60%</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-lime-50/50 to-green-50/50 rounded-lg p-4 border border-lime-100">
+                        <p className="text-lime-700 font-medium text-sm mb-1">Reply Rate (RR)</p>
+                        <p className="text-gray-600 text-xs">Процент ответов</p>
+                        <p className="text-lime-600 font-semibold mt-2">Норма: 3-10%</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-lime-50/50 to-green-50/50 rounded-lg p-4 border border-lime-100">
+                        <p className="text-lime-700 font-medium text-sm mb-1">Positive Reply Rate</p>
+                        <p className="text-gray-600 text-xs">Процент позитивных ответов</p>
+                        <p className="text-lime-600 font-semibold mt-2">Норма: 1-5%</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-lime-50/50 to-green-50/50 rounded-lg p-4 border border-lime-100">
+                        <p className="text-lime-700 font-medium text-sm mb-1">Meeting Rate</p>
+                        <p className="text-gray-600 text-xs">Процент назначенных встреч</p>
+                        <p className="text-lime-600 font-semibold mt-2">Норма: 0.5-2%</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <a href="https://docs.google.com/spreadsheets/d/your-kpi-calculator" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-lime-50 to-green-50 border border-lime-200 rounded-lg text-lime-700 hover:from-lime-100 hover:to-green-100 hover:border-lime-300 transition-all font-medium text-sm shadow-sm">
+                        <Table className="h-3.5 w-3.5" /> Калькулятор KPI (Google Sheets)
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Ретаргет */}
+        <section id="retarget" className="relative overflow-hidden rounded-2xl shadow-xl border border-rose-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-rose-50 via-white to-pink-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-rose-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-rose-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl shadow-lg">
+                  <Target className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-rose-600 to-pink-600 bg-clip-text text-transparent">
+                  Регламент по ретаргету
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Повторные касания с базой</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-rose-100 rounded-xl p-6 hover:border-rose-300 hover:shadow-lg hover:shadow-rose-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-rose-500 to-pink-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-rose-100 to-pink-100 rounded-xl group-hover:from-rose-200 group-hover:to-pink-200 transition-colors shadow-sm">
+                      <ArrowRight className="h-5 w-5 text-rose-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Когда делать ретаргет</h3>
+                    
+                    <p className="text-gray-600 text-sm mb-4">
+                      Ретаргет — это повторное касание с базой, которая уже прошла через рассылку. Делается через 2-3 месяца после первой кампании.
+                    </p>
+
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-rose-500 font-medium">1.</span>
+                        <p>Выгрузите базу тех, кто <span className="font-medium">не ответил</span> на предыдущую рассылку</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-rose-500 font-medium">2.</span>
+                        <p>Исключите тех, кто отписался или попросил не писать</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-rose-500 font-medium">3.</span>
+                        <p>Подготовьте <span className="font-medium">новый оффер</span> — не повторяйте старый!</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-rose-500 font-medium">4.</span>
+                        <p>Можно использовать триггер: &quot;Писали вам пару месяцев назад...&quot;</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4 mt-4">
+                      <p className="text-green-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Эффективность:</span> Ретаргет часто показывает результаты лучше, чем первичная рассылка, т.к. люди уже знакомы с вашим брендом.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Тестовый период */}
+        <section id="test-period" className="relative overflow-hidden rounded-2xl shadow-xl border border-teal-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-teal-50 via-white to-cyan-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-teal-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-teal-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-teal-500 to-cyan-500 rounded-xl shadow-lg">
+                  <Clock className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-teal-600 to-cyan-600 bg-clip-text text-transparent">
+                  Тестовый период — регламент
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Работа с проектами на тесте</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Что это */}
+              <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Что это?</h3>
+                <p className="text-gray-600 leading-relaxed">
+                  Тестовый период — это период, в котором мы демонстрируем свою работу и приводим первых <span className="font-semibold">5 лидов</span>. Это не бесплатная работа — наша цель продлить заказчика на договор (платную основу), и лиды за тест учитываются в KPI (только квалифицированные лиды).
+                </p>
+              </div>
+
+              {/* Этапы */}
+              <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Этапы тестового периода</h3>
+                <div className="space-y-3 text-sm text-gray-600">
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">1</span>
+                    <p><span className="font-medium">Переговоры</span> — аккаунт обсуждает условия, нюансы, цели</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">2</span>
+                    <p><span className="font-medium">Создание чата</span> — отдельный чат с аккаунтом, старшим спецом, специалистом, гендиром и основателем бизнеса</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">3</span>
+                    <p><span className="font-medium">Таймлайн</span> — расписание от брифа до запуска первой кампании + ссылки</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">4</span>
+                    <p><span className="font-medium">Подготовка</span> — спец готовит, аккаунт и старший спец контролируют</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">5</span>
+                    <p><span className="font-medium">Запуск</span> — запуск первой кампании, отписаться в чат</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">6</span>
+                    <p><span className="font-medium">Выполнение KPI</span> — привести 5 тестовых лидов, передать на email из брифа</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">7</span>
+                    <p><span className="font-medium">Отчёт и звонок</span> — демонстрация отчёта, новых гипотез, KPI и подписание договора</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg">
+                    <span className="w-6 h-6 flex items-center justify-center bg-teal-500 text-white text-xs font-bold rounded-md flex-shrink-0">8</span>
+                    <p><span className="font-medium">Оформление в кейс</span> и создание закрепа с гипотезами, ссылками на таблицу лидов</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Сроки и роли */}
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Сколько длится?</h3>
+                  <p className="text-gray-600 text-sm">
+                    <span className="font-semibold text-teal-600">2-3 недели</span> с момента запуска. В тяжёлых нишах — до <span className="font-semibold">5 недель</span>.
+                  </p>
+                  <p className="text-gray-500 text-xs mt-2">600-1000 контактов — достаточно чтобы понять есть ли лиды</p>
+                </div>
+                <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                  <h3 className="font-semibold text-gray-900 mb-3 text-lg">Кто ведёт?</h3>
+                  <p className="text-gray-600 text-sm">
+                    Все специалисты компании. Оплата премией <span className="font-semibold">только после подписания договора</span> и перехода в платные проекты.
+                  </p>
+                </div>
+              </div>
+
+              {/* Ответственность */}
+              <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Роли и ответственность</h3>
+                <div className="grid md:grid-cols-2 gap-3">
+                  <div className="bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg p-4 border border-teal-100">
+                    <p className="text-gray-800 text-sm font-medium mb-1">Проджект-менеджер</p>
+                    <p className="text-gray-500 text-xs">Контроль, управление, решение спорных ситуаций</p>
+                  </div>
+                  <div className="bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg p-4 border border-teal-100">
+                    <p className="text-gray-800 text-sm font-medium mb-1">Старший специалист</p>
+                    <p className="text-gray-500 text-xs">Контроль работы, проверка офферов/баз/кампаний, экспертность</p>
+                  </div>
+                  <div className="bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg p-4 border border-teal-100">
+                    <p className="text-gray-800 text-sm font-medium mb-1">Специалист</p>
+                    <p className="text-gray-500 text-xs">Подготовка, запуск, генерация гипотез, выполнение KPI</p>
+                  </div>
+                  <div className="bg-gradient-to-r from-teal-50/50 to-cyan-50/50 rounded-lg p-4 border border-teal-100">
+                    <p className="text-gray-800 text-sm font-medium mb-1">Генеральный директор</p>
+                    <p className="text-gray-500 text-xs">Критические вопросы: договор, деньги, работа команды</p>
+                  </div>
+                </div>
+                <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3 mt-4">
+                  <p className="text-amber-800 text-xs">
+                    <span className="font-semibold">Важно:</span> Все изменения условий работы согласуются через генерального директора.
+                  </p>
+                </div>
+              </div>
+
+              {/* Что делать если тест плохо */}
+              <div className="bg-white/80 backdrop-blur-sm border border-teal-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Что делать если тест идёт плохо?</h3>
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-yellow-50 to-amber-50 rounded-lg border border-yellow-200">
+                    <span className="text-yellow-600 font-bold">1 нед</span>
+                    <p className="text-gray-700 text-sm">Нет лидов/интереса — руководитель спрашивает спеца что улучшить, корректирует идеи</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-orange-50 to-amber-50 rounded-lg border border-orange-200">
+                    <span className="text-orange-600 font-bold">2 нед</span>
+                    <p className="text-gray-700 text-sm">Нет улучшений — созвон со спецом. Если проблема в проекте — созвон всех вместе, новые гипотезы</p>
+                  </div>
+                  <div className="flex items-start gap-3 p-4 bg-gradient-to-r from-red-50 to-orange-50 rounded-lg border border-red-200">
+                    <span className="text-red-600 font-bold">3 нед</span>
+                    <p className="text-gray-700 text-sm">Метрики не растут — отказываемся (или берём деньги за тесты). Растут недостаточно — увеличиваем мощность</p>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-r from-teal-50 to-cyan-50 border border-teal-200 rounded-lg p-4 mt-4">
+                  <p className="text-teal-800 text-sm font-medium mb-2">Что можно протестировать для улучшения:</p>
+                  <ul className="text-teal-700 text-sm space-y-1">
+                    <li>• Переписать оффер (сменить посыл, добавить/убрать кейсы, СТА)</li>
+                    <li>• Сменить базу (другой сегмент, гео)</li>
+                    <li>• Анализ конкурентов (у кого предложение интереснее)</li>
+                    <li>• Звонок с РОП/ЛПР (уточнить каналы лидов, возражения, запросить базы отказников)</li>
+                  </ul>
+                </div>
+              </div>
+
+              {/* Причины закрытия */}
+              <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-xl p-6">
+                <h3 className="font-semibold text-red-800 mb-3 flex items-center gap-2">
+                  <AlertCircle className="h-5 w-5" />
+                  Причины досрочного закрытия теста
+                </h3>
+                <ul className="text-red-700 text-sm space-y-2">
+                  <li>• Отсутствие лидов и интереса (протестированы разные гипотезы, сегменты, общались с РОП)</li>
+                  <li>• Игнор и отсутствие обработки лидов от заказчика</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Как проводить звонок при закрытии теста */}
+        <section id="test-call" className="relative overflow-hidden rounded-2xl shadow-xl border border-blue-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-blue-50 via-white to-indigo-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-blue-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-blue-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-xl shadow-lg">
+                  <Video className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+                  Как проводить звонок при закрытии теста
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Презентация отчёта и результатов</p>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-sm border border-blue-100 rounded-xl p-6 mb-6">
+              <p className="text-gray-600 leading-relaxed mb-4">
+                Предоставляем отчётность в стандартном виде — в таблице лидов и отчёта. <span className="font-medium">Даже если всё видно — всё равно рассказываем</span>, т.к. не все клиенты смотрят статистику.
+              </p>
+
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
+                <p className="text-blue-800 text-sm font-medium mb-3">О чём рассказываем при демонстрации:</p>
+                <ul className="text-blue-700 text-sm space-y-2">
+                  <li>• <span className="font-medium">Какие гипотезы прошли</span> — что работало</li>
+                  <li>• <span className="font-medium">Как отработали базы</span> — хорошо/плохо и почему</li>
+                  <li>• <span className="font-medium">Что можем сделать</span> для улучшения результатов</li>
+                  <li>• <span className="font-medium">Какие темы открывали</span> больше/меньше, что ещё протестить</li>
+                  <li>• <span className="font-medium">Гипотезы на следующий период</span> — чем больше, тем лучше (показываем что есть над чем работать)</li>
+                </ul>
+              </div>
+            </div>
+
+            <a href="https://youtu.be/cHu3UeXmj3M" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
+              <Video className="h-4 w-4" /> Запись звонка с клиентом (пример)
+            </a>
+          </div>
+        </section>
+
+        {/* Оценка релевантности базы и цепочки */}
+        <section id="relevance-check" className="relative overflow-hidden rounded-2xl shadow-xl border border-purple-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-purple-50 via-white to-fuchsia-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-purple-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-purple-500 to-fuchsia-500 rounded-xl shadow-lg">
+                  <Target className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-fuchsia-600 bg-clip-text text-transparent">
+                  Оценка релевантности базы и цепочки
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Способы оценки на ранних стадиях</p>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-6">
+              {/* Цепочка */}
+              <div className="bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <Mail className="h-5 w-5 text-purple-500" />
+                  Цепочка
+                </h3>
+                <ul className="text-gray-600 text-sm space-y-3">
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Отвечаемость</span> — особенно на 2-е сообщение (если готовы к звонку — оффер сработал)</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Темы писем</span> — от 3х тем в тест, отключать низкий %. Вывод после 50+ писем каждой темы</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Переходы на сайт</span> — Яндекс.Метрика: интерес к офферу и активность</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Персонализация</span> — комплимент компании → больше внимания → больше ответов</span>
+                  </li>
+                </ul>
+              </div>
+
+              {/* Базы */}
+              <div className="bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <Database className="h-5 w-5 text-purple-500" />
+                  Базы
+                </h3>
+                <ul className="text-gray-600 text-sm space-y-3">
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Качество email</span> — если много отваливаются → проверить через валидатор</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">ОС от заказчика</span> — совпадает ли запрос лида с продуктом</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">Отклик базы</span> — много негатива или нет интереса → менять базу</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-purple-500 mt-1">•</span>
+                    <span><span className="font-medium">География</span> — откуда лучший отклик (Москва, СПб, Самара)</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-purple-50 to-fuchsia-50 border border-purple-200 rounded-lg p-4 mt-6">
+              <p className="text-purple-800 text-sm leading-relaxed flex items-start gap-2">
+                <span className="font-semibold">Важно:</span> Отслеживайте статистику по каждой кампании и делайте сравнительный анализ — вовремя исключайте гипотезы, которые не работают.
+              </p>
+              <a href="https://docs.google.com/spreadsheets/d/16yRYOcIPMZrrGrvmWubfVkcb_8ioBZR7BdGToWs9n34/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-purple-200 rounded-lg text-purple-700 hover:border-purple-300 transition-all text-sm mt-3">
+                Таблица оценки кампаний <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          </div>
+        </section>
+
+        {/* Подробный план работы спеца */}
+        <section id="improvement-plan" className="relative overflow-hidden rounded-2xl shadow-xl border border-emerald-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 via-white to-green-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-green-500 rounded-xl shadow-lg">
+                  <Target className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent">
+                  План работы над улучшением результатов
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Пошаговая инструкция для специалиста</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Этап 1: Базовые способы */}
+              <div className="bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <span className="w-8 h-8 flex items-center justify-center bg-emerald-500 text-white font-bold rounded-lg">1</span>
+                  Базовые способы
+                </h3>
+                <p className="text-gray-600 text-sm mb-4">
+                  Первым делом опробуйте примитивные способы — сбор целевой базы из:
+                </p>
+                <div className="grid md:grid-cols-2 gap-2 mb-4">
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">hh.ru</div>
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">2ГИС</div>
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">Селеком</div>
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">Архив баз 70+</div>
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">B2B House по ОКВЭД</div>
+                  <div className="bg-gradient-to-r from-emerald-50/50 to-green-50/50 rounded-lg p-3 border border-emerald-100 text-sm text-gray-700">Export-base (фин. показатели)</div>
+                </div>
+                <p className="text-gray-600 text-sm">
+                  Если база в 300-400 контактов не приносит результата — на основе отрицательных ответов скорректируйте оффер (преимущества перед конкурентами, закрытие возражений).
+                </p>
+              </div>
+
+              {/* Низкая статистика */}
+              <div className="bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Низкая статистика по кампании</h3>
+                
+                <div className="space-y-4">
+                  <div className="bg-gradient-to-r from-yellow-50 to-amber-50 border border-yellow-200 rounded-lg p-4">
+                    <p className="text-yellow-800 text-sm font-medium mb-2">Малый процент открываемости (&lt;50% РФ, &lt;45% зарубеж)</p>
+                    <p className="text-yellow-700 text-sm">Поменяйте тему письма. Она должна <span className="font-medium">интриговать</span>, не раскрывая суть. Описывайте <span className="font-medium">результат</span>, а не предложение. Попросите GPT придумать тему — &quot;не рекламно, коротко, с {`{{companyName}}`}&quot;.</p>
+                  </div>
+                  <div className="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg p-4">
+                    <p className="text-orange-800 text-sm font-medium mb-2">Мало ответов на письма (&lt;7% РФ, &lt;1% зарубеж)</p>
+                    <p className="text-orange-700 text-sm">Пересмотрите CTA или вопрос. Добавьте <span className="font-medium">больше пользы</span> от ответа. Человек должен хотеть обменять время на то, что вы предлагаете.</p>
+                  </div>
+                </div>
+                <p className="text-gray-500 text-xs mt-3">Если ситуация не исправляется — добавьте доп. аккаунты для увеличения мощности.</p>
+              </div>
+
+              {/* Этап 2: GPT персонализация */}
+              <div className="bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <span className="w-8 h-8 flex items-center justify-center bg-emerald-500 text-white font-bold rounded-lg">2</span>
+                  GPT персонализация
+                </h3>
+                <p className="text-gray-600 text-sm">
+                  Вторым шагом — GPT персонализация по базе из hh.ru на основе описания компании. Если при 300 контактах не достигается результат — переходите к следующему этапу.
+                </p>
+              </div>
+
+              {/* Этап 3: CustDev звонок */}
+              <div className="bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
+                  <span className="w-8 h-8 flex items-center justify-center bg-emerald-500 text-white font-bold rounded-lg">3</span>
+                  CustDev звонок с клиентом
+                </h3>
+                <p className="text-gray-600 text-sm mb-4">
+                  Если предыдущие попытки не дали результата — запланируйте звонок, чтобы узнать больше про проект и ЦА.
+                </p>
+
+                <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg p-4 mb-4">
+                  <p className="text-emerald-800 text-sm font-medium mb-2">Что узнать у клиента:</p>
+                  <ul className="text-emerald-700 text-sm space-y-1">
+                    <li>• Ниши, которые берут в работу</li>
+                    <li>• Как сейчас привлекают клиентов? Текущая стоимость лида?</li>
+                    <li>• Кто ЛПР?</li>
+                    <li>• Возможные проблемы в нише, возражения клиентов</li>
+                    <li>• Какие вопросы задают проспекты? С какими запросами приходят?</li>
+                    <li>• Доп. преимущества тезисно</li>
+                  </ul>
+                </div>
+
+                <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                  <p className="text-gray-700 text-sm font-medium mb-3">Ещё варианты вопросов на кастдев звонке:</p>
+                  
+                  <div className="space-y-3 text-sm">
+                    <div>
+                      <p className="text-gray-700 font-medium">🔸 Вопросы про ЦА (боли/желания/контекст):</p>
+                      <ul className="text-gray-600 ml-4 mt-1 space-y-0.5">
+                        <li>1. Какой триггер/проблема, после которого решили искать подобное решение?</li>
+                        <li>2. Почему именно сейчас решили обратиться к вам?</li>
+                      </ul>
+                    </div>
+
+                    <div>
+                      <p className="text-gray-700 font-medium">🔸 Общие вопросы по ЦА:</p>
+                      <ul className="text-gray-600 ml-4 mt-1 space-y-0.5">
+                        <li>1. Компании из какой сферы чаще всего становятся клиентами?</li>
+                        <li>2. Сможете назвать 3-5 ваших действующих клиентов?</li>
+                        <li>3. Есть ли кейсы из релевантного сегмента? (какая компания, проблема, результат)</li>
+                      </ul>
+                    </div>
+
+                    <div>
+                      <p className="text-gray-700 font-medium">🔸 Про конкурентов:</p>
+                      <p className="text-gray-600 ml-4 mt-1">Опишите преимущества перед [конкурент] — некоторые упоминают его в ответах.</p>
+                    </div>
+
+                    <div>
+                      <p className="text-gray-700 font-medium">🔸 Вопросы по базам:</p>
+                      <ul className="text-gray-600 ml-4 mt-1 space-y-0.5">
+                        <li>• Можете предоставить ИНН клиентов? (для выявления ОКВЭД)</li>
+                        <li>• Критерии сегментирования для поиска баз?</li>
+                      </ul>
+                    </div>
+
+                    <div>
+                      <p className="text-gray-700 font-medium">🔸 По существующей лидогенерации:</p>
+                      <ul className="text-gray-600 ml-4 mt-1 space-y-0.5">
+                        <li>• Как сейчас привлекаете лидов?</li>
+                        <li>• Есть ли скрипты или примеры предложений, которые рассылали ранее?</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-gray-600 text-sm">
+                  После звонка зафиксируйте информацию и скорректируйте оффер/базу. Если после 300-400 контактов ничего не меняется — закрывайте тест.
+                </p>
+              </div>
+
+              {/* Краткий план */}
+              <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-xl p-6">
+                <h3 className="font-semibold text-emerald-800 mb-4 text-lg">Краткий план</h3>
+                <div className="space-y-4">
+                  <div className="border-l-4 border-emerald-400 pl-4">
+                    <p className="text-emerald-800 text-sm font-medium">Базовые способы:</p>
+                    <ul className="text-emerald-700 text-sm mt-1 space-y-0.5">
+                      <li>• 2 базы разных сегментов (по 350-400 контактов)</li>
+                      <li>• 2 корректировки в оффере (разные подходы, темы, CTA)</li>
+                      <li>• +3 доп. аккаунта для мощности</li>
+                    </ul>
+                  </div>
+                  <div className="border-l-4 border-emerald-400 pl-4">
+                    <p className="text-emerald-800 text-sm font-medium">GPT персонализация:</p>
+                    <ul className="text-emerald-700 text-sm mt-1 space-y-0.5">
+                      <li>• 2 базы разных сегментов (по 300 контактов)</li>
+                      <li>• 2 корректировки оффера под персонализацию</li>
+                    </ul>
+                  </div>
+                  <div className="border-l-4 border-emerald-400 pl-4">
+                    <p className="text-emerald-800 text-sm font-medium">После CustDev звонка:</p>
+                    <ul className="text-emerald-700 text-sm mt-1 space-y-0.5">
+                      <li>• 1 база (на 400 контактов)</li>
+                      <li>• 1 корректировка оффера на основе инфы со звонка</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Тенчат */}
+        <section id="tenchat" className="relative overflow-hidden rounded-2xl shadow-xl border border-sky-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-sky-50 via-white to-blue-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-sky-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-sky-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-sky-500 to-blue-500 rounded-xl shadow-lg">
+                  <MessageSquare className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-sky-600 to-blue-600 bg-clip-text text-transparent">
+                  Тенчат — рассыльщик сообщений
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Автоматизация рассылки и парсинг</p>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-sm border border-sky-100 rounded-xl p-6">
+              <p className="text-gray-600 leading-relaxed mb-4">
+                Инструмент для автоматизации рассылки сообщений и приглашений в Тенчате. Также включает функцию парсинга контактов.
+              </p>
+
+              <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                <p className="text-gray-700 text-sm mb-2 font-medium">Доступы к удалённому рабочему столу:</p>
+                <div className="space-y-1 text-sm">
+                  <p><span className="font-medium">IP:</span> <span className="font-mono bg-slate-100 px-1 rounded">195.133.25.161</span></p>
+                  <p><span className="font-medium">Username:</span> Administrator</p>
+                  <p><span className="font-medium">Password:</span> <span className="font-mono bg-slate-100 px-1 rounded">pJ.^cY+fL56xDG</span></p>
+                </div>
+              </div>
+
+              <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3">
+                <p className="text-amber-800 text-sm">
+                  <span className="font-semibold">Совет:</span> Для увеличения лимитов рассылки используйте несколько аккаунтов или премиум.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Отчёты */}
+        <section id="reports" className="relative overflow-hidden rounded-2xl shadow-xl border border-indigo-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-indigo-50 via-white to-blue-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-indigo-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-indigo-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-indigo-500 to-blue-500 rounded-xl shadow-lg">
+                  <ClipboardList className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-indigo-600 to-blue-600 bg-clip-text text-transparent">
+                  Регламент по составлению отчётов
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Отчёты в Instantly и Coldy</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Отчёт Instantly через бот */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-indigo-100 rounded-xl p-6 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-500 to-blue-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
+                      <Bot className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg flex items-center gap-2">
+                      Отчёт в Instantly
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Автоматический бот</span>
+                    </h3>
+                    
+                    <p className="text-gray-600 text-sm mb-4">
+                      Бот составляет отчёты менее чем за минуту! Отправляйте сообщения в основной чат (тема &quot;Составить отчёт инстантли&quot;).
+                    </p>
+
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <a href="https://docs.google.com/spreadsheets/d/1I4mQLI2evf1049-pJmX5YU8jwNnOMK5fRz1X6EymRW0/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 hover:border-green-300 transition-all font-medium text-sm shadow-sm">
+                        <Table className="h-3.5 w-3.5" /> Таблица результатов
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-200 rounded-lg p-4 mb-4">
+                      <p className="text-indigo-800 text-sm mb-3 font-medium">Инструкция:</p>
+                      <div className="space-y-2 text-sm text-indigo-700">
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold">1.</span>
+                          <p>Отправьте <span className="font-medium">списком ссылки</span> на ваши кампании (только ссылки, больше ничего!)</p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold">2.</span>
+                          <p>Подождите до 1-5 минут пока бот составит таблицу</p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold">3.</span>
+                          <p>Найдите результат в таблице под вашим юзертэгом</p>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold">4.</span>
+                          <p>Отредактируйте информацию о лидах и скопируйте в свою таблицу</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mb-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Пример сообщения боту:</p>
+                      <div className="bg-white border border-slate-200 rounded-lg p-3 font-mono text-xs text-gray-600">
+                        https://app.instantly.ai/app/campaign/.../analytics<br/>
+                        https://app.instantly.ai/app/campaign/.../analytics<br/>
+                        https://app.instantly.ai/app/campaign/.../analytics
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-3">
+                      <p className="text-red-700 text-sm flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span>Убедитесь, что у вас самих кампания загрузилась в Instantly перед отправкой!</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Отчёт Instantly (ручной способ) */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-indigo-100 rounded-xl p-6 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-500 to-blue-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
+                      <Mail className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Отчёт в Instantly (ручной способ)</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">1.</span>
+                        <p>Зайдите в <span className="font-medium">Analytics → Campaign Analytics</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">2.</span>
+                        <p>Выберите нужную кампанию и период</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">3.</span>
+                        <p>Скриншот основных метрик: Sent, Opened, Replied, Bounced</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">4.</span>
+                        <p>Выгрузите все ответы: <span className="font-medium">Unibox → Export</span></p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl overflow-hidden mt-4 border border-indigo-200 shadow-sm">
+                      <img 
+                        src="/images/instantly-analytics.png" 
+                        alt="Аналитика в Instantly - Campaign и Account Analytics"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Что должно быть в отчёте:</p>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• Скриншот статистики кампании</li>
+                        <li>• Количество отправленных / открытых / ответов</li>
+                        <li>• Процентные показатели (OR, RR)</li>
+                        <li>• Список позитивных ответов с контактами</li>
+                        <li>• Анализ и выводы по результатам</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Отчёт Coldy */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-indigo-100 rounded-xl p-6 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-500 to-blue-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
+                      <Mail className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Отчёт в Coldy</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">1.</span>
+                        <p>Раздел <span className="font-medium">Статистика</span> → выберите кампанию</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">2.</span>
+                        <p>Установите период и сделайте скриншот</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-indigo-500 font-medium">3.</span>
+                        <p>Ответы находятся в разделе <span className="font-medium">Входящие</span></p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl overflow-hidden mt-4 border border-indigo-200 shadow-sm">
+                      <img 
+                        src="/images/coldy-stats-1.png" 
+                        alt="Статистика в Coldy"
+                        className="w-full h-auto"
+                      />
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Автоматизация через скрипт:</p>
+                      <p className="text-gray-600 text-sm mb-3">
+                        Для автоматического построения отчёта используйте скрипт Coldy Report — он парсит данные кампаний из листа Raw и создаёт отчёт.
+                      </p>
+                      <div className="space-y-2 text-sm text-gray-600">
+                        <p><span className="font-medium">1.</span> Создайте лист &quot;Raw&quot; и вставьте данные кампаний</p>
+                        <p><span className="font-medium">2.</span> Откройте Apps Script (Расширения → Apps Script)</p>
+                        <p><span className="font-medium">3.</span> Вставьте скрипт и запустите функцию BuildReport</p>
+                        <p><span className="font-medium">4.</span> Результат появится на листе &quot;Report&quot;</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Остаток базы */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-indigo-100 rounded-xl p-6 hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-indigo-500 to-blue-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
+                      <Database className="h-5 w-5 text-indigo-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Остаток базы</h3>
+                    <p className="text-gray-600 text-sm mb-4">
+                      Остаток базы — количество контактов, которым ещё не отправляли письма. Важно отслеживать, чтобы вовремя пополнять базу.
+                    </p>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Правило:</span> Если остаток базы меньше 500 контактов — пора начинать сбор новой базы, чтобы не было простоя в рассылке.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Создание КП в Figma */}
+        <section id="kp-figma" className="relative overflow-hidden rounded-2xl shadow-xl border border-purple-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-purple-50 via-white to-violet-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-purple-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-purple-500 to-violet-500 rounded-xl shadow-lg">
+                  <FileImage className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-violet-600 bg-clip-text text-transparent">
+                  Создание КП в Figma
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Коммерческие предложения и кейсы</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* Подготовка */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-violet-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
+                      <Settings className="h-5 w-5 text-purple-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Подготовка (только в первый раз)</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">1.</span>
+                        <p>Скачайте <a href="https://drive.google.com/file/d/1mze3VBLJUP8t_ivqtrCGteCh5HyO-Q_c/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">шрифты для Figma</a>. Разархивируйте и скопируйте .ttf файлы в <span className="font-mono bg-slate-100 px-1 rounded">C:\Windows\Fonts</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">2.</span>
+                        <p>Установите Font Installers с <a href="https://www.figma.com/downloads/" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">figma.com/downloads</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">3.</span>
+                        <p>После установки перезагрузите компьютер</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Создание КП */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-violet-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
+                      <FileText className="h-5 w-5 text-purple-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание КП</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">1.</span>
+                        <p>Откройте <a href="https://www.figma.com/file/qX2sVU5Ur413xnNJ5geB3s/%D0%9A%D0%9F-Polza?type=design&node-id=0-1&mode=design" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">шаблон КП Polza</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">2.</span>
+                        <p>Выделите и скопируйте шаблон КП (Ctrl+C)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">3.</span>
+                        <p>Создайте новый файл → вставьте шаблон (Ctrl+V)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">4.</span>
+                        <p>Замените информацию под свой проект (двойной клик для редактирования)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">5.</span>
+                        <p>Экспортируйте в PDF → сожмите через <a href="https://www.ilovepdf.com/ru" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">ilovepdf.com</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">6.</span>
+                        <p>Сохраните в <a href="https://drive.google.com/drive/folders/1dKjBMyb9ySuRKZNzEQOr6KoPAvFdpyx9" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">папку на Google Drive</a> и откройте доступ</p>
+                      </div>
+                    </div>
+
+                    {/* Placeholder для картинки */}
+                    <div className="border-2 border-dashed border-purple-200 rounded-xl p-6 mt-4 bg-purple-50/50 text-center">
+                      <ImageIcon className="h-6 w-6 text-purple-300 mx-auto mb-2" />
+                      <p className="text-xs text-purple-400">Картинка: figma-kp-example.png</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Создание кейсов */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6 hover:border-purple-300 hover:shadow-lg hover:shadow-purple-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-purple-500 to-violet-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
+                      <BookOpen className="h-5 w-5 text-purple-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание кейсов в PDF</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">1.</span>
+                        <p>Откройте <a href="https://www.figma.com/file/qX2sVU5Ur413xnNJ5geB3s/%D0%9A%D0%9F-Polza?type=design&node-id=21-790&mode=design" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">шаблон кейсов</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">2.</span>
+                        <p>Найдите подходящий шаблон с заголовками: О проекте, Канал, Результат, Задача, Реализация</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">3.</span>
+                        <p>Скопируйте в новый файл и отредактируйте</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">4.</span>
+                        <p>Замените скрины статистики (клик → Ctrl+V нового скрина)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-purple-500 font-medium">5.</span>
+                        <p>Экспорт → сжатие → сохранение в <a href="https://drive.google.com/drive/folders/1r-GqjCjgAvKJw5vUATT5HG9GLmOX9kwN" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">папку кейсов</a> (выберите нишу)</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Совет:</span> Для перемещения нескольких текстовых блоков — удерживайте Shift и кликайте на них. Двигайте только вверх/вниз, чтобы не нарушить дизайн.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Block List */}
+        <section id="block-list" className="relative overflow-hidden rounded-2xl shadow-xl border border-slate-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-white to-gray-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-slate-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-slate-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-slate-500 to-gray-500 rounded-xl shadow-lg">
+                  <Shield className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-slate-600 to-gray-700 bg-clip-text text-transparent">
+                  Block List в Instantly
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Блокировка доменов и адресов</p>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-sm border border-slate-100 rounded-xl p-6">
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-slate-100 rounded-xl p-6 hover:border-slate-300 hover:shadow-lg hover:shadow-slate-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-slate-500 to-gray-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
+                      <Shield className="h-5 w-5 text-slate-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Как добавить в Block List</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-slate-500 font-medium">1.</span>
+                        <p><span className="font-medium">Settings → Block List</span></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-slate-500 font-medium">2.</span>
+                        <p>Добавьте домены или email-адреса, которые нужно заблокировать</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-slate-500 font-medium">3.</span>
+                        <p>Сохраните изменения</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
+                      <p className="text-red-700 text-sm leading-relaxed">
+                        <span className="font-semibold">Важно:</span> Всегда добавляйте в Block List домены конкурентов клиента и домены, откуда пришёл негативный ответ с просьбой не писать.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Таблица расходов */}
+        <section id="expenses" className="relative overflow-hidden rounded-2xl shadow-xl border border-emerald-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 via-white to-green-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-green-500 rounded-xl shadow-lg">
+                  <DollarSign className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent">
+                  Таблица расходов по проектам
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Инструкция по заполнению</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="bg-white/80 backdrop-blur-sm border border-emerald-100 rounded-xl p-6">
+                <h3 className="font-semibold text-gray-900 mb-4 text-lg">Как заполнять таблицу расходов</h3>
+                
+                <div className="space-y-3 text-sm text-gray-600">
+                  <div className="flex items-start gap-2">
+                    <span className="text-emerald-500 font-medium">1.</span>
+                    <p>Откройте таблицу проекта</p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-emerald-500 font-medium">2.</span>
+                    <p>Найдите вкладку &quot;Расходы&quot; или &quot;Expenses&quot;</p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-emerald-500 font-medium">3.</span>
+                    <p>Внесите все расходы по проекту: базы, домены, аккаунты и т.д.</p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-emerald-500 font-medium">4.</span>
+                    <p>Укажите дату, категорию и сумму расхода</p>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                  <p className="text-amber-800 text-sm">
+                    <span className="font-semibold">Расход по Пользе:</span> Если расход за сервис используется всеми — заполните <a href="https://docs.google.com/forms/d/e/1FAIpQLSc4rOgdV8-nnFVAH8wWf06SflL1culN1AyB7JuEfgmPp36o6Q/viewform" target="_blank" rel="noopener noreferrer" className="text-amber-700 hover:underline font-medium">специальную форму</a>.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Уходим в отпуск */}
+        <section id="vacation" className="relative overflow-hidden rounded-2xl shadow-xl border border-amber-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-amber-50 via-white to-orange-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-amber-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-amber-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl shadow-lg">
+                  <Plane className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-amber-600 to-orange-600 bg-clip-text text-transparent">
+                  Уходим в отпуск
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Передача проектов</p>
+              </div>
+            </div>
+
+            <div className="bg-white/80 backdrop-blur-sm border border-amber-100 rounded-xl p-6">
+              <p className="text-gray-600 leading-relaxed mb-4">
+                Перед уходом в отпуск необходимо передать все проекты другому специалисту. Убедитесь, что передали все доступы, информацию о проектах и текущие задачи.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* Ретаргет в рекламе */}
+        <section id="retarget-ads" className="relative overflow-hidden rounded-2xl shadow-xl border border-orange-200">
+          <div className="absolute inset-0 bg-gradient-to-br from-orange-50 via-white to-amber-50"></div>
+          <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-orange-200/30 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+          
+          <div className="relative p-8">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="relative">
+                <div className="absolute inset-0 bg-orange-500 rounded-xl blur-md opacity-50"></div>
+                <div className="relative p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl shadow-lg">
+                  <Megaphone className="h-7 w-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-orange-600 to-amber-600 bg-clip-text text-transparent">
+                  Ретаргет в рекламе
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">Яндекс.Директ и VK Реклама</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mb-6">
+              <p className="text-blue-800 text-sm leading-relaxed">
+                <span className="font-semibold">Ознакомительный документ:</span>{' '}
+                <a href="https://docs.google.com/document/d/1dQ7wB8uTglA4vOtIdgZye5sNtUI2KPEk28Fp2d6olDc/edit" target="_blank" rel="noopener noreferrer" className="text-blue-700 hover:underline">
+                  Что такое Яндекс.Директ и ретаргет
+                </a>
+              </p>
+            </div>
+
+            <div className="space-y-6">
+              {/* Первый шаг */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-orange-500 to-amber-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <CheckSquare className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Первый шаг — доступы</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">1.</span>
+                        <p>Узнайте, есть ли у клиента кабинет в <a href="https://direct.yandex.ru/" target="_blank" rel="noopener noreferrer" className="text-orange-600 hover:underline">Яндекс.Директ</a> и <a href="https://ads.vk.com/" target="_blank" rel="noopener noreferrer" className="text-orange-600 hover:underline">VK Реклама</a></p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">2.</span>
+                        <p>Если кабинеты есть — запросите доступы (логин/пароль)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">3.</span>
+                        <p>Если нет — создайте самостоятельно на данные клиента</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
+                      <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span><span className="font-semibold">Важно:</span> Не привязывайте аккаунты к своему номеру телефона! Используйте данные клиента для возможности передачи.</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Яндекс.Директ — Аудитория */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-orange-500 to-amber-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-yellow-100 to-amber-100 rounded-xl group-hover:from-yellow-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <Users className="h-5 w-5 text-yellow-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Яндекс.Директ — Создание аудитории</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-yellow-600 font-medium">1.</span>
+                        <p>В кабинете Яндекс.Директ → нижний угол → иконка &quot;Аудитории&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-yellow-600 font-medium">2.</span>
+                        <p>&quot;Создать сегмент&quot; → &quot;Данные CRM&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-yellow-600 font-medium">3.</span>
+                        <p>Назовите сегмент (укажите, что это базы с аутрича)</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-yellow-600 font-medium">4.</span>
+                        <p>Загрузите файл с базами</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Формат файла с базами:</p>
+                      <p className="text-gray-600 text-sm">Два столбца: <span className="font-mono bg-slate-100 px-1 rounded">companyname</span> и <span className="font-mono bg-slate-100 px-1 rounded">email</span></p>
+                      <p className="text-gray-500 text-xs mt-1">Минимум 100 контактов. Чем больше — тем лучше.</p>
+                      <a href="https://docs.google.com/spreadsheets/d/1-LWzFMYk4ooKdLPJlQZbB0bhPEMmrri5m_MGnlBGhnA/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-yellow-600 hover:underline text-sm mt-2">
+                        Пример базы <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-4 mt-4">
+                      <p className="text-amber-800 text-sm leading-relaxed">
+                        <span className="font-semibold">Время обработки:</span> Обычно 1-24 часа. Статус &quot;Готов&quot; означает, что можно создавать кампанию.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Создание кампании */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-orange-500 to-amber-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <MousePointer className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание кампании Яндекс.Директ</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">1.</span>
+                        <p>&quot;Добавить кампанию&quot; → &quot;Режим эксперта&quot; → &quot;Единая перфоманс-кампания&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">2.</span>
+                        <p>Вставьте ссылку на сайт клиента</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">3.</span>
+                        <p>Места показа: только &quot;Рекламная сеть яндекса&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">4.</span>
+                        <p>Стратегия: максимум конверсий, оплата за клики, бюджет 1000-1500₽/неделю</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">5.</span>
+                        <p>В группе объявлений выберите созданный сегмент в &quot;Ретаргетинг и подбор аудитории&quot;</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">UTM-метка для параметров URL:</p>
+                      <p className="text-gray-600 text-xs font-mono bg-slate-100 p-2 rounded break-all">
+                        {`utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}&utm_term={keyword}`}
+                      </p>
+                    </div>
+
+                    <div className="grid md:grid-cols-2 gap-3 mt-4">
+                      <div className="bg-gradient-to-r from-green-50/50 to-emerald-50/50 rounded-lg p-3 border border-green-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">✓ Автоматические рекомендации</p>
+                        <p className="text-gray-500 text-xs">Оставить галочку</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-red-50/50 to-orange-50/50 rounded-lg p-3 border border-red-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">✗ Автотаргетинг</p>
+                        <p className="text-gray-500 text-xs">Отключить, тематические слова не писать</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* VK Реклама */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-blue-500 to-indigo-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
+                      <Globe className="h-5 w-5 text-blue-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">VK Реклама — Создание кампании</h3>
+                    
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">1.</span>
+                        <p>&quot;Аудитории&quot; → &quot;Списки пользователей&quot; → &quot;Загрузить список&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">2.</span>
+                        <p>Формат: txt/csv, минимум 100 записей, кодировка UTF-8</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">3.</span>
+                        <p>Создайте кампанию: &quot;Конверсии и переходы на сайт&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">4.</span>
+                        <p>Целевое действие: клики, стратегия: минимальная цена, бюджет 200₽/день</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-blue-500 font-medium">5.</span>
+                        <p>Места размещения: <span className="font-medium">только ВКонтакте</span></p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4 mt-4">
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Пример оформления файла с единым списком:</p>
+                      <p className="text-gray-600 text-sm mb-2">В одной строке должна содержаться информация только об одном пользователе. Не смешивайте идентификаторы разных пользователей в одной строке.</p>
+                      <p className="text-gray-700 text-sm mb-2 font-medium">Заголовки для Единого списка:</p>
+                      <p className="text-gray-600 text-sm font-mono bg-white p-2 rounded border border-slate-200">phone, email, ok, vk, vid, gaid, idfa</p>
+                      <a href="https://target.vk.ru/documents/vkads/common_list_example.csv" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-600 hover:underline text-sm mt-2">
+                        Пример файла <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mt-4">
+                      <p className="text-blue-800 text-sm mb-2 font-medium">Создание аудитории:</p>
+                      <p className="text-blue-700 text-sm">После загрузки файла при создании кампании выберите эту аудиторию в блоке &quot;Пользовательские аудитории&quot;. Ставьте галочку &quot;создать аудиторию из списка&quot; и дайте название сегменту.</p>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg p-4 mt-4">
+                      <p className="text-purple-800 text-sm mb-2 font-medium">Создание кампании:</p>
+                      <p className="text-purple-700 text-sm">Создайте кампанию с ключевым действием &quot;конверсии и переходы на сайт&quot;, дайте ссылку на сайт клиента, куда будем вести.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Настройка аналитики */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-orange-500 to-amber-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
+                      <LineChart className="h-5 w-5 text-orange-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Настройка аналитики в Метрике</h3>
+                    
+                    <p className="text-gray-600 text-sm mb-4">
+                      Если у клиента не настроена аналитика — создайте счётчик и цели самостоятельно.
+                    </p>
+
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">1.</span>
+                        <p>Создайте счётчик: имя = название проекта, адрес = домен клиента</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">2.</span>
+                        <p>Включите &quot;Автоматические цели&quot; и &quot;Вебвизор&quot;</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">3.</span>
+                        <p>Передайте код счётчика клиенту для установки на сайт</p>
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <span className="text-orange-500 font-medium">4.</span>
+                        <p>Создайте цели: посещение &quot;страницы спасибо&quot;, отправка формы и т.д.</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4 mt-4">
+                      <p className="text-blue-800 text-sm mb-2 font-medium">Аналитика VK Реклама:</p>
+                      <p className="text-blue-700 text-sm mb-2">Для сбора статистики по аналогии с настройкой целей в метрике нужно создать пиксель. Далее прикрепить его на сайте клиента.</p>
+                      <p className="text-blue-700 text-sm">Чтобы прикрепить пиксель можно также попросить специалистов на стороне клиента сделать это, точно также как делали и с директом. Нужно прислать код-пикселя и попросить вставить его в код сайта.</p>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      <a href="https://drive.google.com/drive/folders/12XCcKNhcmGuhZrt-3TfzfiRnI31XO80r" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
+                        <Video className="h-3.5 w-3.5" /> Видео-регламенты
+                      </a>
+                      <a href="https://docs.google.com/document/d/1bB6BQHJtXNZZGpRfXOkQrM1XccnC3DhEyt98hJ68MBw/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 transition-all text-sm">
+                        <FileText className="h-3.5 w-3.5" /> Текстовый регламент
+                      </a>
+                      <a href="https://ads.vk.com/help/articles/pixel" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
+                        <Globe className="h-3.5 w-3.5" /> Инструкция по пикселю VK
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Маркировка рекламы */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-red-500 to-orange-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-orange-100 rounded-xl group-hover:from-red-200 group-hover:to-orange-200 transition-colors shadow-sm">
+                      <Shield className="h-5 w-5 text-red-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Маркировка рекламы (обязательно!)</h3>
+                    
+                    <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mb-4">
+                      <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        <span>Для новых кабинетов <span className="font-semibold">обязательно</span> заполните данные рекламодателя, иначе можно получить штраф!</span>
+                      </p>
+                    </div>
+
+                    <div className="grid md:grid-cols-2 gap-4">
+                      <div className="bg-gradient-to-r from-yellow-50/50 to-amber-50/50 rounded-lg p-4 border border-yellow-100">
+                        <p className="text-gray-800 text-sm font-medium mb-2">Яндекс.Директ:</p>
+                        <p className="text-gray-600 text-xs">Название кабинета → &quot;Данные рекламодателя&quot; → заполнить: вид организации, ИНН, название, галочка &quot;я конечный рекламодатель&quot;</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-blue-50/50 to-indigo-50/50 rounded-lg p-4 border border-blue-100">
+                        <p className="text-gray-800 text-sm font-medium mb-2">VK Реклама:</p>
+                        <p className="text-gray-600 text-xs">Для компаний: наименование, адрес, ОГРН. Для ИП: ФИО, ОГРНИП. Для самозанятых: ФИО, ИНН.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Пополнение баланса */}
+              <div className="group relative bg-white/80 backdrop-blur-sm border border-orange-100 rounded-xl p-6 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-100/50 transition-all duration-300">
+                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-green-500 to-emerald-500 rounded-l-xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
+                      <DollarSign className="h-5 w-5 text-green-600" />
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-900 mb-3 text-lg">Пополнение баланса</h3>
+                    
+                    <p className="text-gray-600 text-sm mb-4">
+                      Баланс кабинета пополняет клиент. Обратитесь к аккаунт-менеджеру в чате &quot;аккаунт&quot; для запроса пополнения.
+                    </p>
+
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div className="bg-gradient-to-r from-green-50/50 to-emerald-50/50 rounded-lg p-3 border border-green-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Способы оплаты</p>
+                        <p className="text-gray-500 text-xs">Физ.лицо по карте или юр.лицо по карте/счёту</p>
+                      </div>
+                      <div className="bg-gradient-to-r from-green-50/50 to-emerald-50/50 rounded-lg p-3 border border-green-100">
+                        <p className="text-gray-800 text-sm font-medium mb-1">Рекомендуемая сумма</p>
+                        <p className="text-gray-500 text-xs">Минимум 5 000 ₽ (оговаривалось 3-5 тыс.)</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
