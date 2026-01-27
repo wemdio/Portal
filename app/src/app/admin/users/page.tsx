@@ -5,11 +5,12 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
-import { Users, Plus, Loader2, Edit2, X, Check, AlertCircle, UserPlus, Search } from 'lucide-react';
+import { Users, Plus, Loader2, Edit2, X, Check, AlertCircle, UserPlus, Search, Trash2 } from 'lucide-react';
 
 export default function UsersPage() {
   const router = useRouter();
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -22,6 +23,9 @@ export default function UsersPage() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editingRole, setEditingRole] = useState<UserRole | null>(null);
   const [saving, setSaving] = useState(false);
+  
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     checkAccess();
@@ -30,6 +34,12 @@ export default function UsersPage() {
   async function checkAccess() {
     const role = await getCurrentUserRole();
     setCurrentUserRole(role);
+    
+    // Get current user ID
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user?.id) {
+      setCurrentUserId(session.user.id);
+    }
     
     if (!isAdmin(role)) {
       setError('Доступ запрещен. Только администраторы могут управлять пользователями.');
@@ -44,8 +54,7 @@ export default function UsersPage() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: false });
+        .select('*');
 
       if (error) throw error;
       setUsers(data || []);
@@ -92,6 +101,7 @@ export default function UsersPage() {
 
       setShowCreateModal(false);
       setNewUser({ email: '', password: '', role: 'technician', full_name: '' });
+      setSearchQuery(''); // Reset search when user is created
       fetchUsers();
     } catch (err: any) {
       if (err.message.includes('already registered')) {
@@ -121,6 +131,35 @@ export default function UsersPage() {
       setError(err.message || 'Ошибка обновления роли');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDeleteUser(userId: string) {
+    // Prevent deleting yourself
+    if (userId === currentUserId) {
+      setError('Вы не можете удалить самого себя');
+      setDeletingUserId(null);
+      return;
+    }
+
+    setDeleting(true);
+    setError('');
+    try {
+      // Delete from profiles table
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', userId);
+
+      if (error) throw error;
+
+      // Remove from local state
+      setUsers(users.filter(u => u.id !== userId));
+      setDeletingUserId(null);
+    } catch (err: any) {
+      setError(err.message || 'Ошибка удаления пользователя');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -160,7 +199,10 @@ export default function UsersPage() {
           <p className="mt-1 text-sm text-gray-500">Создание и управление ролями пользователей</p>
         </div>
         <button
-          onClick={() => setShowCreateModal(true)}
+          onClick={() => {
+            setSearchQuery(''); // Clear search when opening modal
+            setShowCreateModal(true);
+          }}
           className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           <UserPlus className="h-5 w-5 mr-2" />
@@ -186,6 +228,7 @@ export default function UsersPage() {
             placeholder="Поиск по email, имени или роли..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            autoComplete="off"
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           />
         </div>
@@ -280,13 +323,24 @@ export default function UsersPage() {
                         </button>
                       </div>
                     ) : (
-                      <button
-                        onClick={() => { setEditingUserId(user.id); setEditingRole(user.role); }}
-                        className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                        title="Изменить роль"
-                      >
-                        <Edit2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => { setEditingUserId(user.id); setEditingRole(user.role); }}
+                          className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                          title="Изменить роль"
+                        >
+                          <Edit2 className="h-4 w-4" />
+                        </button>
+                        {user.id !== currentUserId && (
+                          <button
+                            onClick={() => setDeletingUserId(user.id)}
+                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Удалить пользователя"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -304,12 +358,16 @@ export default function UsersPage() {
       </div>
 
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">Новый пользователь</h3>
               <button
-                onClick={() => { setShowCreateModal(false); setError(''); }}
+                onClick={() => { 
+                  setShowCreateModal(false); 
+                  setError(''); 
+                  setSearchQuery(''); 
+                }}
                 className="p-1 hover:bg-gray-100 rounded"
               >
                 <X className="h-5 w-5 text-gray-500" />
@@ -373,7 +431,11 @@ export default function UsersPage() {
             </div>
             <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
               <button
-                onClick={() => { setShowCreateModal(false); setError(''); }}
+                onClick={() => { 
+                  setShowCreateModal(false); 
+                  setError(''); 
+                  setSearchQuery(''); 
+                }}
                 className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 Отмена
@@ -385,6 +447,50 @@ export default function UsersPage() {
               >
                 {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                 Создать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deletingUserId && (
+        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Подтверждение удаления</h3>
+            </div>
+            <div className="p-6">
+              {(() => {
+                const userToDelete = users.find(u => u.id === deletingUserId);
+                return (
+                  <p className="text-gray-700">
+                    Вы уверены, что хотите удалить пользователя{' '}
+                    <span className="font-semibold">
+                      {userToDelete?.full_name || userToDelete?.email || 'этого пользователя'}
+                    </span>?
+                    <br />
+                    <span className="text-sm text-gray-500 mt-2 block">
+                      Это действие нельзя отменить.
+                    </span>
+                  </p>
+                );
+              })()}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => setDeletingUserId(null)}
+                disabled={deleting}
+                className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={() => deletingUserId && handleDeleteUser(deletingUserId)}
+                disabled={deleting}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center"
+              >
+                {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Удалить
               </button>
             </div>
           </div>
