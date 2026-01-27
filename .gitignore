@@ -8,6 +8,8 @@ app/.yarn/*
 !app/.yarn/releases
 !app/.yarn/versions
 
+regl.docx
+
 # next.js
 app/.next/
 app/out/
@@ -36,3 +38,5 @@ app/next-env.d.ts
 
 # docs
 docs/*.xlsx
+
+.cursorrules

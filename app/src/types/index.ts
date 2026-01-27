@@ -1,5 +1,15 @@
 export type ProjectStatus = 'На паузе' | 'Тест' | 'В работе' | 'Подготовка' | 'Completed';
 
+export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer';
+
+export interface UserProfile {
+  id: string;
+  email?: string;
+  role: UserRole | null;
+  full_name?: string;
+  created_at?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
