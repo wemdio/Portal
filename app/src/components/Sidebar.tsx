@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle, FileText } from 'lucide-react';
+import { LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle, FileText } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
+import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin } from '@/lib/roles';
 
@@ -22,22 +23,47 @@ export function Sidebar() {
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  async function getUser() {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session) {
-      setUserEmail(session.user.email);
-      const { data } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', session.user.id)
-        .single();
+  async function fetchUserRole(userId: string) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', userId)
+      .single();
 
-      setUserRole(data?.role as UserRole | null);
-    }
+    return data?.role as UserRole | null;
   }
 
   useEffect(() => {
-    getUser();
+    let isMounted = true;
+
+    const applySession = async (session: Session | null) => {
+      if (!isMounted) return;
+
+      if (!session) {
+        setUserEmail(null);
+        setUserRole(null);
+        return;
+      }
+
+      setUserEmail(session.user.email);
+      const role = await fetchUserRole(session.user.id);
+      if (!isMounted) return;
+      setUserRole(role);
+    };
+
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      await applySession(session);
+    })();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
+      void applySession(session);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription?.unsubscribe();
+    };
   }, []);
 
   async function handleSignOut() {
