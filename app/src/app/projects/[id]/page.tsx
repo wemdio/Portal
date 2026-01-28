@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { Project, ProjectStatus, UserRole } from '@/types';
 import { ArrowLeft, Save, Loader2, Calendar, User, DollarSign, Lock } from 'lucide-react';
 import Link from 'next/link';
-import { getCurrentUserRole, canEditProjects, ROLE_LABELS } from '@/lib/roles';
+import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
 
 export default function ProjectPage() {
   const router = useRouter();
@@ -59,13 +59,12 @@ export default function ProjectPage() {
     setMessage('');
 
     try {
-      // Remove id from update payload
-      const { id: _, ...updates } = project as any;
-      
+      const { id, ...updates } = project;
+
       const { error } = await supabase
         .from('projects')
         .update(updates)
-        .eq('id', project.id);
+        .eq('id', id);
 
       if (error) throw error;
       setMessage('Изменения сохранены');

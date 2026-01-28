@@ -35,9 +35,10 @@ export default function AdminPage() {
           details: result.headers 
         });
       }
-    } catch (error: any) {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ошибка при загрузке CSV';
       console.error(error);
-      setStatus({ type: 'error', message: error.message || 'Ошибка при загрузке CSV' });
+      setStatus({ type: 'error', message });
     } finally {
       setUploading(false);
     }

@@ -1,4 +1,5 @@
 'use client';
+/* eslint-disable react/no-unescaped-entities, @next/next/no-img-element */
 
 import { useState, useRef, useEffect } from 'react';
 import { 
@@ -84,7 +85,7 @@ export default function ReglamentPage() {
               title: sectionTitle || 'Раздел',
               context: beforeMatch + match + afterMatch,
               sectionId: sectionId,
-              searchText: searchQuery
+              searchText: query
             });
           }
           
@@ -99,22 +100,25 @@ export default function ReglamentPage() {
   };
 
   // Поиск по разделам
-  useEffect(() => {
-    if (searchQuery.trim()) {
-      const results = searchInContent(searchQuery);
-      setSearchResults(results);
-      setShowResults(true);
-    } else {
+  const updateSearch = (value: string) => {
+    setSearchQuery(value);
+
+    if (!value.trim()) {
       setSearchResults([]);
       setShowResults(false);
+      return;
     }
-  }, [searchQuery]);
+
+    const results = searchInContent(value);
+    setSearchResults(results);
+    setShowResults(true);
+  };
 
   // Плавная прокрутка к найденному тексту
   const scrollToResult = (result: SearchResult) => {
     const query = result.searchText.toLowerCase();
     setShowResults(false);
-    setSearchQuery('');
+    updateSearch('');
     
     // Небольшая задержка для закрытия выпадающего меню
     setTimeout(() => {
