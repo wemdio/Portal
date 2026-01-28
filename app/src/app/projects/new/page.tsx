@@ -80,9 +80,16 @@ export default function NewProjectPage() {
       if (error) throw error;
 
       router.push(`/projects/${data.id}`);
-    } catch (error: any) {
-      console.error('Error creating project:', error);
-      setError(error.message || 'Ошибка при создании проекта');
+    } catch (caughtError) {
+      console.error('Error creating project:', caughtError);
+      const errorMessage =
+        caughtError instanceof Error
+          ? caughtError.message
+          : typeof caughtError === 'object' && caughtError !== null && 'message' in caughtError && typeof (caughtError as { message: unknown }).message === 'string'
+            ? ((caughtError as { message: string }).message)
+            : 'Ошибка при создании проекта';
+
+      setError(errorMessage);
     } finally {
       setSaving(false);
     }
