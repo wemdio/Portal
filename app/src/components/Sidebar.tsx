@@ -22,10 +22,6 @@ export function Sidebar() {
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  useEffect(() => {
-    getUser();
-  }, []);
-
   async function getUser() {
     const { data: { session } } = await supabase.auth.getSession();
     if (session) {
@@ -35,10 +31,14 @@ export function Sidebar() {
         .select('role')
         .eq('id', session.user.id)
         .single();
-      
+
       setUserRole(data?.role as UserRole | null);
     }
   }
+
+  useEffect(() => {
+    getUser();
+  }, []);
 
   async function handleSignOut() {
     await supabase.auth.signOut();
