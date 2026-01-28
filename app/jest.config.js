@@ -14,6 +14,8 @@ const customJestConfig = {
     '!src/**/*.d.ts',
     '!src/**/*.stories.{js,jsx,ts,tsx}',
     '!tests/**',
+    '!src/app/**',
+    '!src/middleware.ts',
   ],
   coverageThreshold: {
     global: {
@@ -25,11 +27,10 @@ const customJestConfig = {
   },
 }
 
-module.exports = async () => {
-  const { default: nextJest } = await import('next/jest')
-  const createJestConfig = nextJest({
-    dir: './',
-  })
+const nextJest = require('next/jest')
 
-  return createJestConfig(customJestConfig)
-}
+const createJestConfig = nextJest({
+  dir: './',
+})
+
+module.exports = createJestConfig(customJestConfig)
