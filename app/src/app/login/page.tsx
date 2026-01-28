@@ -81,15 +81,21 @@ export default function LoginPage() {
           setError('Сессия не создана. Попробуйте снова или проверьте настройки Supabase.');
         }
       }
-    } catch (error: any) {
-        console.error("Auth error:", error);
-        // Translate common Supabase errors
-        if (error.message.includes('Error sending confirmation email')) {
+    } catch (caughtError) {
+        console.error('Auth error:', caughtError);
+        const errorMessage =
+          caughtError instanceof Error
+            ? caughtError.message
+            : typeof caughtError === 'object' && caughtError !== null && 'message' in caughtError && typeof (caughtError as { message: unknown }).message === 'string'
+              ? ((caughtError as { message: string }).message)
+              : 'Неизвестная ошибка при аутентификации.';
+
+        if (errorMessage.includes('Error sending confirmation email')) {
             setError('Ошибка отправки письма. Скорее всего, в Supabase превышен лимит писем (Rate Limit) или не настроен SMTP. Отключите "Confirm email" в настройках Supabase.');
-        } else if (error.message.includes('invalid_credentials')) {
+        } else if (errorMessage.includes('invalid_credentials')) {
             setError('Неверный email или пароль.');
         } else {
-            setError(error.message);
+            setError(errorMessage);
         }
     } finally {
       setLoading(false);
