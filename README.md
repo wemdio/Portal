@@ -26,37 +26,98 @@
 
 - Node.js 18+ 
 - npm или yarn
+- Docker и Docker Compose (для контейнерного запуска)
 
-### Установка
+### Локальная разработка
+
+#### Установка
 
 ```bash
 cd app
 npm install
 ```
 
-### Настройка переменных окружения
+#### Настройка переменных окружения
 
-Создайте файл `.env.local` в папке `app`:
+Создайте файл `.env.local` в корне проекта:
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-### Запуск в режиме разработки
+#### Запуск в режиме разработки
 
 ```bash
+cd app
 npm run dev
 ```
 
 Приложение будет доступно по адресу [http://localhost:3000](http://localhost:3000)
 
+### Запуск в Docker
+
+#### Сборка и запуск
+
+```bash
+# Создайте .env.local в корне проекта с переменными окружения
+docker-compose up -d --build
+```
+
+Приложение будет доступно по адресу [http://localhost:3000](http://localhost:3000)
+
+#### Остановка
+
+```bash
+docker-compose down
+```
+
+#### Просмотр логов
+
+```bash
+docker-compose logs -f portal
+```
+
 ### Сборка для продакшена
 
 ```bash
+cd app
 npm run build
 npm start
 ```
+
+### Продакшн деплой
+
+Для продакшн деплоя используйте `docker-compose.prod.yml`:
+
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+## Тестирование
+
+### Запуск тестов
+
+```bash
+cd app
+npm test
+```
+
+### Запуск тестов в watch режиме
+
+```bash
+cd app
+npm run test:watch
+```
+
+### Запуск тестов с покрытием
+
+```bash
+cd app
+npm run test:coverage
+```
+
+Тесты автоматически запускаются перед деплоем в CI/CD pipeline.
 
 ## Технологии
 
@@ -65,3 +126,5 @@ npm start
 - **Supabase** - база данных и аутентификация
 - **Tailwind CSS** - стилизация
 - **PapaParse** - парсинг CSV файлов
+- **Jest** - тестовый фреймворк
+- **React Testing Library** - тестирование React компонентов
