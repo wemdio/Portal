@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     name: Run tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
   push_docker_hub_prod:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: Push Docker image
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: test
     steps:
       - name: Check out the repo
@@ -71,7 +71,7 @@ jobs:
 
   deploy_to_prod_dir:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: push_docker_hub_prod
     steps:
       - name: executing remote ssh commands to deploy
