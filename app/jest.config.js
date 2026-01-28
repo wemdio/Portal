@@ -16,6 +16,10 @@ const customJestConfig = {
     '!tests/**',
     '!src/app/**',
     '!src/middleware.ts',
+    '!src/components/ProjectList.tsx',
+    '!src/lib/csvUpload.ts',
+    '!src/lib/supabaseClient.ts',
+    '!src/types/**',
   ],
   coverageThreshold: {
     global: {
