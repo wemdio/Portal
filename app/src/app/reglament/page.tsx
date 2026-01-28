@@ -220,7 +220,7 @@ export default function ReglamentPage() {
                     parent.normalize();
                   }
                 }, 2000);
-              } catch (surroundError) {
+              } catch {
                 const parent = foundNode!.parentElement;
                 if (parent) {
                   parent.style.transition = 'background-color 0.3s';
@@ -231,11 +231,11 @@ export default function ReglamentPage() {
                   }, 2000);
                 }
               }
-            } catch (highlightError) {
+            } catch {
               // Игнорируем ошибки подсветки
             }
           }, 600);
-        } catch (e) {
+        } catch {
           section.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
       } else {

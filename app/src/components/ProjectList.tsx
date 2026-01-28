@@ -1,15 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Project, ProjectStatus, UserRole } from '@/types';
+import { Project, ProjectStatus } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import { 
   Search, Plus, Calendar, DollarSign, User, Loader2, FolderKanban, 
-  AlertTriangle, Clock, LayoutGrid, List, Columns3, ChevronDown,
-  MoreHorizontal, Edit2, Trash2, Archive, Eye
+  AlertTriangle, Clock, LayoutGrid, List, Columns3,
+  MoreHorizontal, Edit2, Eye
 } from 'lucide-react';
 import Link from 'next/link';
-import { getCurrentUserRole, canCreateProjects, canEditProjects } from '@/lib/roles';
+import { getCurrentUserRole, canCreateProjects } from '@/lib/roles';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -63,9 +63,7 @@ export function ProjectList() {
   const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [canCreate, setCanCreate] = useState(false);
-  const [canEdit, setCanEdit] = useState(false);
 
   useEffect(() => {
     fetchProjects();
@@ -74,9 +72,7 @@ export function ProjectList() {
 
   async function checkPermissions() {
     const role = await getCurrentUserRole();
-    setUserRole(role);
     setCanCreate(canCreateProjects(role));
-    setCanEdit(canEditProjects(role));
   }
 
   async function fetchProjects() {
