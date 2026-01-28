@@ -32,6 +32,8 @@ const normalizeKey = (key: string) => {
     .trim();                // Trim whitespace
 };
 
+type CSVRow = Record<string, string>;
+
 export async function uploadCSV(file: File) {
   return new Promise<{ count: number; headers?: string[] }>((resolve, reject) => {
     Papa.parse(file, {
@@ -40,7 +42,7 @@ export async function uploadCSV(file: File) {
       preview: 0, // Parse all rows
       complete: async (results) => {
         try {
-          const rawRows = results.data as any[];
+          const rawRows = results.data as CSVRow[];
           
           if (!rawRows || rawRows.length === 0) {
             resolve({ count: 0 });
@@ -60,7 +62,7 @@ export async function uploadCSV(file: File) {
           console.log('Normalized Header Map:', headerMap);
 
           // Helper to get value using normalized key
-          const getValue = (row: any, targetKey: string) => {
+          const getValue = (row: CSVRow, targetKey: string) => {
             // Try exact match first
             if (row[targetKey]) return row[targetKey];
             
