@@ -45,7 +45,7 @@ export function Sidebar() {
         return;
       }
 
-      setUserEmail(session.user.email);
+      setUserEmail(session.user.email ?? null);
       const role = await fetchUserRole(session.user.id);
       if (!isMounted) return;
       setUserRole(role);

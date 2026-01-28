@@ -34,11 +34,11 @@ describe('Type definitions', () => {
   describe('Project', () => {
     it('should have required fields', () => {
       const project: Project = {
-        id: '1',
+        id: 1,
         name: 'Test Project',
         status: 'В работе',
       };
-      expect(project.id).toBe('1');
+      expect(project.id).toBe(1);
       expect(project.name).toBe('Test Project');
       expect(project.status).toBe('В работе');
     });
