@@ -1,15 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
-import { Project, ProjectStatus, UserRole } from '@/types';
+import { Project, ProjectStatus } from '@/types';
 import { ArrowLeft, Save, Loader2, Calendar, User, DollarSign, Lock } from 'lucide-react';
 import Link from 'next/link';
 import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
 
 export default function ProjectPage() {
-  const router = useRouter();
   const params = useParams();
   const id = params?.id as string;
   
@@ -17,7 +16,6 @@ export default function ProjectPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [canEdit, setCanEdit] = useState(false);
 
   useEffect(() => {
@@ -29,7 +27,6 @@ export default function ProjectPage() {
 
   async function checkPermissions() {
     const role = await getCurrentUserRole();
-    setUserRole(role);
     setCanEdit(canEditProjects(role));
   }
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import { Users, Briefcase, TrendingUp, Clock, User } from 'lucide-react';
+import { Users, Briefcase, User } from 'lucide-react';
 
 interface TeamMember {
   name: string;

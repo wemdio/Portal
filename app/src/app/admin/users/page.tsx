@@ -1,14 +1,21 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
-import { Users, Plus, Loader2, Edit2, X, Check, AlertCircle, UserPlus, Search, Trash2 } from 'lucide-react';
+import { Users, Loader2, Edit2, X, Check, AlertCircle, UserPlus, Search, Trash2 } from 'lucide-react';
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  if (typeof err === 'object' && err !== null && 'message' in err && typeof (err as { message: unknown }).message === 'string') {
+    return (err as { message: string }).message;
+  }
+  return 'Неизвестная ошибка';
+}
 
 export default function UsersPage() {
-  const router = useRouter();
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -27,43 +34,44 @@ export default function UsersPage() {
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    checkAccess();
-  }, []);
-
-  async function checkAccess() {
-    const role = await getCurrentUserRole();
-    setCurrentUserRole(role);
-    
-    // Get current user ID
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session?.user?.id) {
-      setCurrentUserId(session.user.id);
-    }
-    
-    if (!isAdmin(role)) {
-      setError('Доступ запрещен. Только администраторы могут управлять пользователями.');
-      setLoading(false);
-      return;
-    }
-    
-    fetchUsers();
-  }
-
-  async function fetchUsers() {
+  const fetchUsers = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('profiles')
         .select('*');
 
       if (error) throw error;
-      setUsers(data || []);
-    } catch (err: any) {
-      setError(err.message || 'Ошибка загрузки пользователей');
-    } finally {
+      setUsers((data as UserProfile[]) || []);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Ошибка загрузки пользователей');
+    }
+  }, []);
+
+  const checkAccess = useCallback(async () => {
+    try {
+      const role = await getCurrentUserRole();
+      setCurrentUserRole(role);
+
+      const { data: { session } } = await supabase.auth.getSession();
+      setCurrentUserId(session?.user?.id ?? null);
+
+      if (!isAdmin(role)) {
+        setError('Доступ запрещен. Только администраторы могут управлять пользователями.');
+        setLoading(false);
+        return;
+      }
+
+      await fetchUsers();
+      setLoading(false);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
       setLoading(false);
     }
-  }
+  }, [fetchUsers]);
+
+  useEffect(() => {
+    void checkAccess();
+  }, [checkAccess]);
 
   async function handleCreateUser() {
     if (!newUser.email || !newUser.password || !newUser.role) {
@@ -102,12 +110,13 @@ export default function UsersPage() {
       setShowCreateModal(false);
       setNewUser({ email: '', password: '', role: 'technician', full_name: '' });
       setSearchQuery(''); // Reset search when user is created
-      fetchUsers();
-    } catch (err: any) {
-      if (err.message.includes('already registered')) {
+      await fetchUsers();
+    } catch (err: unknown) {
+      const message = getErrorMessage(err);
+      if (message.includes('already registered')) {
         setError('Пользователь с таким email уже существует');
       } else {
-        setError(err.message || 'Ошибка создания пользователя');
+        setError(message || 'Ошибка создания пользователя');
       }
     } finally {
       setCreating(false);
@@ -127,8 +136,8 @@ export default function UsersPage() {
       setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
       setEditingUserId(null);
       setEditingRole(null);
-    } catch (err: any) {
-      setError(err.message || 'Ошибка обновления роли');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Ошибка обновления роли');
     } finally {
       setSaving(false);
     }
@@ -156,8 +165,8 @@ export default function UsersPage() {
       // Remove from local state
       setUsers(users.filter(u => u.id !== userId));
       setDeletingUserId(null);
-    } catch (err: any) {
-      setError(err.message || 'Ошибка удаления пользователя');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err) || 'Ошибка удаления пользователя');
     } finally {
       setDeleting(false);
     }
