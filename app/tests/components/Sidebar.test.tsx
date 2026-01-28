@@ -1,9 +1,9 @@
-import type { FC, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { render, screen } from '@testing-library/react';
 import { Sidebar } from '@/components/Sidebar';
 
 jest.mock('next/link', () => {
-  const MockLink: FC<{ children: ReactNode; href: string }> = ({ children, href }) => {
+  const MockLink = ({ children, href }: { children: ReactNode; href: string }) => {
     return <a href={href}>{children}</a>;
   };
   MockLink.displayName = 'MockLink';
@@ -14,18 +14,26 @@ jest.mock('next/link', () => {
   };
 });
 
-jest.mock('@/lib/supabaseClient', () => ({
-  supabase: {
-    auth: {
-      getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
+jest.mock('@/lib/supabaseClient', () => {
+  const mockSelect = jest.fn().mockReturnThis();
+  const mockEq = jest.fn().mockReturnThis();
+  const mockSingle = jest.fn().mockResolvedValue({ data: { role: 'technician' } });
+  const subscription = { unsubscribe: jest.fn() };
+
+  return {
+    supabase: {
+      auth: {
+        getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
+        onAuthStateChange: jest.fn().mockReturnValue({ data: { subscription } }),
+      },
+      from: jest.fn(() => ({
+        select: mockSelect,
+        eq: mockEq,
+        single: mockSingle,
+      })),
     },
-    from: jest.fn().mockReturnValue({
-      select: jest.fn().mockReturnThis(),
-      eq: jest.fn().mockReturnThis(),
-      single: jest.fn().mockResolvedValue({ data: { role: 'technician' } }),
-    }),
-  },
-}));
+  };
+});
 
 describe('Sidebar Component', () => {
   it('should render navigation items', () => {
