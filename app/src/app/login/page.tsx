@@ -1,12 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { LayoutDashboard, Loader2, Lock, Mail } from 'lucide-react';
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -37,6 +35,23 @@ export default function LoginPage() {
         
         if (error) throw error;
 
+        // Create profile entry if user was created
+        if (data.user) {
+          const { error: profileError } = await supabase
+            .from('profiles')
+            .upsert({
+              id: data.user.id,
+              email: email,
+              full_name: email.split('@')[0],
+              role: null, // Default role - can be set by admin later
+            });
+
+          if (profileError) {
+            console.error('Error creating profile:', profileError);
+            // Don't throw - user is already created in auth, profile can be created later
+          }
+        }
+
         // Check if session was created immediately (meaning email confirmation is off)
         if (data.session) {
              setMessage('Регистрация успешна! Входим...');
@@ -64,15 +79,21 @@ export default function LoginPage() {
           setError('Сессия не создана. Попробуйте снова или проверьте настройки Supabase.');
         }
       }
-    } catch (error: any) {
-        console.error("Auth error:", error);
-        // Translate common Supabase errors
-        if (error.message.includes('Error sending confirmation email')) {
+    } catch (caughtError) {
+        console.error('Auth error:', caughtError);
+        const errorMessage =
+          caughtError instanceof Error
+            ? caughtError.message
+            : typeof caughtError === 'object' && caughtError !== null && 'message' in caughtError && typeof (caughtError as { message: unknown }).message === 'string'
+              ? ((caughtError as { message: string }).message)
+              : 'Неизвестная ошибка при аутентификации.';
+
+        if (errorMessage.includes('Error sending confirmation email')) {
             setError('Ошибка отправки письма. Скорее всего, в Supabase превышен лимит писем (Rate Limit) или не настроен SMTP. Отключите "Confirm email" в настройках Supabase.');
-        } else if (error.message.includes('invalid_credentials')) {
+        } else if (errorMessage.includes('invalid_credentials')) {
             setError('Неверный email или пароль.');
         } else {
-            setError(error.message);
+            setError(errorMessage);
         }
     } finally {
       setLoading(false);

@@ -5,10 +5,11 @@ import { Project, ProjectStatus } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import { 
   Search, Plus, Calendar, DollarSign, User, Loader2, FolderKanban, 
-  AlertTriangle, Clock, LayoutGrid, List, Columns3, ChevronDown,
-  MoreHorizontal, Edit2, Trash2, Archive, Eye
+  AlertTriangle, Clock, LayoutGrid, List, Columns3,
+  MoreHorizontal, Edit2, Eye
 } from 'lucide-react';
 import Link from 'next/link';
+import { getCurrentUserRole, canCreateProjects } from '@/lib/roles';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -62,10 +63,17 @@ export function ProjectList() {
   const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [canCreate, setCanCreate] = useState(false);
 
   useEffect(() => {
     fetchProjects();
+    checkPermissions();
   }, []);
+
+  async function checkPermissions() {
+    const role = await getCurrentUserRole();
+    setCanCreate(canCreateProjects(role));
+  }
 
   async function fetchProjects() {
     try {
@@ -175,13 +183,15 @@ export function ProjectList() {
           <h1 className="text-2xl font-bold text-gray-900">Проекты</h1>
           <p className="text-sm text-gray-500">{projects.length} проектов</p>
         </div>
-        <Link 
-          href="/projects/new"
-          className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:shadow-blue-500/40 hover:scale-[1.02]"
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          Новый проект
-        </Link>
+        {canCreate && (
+          <Link 
+            href="/projects/new"
+            className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-500/30 hover:bg-blue-700 transition-all hover:shadow-blue-500/40 hover:scale-[1.02]"
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            Новый проект
+          </Link>
+        )}
       </div>
 
       {/* Controls */}
@@ -268,13 +278,15 @@ export function ProjectList() {
           <p className="mt-2 text-sm text-gray-500">
             {searchTerm ? 'Попробуйте изменить поиск' : 'Создайте первый проект или импортируйте данные'}
           </p>
-          <Link 
-            href="/projects/new"
-            className="mt-4 inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-700"
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            Создать проект
-          </Link>
+          {canCreate && (
+            <Link 
+              href="/projects/new"
+              className="mt-4 inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-700"
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              Создать проект
+            </Link>
+          )}
         </div>
       )}
 

@@ -1,7 +1,17 @@
 export type ProjectStatus = 'На паузе' | 'Тест' | 'В работе' | 'Подготовка' | 'Completed';
 
-export interface Project {
+export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer';
+
+export interface UserProfile {
   id: string;
+  email?: string;
+  role: UserRole | null;
+  full_name?: string;
+  created_at?: string;
+}
+
+export interface Project {
+  id: number;
   name: string;
   description?: string;
   region?: string;
@@ -25,7 +35,7 @@ export interface Project {
 // Mock data based on CSV
 export const MOCK_PROJECTS: Project[] = [
   {
-    id: '4',
+    id: 4,
     name: 'Software Cats',
     description: 'QA',
     region: 'Ру',
@@ -44,7 +54,7 @@ export const MOCK_PROJECTS: Project[] = [
     weekly_tasks: 'пауза 15'
   },
   {
-    id: '6',
+    id: 6,
     name: 'int-ing (b2b leads)',
     description: 'аудиовизуальное оборудование',
     region: 'Ру',
@@ -64,7 +74,7 @@ export const MOCK_PROJECTS: Project[] = [
     comment_elvira: 'пинганула'
   },
   {
-    id: '8',
+    id: 8,
     name: 'robosculptor.co',
     description: 'производитель аппаратов для неинвазивной коррекции фигуры',
     region: 'Eng',
@@ -84,7 +94,7 @@ export const MOCK_PROJECTS: Project[] = [
     comment_anya: 'Пятница 11:00'
   },
   {
-    id: '13',
+    id: 13,
     name: 'IFT',
     description: 'оборудование для майнинга биткоина',
     region: 'Ру',
@@ -104,7 +114,7 @@ export const MOCK_PROJECTS: Project[] = [
     comment_elvira: '19 December'
   },
   {
-    id: '32',
+    id: 32,
     name: 'SalesAI',
     description: 'платформа речевой аналитики для SMB',
     region: 'Ру',

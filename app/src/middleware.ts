@@ -8,8 +8,13 @@ export async function middleware(request: NextRequest) {
     },
   })
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://whhkkmfcmstawodnghzw.supabase.co';
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndoaGtrbWZjbXN0YXdvZG5naHp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1MzgxMDgsImV4cCI6MjA4MjExNDEwOH0.JNeLI1tKHaWGWKXb7Wzdz3ldfFJrv1lZXKs36m8LZ7g';
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.error('Missing Supabase environment variables. Please check your .env.local file.');
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
 
   const supabase = createServerClient(
     supabaseUrl,
@@ -66,6 +71,19 @@ export async function middleware(request: NextRequest) {
 
   if (user && request.nextUrl.pathname === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
+  }
+
+  // Protect admin routes - only admin role can access
+  if (user && request.nextUrl.pathname.startsWith('/admin')) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    if (!profile || profile.role !== 'admin') {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
   }
 
   return response

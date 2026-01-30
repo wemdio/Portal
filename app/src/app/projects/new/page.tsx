@@ -1,16 +1,30 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
-import { ArrowLeft, Save, Briefcase } from 'lucide-react';
+import { ArrowLeft, Save, Briefcase, AlertCircle, Loader2 } from 'lucide-react';
 import Link from 'next/link';
+import { UserRole } from '@/types';
+import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles';
 
 export default function NewProjectPage() {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [checkingAccess, setCheckingAccess] = useState(true);
   
+  useEffect(() => {
+    checkAccess();
+  }, []);
+
+  async function checkAccess() {
+    const role = await getCurrentUserRole();
+    setUserRole(role);
+    setCheckingAccess(false);
+  }
+
   const [formData, setFormData] = useState({
     project_name: '',
     status: 'В работе',
@@ -66,13 +80,52 @@ export default function NewProjectPage() {
       if (error) throw error;
 
       router.push(`/projects/${data.id}`);
-    } catch (error: any) {
-      console.error('Error creating project:', error);
-      setError(error.message || 'Ошибка при создании проекта');
+    } catch (caughtError) {
+      console.error('Error creating project:', caughtError);
+      const errorMessage =
+        caughtError instanceof Error
+          ? caughtError.message
+          : typeof caughtError === 'object' && caughtError !== null && 'message' in caughtError && typeof (caughtError as { message: unknown }).message === 'string'
+            ? ((caughtError as { message: string }).message)
+            : 'Ошибка при создании проекта';
+
+      setError(errorMessage);
     } finally {
       setSaving(false);
     }
   };
+
+  if (checkingAccess) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  if (!canCreateProjects(userRole)) {
+    return (
+      <div className="max-w-4xl mx-auto py-10">
+        <Link 
+          href="/" 
+          className="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4"
+        >
+          <ArrowLeft className="h-4 w-4 mr-1" />
+          Назад к проектам
+        </Link>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-6 flex items-center">
+          <AlertCircle className="h-6 w-6 text-red-600 mr-3" />
+          <div>
+            <h2 className="text-lg font-semibold text-red-800">Доступ запрещен</h2>
+            <p className="text-red-600">
+              У вас нет прав для создания проектов. 
+              {userRole && ` Ваша роль: ${ROLE_LABELS[userRole]}.`}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto">

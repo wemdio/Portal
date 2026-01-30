@@ -8,6 +8,8 @@ app/.yarn/*
 !app/.yarn/releases
 !app/.yarn/versions
 
+regl.docx
+
 # next.js
 app/.next/
 app/out/
@@ -26,6 +28,8 @@ app/.pnpm-debug.log*
 # env files (NEVER commit these in a real project, but for now we have hardcoded keys in code anyway)
 app/.env*
 app/env.local
+.env.local
+.env
 
 # vercel
 app/.vercel
@@ -36,3 +40,5 @@ app/next-env.d.ts
 
 # docs
 docs/*.xlsx
+
+.cursorrules

@@ -1,14 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { Project, ProjectStatus } from '@/types';
-import { ArrowLeft, Save, Loader2, Calendar, User, DollarSign } from 'lucide-react';
+import { ArrowLeft, Save, Loader2, Calendar, User, DollarSign, Lock } from 'lucide-react';
 import Link from 'next/link';
+import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
 
 export default function ProjectPage() {
-  const router = useRouter();
   const params = useParams();
   const id = params?.id as string;
   
@@ -16,12 +16,19 @@ export default function ProjectPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [canEdit, setCanEdit] = useState(false);
 
   useEffect(() => {
     if (id) {
       fetchProject(id);
+      checkPermissions();
     }
   }, [id]);
+
+  async function checkPermissions() {
+    const role = await getCurrentUserRole();
+    setCanEdit(canEditProjects(role));
+  }
 
   async function fetchProject(projectId: string) {
     try {
@@ -49,13 +56,12 @@ export default function ProjectPage() {
     setMessage('');
 
     try {
-      // Remove id from update payload
-      const { id: _, ...updates } = project as any;
-      
+      const { id, ...updates } = project;
+
       const { error } = await supabase
         .from('projects')
         .update(updates)
-        .eq('id', project.id);
+        .eq('id', id);
 
       if (error) throw error;
       setMessage('Изменения сохранены');
@@ -100,19 +106,27 @@ export default function ProjectPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+            {!canEdit && (
+              <span className="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 flex items-center">
+                <Lock className="h-3 w-3 mr-1" />
+                Только просмотр
+              </span>
+            )}
             {message && (
                 <span className={`text-sm px-3 py-1 rounded-full ${message.includes('Error') || message.includes('Ошибка') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
                     {message}
                 </span>
             )}
-            <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
-            >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Сохранить
-            </button>
+            {canEdit && (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                Сохранить
+              </button>
+            )}
         </div>
       </div>
 
@@ -129,7 +143,8 @@ export default function ProjectPage() {
                 <select
                   value={project.status}
                   onChange={(e) => setProject({ ...project, status: e.target.value as ProjectStatus })}
-                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                  disabled={!canEdit}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 >
                   <option value="New">Новый</option>
                   <option value="Тест">Тест</option>
@@ -150,7 +165,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.budget}
                     onChange={(e) => setProject({ ...project, budget: e.target.value })}
-                    className="w-full pl-10 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full pl-10 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
               </div>
@@ -161,7 +177,8 @@ export default function ProjectPage() {
                   type="text"
                   value={project.lead_source}
                   onChange={(e) => setProject({ ...project, lead_source: e.target.value })}
-                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                  disabled={!canEdit}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -171,7 +188,8 @@ export default function ProjectPage() {
                   type="text"
                   value={project.region}
                   onChange={(e) => setProject({ ...project, region: e.target.value })}
-                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                  disabled={!canEdit}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
               </div>
             </div>
@@ -188,7 +206,8 @@ export default function ProjectPage() {
                     rows={3}
                     value={project.weekly_tasks}
                     onChange={(e) => setProject({ ...project, weekly_tasks: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
 
@@ -199,7 +218,8 @@ export default function ProjectPage() {
                         rows={3}
                         value={project.comment_elvira}
                         onChange={(e) => setProject({ ...project, comment_elvira: e.target.value })}
-                        className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-purple-50 text-gray-900"
+                        disabled={!canEdit}
+                        className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-purple-50 text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                         />
                     </div>
                     <div>
@@ -208,7 +228,8 @@ export default function ProjectPage() {
                         rows={3}
                         value={project.comment_anya}
                         onChange={(e) => setProject({ ...project, comment_anya: e.target.value })}
-                        className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-blue-50 text-gray-900"
+                        disabled={!canEdit}
+                        className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-blue-50 text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                         />
                     </div>
                 </div>
@@ -225,7 +246,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.kpi_plan}
                     onChange={(e) => setProject({ ...project, kpi_plan: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
                  <div>
@@ -234,7 +256,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.kpi_fact}
                     onChange={(e) => setProject({ ...project, kpi_fact: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border font-bold text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border font-bold text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
             </div>
@@ -256,7 +279,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.manager}
                     onChange={(e) => setProject({ ...project, manager: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
                  <div>
@@ -265,7 +289,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.specialist}
                     onChange={(e) => setProject({ ...project, specialist: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                 </div>
             </div>
@@ -284,7 +309,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.launch_date}
                     onChange={(e) => setProject({ ...project, launch_date: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     placeholder="DD.MM.YY"
                     />
                 </div>
@@ -294,7 +320,8 @@ export default function ProjectPage() {
                     type="text"
                     value={project.deadline}
                     onChange={(e) => setProject({ ...project, deadline: e.target.value })}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-red-600"
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-red-600 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     placeholder="DD.MM.YY"
                     />
                 </div>
