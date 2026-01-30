@@ -3,14 +3,15 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle } from 'lucide-react';
+import { LayoutDashboard, Users, FolderKanban, ShieldCheck, Wrench, CreditCard, LogOut, UserCircle } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
 const navItems = [
   { name: 'Проекты', href: '/', icon: FolderKanban },
   { name: 'Команда', href: '/team', icon: Users },
+  { name: 'Инструменты', href: '/tools', icon: Wrench },
+  { name: 'Оплаты', href: '/payments', icon: CreditCard },
   { name: 'Админ', href: '/admin', icon: ShieldCheck, role: 'manager' }, // Only managers see this
-  { name: 'Настройки', href: '/settings', icon: Settings },
 ];
 
 export function Sidebar() {
