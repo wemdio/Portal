@@ -1325,7 +1325,7 @@ export function DatabaseSpreadsheet() {
               <input
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Поиск (слова через запятую)"
+                placeholder="Напр.: коллегия, маркетинг"
                 className="w-72 rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-9 text-sm text-gray-700 outline-none transition focus:border-blue-500"
               />
               {searchQuery.length > 0 && (
@@ -1340,7 +1340,7 @@ export function DatabaseSpreadsheet() {
               )}
             </div>
             <span className="text-[11px] text-gray-500">
-              Ищет по всем колонкам. Можно несколько слов через запятую.
+              Ищет по всем колонкам, данные не удаляются. Можно несколько слов через запятую.
             </span>
           </div>
           <label className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-2 py-2 text-xs text-gray-600">
@@ -1350,7 +1350,8 @@ export function DatabaseSpreadsheet() {
               onChange={(event) => setSearchOnlyMatches(event.target.checked)}
               className="h-3.5 w-3.5"
             />
-            Показывать только строки с совпадением
+            Скрывать все, кроме совпадений
+            <HelpTip text="Если включено, останутся только строки, где найдено слово из поиска." />
           </label>
           {selectedRows.size > 0 && (
             <button
@@ -1802,6 +1803,10 @@ export function DatabaseSpreadsheet() {
             </div>
           ) : (
             <div className="mt-4 space-y-4 text-xs text-gray-600">
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                Здесь действия могут менять таблицу: удаление дублей и нормализация.
+                Последнее действие можно отменить.
+              </div>
               {lastAction && (
                 <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] text-blue-800">
                   <div className="flex items-center justify-between gap-2">
