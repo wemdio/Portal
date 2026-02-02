@@ -35,6 +35,7 @@ jobs:
       - name: Upload coverage reports
         uses: codecov/codecov-action@v3
         if: always()
+        continue-on-error: true
         with:
           file: ./app/coverage/coverage-final.json
           flags: unittests
