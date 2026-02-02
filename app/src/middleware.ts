@@ -13,7 +13,7 @@ export async function middleware(request: NextRequest) {
 
   if (!supabaseUrl || !supabaseAnonKey) {
     console.error('Missing Supabase environment variables. Please check your .env.local file.');
-    return NextResponse.redirect(new URL('/login', request.url));
+    return response;
   }
 
   const supabase = createServerClient(
