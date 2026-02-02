@@ -9,6 +9,8 @@ jobs:
   test:
     name: Run tests
     runs-on: self-hosted
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -34,10 +36,10 @@ jobs:
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v3
-        if: ${{ always() && secrets.CODECOV_TOKEN != '' }}
+        if: ${{ always() && env.CODECOV_TOKEN != '' }}
         continue-on-error: true
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
           file: ./app/coverage/coverage-final.json
           flags: unittests
           name: codecov-umbrella
