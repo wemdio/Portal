@@ -22,6 +22,7 @@ export interface HHSearchConfig {
   date_from?: string;
   date_to?: string;
   per_page?: number;
+  params?: Record<string, string | string[]>;
 }
 
 export interface HHVacancyRow {
