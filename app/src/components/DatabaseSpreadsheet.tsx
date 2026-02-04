@@ -459,6 +459,15 @@ export function DatabaseSpreadsheet() {
     return Array.from(new Set(normalizedBase));
   }, [searchQuery, normalizeOptions]);
 
+  const handleUndo = useCallback(() => {
+    if (!lastUndo) return;
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab)),
+    );
+    setLastAction({ message: `Вернули: ${lastUndo.message}`, time: Date.now() });
+    setLastUndo(null);
+  }, [lastUndo]);
+
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
@@ -1537,15 +1546,6 @@ export function DatabaseSpreadsheet() {
       time: Date.now(),
     });
   };
-
-  const handleUndo = useCallback(() => {
-    if (!lastUndo) return;
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab)),
-    );
-    setLastAction({ message: `Вернули: ${lastUndo.message}`, time: Date.now() });
-    setLastUndo(null);
-  }, [lastUndo]);
 
   const openPersonalizationModal = () => {
     setPersonalization((prev) => ({
