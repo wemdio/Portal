@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { LayoutDashboard, Settings, Users, FolderKanban, ShieldCheck, LogOut, UserCircle, FileText, Search } from 'lucide-react';
+import { LayoutDashboard, Users, FolderKanban, ShieldCheck, Wrench, CreditCard, LogOut, UserCircle, Settings, FileText, Search } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
@@ -12,6 +12,8 @@ import { ROLE_LABELS, isAdmin } from '@/lib/roles';
 const navItems = [
   { name: 'Проекты', href: '/', icon: FolderKanban },
   { name: 'Команда', href: '/team', icon: Users },
+  { name: 'Инструменты', href: '/tools', icon: Wrench },
+  { name: 'Оплаты', href: '/payments', icon: CreditCard },
   { name: 'Регламент', href: '/reglament', icon: FileText },
   { name: 'Парсеры', href: '/parsers', icon: Search },
   { name: 'Админ', href: '/admin', icon: ShieldCheck, adminOnly: true },
