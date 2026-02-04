@@ -3,10 +3,11 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
-import { ArrowLeft, Save, Briefcase, AlertCircle, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 import { UserRole } from '@/types';
 import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles';
+
+const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -26,15 +27,19 @@ export default function NewProjectPage() {
   }
 
   const [formData, setFormData] = useState({
-    project_name: '',
+    client: '',
+    name: '',
     status: 'В работе',
     manager: '',
     specialist: '',
+    description: '',
     budget: '',
-    kpi: '',
-    start_date: '',
-    test_end_date: '',
-    current_tasks: '',
+    margin: '',
+    contract_link: '',
+    handoff_link: '',
+    deadline: '',
+    kpi_plan: '',
+    work_format: '',
     comments: '',
   });
 
@@ -42,6 +47,7 @@ export default function NewProjectPage() {
     'В работе',
     'Тестирование',
     'На паузе',
+    'Подготовка',
     'Завершен',
     'Отменен',
   ];
@@ -51,8 +57,13 @@ export default function NewProjectPage() {
   };
 
   const handleSave = async () => {
-    if (!formData.project_name.trim()) {
-      setError('Название проекта обязательно');
+    if (!formData.client.trim()) {
+      setError('Клиент обязателен');
+      return;
+    }
+
+    if (!formData.name.trim()) {
+      setError('Проект / услуга обязательны');
       return;
     }
 
@@ -63,15 +74,19 @@ export default function NewProjectPage() {
       const { data, error } = await supabase
         .from('projects')
         .insert([{
-          project_name: formData.project_name,
+          name: formData.name,
+          client: formData.client || null,
           status: formData.status,
           manager: formData.manager || null,
           specialist: formData.specialist || null,
+          description: formData.description || null,
           budget: formData.budget || null,
-          kpi: formData.kpi || null,
-          start_date: formData.start_date || null,
-          test_end_date: formData.test_end_date || null,
-          current_tasks: formData.current_tasks || null,
+          margin: formData.margin || null,
+          contract_link: formData.contract_link || null,
+          handoff_link: formData.handoff_link || null,
+          deadline: formData.deadline || null,
+          kpi_plan: formData.kpi_plan || null,
+          work_format: formData.work_format || null,
           comments: formData.comments || null,
         }])
         .select()
@@ -98,7 +113,7 @@ export default function NewProjectPage() {
   if (checkingAccess) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+        <div className="text-gray-500">Загрузка...</div>
       </div>
     );
   }
@@ -110,11 +125,9 @@ export default function NewProjectPage() {
           href="/" 
           className="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4"
         >
-          <ArrowLeft className="h-4 w-4 mr-1" />
-          Назад к проектам
+          ← Назад к проектам
         </Link>
         <div className="bg-red-50 border border-red-200 rounded-lg p-6 flex items-center">
-          <AlertCircle className="h-6 w-6 text-red-600 mr-3" />
           <div>
             <h2 className="text-lg font-semibold text-red-800">Доступ запрещен</h2>
             <p className="text-red-600">
@@ -133,15 +146,11 @@ export default function NewProjectPage() {
       <div className="mb-6">
         <Link 
           href="/" 
-          className="inline-flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4"
+          className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900 mb-4 transition-colors"
         >
-          <ArrowLeft className="h-4 w-4 mr-1" />
-          Назад к проектам
+          ← Назад к проектам
         </Link>
         <div className="flex items-center">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 text-white mr-4">
-            <Briefcase className="h-6 w-6" />
-          </div>
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">Новый проект</h1>
             <p className="text-sm text-gray-500">Заполните информацию о проекте</p>
@@ -157,22 +166,37 @@ export default function NewProjectPage() {
 
       {/* Form */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
-        {/* Project Name */}
+        {/* Client */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Название проекта *
+            Клиент *
           </label>
           <input
             type="text"
-            name="project_name"
-            value={formData.project_name}
+            name="client"
+            value={formData.client}
             onChange={handleChange}
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="Например: Маркетинг для ООО Рога и Копыта"
+            placeholder="Название компании или клиента"
           />
         </div>
 
-        {/* Status & Manager Row */}
+        {/* Project / Service */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Проект / услуга *
+          </label>
+          <input
+            type="text"
+            name="name"
+            value={formData.name}
+            onChange={handleChange}
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Например: Продвижение в Telegram"
+          />
+        </div>
+
+        {/* Status & Lead Row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -191,7 +215,7 @@ export default function NewProjectPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Менеджер (контролирует)
+              Лид (контролирует)
             </label>
             <input
               type="text"
@@ -199,16 +223,16 @@ export default function NewProjectPage() {
               value={formData.manager}
               onChange={handleChange}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Имя менеджера"
+              placeholder="Имя лида"
             />
           </div>
         </div>
 
-        {/* Specialist & Budget Row */}
+        {/* Specialist & Platform Row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Специалист проекта
+              Специалист
             </label>
             <input
               type="text"
@@ -221,7 +245,42 @@ export default function NewProjectPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Бюджет
+              Где ведется проект
+            </label>
+            <select
+              name="work_format"
+              value={formData.work_format}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            >
+              <option value="">Не выбрано</option>
+              {WORK_FORMAT_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Description */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Описание услуги
+          </label>
+          <textarea
+            name="description"
+            value={formData.description}
+            onChange={handleChange}
+            rows={3}
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+            placeholder="Краткое описание услуги или проекта"
+          />
+        </div>
+
+        {/* Budget, Margin & KPI Row */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Выручка / сумма договора
             </label>
             <input
               type="text"
@@ -232,70 +291,82 @@ export default function NewProjectPage() {
               placeholder="Например: 150000"
             />
           </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Маржа
+            </label>
+            <input
+              type="text"
+              name="margin"
+              value={formData.margin}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Например: 45%"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              KPI
+            </label>
+            <input
+              type="text"
+              name="kpi_plan"
+              value={formData.kpi_plan}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Ключевые показатели эффективности"
+            />
+          </div>
         </div>
 
-        {/* KPI */}
+        {/* Deadline */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            KPI
+            Дедлайн
           </label>
           <input
-            type="text"
-            name="kpi"
-            value={formData.kpi}
+            type="date"
+            name="deadline"
+            value={formData.deadline}
             onChange={handleChange}
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="Ключевые показатели эффективности"
           />
         </div>
 
-        {/* Dates Row */}
+        {/* Links Row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Дата начала
+              Ссылка на договор
             </label>
             <input
-              type="date"
-              name="start_date"
-              value={formData.start_date}
+              type="text"
+              name="contract_link"
+              value={formData.contract_link}
               onChange={handleChange}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="https://..."
             />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Дата окончания теста / Дедлайн
+              Ссылка на передачу
             </label>
             <input
-              type="date"
-              name="test_end_date"
-              value={formData.test_end_date}
+              type="text"
+              name="handoff_link"
+              value={formData.handoff_link}
               onChange={handleChange}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="https://t.me/..."
             />
           </div>
-        </div>
-
-        {/* Current Tasks */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Текущие задачи
-          </label>
-          <textarea
-            name="current_tasks"
-            value={formData.current_tasks}
-            onChange={handleChange}
-            rows={3}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-            placeholder="Опишите текущие задачи по проекту"
-          />
         </div>
 
         {/* Comments */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Комментарии
+            Комментарий
           </label>
           <textarea
             name="comments"
@@ -314,22 +385,10 @@ export default function NewProjectPage() {
             disabled={saving}
             className="inline-flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
           >
-            {saving ? (
-              <>
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                Создание...
-              </>
-            ) : (
-              <>
-                <Save className="h-4 w-4 mr-2" />
-                Создать проект
-              </>
-            )}
+            {saving ? 'Создание...' : 'Создать проект'}
           </button>
         </div>
       </div>
     </div>
   );
 }
-
-

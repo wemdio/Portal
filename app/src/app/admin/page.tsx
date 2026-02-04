@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { uploadCSV } from '@/lib/csvUpload';
-import { Upload, CheckCircle, AlertCircle, Loader2, Users, FileSpreadsheet } from 'lucide-react';
 import Link from 'next/link';
 
 export default function AdminPage() {
@@ -54,9 +53,6 @@ export default function AdminPage() {
           className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group"
         >
           <div className="flex items-center mb-4">
-            <div className="p-3 rounded-lg bg-blue-100 group-hover:bg-blue-200 transition-colors">
-              <Users className="h-6 w-6 text-blue-600" />
-            </div>
             <div className="ml-4">
               <h2 className="text-lg font-semibold text-gray-900">Управление пользователями</h2>
               <p className="text-sm text-gray-500">Создание пользователей и назначение ролей</p>
@@ -67,9 +63,6 @@ export default function AdminPage() {
 
         <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
           <div className="flex items-center mb-4">
-            <div className="p-3 rounded-lg bg-green-100">
-              <FileSpreadsheet className="h-6 w-6 text-green-600" />
-            </div>
             <div className="ml-4">
               <h2 className="text-lg font-semibold text-gray-900">Импорт данных</h2>
               <p className="text-sm text-gray-500">Загрузка проектов из CSV</p>
@@ -102,23 +95,12 @@ export default function AdminPage() {
             disabled={!file || uploading}
             className="inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {uploading ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Импорт...
-              </>
-            ) : (
-              <>
-                <Upload className="mr-2 h-4 w-4" />
-                Загрузить данные
-              </>
-            )}
+            {uploading ? 'Импорт...' : 'Загрузить данные'}
           </button>
         </div>
 
         {status.type === 'success' && (
           <div className="mt-4 p-4 rounded-md bg-green-50 border border-green-200 flex items-center text-green-700">
-            <CheckCircle className="h-5 w-5 mr-2" />
             {status.message}
           </div>
         )}
@@ -126,7 +108,6 @@ export default function AdminPage() {
         {status.type === 'warning' && (
           <div className="mt-4 p-4 rounded-md bg-yellow-50 border border-yellow-200 text-yellow-800">
             <div className="flex items-center">
-              <AlertCircle className="h-5 w-5 mr-2" />
               {status.message}
             </div>
             {status.details && (
@@ -142,7 +123,6 @@ export default function AdminPage() {
 
         {status.type === 'error' && (
           <div className="mt-4 p-4 rounded-md bg-red-50 border border-red-200 flex items-center text-red-700">
-            <AlertCircle className="h-5 w-5 mr-2" />
             {status.message}
           </div>
         )}
