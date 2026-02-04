@@ -6,6 +6,7 @@ export type HHSearchConfig = {
   date_from?: string;
   date_to?: string;
   per_page?: number;
+  params?: Record<string, string | string[]>;
 };
 
 export type HHVacancy = {
@@ -76,6 +77,8 @@ const MIN_REQUEST_INTERVAL_MS = 250;
 let throttleChain: Promise<void> = Promise.resolve();
 let lastRequestAt = 0;
 
+type HHSearchParams = Record<string, string | string[]>;
+
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
@@ -138,9 +141,76 @@ function midDate(a: Date, b: Date): Date {
   return mid;
 }
 
+function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefined {
+  if (!params) return undefined;
+  const cleaned: HHSearchParams = {};
+
+  for (const [key, value] of Object.entries(params)) {
+    if (!key) continue;
+    if (Array.isArray(value)) {
+      const items = value.map((item) => String(item).trim()).filter(Boolean);
+      if (items.length === 1) cleaned[key] = items[0];
+      else if (items.length > 1) cleaned[key] = items;
+      continue;
+    }
+    const trimmed = String(value).trim();
+    if (trimmed) cleaned[key] = trimmed;
+  }
+
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+}
+
+function getParamValues(params: HHSearchParams | undefined, key: string): string[] {
+  if (!params) return [];
+  const value = params[key];
+  if (value === undefined) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  return [String(value)];
+}
+
+function getParamString(params: HHSearchParams | undefined, key: string): string | undefined {
+  const values = getParamValues(params, key).map((item) => item.trim()).filter(Boolean);
+  return values[0];
+}
+
+function getParamNumber(params: HHSearchParams | undefined, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = getParamString(params, key);
+    if (!value) continue;
+    const normalized = value.replace(/\s/g, '');
+    const num = Number(normalized);
+    if (Number.isFinite(num)) return num;
+  }
+  return undefined;
+}
+
+function getParamArea(params: HHSearchParams | undefined): string | string[] | undefined {
+  const values = getParamValues(params, 'area')
+    .flatMap((item) => item.split(','))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (values.length === 0) return undefined;
+  return values.length === 1 ? values[0] : values;
+}
+
+function appendExtraParams(params: URLSearchParams, extras?: HHSearchParams) {
+  if (!extras) return;
+  for (const [key, value] of Object.entries(extras)) {
+    if (Array.isArray(value)) {
+      for (const item of value) params.append(key, String(item));
+      continue;
+    }
+    params.append(key, String(value));
+  }
+}
+
 export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
-  const per_page = Math.max(1, Math.min(100, config.per_page ?? 50));
-  const next: HHSearchConfig = { ...config, per_page };
+  const params = normalizeExtraParams(config.params);
+  const next: HHSearchConfig = { ...config, params };
+
+  if (typeof next.text === 'string') next.text = next.text.trim();
+  if (!next.text) next.text = getParamString(params, 'text') ?? '';
+  if (!next.text) next.text = '';
 
   if (Array.isArray(next.area)) {
     const cleaned = next.area.map((a) => a.trim()).filter(Boolean);
@@ -149,30 +219,92 @@ export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
     const cleaned = next.area.trim();
     next.area = cleaned ? cleaned : undefined;
   }
+  if (next.area === undefined) {
+    next.area = getParamArea(params);
+  }
 
-  if (typeof next.text === 'string') next.text = next.text.trim();
-  if (!next.text) next.text = '';
+  if (next.salary_from === undefined) {
+    next.salary_from = getParamNumber(params, ['salary', 'salary_from']);
+  }
+
+  if (typeof next.currency === 'string') {
+    const cleaned = next.currency.trim();
+    next.currency = cleaned ? cleaned : undefined;
+  }
+  if (!next.currency) {
+    const currency = getParamString(params, 'currency');
+    if (currency) next.currency = currency;
+  }
+
+  if (!next.date_from) {
+    const dateFrom = getParamString(params, 'date_from');
+    if (dateFrom) next.date_from = dateFrom;
+  }
+
+  if (!next.date_to) {
+    const dateTo = getParamString(params, 'date_to');
+    if (dateTo) next.date_to = dateTo;
+  }
+
+  if (next.per_page === undefined) {
+    next.per_page = getParamNumber(params, ['per_page', 'items_on_page']);
+  }
+  if (next.per_page !== undefined) {
+    next.per_page = Math.max(1, Math.min(100, next.per_page));
+  }
 
   return next;
 }
 
 function buildVacanciesUrl(config: HHSearchConfig, page: number): string {
   const params = new URLSearchParams();
+  appendExtraParams(params, config.params);
 
-  if (config.text) params.set('text', config.text);
-  if (config.salary_from !== undefined) params.set('salary', String(config.salary_from));
-  if (config.currency) params.set('currency', config.currency);
-  if (config.date_from) params.set('date_from', config.date_from);
-  if (config.date_to) params.set('date_to', config.date_to);
+  if (config.text) {
+    params.delete('text');
+    params.set('text', config.text);
+  }
+
+  if (config.salary_from !== undefined) {
+    params.delete('salary');
+    params.delete('salary_from');
+    params.set('salary', String(config.salary_from));
+  }
+
+  if (config.currency) {
+    params.delete('currency');
+    params.set('currency', config.currency);
+  }
+
+  if (config.date_from) {
+    params.delete('date_from');
+    params.set('date_from', config.date_from);
+  }
+
+  if (config.date_to) {
+    params.delete('date_to');
+    params.set('date_to', config.date_to);
+  }
 
   if (Array.isArray(config.area)) {
+    params.delete('area');
     for (const a of config.area) params.append('area', a);
   } else if (config.area) {
+    params.delete('area');
     params.set('area', config.area);
   }
 
+  const perPage = config.per_page;
+  if (perPage !== undefined) {
+    params.delete('per_page');
+    params.delete('items_on_page');
+    params.set('per_page', String(perPage));
+  } else if (!params.has('per_page') && !params.has('items_on_page')) {
+    params.set('per_page', '50');
+  }
+
+  params.delete('page');
   params.set('page', String(page));
-  params.set('per_page', String(config.per_page ?? 50));
 
   return `${HH_API_BASE}/vacancies?${params.toString()}`;
 }

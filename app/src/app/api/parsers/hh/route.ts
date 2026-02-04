@@ -51,8 +51,8 @@ export async function POST(req: NextRequest) {
     return jsonError('Invalid JSON body', 400);
   }
 
-  if (!config?.text || typeof config.text !== 'string' || !config.text.trim()) {
-    return jsonError('Missing required field: text', 400);
+  if (!config || typeof config !== 'object') {
+    return jsonError('Invalid config payload', 400);
   }
 
   const { data, error } = await supabase
