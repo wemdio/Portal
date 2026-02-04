@@ -141,6 +141,13 @@ function midDate(a: Date, b: Date): Date {
   return mid;
 }
 
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
 function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefined {
   if (!params) return undefined;
   const cleaned: HHSearchParams = {};
@@ -398,13 +405,14 @@ async function partitionByDate(config: HHSearchConfig, from: Date, to: Date, dep
   if (found <= FOUND_LIMIT) return [current];
 
   const mid = midDate(from, to);
-  if (mid <= from || mid >= to) {
+  const rightFrom = addDays(mid, 1);
+  if (mid <= from || rightFrom > to) {
     const fallback = await partitionFallback(current);
     return fallback.length > 0 ? fallback : [current];
   }
 
   const left: HHSearchConfig = { ...config, date_from: fromISO, date_to: toISODate(mid) };
-  const right: HHSearchConfig = { ...config, date_from: toISODate(mid), date_to: toISO };
+  const right: HHSearchConfig = { ...config, date_from: toISODate(rightFrom), date_to: toISO };
 
   const [leftFound, rightFound] = await Promise.all([fetchFound(left), fetchFound(right)]);
   if (leftFound === found && rightFound === found) {
