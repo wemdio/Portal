@@ -88,6 +88,7 @@ export default function UsersPage() {
         options: {
           data: {
             full_name: newUser.full_name || newUser.email.split('@')[0],
+            role: newUser.role,
           }
         }
       });
