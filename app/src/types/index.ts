@@ -1,5 +1,7 @@
 export type ProjectStatus = 'На паузе' | 'Тест' | 'В работе' | 'Подготовка' | 'Completed';
 
+export * from './parsers';
+
 export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer';
 
 export interface UserProfile {
