@@ -52,6 +52,7 @@ export function VacancyResults({
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
   const shownLabel = count ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`) : '—';
+  const limitLabel = limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
 
   return (
@@ -60,7 +61,7 @@ export function VacancyResults({
         <div>
           <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
           <p className="text-sm text-gray-500">
-            {shownLabel}
+            {shownLabel}{limitLabel}
           </p>
         </div>
         <div className="flex items-center gap-2">

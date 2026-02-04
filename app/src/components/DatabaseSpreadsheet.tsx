@@ -116,7 +116,6 @@ const SYSTEM_PROMPT = `Ты - помощник для персонализаци
 
 const EMAIL_HEADER_REGEX = /(e-?mail|email|почта|mail)/i;
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
-const HELP_TOOLTIP_OFFSET = 10;
 const MAX_FILTER_OPTIONS = 1000;
 const BLANK_FILTER_LABEL = '(пусто)';
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}]/gu;
@@ -530,7 +529,7 @@ export function DatabaseSpreadsheet() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [activeTab, activeCell, selectionAnchor]);
+  }, [activeTab, activeCell, selectionAnchor, handleUndo]);
 
   useEffect(() => {
     const handleMouseUp = () => setIsSelecting(false);
@@ -1040,8 +1039,9 @@ export function DatabaseSpreadsheet() {
   const setFilterForColumn = (colIndex: number, keys: string[], options: FilterOption[]) => {
     setColumnFilters((prev) => {
       if (keys.length === options.length) {
-        const { [colIndex]: _, ...rest } = prev;
-        return rest;
+        const next = { ...prev };
+        delete next[colIndex];
+        return next;
       }
       return { ...prev, [colIndex]: keys };
     });
@@ -1059,8 +1059,9 @@ export function DatabaseSpreadsheet() {
 
   const resetFilter = (colIndex: number) => {
     setColumnFilters((prev) => {
-      const { [colIndex]: _, ...rest } = prev;
-      return rest;
+      const next = { ...prev };
+      delete next[colIndex];
+      return next;
     });
   };
 
@@ -1537,14 +1538,14 @@ export function DatabaseSpreadsheet() {
     });
   };
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (!lastUndo) return;
     setTabs((prev) =>
       prev.map((tab) => (tab.id === lastUndo.tabId ? { ...tab, data: lastUndo.data } : tab)),
     );
     setLastAction({ message: `Вернули: ${lastUndo.message}`, time: Date.now() });
     setLastUndo(null);
-  };
+  }, [lastUndo]);
 
   const openPersonalizationModal = () => {
     setPersonalization((prev) => ({
@@ -2059,50 +2060,61 @@ export function DatabaseSpreadsheet() {
           </p>
         </div>
         
-        <div className="flex flex-wrap items-center gap-3">
-          {selectedRows.size > 0 && (
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            {selectedRows.size > 0 && (
+              <button
+                type="button"
+                onClick={confirmRemoveSelectedRows}
+                className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
+              >
+                Удалить ({selectedRows.size})
+              </button>
+            )}
+
+            <div className="flex items-center rounded-lg bg-gray-100 p-1">
+              <button
+                type="button"
+                onClick={() => importInputRef.current?.click()}
+                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
+              >
+                Импорт
+              </button>
+              <div className="h-4 w-px bg-gray-300 mx-1" />
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
+              >
+                CSV
+              </button>
+              <button
+                type="button"
+                onClick={handleExportXlsx}
+                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
+              >
+                Excel
+              </button>
+            </div>
+
             <button
               type="button"
-              onClick={confirmRemoveSelectedRows}
-              className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
+              onClick={openPersonalizationModal}
+              disabled={colCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300"
             >
-              Удалить ({selectedRows.size})
-            </button>
-          )}
-          
-          <div className="flex items-center rounded-lg bg-gray-100 p-1">
-            <button
-              type="button"
-              onClick={() => importInputRef.current?.click()}
-              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-            >
-              Импорт
-            </button>
-            <div className="h-4 w-px bg-gray-300 mx-1" />
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-            >
-              CSV
-            </button>
-            <button
-              type="button"
-              onClick={handleExportXlsx}
-              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-            >
-              Excel
+              <span>Персонализация</span>
             </button>
           </div>
-
-          <button
-            type="button"
-            onClick={openPersonalizationModal}
-            disabled={colCount === 0}
-            className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300"
-          >
-            <span>Персонализация</span>
-          </button>
+          {importStatus.status !== 'idle' && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>{formatProgressLabel(importStatus)}</span>
+              {importStatus.filename ? (
+                <span className="max-w-[200px] truncate">· {importStatus.filename}</span>
+              ) : null}
+              {importStatus.status !== 'error' ? <span>{importStatus.progress}%</span> : null}
+            </div>
+          )}
         </div>
       </div>
 
@@ -2250,7 +2262,15 @@ export function DatabaseSpreadsheet() {
                 <tr>
                   <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-2 py-2 text-xs font-semibold text-gray-500 w-10 min-w-[40px]">
                     <div className="flex items-center justify-center h-full">
-                      <span className="text-[10px] text-gray-400">#</span>
+                      <input
+                        ref={selectAllRef}
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={toggleSelectAllVisible}
+                        onClick={(event) => event.stopPropagation()}
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        aria-label="Выбрать все видимые строки"
+                      />
                     </div>
                   </th>
                   {Array.from({ length: colCount }, (_, colIndex) => {
@@ -2318,6 +2338,7 @@ export function DatabaseSpreadsheet() {
                   const isVisible = rowMatchesFilters(rowIndex, row);
                   if (!isVisible) return null;
                   const isChecked = selectedRows.has(rowIndex);
+                  const isHeaderRow = rowIndex === 0;
                   return (
                     <tr key={`row-${rowIndex}`} className="group">
                       <th
@@ -2345,6 +2366,15 @@ export function DatabaseSpreadsheet() {
                         }`}
                       >
                         <div className="flex items-center justify-center gap-1.5 h-full">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={isHeaderRow}
+                            onChange={() => toggleRowSelection(rowIndex)}
+                            onClick={(event) => event.stopPropagation()}
+                            className="h-3 w-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                            aria-label={`Выбрать строку ${rowIndex + 1}`}
+                          />
                           <span className="min-w-[1.5rem] text-center">{rowIndex + 1}</span>
                         </div>
                       </th>

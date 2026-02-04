@@ -111,7 +111,7 @@ export function ProjectList() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [viewMode, setViewMode] = useState<ViewMode>('table');
+  const [viewMode] = useState<ViewMode>('table');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [canCreate, setCanCreate] = useState(false);
@@ -185,8 +185,9 @@ export function ProjectList() {
         delete entry[field];
       });
       if (Object.keys(entry).length === 0) {
-        const { [id]: _removed, ...rest } = prev;
-        return rest;
+        const next = { ...prev };
+        delete next[id];
+        return next;
       }
       return { ...prev, [id]: entry };
     });
