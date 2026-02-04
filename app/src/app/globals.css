@@ -2,19 +2,54 @@
 
 :root {
   --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 243, 244, 246; /* gray-100 */
-  --background-end-rgb: 243, 244, 246;
+  --background-rgb: 249, 250, 251; /* gray-50 */
 }
 
 @theme {
+  --color-gray-50: #f9fafb;
   --color-gray-100: #f3f4f6;
+  --color-gray-200: #e5e7eb;
+  --color-gray-300: #d1d5db;
+  --color-gray-400: #9ca3af;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #4b5563;
+  --color-gray-700: #374151;
+  --color-gray-800: #1f2937;
   --color-gray-900: #111827;
+  --color-blue-500: #3b82f6;
   --color-blue-600: #2563eb;
-  /* Add other colors if needed, but standard palette is included by default */
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: rgb(var(--background-start-rgb));
+  background: rgb(var(--background-rgb));
   font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar for better aesthetics */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Remove spin buttons from number inputs */
+input[type=number]::-webkit-inner-spin-button, 
+input[type=number]::-webkit-outer-spin-button { 
+  -webkit-appearance: none; 
+  margin: 0; 
 }

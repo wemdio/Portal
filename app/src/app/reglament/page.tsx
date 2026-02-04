@@ -1,19 +1,8 @@
 'use client';
 /* eslint-disable react/no-unescaped-entities, @next/next/no-img-element */
 
-import { useState, useRef, useEffect } from 'react';
-import type { LucideIcon } from 'lucide-react';
-import { 
-  CheckCircle2, CheckCircle, Clock, Database, Mail, FileText, Pin, Globe, 
-  BarChart3, AlertCircle, User, Calendar, MessageSquare, 
-  Users, Shield, BookOpen, ExternalLink, ArrowRight, PenTool, 
-  Video, Book, CheckSquare, Image as ImageIcon, Search,
-  Zap, ShieldAlert, XCircle, UserCheck, Sparkles, Server, Ban,
-  HardDrive, Monitor, Map, Briefcase, MessageCircle, Link, Download,
-  Table, Code, Bot, Wand2, Copy, Trash2, Filter, Calculator, 
-  ClipboardList, Plane, Target, FileImage, DollarSign, Megaphone,
-  Settings, MousePointer, LineChart
-} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+
 
 interface SearchResult {
   id: string;
@@ -29,7 +18,7 @@ type ContentLink = {
 };
 
 type DetailsItem = {
-  icon: LucideIcon;
+  
   title: string;
   content: string;
   links?: ContentLink[];
@@ -278,7 +267,7 @@ export default function ReglamentPage() {
         {/* Поиск */}
         <div className="mt-6 relative" ref={searchInputRef}>
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
+            
             <input
               type="text"
               value={searchQuery}
@@ -330,9 +319,7 @@ export default function ReglamentPage() {
         {/* Этапы работы */}
         <section id="etapy-raboty" className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow-md border border-blue-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-blue-600 rounded-lg">
-              <CheckCircle2 className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Этапы работы</h2>
           </div>
           <div className="bg-white rounded-lg p-6 shadow-sm">
@@ -364,23 +351,21 @@ export default function ReglamentPage() {
         {/* Подробнее */}
         <section id="podrobnee" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-indigo-600 rounded-lg">
-              <BookOpen className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Подробнее</h2>
           </div>
           
           <div className="space-y-5">
             {([
-              { icon: Clock, title: 'Рабочий день', content: 'Рабочий день начинается с 10:00 по МСК до 19:00 по МСК с определения своих задач и проблем по проектам, список которых нужно отправить в общий чат Polza в Телеграм. В течение рабочего дня записываем все, что сделано и как решили проблемы. В конце дня отправляем в общий чат этот список. Каждый день в 12ч. по мск общий звонок в Гугл мит.' },
-              { icon: Calendar, title: 'Таймлайн проекта', content: 'В чате с клиентом всегда по датам расписаны шаги (заполнение брифа клиентом, сбор базы, создание цепочки писем, запуск). Если неизвестно, сколько времени займет задача, лучше начать ее выполнение за 1-2 дня до назначенного срока (при условии, что клиент заполнил бриф).' },
-              { icon: Database, title: 'База', content: 'Собираем базу компаний, которым будем отправлять рассылку. Есть разные способы собрать базу: HH, карты 2gis, 70+, экспортбэйс (дорого), LinkedIn и Аполло (для иностранных баз), кворк и др. Если база компаний состоит из сайтов, а имейлов в ней нет, получаем имейлы в экстракторе. Согласовываем базу с руководителем, после чего отправляем на согласование клиенту в чат. Важно: если понимаете, что по итогу сбора баз выходит меньше 200 контактов, то нужно написать клиенту уточняющие вопросы по расширению критериев для их поиска, т.к. они неосознанно сами же могут урезать возможность для выборки (из вариантов: шире география, доп отрасли, конкретные оквэды, инн и т.д). Верифицировать собранные базы - проверять на актуальность рабочие/не рабочие (или даже если они из готовых баз) нужно через letsextract.' },
-              { icon: Mail, title: 'Оффер', content: 'В чате с клиентом берем заполненный клиентом бриф, изучаем его, определяем целевую аудиторию и пишем цепочку писем (оффер). Отправляем цепочку на проверку своему наставнику по обучению. Потом нужно будет сделать правки и отправить оффер на согласование клиенту в чат и внести правки от клиента.' },
+              {  title: 'Рабочий день', content: 'Рабочий день начинается с 10:00 по МСК до 19:00 по МСК с определения своих задач и проблем по проектам, список которых нужно отправить в общий чат Polza в Телеграм. В течение рабочего дня записываем все, что сделано и как решили проблемы. В конце дня отправляем в общий чат этот список. Каждый день в 12ч. по мск общий звонок в Гугл мит.' },
+              {  title: 'Таймлайн проекта', content: 'В чате с клиентом всегда по датам расписаны шаги (заполнение брифа клиентом, сбор базы, создание цепочки писем, запуск). Если неизвестно, сколько времени займет задача, лучше начать ее выполнение за 1-2 дня до назначенного срока (при условии, что клиент заполнил бриф).' },
+              {  title: 'База', content: 'Собираем базу компаний, которым будем отправлять рассылку. Есть разные способы собрать базу: HH, карты 2gis, 70+, экспортбэйс (дорого), LinkedIn и Аполло (для иностранных баз), кворк и др. Если база компаний состоит из сайтов, а имейлов в ней нет, получаем имейлы в экстракторе. Согласовываем базу с руководителем, после чего отправляем на согласование клиенту в чат. Важно: если понимаете, что по итогу сбора баз выходит меньше 200 контактов, то нужно написать клиенту уточняющие вопросы по расширению критериев для их поиска, т.к. они неосознанно сами же могут урезать возможность для выборки (из вариантов: шире география, доп отрасли, конкретные оквэды, инн и т.д). Верифицировать собранные базы - проверять на актуальность рабочие/не рабочие (или даже если они из готовых баз) нужно через letsextract.' },
+              {  title: 'Оффер', content: 'В чате с клиентом берем заполненный клиентом бриф, изучаем его, определяем целевую аудиторию и пишем цепочку писем (оффер). Отправляем цепочку на проверку своему наставнику по обучению. Потом нужно будет сделать правки и отправить оффер на согласование клиенту в чат и внести правки от клиента.' },
             ] as DetailsItem[]).map((item, idx) => (
               <div key={idx} className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
                 <div className="flex items-start gap-4">
                   <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                    <item.icon className="h-5 w-5 text-indigo-600" />
+                    
                   </div>
                   <div className="flex-1">
                     <h3 className="font-semibold text-gray-900 mb-2 text-lg">{item.title}</h3>
@@ -397,7 +382,7 @@ export default function ReglamentPage() {
                               className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium"
                             >
                               {link.text}
-                              <ExternalLink className="h-3 w-3" />
+                              
                             </a>
                           );
                         }
@@ -410,23 +395,23 @@ export default function ReglamentPage() {
             ))}
 
             {([
-              { icon: FileText, title: 'Таблица лидов', content: 'Создаем в Гугл шитс таблицу по шаблону (нужно сделать копию), в которую потом будем вносить лиды, отчет (после окончания тестового периода и после достижения кпи), расходы, гипотезы. Перемещаем эту таблицу в папку своего проекта на диске Пользы.' },
-              { icon: Pin, title: 'Закреп', content: 'Создаем закрепленное сообщение в чате с клиентом, в котором прописываем ближайшие 2-4 гипотезы с датами, кпи, у клиента для пересылки лидов и ссылку на таблицу лидов. (рядом с гипотезами, которые всё ещё крутятся, ставим статус "в работе", а завершённые кампании убираем из закрепа). Обновляем закрепы каждую пятницу.' },
-              { icon: Globe, title: 'Домены и почты для отправки рассылки', content: 'Если в договоре проекта указано про именные домены: Покупаем именной домен, а потом в Гугл воркспейс (https://admin.google.com/) или на альтернативном сервисе создаем именные почты (пользователей) на купленном домене. Если не указано про именные, то используем готовые почты с нашего почтового сервера (в Instantly они под тегами указаны (почтовые сервера 1, 2, 3, 4, 5). Когда выбрали почты и поставили тег, отмечаем в этой таблице, какие почты для какого проекта взяли (лист "Свободные" - как только выбрали почты переносим их на лист "Заняты").', links: [{ text: 'https://admin.google.com/', url: 'https://admin.google.com/' }] },
-              { icon: Mail, title: 'Instantly', content: 'Это сервис для отправки рассылки. Нужно проверить, добавлены ли здесь выбранные для проекта почты. Если почты не добавлены (например, их только создали), добавляем их и ставим на прогрев (в регламенте нужно про прогрев подробнее). Создаем новую кампанию. Про добавление картинок в письмо написано здесь.', links: [{ text: 'https://instantly.ai/', url: 'https://instantly.ai/' }] },
-              { icon: BarChart3, title: 'Учет проектов', content: 'В конце каждой недели в пятницу вносим количество лидов в эту таблицу, а также вносим расходы на сбор баз (кроме экстрактора), покупку доменов, создание пользователей в эту форму (все расходы отображаются здесь). Сделать это нужно до нашего общего звонка.' },
-              { icon: FileText, title: 'Еженедельный отчёт по проектам', content: 'Раз в неделю по понедельникам (желательно до 16:00 по МСК) специалистам необходимо заполнять еженедельный отчет по своим проектам и отправлять его в чат с заказчиком. Заполнять его нужно в таблице самого проекта, куда вносим лиды и доп расход (нужна вкладка "Email Otreach, отчет"). Отчёт формируется при помощи скрипта, подробнее про него и как им пользоваться тут.', links: [{ text: 'тут', url: 'https://docs.google.com/document/d/1-npB_6xhbgHCfuhF6GHpXIx6xUhgZIXNZHzji8fzchk/edit?pli=1&tab=t.0#heading=h.tquuykum3mqb' }] },
-              { icon: AlertCircle, title: 'Отчёт по проблемным проектам', content: 'Когда по проекту плохо идут лиды и есть сложности в генерации гипотез, то нужно заполнять Отчет спецов по проблемным проектам, чтобы рассчитать сколько ещё нужно мощностей, писем в цепочке, дней для достижения KPI и т.д.', links: [{ text: 'Отчет спецов по проблемным проектам', url: 'https://docs.google.com/spreadsheets/u/0/d/1RaGZmDH6mZJS8yvwy94OSorqYFTeKGNJg-Mpt-qZi1Q/edit' }] },
-              { icon: User, title: 'Личный KPI', content: 'Всем специалистам нужно поддерживать актуальной информацию по себе на листе "Личный KPI" в таблице Учет проектов внутреннее от 20.10. Инструкции по заполнению есть в самой таблице.', links: [{ text: 'Учет проектов внутреннее от 20.10', url: 'https://docs.google.com/spreadsheets/d/1dh5oK-Uhz7a4QvcLn4Wvzr_S2kVuP4KoQRawPUFzL58/edit?usp=sharing' }] },
-              { icon: BookOpen, title: 'Журнал тестов', content: 'Раз в месяц нужно заполнять в таблице учета проектов лист "Журнал тестов" по гипотезам, которые сработали по разным проектам. Формат такой: пишем сферу компании, суть гипотезы и какой результат.', links: [{ text: 'ссылка', url: 'https://docs.google.com/spreadsheets/d/1RIlIcheJoFzp63t0QPVWnGc8e7GKDzCGKhIz8-UO0xg/edit?gid=527804907#gid=527804907' }] },
-              { icon: Shield, title: 'BlockList', content: 'Необходимо добавлять домены действующих наших клиентов в таблицу: 🛑 BlockList | Instantly (Черный список). Это нужно для того, чтобы наши аутрич письма не отправлялись нашим действующим клиентам. Таблица подключена в Instantly, ссылку важно обновлять, когда добавляете новые домены в неё: заходим в настройки Instantly → блок лист, ссылка на нашу таблицу, нажимаем «Set block list». Готово!', links: [{ text: '🛑 BlockList | Instantly (Черный список)', url: 'https://docs.google.com/spreadsheets/d/1GYKM2X44pBodVrwnim1bgye5fI9k1F_dx7kjwe_Ey8s/edit?usp=sharing' }] },
-              { icon: CheckCircle2, title: 'Проверка кампаний в Instantly', content: 'Каждую пятницу до 15:00 по мск нужно успеть проверить все свои кампании по проектам: в завершенных, чтобы не было контактов, а в запущенных не было ошибок и всё исправно работало, если же есть какие-то технические проблемы, то нужно сразу написать об этом в чат аутрича "Поломка", отметить Дениса и описать суть (лучше ещё приложить соответствующие скрины).' },
-              { icon: Users, title: 'Нагрузка по проектам', content: 'Распределение проектов делаем из расчета того, сколько специалист может вести параллельно. Задача спеца здесь - вовремя сигнализировать руководителям, когда вы не справляетесь с нагрузкой, чтобы с вас сняли проект и передали следующему человеку. Важно: если понимаете, что тяжело дается ведение нескольких проектов - не молчите до последнего, чтобы не страдала ваша менталка и качество работы на самом проекте. Как передавать проекты правильно, расписано тут.' }
+              {  title: 'Таблица лидов', content: 'Создаем в Гугл шитс таблицу по шаблону (нужно сделать копию), в которую потом будем вносить лиды, отчет (после окончания тестового периода и после достижения кпи), расходы, гипотезы. Перемещаем эту таблицу в папку своего проекта на диске Пользы.' },
+              {  title: 'Закреп', content: 'Создаем закрепленное сообщение в чате с клиентом, в котором прописываем ближайшие 2-4 гипотезы с датами, кпи, у клиента для пересылки лидов и ссылку на таблицу лидов. (рядом с гипотезами, которые всё ещё крутятся, ставим статус "в работе", а завершённые кампании убираем из закрепа). Обновляем закрепы каждую пятницу.' },
+              {  title: 'Домены и почты для отправки рассылки', content: 'Если в договоре проекта указано про именные домены: Покупаем именной домен, а потом в Гугл воркспейс (https://admin.google.com/) или на альтернативном сервисе создаем именные почты (пользователей) на купленном домене. Если не указано про именные, то используем готовые почты с нашего почтового сервера (в Instantly они под тегами указаны (почтовые сервера 1, 2, 3, 4, 5). Когда выбрали почты и поставили тег, отмечаем в этой таблице, какие почты для какого проекта взяли (лист "Свободные" - как только выбрали почты переносим их на лист "Заняты").', links: [{ text: 'https://admin.google.com/', url: 'https://admin.google.com/' }] },
+              {  title: 'Instantly', content: 'Это сервис для отправки рассылки. Нужно проверить, добавлены ли здесь выбранные для проекта почты. Если почты не добавлены (например, их только создали), добавляем их и ставим на прогрев (в регламенте нужно про прогрев подробнее). Создаем новую кампанию. Про добавление картинок в письмо написано здесь.', links: [{ text: 'https://instantly.ai/', url: 'https://instantly.ai/' }] },
+              {  title: 'Учет проектов', content: 'В конце каждой недели в пятницу вносим количество лидов в эту таблицу, а также вносим расходы на сбор баз (кроме экстрактора), покупку доменов, создание пользователей в эту форму (все расходы отображаются здесь). Сделать это нужно до нашего общего звонка.' },
+              {  title: 'Еженедельный отчёт по проектам', content: 'Раз в неделю по понедельникам (желательно до 16:00 по МСК) специалистам необходимо заполнять еженедельный отчет по своим проектам и отправлять его в чат с заказчиком. Заполнять его нужно в таблице самого проекта, куда вносим лиды и доп расход (нужна вкладка "Email Otreach, отчет"). Отчёт формируется при помощи скрипта, подробнее про него и как им пользоваться тут.', links: [{ text: 'тут', url: 'https://docs.google.com/document/d/1-npB_6xhbgHCfuhF6GHpXIx6xUhgZIXNZHzji8fzchk/edit?pli=1&tab=t.0#heading=h.tquuykum3mqb' }] },
+              {  title: 'Отчёт по проблемным проектам', content: 'Когда по проекту плохо идут лиды и есть сложности в генерации гипотез, то нужно заполнять Отчет спецов по проблемным проектам, чтобы рассчитать сколько ещё нужно мощностей, писем в цепочке, дней для достижения KPI и т.д.', links: [{ text: 'Отчет спецов по проблемным проектам', url: 'https://docs.google.com/spreadsheets/u/0/d/1RaGZmDH6mZJS8yvwy94OSorqYFTeKGNJg-Mpt-qZi1Q/edit' }] },
+              {  title: 'Личный KPI', content: 'Всем специалистам нужно поддерживать актуальной информацию по себе на листе "Личный KPI" в таблице Учет проектов внутреннее от 20.10. Инструкции по заполнению есть в самой таблице.', links: [{ text: 'Учет проектов внутреннее от 20.10', url: 'https://docs.google.com/spreadsheets/d/1dh5oK-Uhz7a4QvcLn4Wvzr_S2kVuP4KoQRawPUFzL58/edit?usp=sharing' }] },
+              {  title: 'Журнал тестов', content: 'Раз в месяц нужно заполнять в таблице учета проектов лист "Журнал тестов" по гипотезам, которые сработали по разным проектам. Формат такой: пишем сферу компании, суть гипотезы и какой результат.', links: [{ text: 'ссылка', url: 'https://docs.google.com/spreadsheets/d/1RIlIcheJoFzp63t0QPVWnGc8e7GKDzCGKhIz8-UO0xg/edit?gid=527804907#gid=527804907' }] },
+              {  title: 'BlockList', content: 'Необходимо добавлять домены действующих наших клиентов в таблицу: 🛑 BlockList | Instantly (Черный список). Это нужно для того, чтобы наши аутрич письма не отправлялись нашим действующим клиентам. Таблица подключена в Instantly, ссылку важно обновлять, когда добавляете новые домены в неё: заходим в настройки Instantly → блок лист, ссылка на нашу таблицу, нажимаем «Set block list». Готово!', links: [{ text: '🛑 BlockList | Instantly (Черный список)', url: 'https://docs.google.com/spreadsheets/d/1GYKM2X44pBodVrwnim1bgye5fI9k1F_dx7kjwe_Ey8s/edit?usp=sharing' }] },
+              {  title: 'Проверка кампаний в Instantly', content: 'Каждую пятницу до 15:00 по мск нужно успеть проверить все свои кампании по проектам: в завершенных, чтобы не было контактов, а в запущенных не было ошибок и всё исправно работало, если же есть какие-то технические проблемы, то нужно сразу написать об этом в чат аутрича "Поломка", отметить Дениса и описать суть (лучше ещё приложить соответствующие скрины).' },
+              {  title: 'Нагрузка по проектам', content: 'Распределение проектов делаем из расчета того, сколько специалист может вести параллельно. Задача спеца здесь - вовремя сигнализировать руководителям, когда вы не справляетесь с нагрузкой, чтобы с вас сняли проект и передали следующему человеку. Важно: если понимаете, что тяжело дается ведение нескольких проектов - не молчите до последнего, чтобы не страдала ваша менталка и качество работы на самом проекте. Как передавать проекты правильно, расписано тут.' }
             ] as DetailsItem[]).map((item, idx) => (
               <div key={idx} className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
                 <div className="flex items-start gap-4">
                   <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                    <item.icon className="h-5 w-5 text-indigo-600" />
+                    
                   </div>
                   <div className="flex-1">
                     <h3 className="font-semibold text-gray-900 mb-2 text-lg">{item.title}</h3>
@@ -443,7 +428,7 @@ export default function ReglamentPage() {
                               className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium"
                             >
                               {link.text}
-                              <ExternalLink className="h-3 w-3" />
+                              
                             </a>
                           );
                         }
@@ -460,9 +445,7 @@ export default function ReglamentPage() {
         {/* Регламент по работе с клиентами */}
         <section id="reglament-klienty" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-purple-600 rounded-lg">
-              <Users className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">
               Регламент по работе с клиентами
             </h2>
@@ -473,7 +456,7 @@ export default function ReglamentPage() {
             {/* Раздел 1 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <Calendar className="h-5 w-5 text-purple-600" />
+                
                 1. Начало работы по проекту (День 0-1)
               </h3>
               <div className="space-y-4">
@@ -490,7 +473,7 @@ export default function ReglamentPage() {
                       'Поприветствовать клиента в день передачи проекта (смотри скрипт ниже).'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -513,7 +496,7 @@ export default function ReglamentPage() {
             {/* Раздел 2 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <MessageSquare className="h-5 w-5 text-purple-600" />
+                
                 2. Планирование и гипотезы (День 2)
               </h3>
               <div className="space-y-4">
@@ -539,7 +522,7 @@ export default function ReglamentPage() {
                       'Уточнить все неясные моменты брифа, помочь клиенту с незаполненными разделами.'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -551,7 +534,7 @@ export default function ReglamentPage() {
             {/* Раздел 3 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <Database className="h-5 w-5 text-purple-600" />
+                
                 3. Операционная работа
               </h3>
               <div className="space-y-4">
@@ -582,7 +565,7 @@ export default function ReglamentPage() {
             {/* Раздел 4 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <MessageSquare className="h-5 w-5 text-purple-600" />
+                
                 4. Ежедневная коммуникация и отчетность
               </h3>
               <div className="space-y-4">
@@ -618,7 +601,7 @@ export default function ReglamentPage() {
                       'KPI со второго месяца (если проект изначально заводился без гарантий). Звонок проводится по истечению месяца с первого запуска.'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -637,7 +620,7 @@ export default function ReglamentPage() {
             {/* Раздел 5 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <User className="h-5 w-5 text-purple-600" />
+                
                 5. Построение отношений и контроль качества
               </h3>
               <div className="space-y-4">
@@ -649,7 +632,7 @@ export default function ReglamentPage() {
                       'Проявлять внимание к деталям: исправлять опечатки в офферах, следить за дедлайнами и минимизировать их срывы.'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -668,14 +651,14 @@ export default function ReglamentPage() {
             {/* Раздел 6 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-purple-600" />
+                
                 6. Эскалация проблем
               </h3>
               <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4">
                 <h4 className="font-semibold text-gray-700 mb-3">6.1. Реакция на негатив:</h4>
                 <ul className="space-y-2 ml-4 mb-3">
                   <li className="flex items-start gap-2 text-gray-700">
-                    <AlertCircle className="h-4 w-4 text-red-500 mt-1 flex-shrink-0" />
+                    
                     <span>При появлении любого недопонимания, негатива или конфликтной ситуации с клиентом, специалист/руководитель проекта в обязательном порядке обязан немедленно эскалировать вопрос к Егору (@ROP_PolzaAgency).</span>
                   </li>
                 </ul>
@@ -688,7 +671,7 @@ export default function ReglamentPage() {
             {/* Раздел 7 */}
             <div className="border-l-4 border-purple-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <Shield className="h-5 w-5 text-purple-600" />
+                
                 7. Обязанности руководителя, ОП и общие правила
               </h3>
               <div className="space-y-4">
@@ -701,7 +684,7 @@ export default function ReglamentPage() {
                       'Процесс передачи проекта специалисту (отписка в чат "Передача проектов" с комментариями по индивидуальным договоренностям, создание общего чата, назначение ответственного, объяснение специалисту специфики бизнеса клиента).'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -720,7 +703,7 @@ export default function ReglamentPage() {
             {/* Важная ссылка */}
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500 p-5 rounded-r-md">
               <div className="flex items-start gap-3">
-                <FileText className="h-6 w-6 text-blue-600 flex-shrink-0 mt-1" />
+                
                 <div>
                   <p className="text-gray-900 font-semibold mb-2">
                     Ссылка на презентацию с обязательными услугами по всем проектам (обязательно к изучению!):
@@ -732,7 +715,7 @@ export default function ReglamentPage() {
                     className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-2 font-medium"
                   >
                     Презентация Polza Agency.pdf
-                    <ExternalLink className="h-4 w-4" />
+                    
                   </a>
                 </div>
               </div>
@@ -741,14 +724,14 @@ export default function ReglamentPage() {
             {/* Написание цепочки */}
             <div id="napisanie-cepochki" className="border-l-4 border-purple-500 pl-6 py-2 mt-6">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <PenTool className="h-5 w-5 text-purple-600" />
+                
                 Написание цепочки
               </h3>
               <div className="space-y-4">
                 {/* Ресурсы для изучения */}
                 <div className="bg-gray-50 rounded-lg p-4">
                   <h4 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                    <Book className="h-4 w-4 text-emerald-600" />
+                    
                     Ресурсы для изучения
                   </h4>
                   <div className="space-y-3 text-sm">
@@ -760,7 +743,7 @@ export default function ReglamentPage() {
                         <span className="font-semibold">Настоятельно рекомендуем</span> прочитать главу 3.3 "Текст о себе и компании" в книге:{' '}
                         <a href="https://drive.google.com/file/d/15ZJ6CUw0PlcD1oDzJaIV9cbjLGQNwOy5/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                           Пиши - Сокращай.pdf
-                          <ExternalLink className="h-3 w-3" />
+                          
                         </a>
                       </p>
                     </div>
@@ -768,28 +751,28 @@ export default function ReglamentPage() {
                       <p className="text-gray-700 mb-1">Видео мастер-класс Олеси по написанию цепочек писем:</p>
                       <a href="https://youtu.be/pLEdg-YJJn4" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium text-sm">
                         https://youtu.be/pLEdg-YJJn4
-                        <ExternalLink className="h-3 w-3" />
+                        
                       </a>
                     </div>
                     <div>
                       <p className="text-gray-700 mb-1">Видео мастер-класс по написанию цепочки с помощью ChatGPT:</p>
                       <a href="https://drive.google.com/file/d/1atsZSUUulEIK_V16T68x29XzpfIeSh2f/view" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium text-sm">
                         Написание оффера в GPT.mp4
-                        <ExternalLink className="h-3 w-3" />
+                        
                       </a>
                     </div>
                     <div>
                       <p className="text-gray-700 mb-1">Сервис для проверки текстов и уменьшения количества "воды":</p>
                       <a href="https://glvrd.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium text-sm">
                         https://glvrd.ru/
-                        <ExternalLink className="h-3 w-3" />
+                        
                       </a>
                     </div>
                     <div>
                       <p className="text-gray-700 mb-1">Как можно ещё себя проверить - пройтись по чек-листу и ответить на вопросы (2 слайд):</p>
                       <a href="https://drive.google.com/file/d/1d6_R-0uYq8VQk9iEJMbqB4kslvbed1br/view" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium text-sm">
                         Чек-лист для проверки
-                        <ExternalLink className="h-3 w-3" />
+                        
                       </a>
                     </div>
                   </div>
@@ -798,7 +781,7 @@ export default function ReglamentPage() {
                 {/* Основные принципы */}
                 <div className="bg-gray-50 rounded-lg p-4">
                   <h4 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                    <CheckSquare className="h-4 w-4 text-emerald-600" />
+                    
                     Основные принципы
                   </h4>
                   <div className="space-y-3 text-sm">
@@ -815,7 +798,7 @@ export default function ReglamentPage() {
                           'письмо должно вызвать интерес и желание пообщаться с вами.'
                         ].map((item, i) => (
                           <li key={i} className="flex items-start gap-2 text-gray-700">
-                            <CheckCircle2 className="h-3 w-3 text-emerald-500 mt-1 flex-shrink-0" />
+                            
                             <span>{item}</span>
                           </li>
                         ))}
@@ -837,7 +820,7 @@ export default function ReglamentPage() {
                 {/* A/B тестирование */}
                 <div className="bg-gray-50 rounded-lg p-4">
                   <h4 className="font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                    <BarChart3 className="h-4 w-4 text-blue-600" />
+                    
                     A/B тестирование
                   </h4>
                   <p className="text-gray-700 text-sm">
@@ -848,7 +831,7 @@ export default function ReglamentPage() {
                 {/* Пример блок-схемы */}
                 <div className="bg-gray-50 rounded-lg p-4">
                   <h4 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                    <ImageIcon className="h-4 w-4 text-emerald-600" />
+                    
                     Пример блок-схемы цепочки писем
                   </h4>
                   <p className="text-gray-700 mb-3 text-sm">
@@ -870,9 +853,7 @@ export default function ReglamentPage() {
         {/* Структура письма и работа с ЦА */}
         <section id="struktura-pisma" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-teal-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Структура письма и работа с ЦА</h2>
           </div>
 
@@ -880,7 +861,7 @@ export default function ReglamentPage() {
             {/* 1. Определение целевой аудитории */}
             <div className="border-l-4 border-teal-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <Users className="h-5 w-5 text-teal-600" />
+                
                 1. Определение целевой аудитории
               </h3>
               <div className="space-y-4">
@@ -897,11 +878,11 @@ export default function ReglamentPage() {
                   </p>
                   <ul className="space-y-2 ml-4">
                     <li className="flex items-start gap-2 text-gray-700">
-                      <CheckCircle2 className="h-4 w-4 text-blue-500 mt-1 flex-shrink-0" />
+                      
                       <span>«Видел, что вы ищите С-level специалиста…»</span>
                     </li>
                     <li className="flex items-start gap-2 text-gray-700">
-                      <CheckCircle2 className="h-4 w-4 text-blue-500 mt-1 flex-shrink-0" />
+                      
                       <span>«Видел, что ваша выручка за 2022 год выросла на 20%…»</span>
                     </li>
                   </ul>
@@ -921,7 +902,7 @@ export default function ReglamentPage() {
             {/* 2. Что можно добавить в письмо */}
             <div className="border-l-4 border-teal-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <FileText className="h-5 w-5 text-teal-600" />
+                
                 2. Что можно добавить в письмо?
               </h3>
               <div className="bg-gray-50 rounded-lg p-4">
@@ -939,7 +920,7 @@ export default function ReglamentPage() {
                     'ссылки на кейсы (из похожей или такой же сферы)'
                   ].map((item, i) => (
                     <li key={i} className="flex items-start gap-2 text-gray-700">
-                      <CheckCircle2 className="h-4 w-4 text-teal-500 mt-1 flex-shrink-0" />
+                      
                       <span>{item}</span>
                     </li>
                   ))}
@@ -950,7 +931,7 @@ export default function ReglamentPage() {
             {/* 3. Структура письма */}
             <div className="border-l-4 border-teal-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <Mail className="h-5 w-5 text-teal-600" />
+                
                 3. Структура письма
               </h3>
               <div className="space-y-4">
@@ -978,9 +959,7 @@ export default function ReglamentPage() {
         {/* Варианты первого письма */}
         <section id="varianty-pervogo" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-cyan-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Варианты первого письма</h2>
           </div>
 
@@ -1136,9 +1115,7 @@ export default function ReglamentPage() {
         {/* Второе письмо - основной оффер */}
         <section id="vtoroe-pismo" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-orange-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Второе письмо - основной оффер</h2>
           </div>
 
@@ -1152,7 +1129,7 @@ export default function ReglamentPage() {
             {/* Структура второго письма */}
             <div className="border-l-4 border-orange-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <FileText className="h-5 w-5 text-orange-600" />
+                
                 Структура второго письма
               </h3>
               <div className="space-y-4">
@@ -1173,7 +1150,7 @@ export default function ReglamentPage() {
                       'Свойства продукта, услуги, его преимущество;'
                     ].map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-gray-700">
-                        <CheckCircle2 className="h-4 w-4 text-orange-500 mt-1 flex-shrink-0" />
+                        
                         <span>{item}</span>
                       </li>
                     ))}
@@ -1192,7 +1169,7 @@ export default function ReglamentPage() {
             {/* Примеры второго письма */}
             <div className="border-l-4 border-orange-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-orange-600" />
+                
                 Примеры второго письма
               </h3>
               <div className="space-y-4">
@@ -1222,9 +1199,7 @@ export default function ReglamentPage() {
         {/* Третье письмо */}
         <section id="trete-pismo" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-amber-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Третье письмо</h2>
           </div>
 
@@ -1238,7 +1213,7 @@ export default function ReglamentPage() {
             {/* Учет открытия письма */}
             <div className="border-l-4 border-amber-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-amber-600" />
+                
                 Учет открытия письма
               </h3>
               <div className="space-y-4">
@@ -1261,7 +1236,7 @@ export default function ReglamentPage() {
             {/* Структура третьего письма */}
             <div className="border-l-4 border-amber-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <FileText className="h-5 w-5 text-amber-600" />
+                
                 Структура третьего письма
               </h3>
               <div className="bg-gray-50 rounded-lg p-4">
@@ -1276,7 +1251,7 @@ export default function ReglamentPage() {
                     'Дополнительные детали и преимущества'
                   ].map((item, i) => (
                     <li key={i} className="flex items-start gap-2 text-gray-700">
-                      <CheckCircle2 className="h-4 w-4 text-amber-500 mt-1 flex-shrink-0" />
+                      
                       <span>{item}</span>
                     </li>
                   ))}
@@ -1290,7 +1265,7 @@ export default function ReglamentPage() {
             {/* Пример третьего письма */}
             <div className="border-l-4 border-amber-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-amber-600" />
+                
                 Пример третьего письма
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1312,9 +1287,7 @@ export default function ReglamentPage() {
         {/* Четвертое письмо - FOMO */}
         <section id="chetvertoe-pismo" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-red-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Четвертое письмо - FOMO</h2>
           </div>
 
@@ -1328,7 +1301,7 @@ export default function ReglamentPage() {
             {/* Структура четвертого письма */}
             <div className="border-l-4 border-red-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <FileText className="h-5 w-5 text-red-600" />
+                
                 Структура четвертого письма
               </h3>
               <div className="space-y-4">
@@ -1365,7 +1338,7 @@ export default function ReglamentPage() {
             {/* Пример четвертого письма */}
             <div className="border-l-4 border-red-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-red-600" />
+                
                 Пример четвертого письма
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1387,9 +1360,7 @@ export default function ReglamentPage() {
         {/* Шаблонное письмо */}
         <section className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-violet-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Шаблонное письмо</h2>
           </div>
 
@@ -1403,7 +1374,7 @@ export default function ReglamentPage() {
             {/* Пример шаблонного письма */}
             <div className="border-l-4 border-violet-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-violet-600" />
+                
                 Пример шаблонного письма
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1425,9 +1396,7 @@ export default function ReglamentPage() {
         {/* Вариант цепочки из 6 писем - сторителлинг о команде */}
         <section id="variant-6-pisem" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-indigo-600 rounded-lg">
-              <Users className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Вариант цепочки из 6 писем</h2>
           </div>
 
@@ -1441,7 +1410,7 @@ export default function ReglamentPage() {
             {/* Пример письма о команде */}
             <div className="border-l-4 border-indigo-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-indigo-600" />
+                
                 Пример письма о команде (сторителлинг)
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1464,9 +1433,7 @@ export default function ReglamentPage() {
         {/* Пятое письмо - кейс */}
         <section id="pyatoe-pismo" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-emerald-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Пятое письмо</h2>
           </div>
 
@@ -1480,7 +1447,7 @@ export default function ReglamentPage() {
             {/* Пример пятого письма */}
             <div className="border-l-4 border-emerald-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-emerald-600" />
+                
                 Пример пятого письма
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1502,9 +1469,7 @@ export default function ReglamentPage() {
         {/* Проверка офферов через Главред */}
         <section id="proverka-glavred" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-slate-600 rounded-lg">
-              <FileText className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">4. Проверка офферов через Главред</h2>
           </div>
 
@@ -1513,7 +1478,7 @@ export default function ReglamentPage() {
               <p className="text-gray-700 mb-3">
                 При помощи сервиса Главред (<a href="https://glvrd.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                   https://glvrd.ru/
-                  <ExternalLink className="h-3 w-3" />
+                  
                 </a>) можно оценить и улучшить свой текст, упростить его, добавить конкретики, избавиться от штампов и т.п.. Так вы по другому посмотрите на текст, поймёте, какие ошибки возникают при написании, и будете учитывать все эти моменты в последующих цепочках.
               </p>
               <p className="text-gray-700">
@@ -1524,7 +1489,7 @@ export default function ReglamentPage() {
             {/* Пример проверки через Главред */}
             <div className="border-l-4 border-slate-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <ImageIcon className="h-5 w-5 text-slate-600" />
+                
                 Пример проверки через Главред
               </h3>
               <div className="bg-white rounded-lg p-4 border border-gray-300">
@@ -1543,9 +1508,7 @@ export default function ReglamentPage() {
         {/* Письма на иностранном языке */}
         <section className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-rose-600 rounded-lg">
-              <Globe className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">5. Письма на иностранном языке</h2>
           </div>
 
@@ -1563,7 +1526,7 @@ export default function ReglamentPage() {
                     Берем уже написанную цепочку из писем на русском и переводим в переводчике (
                     <a href="https://www.deepl.com/ru/translator" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                       https://www.deepl.com/ru/translator
-                      <ExternalLink className="h-3 w-3" />
+                      
                     </a>), либо в самом GPT по промпту: <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded">"Translate this text without changing the meaning or changing its structure into English in a slightly more conversational style similar to human speech: [text]"</span>;
                   </span>
                 </li>
@@ -1583,7 +1546,7 @@ export default function ReglamentPage() {
                     То что получили в чате GPT прогоняем через грамматику (
                     <a href="https://quillbot.com/grammar-check" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                       https://quillbot.com/grammar-check
-                      <ExternalLink className="h-3 w-3" />
+                      
                     </a>).
                   </span>
                 </li>
@@ -1595,9 +1558,7 @@ export default function ReglamentPage() {
         {/* Как можно упростить работу */}
         <section id="uproshchenie-raboty" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-cyan-600 rounded-lg">
-              <MessageSquare className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">6. Как можно упростить работу?</h2>
           </div>
 
@@ -1646,7 +1607,7 @@ export default function ReglamentPage() {
             {/* ТГ бот для написания цепочек */}
             <div id="tg-bot" className="border-l-4 border-cyan-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <MessageSquare className="h-5 w-5 text-cyan-600" />
+                
                 6.1 (НОВИНКА) ТГ бот для написания цепочек, оффера
               </h3>
               <div className="space-y-4">
@@ -1668,7 +1629,7 @@ export default function ReglamentPage() {
                           Составить упрощенный бриф с только основной информацией о проекте. Т.е вам нужно вынести в отдельный документ основной текст брифа, обязательно в вашем брифе должна быть ссылка на сайт клиента и фигурировать название. Вот пример того как должен выглядеть бриф для нейросети -{' '}
                           <a href="https://docs.google.com/document/d/1UiqDFc7P0uKZxFaVFotMqKAokKbyY5QOhSyqDrUL6LQ/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                             ОПИСАНИЕ КОМПАНИИ
-                            <ExternalLink className="h-3 w-3" />
+                            
                           </a>
                         </span>
                       </li>
@@ -1710,7 +1671,7 @@ export default function ReglamentPage() {
                             Дополнительная информация записана в этом документе{' '}
                             <a href="https://docs.google.com/document/d/1Lg5f8_bA6GEYqPF7mzk8teFdq_SqjTd3nQqW1A0jrAg/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                               https://docs.google.com/document/d/1Lg5f8_bA6GEYqPF7mzk8teFdq_SqjTd3nQqW1A0jrAg/edit?usp=sharing
-                              <ExternalLink className="h-3 w-3" />
+                              
                             </a>
                           </p>
                           <div className="bg-red-50 border-l-4 border-red-400 rounded-lg p-3">
@@ -1772,9 +1733,7 @@ export default function ReglamentPage() {
         {/* Персонализация */}
         <section id="personalizaciya" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-pink-600 rounded-lg">
-              <User className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">7. Персонализация</h2>
           </div>
 
@@ -1809,7 +1768,7 @@ export default function ReglamentPage() {
             {/* Формулы для персонализации */}
             <div className="border-l-4 border-pink-500 pl-6 py-2">
               <h3 className="text-xl font-semibold mb-4 text-gray-800 flex items-center gap-2">
-                <FileText className="h-5 w-5 text-pink-600" />
+                
                 Формулы для персонализации
               </h3>
               <div className="space-y-4">
@@ -1861,9 +1820,7 @@ export default function ReglamentPage() {
         {/* Как достать данные для персонализации? */}
         <section id="data-extraction" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-blue-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">8. Как достать данные для персонализации?</h2>
           </div>
 
@@ -2022,9 +1979,7 @@ export default function ReglamentPage() {
         {/* Импорт персонализированной базы в Instantly */}
         <section id="instantly-import" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-blue-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">9. Импорт персонализированной базы в Instantly</h2>
           </div>
 
@@ -2047,9 +2002,7 @@ export default function ReglamentPage() {
         {/* Нехватка места для лидов в instantly */}
         <section id="instantly-space" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-orange-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Нехватка места для лидов в instantly</h2>
           </div>
 
@@ -2119,9 +2072,7 @@ export default function ReglamentPage() {
         {/* Проверка персонализации */}
         <section id="personalization-check" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-green-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">10. Проверка персонализации</h2>
           </div>
 
@@ -2164,9 +2115,7 @@ export default function ReglamentPage() {
         {/* Шаблон первого письма в GPT для зарубежных проектов */}
         <section id="gpt-template" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-purple-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">11. Шаблон первого письма в GPT для зарубежных проектов</h2>
           </div>
 
@@ -2286,9 +2235,7 @@ export default function ReglamentPage() {
         {/* Продвинутый шаблон первого письма в GPT */}
         <section id="gpt-advanced-template" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-purple-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">12. Продвинутый шаблон первого письма в GPT</h2>
           </div>
 
@@ -2364,9 +2311,7 @@ export default function ReglamentPage() {
         {/* Написание RU цепочек с помощью ChatGPT */}
         <section id="chatgpt-ru-chains" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-red-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">13. Написание RU цепочек с помощью ChatGPT</h2>
           </div>
 
@@ -2387,9 +2332,7 @@ export default function ReglamentPage() {
         {/* UTM метки в ссылки в письмах */}
         <section id="utm-tags" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-teal-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">14. UTM метки в ссылки в письмах</h2>
           </div>
 
@@ -2421,9 +2364,7 @@ export default function ReglamentPage() {
         {/* Настройка мощности для именных почт */}
         <section id="email-power-settings" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-yellow-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">6.1 Настройка мощности для именных почт</h2>
           </div>
 
@@ -2439,9 +2380,7 @@ export default function ReglamentPage() {
         {/* Создание кампаний */}
         <section id="campaign-creation" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-indigo-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">7. Создание кампаний</h2>
           </div>
 
@@ -2450,14 +2389,14 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                  <FileText className="h-5 w-5 text-indigo-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Видео про создание кампаний в Instantly</h3>
                   <p className="text-gray-700 leading-relaxed mb-3">
                     <a href="https://youtu.be/Y-J2HEjtl1E" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">
                       https://youtu.be/Y-J2HEjtl1E
-                      <ExternalLink className="h-3 w-3" />
+                      
                     </a>
                   </p>
                   <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4">
@@ -2572,9 +2511,7 @@ export default function ReglamentPage() {
         {/* Улучшение и проверка письма через инструменты instantly */}
         <section id="instantly-ai-tools" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-cyan-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">7.1 Улучшение и проверка письма через инструменты instantly</h2>
           </div>
 
@@ -2582,7 +2519,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-cyan-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-cyan-100 rounded-lg group-hover:bg-cyan-200 transition-colors">
-                  <CheckCircle2 className="h-5 w-5 text-cyan-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">AI Spintax Writer</h3>
@@ -2624,9 +2561,7 @@ export default function ReglamentPage() {
         {/* Добавление картинок в письмо в Instantly (через imgur) */}
         <section id="instantly-images" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-green-600 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">8. Добавление картинок в письмо в Instantly (через imgur)</h2>
           </div>
 
@@ -2638,7 +2573,7 @@ export default function ReglamentPage() {
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Вход в Imgur</h3>
                   <p className="text-gray-700 leading-relaxed mb-3">
-                    Зайти в <a href="https://imgur.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://imgur.com <ExternalLink className="h-3 w-3" /></a>
+                    Зайти в <a href="https://imgur.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://imgur.com </a>
                   </p>
                   <p className="text-gray-700 leading-relaxed mb-3">
                     Можно залогинится через гугл со своей почтой или sorichev@polzaagency.ru
@@ -2729,9 +2664,7 @@ export default function ReglamentPage() {
         {/* Проверка входящих и использование готовых шаблонов в Instantly */}
         <section id="instantly-unibox" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-violet-600 rounded-lg">
-              <Mail className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">9. Проверка входящих и использование готовых шаблонов в Instantly</h2>
           </div>
 
@@ -2740,7 +2673,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-violet-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-violet-100 rounded-lg group-hover:bg-violet-200 transition-colors">
-                  <Mail className="h-5 w-5 text-violet-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Unibox и почтовые клиенты</h3>
@@ -2758,7 +2691,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-violet-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-violet-100 rounded-lg group-hover:bg-violet-200 transition-colors">
-                  <FileText className="h-5 w-5 text-violet-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Какие могут быть примеры шаблонов:</h3>
@@ -2797,9 +2730,7 @@ export default function ReglamentPage() {
         {/* Настройки прогрева в instantly для улучшения прогрева */}
         <section id="instantly-warmup-settings" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-pink-600 rounded-lg">
-              <BarChart3 className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">10. Настройки прогрева в instantly для улучшения прогрева</h2>
           </div>
 
@@ -2807,7 +2738,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-pink-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-pink-100 rounded-lg group-hover:bg-pink-200 transition-colors">
-                  <BarChart3 className="h-5 w-5 text-pink-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Рекомендуемые настройки прогрева</h3>
@@ -2836,9 +2767,7 @@ export default function ReglamentPage() {
         {/* Отложенный старт кампаний */}
         <section id="delayed-start" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-slate-600 rounded-lg">
-              <Calendar className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">11. Отложенный старт кампаний</h2>
           </div>
 
@@ -2967,9 +2896,7 @@ export default function ReglamentPage() {
         {/* Проверка заспамленности новых аккаунтов */}
         <section id="spam-check" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-orange-600 rounded-lg">
-              <Shield className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">12. Проверка заспамленности новых аккаунтов</h2>
           </div>
 
@@ -2978,7 +2905,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-orange-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-orange-100 rounded-lg group-hover:bg-orange-200 transition-colors">
-                  <BarChart3 className="h-5 w-5 text-orange-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Analytics в Instantly</h3>
@@ -3020,12 +2947,12 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-orange-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-orange-100 rounded-lg group-hover:bg-orange-200 transition-colors">
-                  <Globe className="h-5 w-5 text-orange-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Postmaster</h3>
                   <p className="text-gray-700 leading-relaxed">
-                    <a href="https://postmaster.mail.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://postmaster.mail.ru/ <ExternalLink className="h-3 w-3" /></a>
+                    <a href="https://postmaster.mail.ru/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://postmaster.mail.ru/ </a>
                   </p>
                   <p className="text-gray-700 leading-relaxed mt-2">
                     С помощью этого сервиса можно оценить доставляемость на почты mail.ru в абсолютных значениях, и просматривать статистику по доменам.
@@ -3040,7 +2967,7 @@ export default function ReglamentPage() {
         <section id="linkedin" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-blue-700 rounded-lg">
-              <Users className="h-6 w-6 text-white" />
+              
             </div>
             <h2 className="text-2xl font-bold text-gray-900">LinkedIn</h2>
           </div>
@@ -3083,7 +3010,7 @@ export default function ReglamentPage() {
         <section id="linkedin-personalization" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-blue-500 rounded-lg">
-              <User className="h-6 w-6 text-white" />
+              
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Персонализация LinkedIn</h2>
           </div>
@@ -3092,7 +3019,7 @@ export default function ReglamentPage() {
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-blue-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-blue-100 rounded-lg group-hover:bg-blue-200 transition-colors">
-                  <User className="h-5 w-5 text-blue-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Создание персонализированных писем</h3>
@@ -3137,7 +3064,7 @@ Here&apos;s the profile of the person you want to compliment:
         <section id="english-sources" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-indigo-700 rounded-lg">
-              <Globe className="h-6 w-6 text-white" />
+              
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Работа с англ источниками в целом</h2>
           </div>
@@ -3146,26 +3073,26 @@ Here&apos;s the profile of the person you want to compliment:
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                  <FileText className="h-5 w-5 text-indigo-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Полезные материалы</h3>
                   <div className="space-y-2">
                     <div className="flex items-start gap-2">
                       <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
-                      <p className="text-gray-700"><strong>Регламент по аполло:</strong> <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть документ <ExternalLink className="h-3 w-3" /></a></p>
+                      <p className="text-gray-700"><strong>Регламент по аполло:</strong> <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть документ </a></p>
                     </div>
                     <div className="flex items-start gap-2">
                       <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
-                      <p className="text-gray-700"><strong>Видео про работу с аполло и аутскрепер:</strong> <a href="https://drive.google.com/file/d/1Fk03xRGx6sywRU4S-WysmZEqfqB9SwIk/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Смотреть видео <ExternalLink className="h-3 w-3" /></a></p>
+                      <p className="text-gray-700"><strong>Видео про работу с аполло и аутскрепер:</strong> <a href="https://drive.google.com/file/d/1Fk03xRGx6sywRU4S-WysmZEqfqB9SwIk/view?usp=share_link" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Смотреть видео </a></p>
                     </div>
                     <div className="flex items-start gap-2">
                       <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
-                      <p className="text-gray-700"><strong>Регламент по цепочкам (Notion, нужен VPN):</strong> <a href="https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть в Notion <ExternalLink className="h-3 w-3" /></a></p>
+                      <p className="text-gray-700"><strong>Регламент по цепочкам (Notion, нужен VPN):</strong> <a href="https://sheer-practice-087.notion.site/29258a29f12c4540ab444732ae80c2f0" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Открыть в Notion </a></p>
                     </div>
                     <div className="flex items-start gap-2">
                       <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-2"></span>
-                      <p className="text-gray-700"><strong>Примеры цепочек на англ рынок:</strong> <a href="https://docs.google.com/document/d/1UfMvEW5XH1SaV_5YMtIFc_BCCdpvEX6ZCcjPZUP0BTA/edit#heading=h.mj8nf2lc976n" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Примеры заруб. офферов <ExternalLink className="h-3 w-3" /></a></p>
+                      <p className="text-gray-700"><strong>Примеры цепочек на англ рынок:</strong> <a href="https://docs.google.com/document/d/1UfMvEW5XH1SaV_5YMtIFc_BCCdpvEX6ZCcjPZUP0BTA/edit#heading=h.mj8nf2lc976n" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Примеры заруб. офферов </a></p>
                     </div>
                   </div>
                   <div className="bg-amber-50 border-l-4 border-amber-400 rounded-r-md p-4 mt-4">
@@ -3181,7 +3108,7 @@ Here&apos;s the profile of the person you want to compliment:
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                  <Database className="h-5 w-5 text-indigo-600" />
+                  
                 </div>
                 <div className="flex-1">
 
@@ -3209,7 +3136,7 @@ Here&apos;s the profile of the person you want to compliment:
             <div className="group border border-gray-200 rounded-lg p-5 hover:border-indigo-300 hover:shadow-md transition-all duration-200 bg-gray-50">
               <div className="flex items-start gap-4">
                 <div className="p-2 bg-indigo-100 rounded-lg group-hover:bg-indigo-200 transition-colors">
-                  <FileText className="h-5 w-5 text-indigo-600" />
+                  
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-3 text-lg">Как теперь сохранять выборки в листы</h3>
@@ -3241,7 +3168,7 @@ Here&apos;s the profile of the person you want to compliment:
         <section id="adspower-setup" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-8">
             <div className="p-2 bg-blue-500 rounded-lg">
-              <Database className="h-6 w-6 text-white" />
+              
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Установка анонимного браузера (для подключения к chat gpt)</h2>
           </div>
@@ -3379,9 +3306,7 @@ Here&apos;s the profile of the person you want to compliment:
         {/* Как обойти запрет ВПН в РФ */}
         <section id="vpn-bypass" className="bg-white rounded-xl shadow-md border border-gray-200 p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="p-2 bg-emerald-600 rounded-lg">
-              <Shield className="h-6 w-6 text-white" />
-            </div>
+            
             <h2 className="text-2xl font-bold text-gray-900">Как обойти запрет ВПН в РФ</h2>
           </div>
 
@@ -3393,7 +3318,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Скачать расширение</h3>
                   <p className="text-gray-700 leading-relaxed">
-                    Скачайте расширение <a href="https://chromewebstore.google.com/detail/proxycontrol-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80-%D0%B4%D0%BB%D1%8F/hjocpjdeacglfchomobaagbmipeggnjg" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">ProxyControl <ExternalLink className="h-3 w-3" /></a>
+                    Скачайте расширение <a href="https://chromewebstore.google.com/detail/proxycontrol-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80-%D0%B4%D0%BB%D1%8F/hjocpjdeacglfchomobaagbmipeggnjg" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">ProxyControl </a>
                   </p>
                 </div>
               </div>
@@ -3406,7 +3331,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Найти свой прокси</h3>
                   <p className="text-gray-700 leading-relaxed">
-                    Найдите в этой таблице своё имя и скопируйте содержимое столбца &quot;Информация о Прокси&quot; в <a href="https://docs.google.com/spreadsheets/d/14EJWqsVsikR2agW2c-Z66J1IHK5Ep05u5uR3Wy1cwBc/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Таблица прокси <ExternalLink className="h-3 w-3" /></a>
+                    Найдите в этой таблице своё имя и скопируйте содержимое столбца &quot;Информация о Прокси&quot; в <a href="https://docs.google.com/spreadsheets/d/14EJWqsVsikR2agW2c-Z66J1IHK5Ep05u5uR3Wy1cwBc/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">Таблица прокси </a>
                   </p>
                 </div>
               </div>
@@ -3472,7 +3397,7 @@ Here&apos;s the profile of the person you want to compliment:
                     Нажмите &quot;включить прокси&quot;
                   </p>
                   <p className="text-gray-700 leading-relaxed">
-                    Проверьте работает ли прокси зайдя на заблокированный в рф сайт или проверьте айпи в <a href="https://2ip.ru" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://2ip.ru <ExternalLink className="h-3 w-3" /></a>
+                    Проверьте работает ли прокси зайдя на заблокированный в рф сайт или проверьте айпи в <a href="https://2ip.ru" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline inline-flex items-center gap-1 font-medium">https://2ip.ru </a>
                   </p>
                 </div>
               </div>
@@ -3493,7 +3418,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-purple-600 to-indigo-600 rounded-xl shadow-lg">
-                  <CheckCircle2 className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -3511,7 +3436,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <AlertCircle className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3523,8 +3448,8 @@ Here&apos;s the profile of the person you want to compliment:
                     Общая рекомендация - не стесняйтесь обращаться к нейросетям за ЛЮБОЙ ПОМОЩЬЮ, помните, если какую-то задачу можно автоматизировать нейросети ваш лучший друг.
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">ChatGPT <ExternalLink className="h-3.5 w-3.5" /></a>
-                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Google AI Studio <ExternalLink className="h-3.5 w-3.5" /></a>
+                    <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">ChatGPT </a>
+                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Google AI Studio </a>
                   </div>
                 </div>
               </div>
@@ -3536,13 +3461,13 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <BookOpen className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
                   <h3 className="font-semibold text-gray-900 mb-2 text-lg">Помощник по работе</h3>
                   <p className="text-gray-600 leading-relaxed">
-                    Вы можете воспользоваться промтом, в который загружен регламент + этот промт подскажет как возможно решить вашу проблему. <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%2211rLQ7FGpT1lY8SH8U3IDj9_neuCMXdiG%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 mt-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт помощника <ExternalLink className="h-3.5 w-3.5" /></a>
+                    Вы можете воспользоваться промтом, в который загружен регламент + этот промт подскажет как возможно решить вашу проблему. <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%2211rLQ7FGpT1lY8SH8U3IDj9_neuCMXdiG%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 mt-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт помощника </a>
                   </p>
                 </div>
               </div>
@@ -3554,7 +3479,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <Database className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3579,7 +3504,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <FileText className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3619,7 +3544,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <FileText className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3628,7 +3553,7 @@ Here&apos;s the profile of the person you want to compliment:
                     Чтобы быстро сократить названия и привести их нужный формат для рассылки используйте этот промт gemini - сейчас работает очень круто! (если работает плохо, или названия это длинное описание, то вставляйте по 300 строк за раз)
                   </p>
                   <div className="mb-4">
-                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221Vqgv-oZNratrt5i07UVoMprUEAC2wbx2%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для сокращения названий <ExternalLink className="h-3.5 w-3.5" /></a>
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221Vqgv-oZNratrt5i07UVoMprUEAC2wbx2%22%5D,%22action%22:%22open%22,%22userId%22:%22103961347993105628535%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для сокращения названий </a>
                   </div>
                   <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg p-3 mb-4">
                     <p className="text-amber-800 text-sm flex items-start gap-2">
@@ -3649,7 +3574,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <Mail className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3662,7 +3587,7 @@ Here&apos;s the profile of the person you want to compliment:
                     Сейчас нейросети могут практически за вас написать оффер, или дать основу для оффера и идеи для него. В этом промте вы также можете просить модель улучшить или что-то переработать.
                   </p>
                   <div className="mb-4">
-                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221nuzMhi8pHPInt8QXomt9AO3g-aeVG053%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для написания оффера <ExternalLink className="h-3.5 w-3.5" /></a>
+                    <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221nuzMhi8pHPInt8QXomt9AO3g-aeVG053%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Промт для написания оффера </a>
                   </div>
                   <div className="border border-purple-100 rounded-xl overflow-hidden shadow-md bg-white mb-4 w-2/3 group-hover:shadow-lg transition-shadow">
                     <img src="/images/offer-writing.png" alt="Интерфейс написания оффера в Gemini" className="w-full h-auto" />
@@ -3685,7 +3610,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100 rounded-xl group-hover:from-purple-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                    <Mail className="h-5 w-5 text-purple-600" />
+                    
                   </div>
                 </div>
                 <div className="flex-1">
@@ -3733,7 +3658,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-orange-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl shadow-lg">
-                  <Zap className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -3751,7 +3676,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <Sparkles className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -3776,7 +3701,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mb-4">
                       <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span><span className="font-semibold">ОБЯЗАТЕЛЬНО</span> перечитайте что вышло в итоге и удалите неграмотные варианты!</span>
                       </p>
                     </div>
@@ -3811,7 +3736,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl shadow-lg">
-                  <ShieldAlert className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -3829,7 +3754,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl group-hover:from-emerald-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Shield className="h-5 w-5 text-emerald-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -3837,7 +3762,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://dnschecker.org/ip-blacklist-checker.php" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-lg text-emerald-700 hover:from-emerald-100 hover:to-teal-100 hover:border-emerald-300 transition-all font-medium text-sm shadow-sm">
-                        dnschecker.org/ip-blacklist-checker <ExternalLink className="h-3.5 w-3.5" />
+                        dnschecker.org/ip-blacklist-checker 
                       </a>
                     </div>
 
@@ -3872,7 +3797,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-teal-100 rounded-xl group-hover:from-emerald-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Server className="h-5 w-5 text-emerald-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -3924,7 +3849,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
                       <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span>Если таких писем очень много — сообщайте в поломки, это значит что письма в принципе не отправились.</span>
                       </p>
                     </div>
@@ -3945,7 +3870,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-rose-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl shadow-lg">
-                  <BarChart3 className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -4001,7 +3926,7 @@ Here&apos;s the profile of the person you want to compliment:
 
               {/* Placeholder для картинки */}
               <div className="border-2 border-dashed border-rose-200 rounded-xl p-8 my-6 bg-rose-50/50 text-center">
-                <ImageIcon className="h-8 w-8 text-rose-300 mx-auto mb-2" />
+                
                 <p className="text-sm text-rose-400">Картинка: instantly-spam-check.png</p>
               </div>
 
@@ -4030,7 +3955,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-red-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-red-500 to-orange-500 rounded-xl shadow-lg">
-                  <Ban className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -4099,7 +4024,7 @@ Here&apos;s the profile of the person you want to compliment:
                       
                       {/* Placeholder для картинки */}
                       <div className="border-2 border-dashed border-red-200 rounded-xl p-6 bg-red-50/50 text-center">
-                        <ImageIcon className="h-6 w-6 text-red-300 mx-auto mb-2" />
+                        
                         <p className="text-xs text-red-400">Картинка: google-workspace-org.png</p>
                       </div>
 
@@ -4151,7 +4076,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-sky-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-sky-500 to-blue-500 rounded-xl shadow-lg">
-                  <UserCheck className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -4177,7 +4102,7 @@ Here&apos;s the profile of the person you want to compliment:
                   {/* НЕ передаём */}
                   <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
                     <h4 className="font-semibold text-red-700 mb-3 flex items-center gap-2">
-                      <XCircle className="h-5 w-5" />
+                      
                       НЕ передаём
                     </h4>
                     <ul className="space-y-2 text-sm text-red-700">
@@ -4203,7 +4128,7 @@ Here&apos;s the profile of the person you want to compliment:
                   {/* Передаём */}
                   <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
                     <h4 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
-                      <CheckCircle2 className="h-5 w-5" />
+                      
                       Передаём
                     </h4>
                     <ul className="space-y-2 text-sm text-green-700">
@@ -4311,7 +4236,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-violet-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-violet-500 to-purple-500 rounded-xl shadow-lg">
-                  <Database className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -4337,7 +4262,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-violet-100 to-purple-100 rounded-xl group-hover:from-violet-200 group-hover:to-purple-200 transition-colors shadow-sm">
-                      <Monitor className="h-5 w-5 text-violet-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4379,7 +4304,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-yellow-100 to-orange-100 rounded-xl group-hover:from-yellow-200 group-hover:to-orange-200 transition-colors shadow-sm">
-                      <Globe className="h-5 w-5 text-yellow-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4387,7 +4312,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://arsenkin.ru/tools/parser-ads/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-yellow-50 to-orange-50 border border-yellow-200 rounded-lg text-yellow-700 hover:from-yellow-100 hover:to-orange-100 hover:border-yellow-300 transition-all font-medium text-sm shadow-sm">
-                        arsenkin.ru/tools/parser-ads <ExternalLink className="h-3.5 w-3.5" />
+                        arsenkin.ru/tools/parser-ads 
                       </a>
                     </div>
 
@@ -4419,7 +4344,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-orange-100 rounded-xl group-hover:from-red-200 group-hover:to-orange-200 transition-colors shadow-sm">
-                      <Map className="h-5 w-5 text-red-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4427,7 +4352,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://drive.google.com/file/d/1hK2_KrQQ2g-uZeKCAm20tzBOLl1y8uwP/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-violet-50 to-purple-50 border border-violet-200 rounded-lg text-violet-700 hover:from-violet-100 hover:to-purple-100 hover:border-violet-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                         Скачать парсер
                       </a>
                     </div>
 
@@ -4468,7 +4393,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
-                      <Map className="h-5 w-5 text-green-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4477,10 +4402,10 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://drive.google.com/file/d/1W_gwgL2AdI6_JwxSOe5fzjotJYa5lIHQ/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 hover:border-green-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                         Скачать парсер
                       </a>
                       <a href="https://www.google.ru/chrome/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Требуется Chrome <ExternalLink className="h-3 w-3" />
+                        Требуется Chrome 
                       </a>
                     </div>
 
@@ -4523,7 +4448,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-pink-100 rounded-xl group-hover:from-red-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <Briefcase className="h-5 w-5 text-red-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4555,7 +4480,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="mb-4">
                       <a href="https://t.me/polzaagency_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
-                        <MessageCircle className="h-3.5 w-3.5" /> @polzaagency_bot — отправьте ссылку на выборку
+                         @polzaagency_bot — отправьте ссылку на выборку
                       </a>
                     </div>
 
@@ -4584,7 +4509,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-rose-100 rounded-xl group-hover:from-red-200 group-hover:to-rose-200 transition-colors shadow-sm">
-                      <BarChart3 className="h-5 w-5 text-red-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4592,7 +4517,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://drive.google.com/file/d/1Fwo_KtJ_fwPHIcMz1LRij6So8pRgldYr/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-rose-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-rose-100 hover:border-red-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Скачать парсер рейтинга
+                         Скачать парсер рейтинга
                       </a>
                     </div>
 
@@ -4628,7 +4553,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-emerald-100 to-green-100 rounded-xl group-hover:from-emerald-200 group-hover:to-green-200 transition-colors shadow-sm">
-                      <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4636,7 +4561,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://drive.google.com/file/d/1ys0r1EKA2kHVAp2Fe83xT36ib_Pit0P6/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg text-emerald-700 hover:from-emerald-100 hover:to-green-100 hover:border-emerald-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Sites Availability Checker.zip
+                         Sites Availability Checker.zip
                       </a>
                     </div>
 
@@ -4668,7 +4593,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-cyan-100 rounded-xl group-hover:from-blue-200 group-hover:to-cyan-200 transition-colors shadow-sm">
-                      <MessageCircle className="h-5 w-5 text-blue-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4676,7 +4601,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://t.me/parse_polza_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-cyan-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-cyan-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
-                        <MessageCircle className="h-3.5 w-3.5" /> @parse_polza_bot
+                         @parse_polza_bot
                       </a>
                     </div>
 
@@ -4705,7 +4630,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
-                      <Search className="h-5 w-5 text-slate-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4714,7 +4639,7 @@ Here&apos;s the profile of the person you want to compliment:
                       Бот для поиска информации о контактах. Позволяет найти дополнительные данные по номеру телефона, email или имени.
                     </p>
                     <a href="https://t.me/eyeofgod_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg text-slate-700 hover:from-slate-100 hover:to-gray-100 transition-all text-sm mt-3">
-                      <MessageCircle className="h-3.5 w-3.5" /> @eyeofgod_bot
+                       @eyeofgod_bot
                     </a>
                   </div>
                 </div>
@@ -4726,7 +4651,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                      <Database className="h-5 w-5 text-blue-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4735,7 +4660,7 @@ Here&apos;s the profile of the person you want to compliment:
                       Сервис для сбора баз контактов. <span className="text-amber-600">Учтите: базы из Selecom, РБК и прочих источников могут быть не совсем свежими.</span>
                     </p>
                     <a href="https://selecom.ru" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
-                      selecom.ru <ExternalLink className="h-3 w-3" />
+                      selecom.ru 
                     </a>
                   </div>
                 </div>
@@ -4747,7 +4672,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-fuchsia-100 rounded-xl group-hover:from-purple-200 group-hover:to-fuchsia-200 transition-colors shadow-sm">
-                      <Bot className="h-5 w-5 text-purple-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4770,7 +4695,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-teal-100 to-cyan-100 rounded-xl group-hover:from-teal-200 group-hover:to-cyan-200 transition-colors shadow-sm">
-                      <Database className="h-5 w-5 text-teal-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4788,7 +4713,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Briefcase className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4796,10 +4721,10 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://t.me/habrcareer_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
-                        <MessageCircle className="h-3.5 w-3.5" /> @habrcareer_parser_bot
+                         @habrcareer_parser_bot
                       </a>
                       <a href="https://docs.google.com/spreadsheets/d/1EZ1refZQh_LJ20OhOYMcvQVYboY5CmpBF3zZTjrakQM/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Таблица результатов <ExternalLink className="h-3 w-3" />
+                        Таблица результатов 
                       </a>
                     </div>
 
@@ -4816,7 +4741,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Briefcase className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4824,10 +4749,10 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://t.me/habrcareer_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
-                        <MessageCircle className="h-3.5 w-3.5" /> @habrcareer_parser_bot
+                         @habrcareer_parser_bot
                       </a>
                       <a href="https://docs.google.com/spreadsheets/d/1EZ1refZQh_LJ20OhOYMcvQVYboY5CmpBF3zZTjrakQM/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Таблица результатов <ExternalLink className="h-3 w-3" />
+                        Таблица результатов 
                       </a>
                     </div>
 
@@ -4844,7 +4769,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                      <Link className="h-5 w-5 text-blue-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4878,7 +4803,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <HardDrive className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4894,7 +4819,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="mb-4">
                       <a href="https://drive.google.com/file/d/1iVPb_7Ok-x9L6VE5Ef0auElUIt0YUgjj/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 hover:border-orange-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Скачать парсер
+                         Скачать парсер
                       </a>
                     </div>
 
@@ -4936,7 +4861,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-violet-100 rounded-xl group-hover:from-indigo-200 group-hover:to-violet-200 transition-colors shadow-sm">
-                      <Globe className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -4944,13 +4869,13 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://docs.google.com/document/d/1WRrcMpET3_4FATWX1shGjozDPTV-VTLA/edit#heading=h.yy5iphwlrlro" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 rounded-lg text-indigo-700 hover:from-indigo-100 hover:to-violet-100 hover:border-indigo-300 transition-all font-medium text-sm shadow-sm">
-                        Полный регламент <ExternalLink className="h-3.5 w-3.5" />
+                        Полный регламент 
                       </a>
                       <a href="https://drive.google.com/file/d/1U6wykUwYIn-bUi7y6mGshROCUuVTOpgx/view?usp=drive_link" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
-                        <Video className="h-3.5 w-3.5" /> Видео-инструкция
+                         Видео-инструкция
                       </a>
                       <a href="https://t.me/Apollo_parser_bot" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 hover:border-blue-300 transition-all font-medium text-sm shadow-sm">
-                        <MessageCircle className="h-3.5 w-3.5" /> @Apollo_parser_bot
+                         @Apollo_parser_bot
                       </a>
                     </div>
 
@@ -5001,7 +4926,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-pink-100 rounded-xl group-hover:from-purple-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <Mail className="h-5 w-5 text-purple-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5009,10 +4934,10 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://drive.google.com/file/d/1VwXMpskP0zA-kWED0bj2CTrM-hVOKTjR/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-pink-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Скачать (пиратская версия)
+                         Скачать (пиратская версия)
                       </a>
                       <a href="https://letsextract.com/ru/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Официальный сайт <ExternalLink className="h-3 w-3" />
+                        Официальный сайт 
                       </a>
                     </div>
 
@@ -5022,7 +4947,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     {/* Placeholder для картинки */}
                     <div className="border-2 border-dashed border-purple-200 rounded-xl p-6 bg-purple-50/50 text-center">
-                      <ImageIcon className="h-6 w-6 text-purple-300 mx-auto mb-2" />
+                      
                       <p className="text-xs text-purple-400">Картинка: letsextract-interface.png</p>
                     </div>
                   </div>
@@ -5035,7 +4960,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
-                      <Database className="h-5 w-5 text-slate-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5066,7 +4991,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-teal-100 to-cyan-100 rounded-xl group-hover:from-teal-200 group-hover:to-cyan-200 transition-colors shadow-sm">
-                      <Link className="h-5 w-5 text-teal-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5074,7 +4999,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="mb-4">
                       <a href="https://drive.google.com/file/d/1ys0r1EKA2kHVAp2Fe83xT36ib_Pit0P6/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-teal-50 to-cyan-50 border border-teal-200 rounded-lg text-teal-700 hover:from-teal-100 hover:to-cyan-100 hover:border-teal-300 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Sites Availability Checker
+                         Sites Availability Checker
                       </a>
                     </div>
 
@@ -5100,7 +5025,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-cyan-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-cyan-500 to-teal-500 rounded-xl shadow-lg">
-                  <Table className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -5124,7 +5049,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Trash2 className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5154,7 +5079,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Copy className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5204,13 +5129,13 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2">
                       <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.h5noicqvgp4d" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
-                        <Code className="h-3.5 w-3.5" /> Скрипт по email
+                         Скрипт по email
                       </a>
                       <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.6dakluhnykvv" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
-                        <Code className="h-3.5 w-3.5" /> Скрипт по названиям
+                         Скрипт по названиям
                       </a>
                       <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit?tab=t.0#heading=h.92otwfh5rgd1" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 transition-all text-sm">
-                        <Code className="h-3.5 w-3.5" /> Скрипт по сайтам
+                         Скрипт по сайтам
                       </a>
                     </div>
                   </div>
@@ -5223,7 +5148,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Code className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5258,10 +5183,10 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2 mt-4">
                       <a href="https://youtu.be/caG33Q4nkIc" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
-                        <Video className="h-3.5 w-3.5" /> Добавление макроса
+                         Добавление макроса
                       </a>
                       <a href="https://youtu.be/UGW-dMFlqRE" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
-                        <Video className="h-3.5 w-3.5" /> Применение скрипта
+                         Применение скрипта
                       </a>
                     </div>
                   </div>
@@ -5274,7 +5199,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-100 to-teal-100 rounded-xl group-hover:from-cyan-200 group-hover:to-teal-200 transition-colors shadow-sm">
-                      <Filter className="h-5 w-5 text-cyan-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5317,7 +5242,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="mt-4">
                       <a href="https://docs.google.com/document/d/1UzdHKo_dwICovxbCONdA5z4bKfwum96s5AoHGn_AO1A/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-50 to-teal-50 border border-cyan-200 rounded-lg text-cyan-700 hover:from-cyan-100 hover:to-teal-100 hover:border-cyan-300 transition-all font-medium text-sm shadow-sm">
-                        <Code className="h-3.5 w-3.5" /> Все скрипты в документе
+                         Все скрипты в документе
                       </a>
                     </div>
                   </div>
@@ -5330,7 +5255,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <Globe className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5341,13 +5266,13 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2">
                       <a href="https://addons.mozilla.org/en-US/firefox/addon/web-scraper/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 transition-all font-medium text-sm shadow-sm">
-                        <Download className="h-3.5 w-3.5" /> Firefox Add-on
+                         Firefox Add-on
                       </a>
                       <a href="https://www.webscraper.io/documentation" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Документация <ExternalLink className="h-3 w-3" />
+                        Документация 
                       </a>
                       <a href="https://youtu.be/HUIlsrri72o" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
-                        <Video className="h-3.5 w-3.5" /> Видео-разбор
+                         Видео-разбор
                       </a>
                     </div>
                   </div>
@@ -5360,7 +5285,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
-                      <CheckCircle className="h-5 w-5 text-green-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5373,7 +5298,7 @@ Here&apos;s the profile of the person you want to compliment:
                     </p>
 
                     <a href="https://drive.google.com/file/d/11gXuXyWPHpfR8JOhLHlSMVbYc710EyH3/view?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 transition-all font-medium text-sm shadow-sm mb-4">
-                      <Download className="h-3.5 w-3.5" /> Скачать EmailValidator
+                       Скачать EmailValidator
                     </a>
 
                     <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4 mb-4">
@@ -5414,7 +5339,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-violet-100 rounded-xl group-hover:from-indigo-200 group-hover:to-violet-200 transition-colors shadow-sm">
-                      <Search className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5425,10 +5350,10 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://journal.topvisor.com/ru/seo-kitchen/google-search-operators/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:border-gray-300 transition-all text-sm">
-                        Список операторов <ExternalLink className="h-3 w-3" />
+                        Список операторов 
                       </a>
                       <a href="https://aistudio.google.com/app/prompts?state=%7B%22ids%22:%5B%221BKXMbQTtHndPITAS9EFgjr4aHXAGw9g0%22%5D,%22action%22:%22open%22,%22userId%22:%22112464031614056669260%22,%22resourceKeys%22:%7B%7D%7D&usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 rounded-lg text-indigo-700 hover:from-indigo-100 hover:to-violet-100 transition-all text-sm">
-                        <Bot className="h-3.5 w-3.5" /> Промпт для Gemini
+                         Промпт для Gemini
                       </a>
                     </div>
 
@@ -5470,7 +5395,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-fuchsia-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-fuchsia-500 to-pink-500 rounded-xl shadow-lg">
-                  <Bot className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -5488,7 +5413,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <Wand2 className="h-5 w-5 text-fuchsia-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5501,7 +5426,7 @@ Here&apos;s the profile of the person you want to compliment:
                       <div className="bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 rounded-lg p-4">
                         <p className="text-gray-700 text-sm mb-2 font-medium">1. Установите расширение:</p>
                         <a href="https://workspace.google.com/marketplace/app/gpt_for_sheets_and_docs/677318054654" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-fuchsia-50 to-pink-50 border border-fuchsia-200 rounded-lg text-fuchsia-700 hover:from-fuchsia-100 hover:to-pink-100 transition-all text-sm">
-                          GPT for Sheets and Docs <ExternalLink className="h-3 w-3" />
+                          GPT for Sheets and Docs 
                         </a>
                       </div>
 
@@ -5525,14 +5450,14 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
                       <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span><span className="font-semibold">Важно:</span> После генерации сразу выделите столбец → Ctrl+C → Ctrl+Shift+V (вставить как текст). Это зафиксирует результат и не даст формулам обновляться (экономия токенов!).</span>
                       </p>
                     </div>
 
                     <div className="mt-4">
                       <a href="https://youtu.be/-kIZLuZd45Y" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
-                        <Video className="h-3.5 w-3.5" /> Видео от Данилы с примером
+                         Видео от Данилы с примером
                       </a>
                     </div>
                   </div>
@@ -5545,7 +5470,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <FileText className="h-5 w-5 text-fuchsia-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5580,7 +5505,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <Code className="h-5 w-5 text-fuchsia-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5623,7 +5548,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <BarChart3 className="h-5 w-5 text-fuchsia-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5662,7 +5587,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-fuchsia-100 to-pink-100 rounded-xl group-hover:from-fuchsia-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <Shield className="h-5 w-5 text-fuchsia-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5692,7 +5617,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                      <Sparkles className="h-5 w-5 text-blue-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5708,7 +5633,7 @@ Here&apos;s the profile of the person you want to compliment:
                         <p className="text-gray-700 text-sm mb-2 font-medium">Шаг 2 — Заходим на Gemini:</p>
                         <p className="text-gray-600 text-sm mb-2">Регистрация не нужна — только вход в Google-аккаунт</p>
                         <a href="https://aistudio.google.com/app/prompts/new_chat" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
-                          AI Studio <ExternalLink className="h-3 w-3" />
+                          AI Studio 
                         </a>
                         <p className="text-gray-500 text-xs mt-2">Рекомендуем модель: Gemini 1.5 PRO</p>
                       </div>
@@ -5746,7 +5671,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-lime-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-lime-500 to-green-500 rounded-xl shadow-lg">
-                  <Calculator className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -5763,7 +5688,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-lime-100 to-green-100 rounded-xl group-hover:from-lime-200 group-hover:to-green-200 transition-colors shadow-sm">
-                      <BarChart3 className="h-5 w-5 text-lime-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5794,7 +5719,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="mt-4">
                       <a href="https://docs.google.com/spreadsheets/d/your-kpi-calculator" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-lime-50 to-green-50 border border-lime-200 rounded-lg text-lime-700 hover:from-lime-100 hover:to-green-100 hover:border-lime-300 transition-all font-medium text-sm shadow-sm">
-                        <Table className="h-3.5 w-3.5" /> Калькулятор KPI (Google Sheets)
+                         Калькулятор KPI (Google Sheets)
                       </a>
                     </div>
                   </div>
@@ -5814,7 +5739,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-rose-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl shadow-lg">
-                  <Target className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -5831,7 +5756,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-rose-100 to-pink-100 rounded-xl group-hover:from-rose-200 group-hover:to-pink-200 transition-colors shadow-sm">
-                      <ArrowRight className="h-5 w-5 text-rose-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -5882,7 +5807,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-teal-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-teal-500 to-cyan-500 rounded-xl shadow-lg">
-                  <Clock className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6018,7 +5943,7 @@ Here&apos;s the profile of the person you want to compliment:
               {/* Причины закрытия */}
               <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-xl p-6">
                 <h3 className="font-semibold text-red-800 mb-3 flex items-center gap-2">
-                  <AlertCircle className="h-5 w-5" />
+                  
                   Причины досрочного закрытия теста
                 </h3>
                 <ul className="text-red-700 text-sm space-y-2">
@@ -6040,7 +5965,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-blue-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-xl shadow-lg">
-                  <Video className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6069,7 +5994,7 @@ Here&apos;s the profile of the person you want to compliment:
             </div>
 
             <a href="https://youtu.be/cHu3UeXmj3M" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all font-medium text-sm shadow-sm">
-              <Video className="h-4 w-4" /> Запись звонка с клиентом (пример)
+               Запись звонка с клиентом (пример)
             </a>
           </div>
         </section>
@@ -6084,7 +6009,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-purple-500 to-fuchsia-500 rounded-xl shadow-lg">
-                  <Target className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6099,7 +6024,7 @@ Here&apos;s the profile of the person you want to compliment:
               {/* Цепочка */}
               <div className="bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6">
                 <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
-                  <Mail className="h-5 w-5 text-purple-500" />
+                  
                   Цепочка
                 </h3>
                 <ul className="text-gray-600 text-sm space-y-3">
@@ -6125,7 +6050,7 @@ Here&apos;s the profile of the person you want to compliment:
               {/* Базы */}
               <div className="bg-white/80 backdrop-blur-sm border border-purple-100 rounded-xl p-6">
                 <h3 className="font-semibold text-gray-900 mb-4 text-lg flex items-center gap-2">
-                  <Database className="h-5 w-5 text-purple-500" />
+                  
                   Базы
                 </h3>
                 <ul className="text-gray-600 text-sm space-y-3">
@@ -6154,7 +6079,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <span className="font-semibold">Важно:</span> Отслеживайте статистику по каждой кампании и делайте сравнительный анализ — вовремя исключайте гипотезы, которые не работают.
               </p>
               <a href="https://docs.google.com/spreadsheets/d/16yRYOcIPMZrrGrvmWubfVkcb_8ioBZR7BdGToWs9n34/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-purple-200 rounded-lg text-purple-700 hover:border-purple-300 transition-all text-sm mt-3">
-                Таблица оценки кампаний <ExternalLink className="h-3 w-3" />
+                Таблица оценки кампаний 
               </a>
             </div>
           </div>
@@ -6170,7 +6095,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-green-500 rounded-xl shadow-lg">
-                  <Target className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6345,7 +6270,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-sky-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-sky-500 to-blue-500 rounded-xl shadow-lg">
-                  <MessageSquare className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6389,7 +6314,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-indigo-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-indigo-500 to-blue-500 rounded-xl shadow-lg">
-                  <ClipboardList className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6407,7 +6332,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
-                      <Bot className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6422,7 +6347,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2 mb-4">
                       <a href="https://docs.google.com/spreadsheets/d/1I4mQLI2evf1049-pJmX5YU8jwNnOMK5fRz1X6EymRW0/edit?usp=sharing" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg text-green-700 hover:from-green-100 hover:to-emerald-100 hover:border-green-300 transition-all font-medium text-sm shadow-sm">
-                        <Table className="h-3.5 w-3.5" /> Таблица результатов
+                         Таблица результатов
                       </a>
                     </div>
 
@@ -6459,7 +6384,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-3">
                       <p className="text-red-700 text-sm flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span>Убедитесь, что у вас самих кампания загрузилась в Instantly перед отправкой!</span>
                       </p>
                     </div>
@@ -6473,7 +6398,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
-                      <Mail className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6526,7 +6451,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
-                      <Mail className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6577,7 +6502,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-100 rounded-xl group-hover:from-indigo-200 group-hover:to-blue-200 transition-colors shadow-sm">
-                      <Database className="h-5 w-5 text-indigo-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6608,7 +6533,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-purple-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-purple-500 to-violet-500 rounded-xl shadow-lg">
-                  <FileImage className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6626,7 +6551,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
-                      <Settings className="h-5 w-5 text-purple-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6656,7 +6581,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
-                      <FileText className="h-5 w-5 text-purple-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6691,7 +6616,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     {/* Placeholder для картинки */}
                     <div className="border-2 border-dashed border-purple-200 rounded-xl p-6 mt-4 bg-purple-50/50 text-center">
-                      <ImageIcon className="h-6 w-6 text-purple-300 mx-auto mb-2" />
+                      
                       <p className="text-xs text-purple-400">Картинка: figma-kp-example.png</p>
                     </div>
                   </div>
@@ -6704,7 +6629,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-purple-100 to-violet-100 rounded-xl group-hover:from-purple-200 group-hover:to-violet-200 transition-colors shadow-sm">
-                      <BookOpen className="h-5 w-5 text-purple-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6755,7 +6680,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-slate-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-slate-500 to-gray-500 rounded-xl shadow-lg">
-                  <Shield className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6772,7 +6697,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-slate-100 to-gray-100 rounded-xl group-hover:from-slate-200 group-hover:to-gray-200 transition-colors shadow-sm">
-                      <Shield className="h-5 w-5 text-slate-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6815,7 +6740,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-emerald-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-emerald-500 to-green-500 rounded-xl shadow-lg">
-                  <DollarSign className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6869,7 +6794,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-amber-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl shadow-lg">
-                  <Plane className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6898,7 +6823,7 @@ Here&apos;s the profile of the person you want to compliment:
               <div className="relative">
                 <div className="absolute inset-0 bg-orange-500 rounded-xl blur-md opacity-50"></div>
                 <div className="relative p-3 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl shadow-lg">
-                  <Megaphone className="h-7 w-7 text-white" />
+                  
                 </div>
               </div>
               <div>
@@ -6925,7 +6850,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <CheckSquare className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6948,7 +6873,7 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mt-4">
                       <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span><span className="font-semibold">Важно:</span> Не привязывайте аккаунты к своему номеру телефона! Используйте данные клиента для возможности передачи.</span>
                       </p>
                     </div>
@@ -6962,7 +6887,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-yellow-100 to-amber-100 rounded-xl group-hover:from-yellow-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <Users className="h-5 w-5 text-yellow-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -6992,7 +6917,7 @@ Here&apos;s the profile of the person you want to compliment:
                       <p className="text-gray-600 text-sm">Два столбца: <span className="font-mono bg-slate-100 px-1 rounded">companyname</span> и <span className="font-mono bg-slate-100 px-1 rounded">email</span></p>
                       <p className="text-gray-500 text-xs mt-1">Минимум 100 контактов. Чем больше — тем лучше.</p>
                       <a href="https://docs.google.com/spreadsheets/d/1-LWzFMYk4ooKdLPJlQZbB0bhPEMmrri5m_MGnlBGhnA/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-yellow-600 hover:underline text-sm mt-2">
-                        Пример базы <ExternalLink className="h-3 w-3" />
+                        Пример базы 
                       </a>
                     </div>
 
@@ -7011,7 +6936,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <MousePointer className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -7067,7 +6992,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100 rounded-xl group-hover:from-blue-200 group-hover:to-indigo-200 transition-colors shadow-sm">
-                      <Globe className="h-5 w-5 text-blue-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -7102,7 +7027,7 @@ Here&apos;s the profile of the person you want to compliment:
                       <p className="text-gray-700 text-sm mb-2 font-medium">Заголовки для Единого списка:</p>
                       <p className="text-gray-600 text-sm font-mono bg-white p-2 rounded border border-slate-200">phone, email, ok, vk, vid, gaid, idfa</p>
                       <a href="https://target.vk.ru/documents/vkads/common_list_example.csv" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-600 hover:underline text-sm mt-2">
-                        Пример файла <ExternalLink className="h-3 w-3" />
+                        Пример файла 
                       </a>
                     </div>
 
@@ -7125,7 +7050,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl group-hover:from-orange-200 group-hover:to-amber-200 transition-colors shadow-sm">
-                      <LineChart className="h-5 w-5 text-orange-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -7162,13 +7087,13 @@ Here&apos;s the profile of the person you want to compliment:
 
                     <div className="flex flex-wrap gap-2 mt-4">
                       <a href="https://drive.google.com/drive/folders/12XCcKNhcmGuhZrt-3TfzfiRnI31XO80r" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-lg text-red-700 hover:from-red-100 hover:to-pink-100 transition-all text-sm">
-                        <Video className="h-3.5 w-3.5" /> Видео-регламенты
+                         Видео-регламенты
                       </a>
                       <a href="https://docs.google.com/document/d/1bB6BQHJtXNZZGpRfXOkQrM1XccnC3DhEyt98hJ68MBw/edit" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg text-orange-700 hover:from-orange-100 hover:to-amber-100 transition-all text-sm">
-                        <FileText className="h-3.5 w-3.5" /> Текстовый регламент
+                         Текстовый регламент
                       </a>
                       <a href="https://ads.vk.com/help/articles/pixel" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg text-blue-700 hover:from-blue-100 hover:to-indigo-100 transition-all text-sm">
-                        <Globe className="h-3.5 w-3.5" /> Инструкция по пикселю VK
+                         Инструкция по пикселю VK
                       </a>
                     </div>
                   </div>
@@ -7181,7 +7106,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-red-100 to-orange-100 rounded-xl group-hover:from-red-200 group-hover:to-orange-200 transition-colors shadow-sm">
-                      <Shield className="h-5 w-5 text-red-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">
@@ -7189,7 +7114,7 @@ Here&apos;s the profile of the person you want to compliment:
                     
                     <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4 mb-4">
                       <p className="text-red-700 text-sm leading-relaxed flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                        
                         <span>Для новых кабинетов <span className="font-semibold">обязательно</span> заполните данные рекламодателя, иначе можно получить штраф!</span>
                       </p>
                     </div>
@@ -7214,7 +7139,7 @@ Here&apos;s the profile of the person you want to compliment:
                 <div className="flex items-start gap-4">
                   <div className="flex-shrink-0">
                     <div className="w-10 h-10 flex items-center justify-center bg-gradient-to-br from-green-100 to-emerald-100 rounded-xl group-hover:from-green-200 group-hover:to-emerald-200 transition-colors shadow-sm">
-                      <DollarSign className="h-5 w-5 text-green-600" />
+                      
                     </div>
                   </div>
                   <div className="flex-1">

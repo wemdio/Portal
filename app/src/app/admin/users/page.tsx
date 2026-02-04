@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
-import { Users, Loader2, Edit2, X, Check, AlertCircle, UserPlus, Search, Trash2 } from 'lucide-react';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -181,7 +180,7 @@ export default function UsersPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+        <div className="text-gray-500">Загрузка...</div>
       </div>
     );
   }
@@ -190,7 +189,6 @@ export default function UsersPage() {
     return (
       <div className="max-w-4xl mx-auto py-10">
         <div className="bg-red-50 border border-red-200 rounded-lg p-6 flex items-center">
-          <AlertCircle className="h-6 w-6 text-red-600 mr-3" />
           <div>
             <h2 className="text-lg font-semibold text-red-800">Доступ запрещен</h2>
             <p className="text-red-600">Только администраторы могут управлять пользователями.</p>
@@ -214,31 +212,28 @@ export default function UsersPage() {
           }}
           className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
-          <UserPlus className="h-5 w-5 mr-2" />
           Добавить пользователя
         </button>
       </div>
 
       {error && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center text-red-700">
-          <AlertCircle className="h-5 w-5 mr-2" />
           {error}
           <button onClick={() => setError('')} className="ml-auto">
-            <X className="h-4 w-4" />
+            ✕
           </button>
         </div>
       )}
 
       <div className="mb-6">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
           <input
             type="text"
             placeholder="Поиск по email, имени или роли..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             autoComplete="off"
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full pl-4 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           />
         </div>
       </div>
@@ -246,7 +241,6 @@ export default function UsersPage() {
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-            <Users className="h-5 w-5 mr-2 text-blue-600" />
             Пользователи ({filteredUsers.length})
           </h2>
         </div>
@@ -322,13 +316,13 @@ export default function UsersPage() {
                           disabled={saving || !editingRole}
                           className="p-1 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
                         >
-                          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                          {saving ? '...' : '✓'}
                         </button>
                         <button
                           onClick={() => { setEditingUserId(null); setEditingRole(null); }}
                           className="p-1 text-gray-600 hover:bg-gray-100 rounded"
                         >
-                          <X className="h-4 w-4" />
+                          ✕
                         </button>
                       </div>
                     ) : (
@@ -338,7 +332,7 @@ export default function UsersPage() {
                           className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
                           title="Изменить роль"
                         >
-                          <Edit2 className="h-4 w-4" />
+                          ✎
                         </button>
                         {user.id !== currentUserId && (
                           <button
@@ -346,7 +340,7 @@ export default function UsersPage() {
                             className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                             title="Удалить пользователя"
                           >
-                            <Trash2 className="h-4 w-4" />
+                            🗑
                           </button>
                         )}
                       </div>
@@ -379,7 +373,7 @@ export default function UsersPage() {
                 }}
                 className="p-1 hover:bg-gray-100 rounded"
               >
-                <X className="h-5 w-5 text-gray-500" />
+                ✕
               </button>
             </div>
             <div className="p-6 space-y-4">
@@ -454,8 +448,7 @@ export default function UsersPage() {
                 disabled={creating}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center"
               >
-                {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                Создать
+                {creating ? 'Создание...' : 'Создать'}
               </button>
             </div>
           </div>
@@ -498,8 +491,7 @@ export default function UsersPage() {
                 disabled={deleting}
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center"
               >
-                {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                Удалить
+                {deleting ? 'Удаление...' : 'Удалить'}
               </button>
             </div>
           </div>
