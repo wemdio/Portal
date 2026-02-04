@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, MouseEvent } from 'react';
-import { Filter, Plus, Search, X } from 'lucide-react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
+import { supabase } from '@/lib/supabaseClient';
 
 type Sheet = {
   id: string;
@@ -65,6 +65,55 @@ type ImportStatus = {
   message?: string;
 };
 
+type PersistedSpreadsheetState = {
+  version: number;
+  tabs: Sheet[];
+  activeTabId: string;
+  tabCounter: number;
+  columnWidths?: number[];
+};
+
+type PersonalizationState = {
+  isOpen: boolean;
+  sourceCol: number;
+  prompt: string;
+  isGenerating: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
+const OPENROUTER_API_KEY = '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';
+const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
+const PERSONALIZATION_BATCH_SIZE = 2;
+const PERSONALIZATION_MAX_RETRIES = 3;
+const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
+const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
+const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
+
+const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
+
+КЛЮЧЕВАЯ ЗАДАЧА:
+- Генерируй короткие персонализированные фразы для email-аутрича на основе ДАННЫХ ИЗ СТОЛБЦА и промпта пользователя.
+
+КРИТИЧЕСКИ ВАЖНО:
+1. Используй ТОЛЬКО факты из входных данных. НИЧЕГО не выдумывай.
+2. Не добавляй названия компаний, имена, цифры, кейсы, сроки, технологии, если их нет в данных.
+3. Если данных мало - пиши нейтрально и обобщенно, без уточнений.
+4. Не добавляй приветствия, подписи, темы письма и служебные фразы.
+
+СТИЛЬ:
+- Пиши как живой человек, без канцелярита и шаблонов
+- СТРОГО соблюдай русскую грамматику, падежи и склонения
+- Используй ТОЛЬКО дефис "-", НИКОГДА не используй длинное тире "—"
+- 1-3 коротких предложения, конкретно по делу
+- Не используй восклицательные знаки в избытке
+- Избегай слов: "уникальный", "эксклюзивный", "лучший", "инновационный"
+- Фокусируйся на выгоде/ценности для клиента
+
+Ответ: только текст персонализации, без пояснений и нумерации.`;
+
 const EMAIL_HEADER_REGEX = /(e-?mail|email|почта|mail)/i;
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const HELP_TOOLTIP_OFFSET = 10;
@@ -77,6 +126,9 @@ const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 
 const DEFAULT_ROWS = 20;
 const DEFAULT_COLS = 10;
+const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
+const STORAGE_VERSION = 1;
+const STORAGE_SAVE_DELAY = 700;
 
 const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -102,6 +154,85 @@ const normalizeRows = (rows: string[][]) => {
     if (row.length >= maxCols) return row;
     return [...row, ...Array.from({ length: maxCols - row.length }, () => '')];
   });
+};
+
+const buildStorageKey = (userId: string | null) =>
+  `${STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
+
+const coerceRows = (rows: unknown) => {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    if (!Array.isArray(row)) return [''];
+    return row.map((cell) => `${cell ?? ''}`);
+  });
+};
+
+const coerceTabs = (value: unknown) => {
+  if (!Array.isArray(value)) return [] as Sheet[];
+  return value
+    .map((tab, index) => {
+      if (!tab || typeof tab !== 'object') return null;
+      const { id, name, data } = tab as Partial<Sheet>;
+      const safeId = typeof id === 'string' && id.trim().length > 0 ? id : createId();
+      const safeName =
+        typeof name === 'string' && name.trim().length > 0 ? name : `Вкладка ${index + 1}`;
+      const rows = coerceRows(data);
+      const normalized =
+        rows.length > 0
+          ? normalizeRows(rows)
+          : [Array.from({ length: DEFAULT_COLS }, () => '')];
+      return { id: safeId, name: safeName, data: normalized };
+    })
+    .filter((tab): tab is Sheet => tab !== null);
+};
+
+const resolveActiveTabId = (tabs: Sheet[], activeTabId?: string) => {
+  if (tabs.length === 0) return '';
+  if (activeTabId && tabs.some((tab) => tab.id === activeTabId)) return activeTabId;
+  return tabs[0].id;
+};
+
+const deriveTabCounter = (tabs: Sheet[], storedCounter?: number) => {
+  const safeStored =
+    typeof storedCounter === 'number' && Number.isFinite(storedCounter)
+      ? Math.max(1, Math.floor(storedCounter))
+      : 1;
+  const maxFromNames = tabs.reduce((max, tab) => {
+    const match = tab.name.match(/Вкладка\s+(\d+)/i);
+    if (!match) return max;
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? Math.max(max, value) : max;
+  }, 1);
+  return Math.max(safeStored, maxFromNames, tabs.length);
+};
+
+const sanitizeColumnWidths = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  return value.map((width) => {
+    if (typeof width !== 'number' || !Number.isFinite(width)) return DEFAULT_COLUMN_WIDTH;
+    return Math.max(MIN_COLUMN_WIDTH, width);
+  });
+};
+
+const readPersistedState = (raw: unknown): PersistedSpreadsheetState | null => {
+  if (!raw) return null;
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const candidate = parsed as PersistedSpreadsheetState;
+  if (candidate.version !== STORAGE_VERSION) return null;
+  const tabs = coerceTabs(candidate.tabs);
+  if (tabs.length === 0) return null;
+  const activeTabId = resolveActiveTabId(tabs, candidate.activeTabId);
+  const tabCounter = deriveTabCounter(tabs, candidate.tabCounter);
+  const columnWidths = sanitizeColumnWidths(candidate.columnWidths);
+  return { version: STORAGE_VERSION, tabs, activeTabId, tabCounter, columnWidths };
 };
 
 const trimTrailingEmptyRows = (rows: string[][]) => {
@@ -146,6 +277,8 @@ const cloneData = (data: string[][]) => data.map((row) => [...row]);
 
 const normalizeCellKey = (value: string) => value.trim().toLowerCase();
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const buildFilterOptions = (data: string[][], colIndex: number) => {
   const map = new Map<string, string>();
   let overflow = false;
@@ -179,6 +312,8 @@ const formatProgressLabel = (status: ImportStatus) => {
 const countFilledCells = (row: string[]) => row.reduce((acc, cell) => {
   return acc + (cell.trim().length > 0 ? 1 : 0);
 }, 0);
+
+const isRowEmpty = (row: string[]) => row.every((cell) => cell.trim().length === 0);
 
 const hasHeaderRow = (data: string[][]) => {
   const firstRow = data[0] ?? [];
@@ -228,24 +363,12 @@ const getRowEmail = (row: string[], emailColumns: number[]) => {
   return null;
 };
 
-const HelpTip = ({ text }: { text: string }) => (
-  <span className="relative inline-flex group">
-    <span className="ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full border border-gray-300 text-xs font-semibold text-gray-600 cursor-help">
-      ?
-    </span>
-    <span
-      className="pointer-events-none absolute left-1/2 top-full z-30 w-64 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 shadow-lg opacity-0 transition group-hover:opacity-100"
-      style={{ marginTop: HELP_TOOLTIP_OFFSET }}
-    >
-      {text}
-    </span>
-  </span>
-);
-
 export function DatabaseSpreadsheet() {
   const [tabs, setTabs] = useState<Sheet[]>(() => [createSheet('Вкладка 1')]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
   const [tabCounter, setTabCounter] = useState(1);
+  const [storageKey, setStorageKey] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('cell');
@@ -254,6 +377,7 @@ export function DatabaseSpreadsheet() {
   const [columnFilters, setColumnFilters] = useState<Record<number, string[]>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOnlyMatches, setSearchOnlyMatches] = useState(false);
+  const [wrapCells, setWrapCells] = useState(true);
   const [normalizeLowercase, setNormalizeLowercase] = useState(true);
   const [normalizeSpaces, setNormalizeSpaces] = useState(true);
   const [normalizeEmoji, setNormalizeEmoji] = useState(true);
@@ -270,12 +394,16 @@ export function DatabaseSpreadsheet() {
     endRow: 0,
     endCol: 0,
   });
+  const [selectionAnchor, setSelectionAnchor] = useState({ row: 0, col: 0 });
   const [activeCell, setActiveCell] = useState({ row: 0, col: 0 });
   const [isSelecting, setIsSelecting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
+  const tableWrapperRef = useRef<HTMLDivElement | null>(null);
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
+  const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resizingRef = useRef<{ col: number; startX: number; startWidth: number } | null>(
     null,
   );
@@ -286,6 +414,19 @@ export function DatabaseSpreadsheet() {
     status: 'idle',
     progress: 0,
   });
+  const [isHydrated, setIsHydrated] = useState(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [personalization, setPersonalization] = useState<PersonalizationState>({
+    isOpen: false,
+    sourceCol: 0,
+    prompt: '',
+    isGenerating: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const personalizationAbortRef = useRef<AbortController | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -321,6 +462,77 @@ export function DatabaseSpreadsheet() {
 
 
   useEffect(() => {
+    const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
+      // Поддержка Ctrl+Z / Cmd+Z
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+
+      // Игнорируем если фокус в инпуте/текстареа (кроме нашей таблицы)
+      if (
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement
+      ) {
+        // Разрешаем навигацию если это инпут внутри ячейки
+        if (!document.activeElement.closest('td')) return;
+      }
+
+      if (!activeTab) return;
+
+      const { row, col } = activeCell;
+      const maxRow = activeTab.data.length - 1;
+      const maxCol = (activeTab.data[0]?.length ?? 1) - 1;
+
+      let nextRow = row;
+      let nextCol = col;
+      let handled = false;
+
+      if (e.key === 'ArrowUp') {
+        nextRow = Math.max(0, row - 1);
+        handled = true;
+      } else if (e.key === 'ArrowDown') {
+        nextRow = Math.min(maxRow, row + 1);
+        handled = true;
+      } else if (e.key === 'ArrowLeft') {
+        nextCol = Math.max(0, col - 1);
+        handled = true;
+      } else if (e.key === 'ArrowRight') {
+        nextCol = Math.min(maxCol, col + 1);
+        handled = true;
+      }
+
+      if (handled) {
+        if (e.shiftKey) {
+          const anchorRow = selectionAnchor.row;
+          const anchorCol = selectionAnchor.col;
+          
+          setSelection({
+            startRow: Math.min(anchorRow, nextRow),
+            endRow: Math.max(anchorRow, nextRow),
+            startCol: Math.min(anchorCol, nextCol),
+            endCol: Math.max(anchorCol, nextCol),
+          });
+        } else {
+          setSelection({
+            startRow: nextRow,
+            endRow: nextRow,
+            startCol: nextCol,
+            endCol: nextCol,
+          });
+          setSelectionAnchor({ row: nextRow, col: nextCol });
+        }
+        
+        setActiveCell({ row: nextRow, col: nextCol });
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [activeTab, activeCell, selectionAnchor]);
+
+  useEffect(() => {
     const handleMouseUp = () => setIsSelecting(false);
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
@@ -350,7 +562,16 @@ export function DatabaseSpreadsheet() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    setSelectionAnchor({ row: 0, col: 0 });
     setActiveCell({ row: 0, col: 0 });
     setSelectionMode('cell');
     setColumnFilters({});
@@ -462,28 +683,34 @@ export function DatabaseSpreadsheet() {
 
   const handleRowHeaderClick = (rowIndex: number, isRange: boolean) => {
     const lastCol = Math.max((activeTab?.data[0]?.length ?? 0) - 1, 0);
-    const startRow = isRange ? selection.startRow : rowIndex;
+    const anchorRow = isRange ? selectionAnchor.row : rowIndex;
     setSelection({
-      startRow,
+      startRow: anchorRow,
       endRow: rowIndex,
       startCol: 0,
       endCol: lastCol,
     });
     setActiveCell({ row: rowIndex, col: 0 });
     setSelectionMode('row');
+    if (!isRange) {
+      setSelectionAnchor({ row: rowIndex, col: 0 });
+    }
   };
 
   const handleColumnHeaderClick = (colIndex: number, isRange: boolean) => {
     const lastRow = Math.max((activeTab?.data.length ?? 0) - 1, 0);
-    const startCol = isRange ? selection.startCol : colIndex;
+    const anchorCol = isRange ? selectionAnchor.col : colIndex;
     setSelection({
       startRow: 0,
       endRow: lastRow,
-      startCol,
+      startCol: anchorCol,
       endCol: colIndex,
     });
     setActiveCell({ row: 0, col: colIndex });
     setSelectionMode('col');
+    if (!isRange) {
+      setSelectionAnchor({ row: 0, col: colIndex });
+    }
   };
 
   const openContextMenu = (event: MouseEvent, mode: SelectionMode) => {
@@ -510,10 +737,22 @@ export function DatabaseSpreadsheet() {
     if (event.button !== 0) return;
     setIsSelecting(true);
     setActiveCell({ row, col });
-    if (event.ctrlKey || event.metaKey) {
+    if (event.shiftKey) {
+      const maxRow = Math.max((activeTab?.data.length ?? 1) - 1, 0);
+      const maxCol = Math.max((activeTab?.data[0]?.length ?? 1) - 1, 0);
+      const anchorRow = Math.min(Math.max(selectionAnchor.row, 0), maxRow);
+      const anchorCol = Math.min(Math.max(selectionAnchor.col, 0), maxCol);
+      setSelection({
+        startRow: anchorRow,
+        startCol: anchorCol,
+        endRow: row,
+        endCol: col,
+      });
+    } else if (event.ctrlKey || event.metaKey) {
       setSelection((prev) => ({ ...prev, endRow: row, endCol: col }));
     } else {
       setSelection({ startRow: row, startCol: col, endRow: row, endCol: col });
+      setSelectionAnchor({ row, col });
     }
     setSelectionMode('cell');
   };
@@ -526,6 +765,7 @@ export function DatabaseSpreadsheet() {
   const handleCellFocus = (row: number, col: number) => {
     setActiveCell({ row, col });
     setSelection({ startRow: row, startCol: col, endRow: row, endCol: col });
+    setSelectionAnchor({ row, col });
     setSelectionMode('cell');
   };
 
@@ -600,6 +840,7 @@ export function DatabaseSpreadsheet() {
           : [Array.from({ length: sheet.data[0]?.length ?? 1 }, () => '')],
     }));
     setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    setSelectionAnchor({ row: 0, col: 0 });
     setActiveCell({ row: 0, col: 0 });
     setSelectionMode('cell');
   };
@@ -989,6 +1230,75 @@ export function DatabaseSpreadsheet() {
     );
   };
 
+  const handleRemoveEmptyRows = () => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const header = data[0] ?? [];
+    const body = data.slice(1);
+    const nextBody = body.filter((row) => !isRowEmpty(row));
+    const removed = body.length - nextBody.length;
+
+    if (removed === 0) {
+      setLastAction({ message: 'Пустые строки не найдены', time: Date.now() });
+      return;
+    }
+
+    requestConfirm(
+      'Удалить пустые строки?',
+      `Будет удалено строк: ${removed}.`,
+      () => {
+        setUndoSnapshot(`Удаление пустых строк (${removed})`);
+        applyRows([header, ...nextBody]);
+        setLastAction({ message: `Удалено пустых строк: ${removed}`, time: Date.now() });
+      },
+      'Удалить',
+    );
+  };
+
+  const handleRemoveEmptyColumns = () => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const maxCols = Math.max(1, ...data.map((row) => row.length));
+    const hasValue = Array.from({ length: maxCols }, () => false);
+
+    for (const row of data) {
+      for (let c = 0; c < maxCols; c += 1) {
+        if ((row[c] ?? '').trim().length > 0) {
+          hasValue[c] = true;
+        }
+      }
+    }
+
+    const keepCols = hasValue
+      .map((value, index) => (value ? index : -1))
+      .filter((index) => index >= 0);
+
+    const removed = maxCols - keepCols.length;
+    if (removed === 0) {
+      setLastAction({ message: 'Пустые колонки не найдены', time: Date.now() });
+      return;
+    }
+
+    requestConfirm(
+      'Удалить пустые колонки?',
+      `Будет удалено колонок: ${removed}.`,
+      () => {
+        setUndoSnapshot(`Удаление пустых колонок (${removed})`);
+        const nextRows = data.map((row) =>
+          keepCols.length > 0 ? keepCols.map((idx) => row[idx] ?? '') : [''],
+        );
+        applyRows(nextRows);
+        setColumnWidths(() =>
+          keepCols.length > 0
+            ? keepCols.map((idx) => columnWidths[idx] ?? DEFAULT_COLUMN_WIDTH)
+            : [DEFAULT_COLUMN_WIDTH],
+        );
+        setLastAction({ message: `Удалено пустых колонок: ${removed}`, time: Date.now() });
+      },
+      'Удалить',
+    );
+  };
+
   const clearSelectedCells = () => {
     if (!activeTab) return;
     const { startRow, endRow, startCol, endCol } = normalizedSelection;
@@ -1015,6 +1325,7 @@ export function DatabaseSpreadsheet() {
       return { ...sheet, data };
     });
     setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    setSelectionAnchor({ row: 0, col: 0 });
     setActiveCell({ row: 0, col: 0 });
     setSelectionMode('cell');
   };
@@ -1030,6 +1341,7 @@ export function DatabaseSpreadsheet() {
       return { ...sheet, data: nextData };
     });
     setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+    setSelectionAnchor({ row: 0, col: 0 });
     setActiveCell({ row: 0, col: 0 });
     setSelectionMode('cell');
   };
@@ -1097,6 +1409,7 @@ export function DatabaseSpreadsheet() {
       const lastCol = (activeTab.data[0]?.length ?? 0) - 1;
       if (lastRow < 0 || lastCol < 0) return;
       setSelection({ startRow: 0, startCol: 0, endRow: lastRow, endCol: lastCol });
+      setSelectionAnchor({ row: 0, col: 0 });
       setActiveCell({ row: 0, col: 0 });
       setSelectionMode('cell');
       return;
@@ -1117,7 +1430,7 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const isCopy =
       (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c';
     if (isCopy) {
@@ -1126,7 +1439,7 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const text = event.clipboardData.getData('text');
     if (!text) return;
     event.preventDefault();
@@ -1233,11 +1546,320 @@ export function DatabaseSpreadsheet() {
     setLastUndo(null);
   };
 
+  const openPersonalizationModal = () => {
+    setPersonalization((prev) => ({
+      ...prev,
+      isOpen: true,
+      sourceCol: 0,
+      prompt: '',
+      isGenerating: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    }));
+  };
+
+  const closePersonalizationModal = () => {
+    if (personalizationAbortRef.current) {
+      personalizationAbortRef.current.abort();
+      personalizationAbortRef.current = null;
+    }
+    setPersonalization((prev) => ({
+      ...prev,
+      isOpen: false,
+      isGenerating: false,
+      error: null,
+    }));
+  };
+
+  const generatePersonalizedProposals = async (
+    sourceData: string,
+    userPrompt: string,
+  ): Promise<string> => {
+    const requestBody = {
+      model: OPENROUTER_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content: `Данные для персонализации: "${sourceData}"
+
+Задача от пользователя: ${userPrompt}
+
+Сгенерируй 1 персонализированное предложение.
+Не нумеруй варианты. Пиши только сами предложения без пояснений.`,
+        },
+      ],
+      temperature: 0.7,
+      max_tokens: 500,
+    };
+
+    for (let attempt = 0; attempt <= PERSONALIZATION_MAX_RETRIES; attempt += 1) {
+      let response: Response;
+
+      try {
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
+            'X-Title': 'Portal - Database Personalization',
+          },
+          body: JSON.stringify(requestBody),
+          signal: personalizationAbortRef.current?.signal,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw error;
+        }
+        if (attempt < PERSONALIZATION_MAX_RETRIES) {
+          const retryDelay =
+            PERSONALIZATION_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+            Math.floor(Math.random() * 300);
+          await sleep(retryDelay);
+          continue;
+        }
+        throw new Error('Не удалось отправить запрос к API');
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content?.trim() || '';
+        if (!content) {
+          throw new Error('Пустой ответ от API');
+        }
+        return content;
+      }
+
+      const shouldRetry = [429, 502, 503, 504].includes(response.status);
+      let errorMessage = `API ошибка: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error?.message || errorMessage;
+      } catch {
+        // ignore parse error
+      }
+
+      if (shouldRetry && attempt < PERSONALIZATION_MAX_RETRIES) {
+        const retryDelay =
+          PERSONALIZATION_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+          Math.floor(Math.random() * 300);
+        await sleep(retryDelay);
+        continue;
+      }
+
+      throw new Error(errorMessage);
+    }
+
+    throw new Error('Не удалось получить ответ от API');
+  };
+
+  const handleStartPersonalization = async () => {
+    if (!activeTab || personalization.isGenerating) return;
+
+    const dataRows = activeTab.data.slice(1).filter((row) => {
+      const sourceValue = row[personalization.sourceCol]?.trim();
+      return sourceValue && sourceValue.length > 0;
+    });
+
+    if (dataRows.length === 0) {
+      setPersonalization((prev) => ({
+        ...prev,
+        error: 'Нет данных для персонализации в выбранной колонке',
+      }));
+      return;
+    }
+
+    if (!personalization.prompt.trim()) {
+      setPersonalization((prev) => ({
+        ...prev,
+        error: 'Введите промпт для генерации',
+      }));
+      return;
+    }
+
+    personalizationAbortRef.current = new AbortController();
+
+    setPersonalization((prev) => ({
+      ...prev,
+      isGenerating: true,
+      progress: 0,
+      totalRows: dataRows.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Персонализация');
+
+    const newColIndex = activeTab.data[0].length;
+    const newHeaderName = `Персонализация (${headerLabels[personalization.sourceCol] || toColumnLabel(personalization.sourceCol)})`;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      if (rowIndex === 0) {
+        return [...row, newHeaderName];
+      }
+      return [...row, ''];
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    setHighlightedCol(newColIndex);
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedCol(null);
+    }, PERSONALIZATION_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => {
+        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
+      });
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+    const batchSize = PERSONALIZATION_BATCH_SIZE;
+    const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
+
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const sourceValue = activeTab.data[i][personalization.sourceCol]?.trim();
+      if (sourceValue && sourceValue.length > 0) {
+        rowsToProcess.push({ rowIndex: i, sourceValue });
+      }
+    }
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += batchSize) {
+        if (personalizationAbortRef.current?.signal.aborted) {
+          throw new Error('Отменено пользователем');
+        }
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + batchSize);
+        
+        const results = await Promise.all(
+          batch.map(async ({ rowIndex, sourceValue }) => {
+            try {
+              const proposal = await generatePersonalizedProposals(
+                sourceValue,
+                personalization.prompt,
+              );
+              return { rowIndex, proposal, error: null };
+            } catch (err) {
+              if (err instanceof Error && err.name === 'AbortError') {
+                throw err;
+              }
+              return { rowIndex, proposal: '', error: err instanceof Error ? err.message : 'Ошибка' };
+            }
+          }),
+        );
+
+        // Подсчитываем ошибки
+        for (const result of results) {
+          if (result.error) errorCount++;
+        }
+
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.map((row, idx) => {
+              const result = results.find((r) => r.rowIndex === idx);
+              if (!result) return row;
+              const newRow = [...row];
+              while (newRow.length <= newColIndex) {
+                newRow.push('');
+              }
+              newRow[newColIndex] = result.error
+                ? `[Ошибка: ${result.error}]`
+                : result.proposal;
+              return newRow;
+            });
+            return { ...tab, data: nextData };
+          }),
+        );
+
+        processedCount += batch.length;
+
+        setPersonalization((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+
+        if (batchStart + batchSize < rowsToProcess.length) {
+          await sleep(700);
+        }
+      }
+
+      const successCount = processedCount - errorCount;
+
+      setLastAction({
+        message: errorCount > 0 
+          ? `Персонализация: ${successCount} успешно, ${errorCount} с ошибками`
+          : `Персонализация завершена: ${processedCount} строк`,
+        time: Date.now(),
+      });
+
+      setPersonalization((prev) => ({
+        ...prev,
+        isGenerating: false,
+        isOpen: false,
+      }));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({
+          message: `Персонализация отменена (обработано: ${processedCount})`,
+          time: Date.now(),
+        });
+        setPersonalization((prev) => ({
+          ...prev,
+          isGenerating: false,
+          isOpen: false,
+        }));
+      } else {
+        setPersonalization((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isGenerating: false,
+        }));
+      }
+    } finally {
+      personalizationAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
     }
   }, [someVisibleSelected]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(WRAP_STORAGE_KEY);
+      if (stored !== null) {
+        setWrapCells(stored === 'true');
+      }
+    } catch (error) {
+      console.error('Не удалось загрузить настройку переноса строк:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(WRAP_STORAGE_KEY, String(wrapCells));
+    } catch (error) {
+      console.error('Не удалось сохранить настройку переноса строк:', error);
+    }
+  }, [wrapCells]);
 
   useEffect(() => {
     if (!activeTab || colCount === 0) {
@@ -1276,188 +1898,346 @@ export function DatabaseSpreadsheet() {
     setSelectedRows(new Set());
   }, [rowCount]);
 
+  useEffect(() => {
+    let isMounted = true;
+    const applySession = (session: { user: { id: string } } | null) => {
+      if (!isMounted) return;
+      const userId = session?.user?.id ?? null;
+      setUserId(userId);
+      setStorageKey(buildStorageKey(userId));
+    };
+
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      applySession(session);
+    })();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
+      applySession(session);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription?.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!storageKey) return;
+    let isMounted = true;
+    setIsHydrated(false);
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    const applyState = (state: PersistedSpreadsheetState | null) => {
+      if (!isMounted) return;
+      if (state) {
+        setTabs(state.tabs);
+        setActiveTabId(state.activeTabId);
+        setTabCounter(state.tabCounter);
+        setColumnWidths(state.columnWidths ?? []);
+      } else {
+        const fallbackTab = createSheet('Вкладка 1');
+        setTabs([fallbackTab]);
+        setActiveTabId(fallbackTab.id);
+        setTabCounter(1);
+        setColumnWidths([]);
+      }
+      setIsHydrated(true);
+    };
+
+    const localState = readPersistedState(window.localStorage.getItem(storageKey));
+
+    if (!userId) {
+      applyState(localState);
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    void (async () => {
+      let remoteState: PersistedSpreadsheetState | null = null;
+      try {
+        const { data, error } = await supabase
+          .from('database_spreadsheet_states')
+          .select('state')
+          .eq('user_id', userId)
+          .limit(1);
+        if (!error && data?.[0]?.state) {
+          remoteState = readPersistedState(data[0].state);
+        }
+      } catch (error) {
+        console.error('Не удалось загрузить таблицу из Supabase:', error);
+      }
+
+      const nextState = remoteState ?? localState;
+      if (nextState) {
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify(nextState));
+        } catch (error) {
+          console.error('Не удалось обновить локальное сохранение:', error);
+        }
+      }
+      applyState(nextState);
+
+      if (!remoteState && localState) {
+        try {
+          await supabase.from('database_spreadsheet_states').upsert({
+            user_id: userId,
+            state: localState,
+            updated_at: new Date().toISOString(),
+          });
+        } catch (error) {
+          console.error('Не удалось сохранить таблицу в Supabase:', error);
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [storageKey, userId]);
+
+  useEffect(() => {
+    if (tabs.length === 0) return;
+    if (tabs.some((tab) => tab.id === activeTabId)) return;
+    setActiveTabId(tabs[0].id);
+  }, [tabs, activeTabId]);
+
+  useEffect(() => {
+    if (!storageKey || !isHydrated) return;
+    const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
+    const payload: PersistedSpreadsheetState = {
+      version: STORAGE_VERSION,
+      tabs,
+      activeTabId: safeActiveTabId,
+      tabCounter: deriveTabCounter(tabs, tabCounter),
+      columnWidths,
+    };
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    const userIdSnapshot = userId;
+    const storageKeySnapshot = storageKey;
+    saveTimeoutRef.current = setTimeout(() => {
+      try {
+        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+      } catch (error) {
+        console.error('Не удалось сохранить таблицу:', error);
+      }
+      if (!userIdSnapshot) return;
+      void supabase
+        .from('database_spreadsheet_states')
+        .upsert({
+          user_id: userIdSnapshot,
+          state: payload,
+          updated_at: new Date().toISOString(),
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('Не удалось сохранить таблицу в Supabase:', error);
+          }
+        });
+    }, STORAGE_SAVE_DELAY);
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+    };
+  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Работа с базами</h1>
-          <p className="text-sm text-gray-500">
-            Табличный редактор с вкладками и копированием. Ctrl/Cmd+C/V.
+    <div className="space-y-6">
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between border-b border-gray-100 pb-6">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Работа с базами</h1>
+          <p className="text-sm text-gray-500 max-w-2xl">
+            Табличный редактор. Поддерживает Ctrl/Cmd+C/V и Ctrl/Cmd+Z.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => importInputRef.current?.click()}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
-          >
-            Импорт
-          </button>
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".csv,.xlsx,.xls"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              void handleImportFile(file);
-              event.currentTarget.value = '';
-            }}
-          />
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
-          >
-            CSV
-          </button>
-          <button
-            type="button"
-            onClick={handleExportXlsx}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
-          >
-            Excel
-          </button>
-          <div className="flex flex-col gap-1">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-              <input
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Напр.: коллегия, маркетинг"
-                className="w-72 rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-9 text-sm text-gray-700 outline-none transition focus:border-blue-500"
-              />
-              {searchQuery.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-                  aria-label="Очистить поиск"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-            <span className="text-[11px] text-gray-500">
-              Ищет по всем колонкам, данные не удаляются. Можно несколько слов через запятую.
-            </span>
-          </div>
-          <label className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-2 py-2 text-xs text-gray-600">
-            <input
-              type="checkbox"
-              checked={searchOnlyMatches}
-              onChange={(event) => setSearchOnlyMatches(event.target.checked)}
-              className="h-3.5 w-3.5"
-            />
-            Скрывать все, кроме совпадений
-            <HelpTip text="Если включено, останутся только строки, где найдено слово из поиска." />
-          </label>
+        
+        <div className="flex flex-wrap items-center gap-3">
           {selectedRows.size > 0 && (
             <button
               type="button"
               onClick={confirmRemoveSelectedRows}
-              className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
+              className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
             >
-              Удалить выбранные ({selectedRows.size})
+              Удалить ({selectedRows.size})
             </button>
           )}
-        </div>
-      </div>
-      {importStatus.status !== 'idle' && (
-        <div className="rounded-xl border border-gray-200 bg-white px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
-            <span>
-              {formatProgressLabel(importStatus)}
-              {importStatus.filename ? `: ${importStatus.filename}` : ''}
-            </span>
-            <span>{importStatus.progress}%</span>
-          </div>
-          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200">
-            <div
-              className={`h-full transition-all ${
-                importStatus.status === 'error' ? 'bg-red-500' : 'bg-blue-600'
-              }`}
-              style={{ width: `${importStatus.progress}%` }}
-            />
-          </div>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2">
-        {tabs.map((tab) => {
-          const isActive = tab.id === activeTabId;
-          const isEditing = editingTabId === tab.id;
-          return (
+          
+          <div className="flex items-center rounded-lg bg-gray-100 p-1">
             <button
-              key={tab.id}
               type="button"
-              onClick={() => setActiveTabId(tab.id)}
-              className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition ${
-                isActive
-                  ? 'bg-gray-900 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
+              onClick={() => importInputRef.current?.click()}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
             >
-              {isEditing ? (
-                <input
-                  value={editingTabName}
-                  onChange={(event) => setEditingTabName(event.target.value)}
-                  onBlur={commitTabName}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      commitTabName();
-                    }
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      cancelTabEdit();
-                    }
-                  }}
-                  onClick={(event) => event.stopPropagation()}
-                  className="w-32 rounded-full border border-gray-300 bg-white px-3 py-1 text-sm text-gray-800 outline-none focus:border-blue-500"
-                  autoFocus
-                />
-              ) : (
-                <span
-                  onDoubleClick={(event) => {
-                    event.stopPropagation();
-                    startEditingTab(tab);
-                  }}
-                >
-                  {tab.name}
-                </span>
-              )}
-              {tabs.length > 1 && !isEditing && (
-                <span
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleRemoveTab(tab.id);
-                  }}
-                  className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${
-                    isActive ? 'bg-white/20 text-white' : 'bg-gray-300 text-gray-600'
-                  }`}
-                >
-                  ×
-                </span>
-              )}
+              Импорт
             </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={handleAddTab}
-          className="inline-flex items-center gap-2 rounded-full border border-dashed border-gray-300 px-4 py-2 text-sm font-medium text-gray-600 transition hover:border-gray-400 hover:text-gray-700"
-        >
-          <Plus className="h-4 w-4" />
-          Новая вкладка
-        </button>
+            <div className="h-4 w-px bg-gray-300 mx-1" />
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
+            >
+              CSV
+            </button>
+            <button
+              type="button"
+              onClick={handleExportXlsx}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
+            >
+              Excel
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={openPersonalizationModal}
+            disabled={colCount === 0}
+            className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300"
+          >
+            <span>Персонализация</span>
+          </button>
+        </div>
       </div>
+
+      <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center justify-between bg-white rounded-xl p-4 border border-gray-200">
+        <div className="flex items-center gap-2 flex-1 w-full lg:w-auto">
+          <div className="relative flex-1 lg:max-w-md">
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Поиск по всем колонкам..."
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 px-3 text-sm text-gray-900 outline-none transition focus:border-gray-400 focus:bg-white placeholder:text-gray-400"
+            />
+            {searchQuery.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 text-lg leading-none"
+                aria-label="Очистить поиск"
+              >
+                &times;
+              </button>
+            )}
+          </div>
+          
+          <label className="flex items-center gap-2 cursor-pointer select-none rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 transition-all">
+            <input
+              type="checkbox"
+              checked={searchOnlyMatches}
+              onChange={(event) => setSearchOnlyMatches(event.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span>Только совпадения</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => setWrapCells((prev) => !prev)}
+            aria-pressed={wrapCells}
+            className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+              wrapCells
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            Перенос строк: {wrapCells ? 'вкл' : 'выкл'}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 overflow-x-auto max-w-full pb-1 lg:pb-0">
+          {tabs.map((tab) => {
+            const isActive = tab.id === activeTabId;
+            const isEditing = editingTabId === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTabId(tab.id)}
+                className={`group flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all whitespace-nowrap ${
+                  isActive
+                    ? 'bg-gray-100 text-gray-900'
+                    : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'
+                }`}
+              >
+                {isEditing ? (
+                  <input
+                    value={editingTabName}
+                    onChange={(event) => setEditingTabName(event.target.value)}
+                    onBlur={commitTabName}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        commitTabName();
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        cancelTabEdit();
+                      }
+                    }}
+                    onClick={(event) => event.stopPropagation()}
+                    className="w-24 bg-transparent border-b border-blue-500 text-gray-900 outline-none p-0"
+                    autoFocus
+                  />
+                ) : (
+                  <span
+                    onDoubleClick={(event) => {
+                      event.stopPropagation();
+                      startEditingTab(tab);
+                    }}
+                  >
+                    {tab.name}
+                  </span>
+                )}
+                {tabs.length > 1 && !isEditing && (
+                  <span
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleRemoveTab(tab.id);
+                    }}
+                    className="flex h-4 w-4 items-center justify-center rounded-full text-base leading-none opacity-0 group-hover:opacity-100 transition-opacity hover:bg-gray-200 hover:text-red-600"
+                  >
+                    &times;
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={handleAddTab}
+            className="flex items-center justify-center h-9 w-9 rounded-lg border border-dashed border-gray-300 text-gray-400 hover:border-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
+            title="Новая вкладка"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".csv,.xlsx,.xls"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          void handleImportFile(file);
+          event.currentTarget.value = '';
+        }}
+      />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="rounded-xl border border-gray-200 bg-white">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
           <div
-            className="overflow-auto"
+            ref={tableWrapperRef}
+            className="overflow-auto max-h-[calc(100vh-300px)]"
             onKeyDownCapture={handleGridKeyDown}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -1468,27 +2248,18 @@ export function DatabaseSpreadsheet() {
             <table className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
-                  <th className="sticky left-0 z-10 border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-500">
-                    <div className="flex items-center gap-2">
-                      <input
-                        ref={selectAllRef}
-                        type="checkbox"
-                        checked={allVisibleSelected}
-                        onChange={toggleSelectAllVisible}
-                        onClick={(event) => event.stopPropagation()}
-                        className="h-3.5 w-3.5"
-                      />
-                      <span>#</span>
+                  <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-2 py-2 text-xs font-semibold text-gray-500 w-10 min-w-[40px]">
+                    <div className="flex items-center justify-center h-full">
+                      <span className="text-[10px] text-gray-400">#</span>
                     </div>
                   </th>
                   {Array.from({ length: colCount }, (_, colIndex) => {
                     const isFiltered = columnFilters[colIndex] !== undefined;
+                    const isHighlighted = highlightedCol === colIndex;
                     return (
                       <th
                         key={`col-${colIndex}`}
-                        onClick={(event) =>
-                          handleColumnHeaderClick(colIndex, event.ctrlKey || event.metaKey)
-                        }
+                        onClick={(event) => handleColumnHeaderClick(colIndex, event.shiftKey)}
                         onContextMenu={(event) => {
                           if (
                             !(
@@ -1502,12 +2273,14 @@ export function DatabaseSpreadsheet() {
                           openContextMenu(event, 'col');
                         }}
                         style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`relative cursor-pointer border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-500 transition ${
+                        className={`sticky top-0 z-10 relative cursor-pointer border-b border-r border-gray-200 px-2 py-2 text-xs font-semibold text-gray-700 transition select-none ${
                           selectionMode === 'col' &&
                           colIndex >= normalizedSelection.startCol &&
                           colIndex <= normalizedSelection.endCol
-                            ? 'bg-blue-200 text-blue-800'
-                            : 'hover:bg-gray-100'
+                            ? 'bg-blue-100 text-blue-900'
+                            : isHighlighted
+                              ? 'bg-purple-100 text-purple-900'
+                              : 'bg-gray-50 hover:bg-gray-100'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-1">
@@ -1515,29 +2288,27 @@ export function DatabaseSpreadsheet() {
                           <button
                             type="button"
                             onClick={(event) => openFilterMenu(event, colIndex)}
-                            className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600"
+                            className={`flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 ${isFiltered ? 'text-blue-600 font-bold' : ''}`}
                             aria-label="Фильтр колонки"
                           >
-                            <Filter
-                              className={`h-3.5 w-3.5 ${isFiltered ? 'text-blue-600' : ''}`}
-                            />
+                             ▼
                           </button>
                         </div>
                         <div
                           onMouseDown={(event) => startColumnResize(event, colIndex)}
-                          className="absolute right-0 top-0 h-full w-1 cursor-col-resize"
+                          className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-blue-400"
                         />
                       </th>
                     );
                   })}
-                  <th className="border border-gray-200 bg-gray-50 px-2 py-1">
+                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-2 py-2 w-10">
                     <button
                       type="button"
                       onClick={handleAddColumn}
-                      className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-200 hover:text-gray-700"
+                      className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
                       aria-label="Добавить колонку"
                     >
-                      <Plus className="h-4 w-4" />
+                      +
                     </button>
                   </th>
                 </tr>
@@ -1548,11 +2319,9 @@ export function DatabaseSpreadsheet() {
                   if (!isVisible) return null;
                   const isChecked = selectedRows.has(rowIndex);
                   return (
-                    <tr key={`row-${rowIndex}`}>
+                    <tr key={`row-${rowIndex}`} className="group">
                       <th
-                        onClick={(event) =>
-                          handleRowHeaderClick(rowIndex, event.ctrlKey || event.metaKey)
-                        }
+                        onClick={(event) => handleRowHeaderClick(rowIndex, event.shiftKey)}
                         onContextMenu={(event) => {
                           if (
                             !(
@@ -1565,25 +2334,18 @@ export function DatabaseSpreadsheet() {
                           }
                           openContextMenu(event, 'row');
                         }}
-                        className={`sticky left-0 z-10 cursor-pointer border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-semibold text-gray-500 transition ${
+                        className={`sticky left-0 z-10 cursor-pointer border-b border-r border-gray-200 px-2 py-2 text-xs font-medium transition-colors select-none ${
                           selectionMode === 'row' &&
                           rowIndex >= normalizedSelection.startRow &&
                           rowIndex <= normalizedSelection.endRow
-                            ? 'bg-blue-200 text-blue-800'
-                            : 'hover:bg-gray-100'
+                            ? 'bg-blue-100 text-blue-900'
+                            : isChecked 
+                              ? 'bg-blue-50 text-blue-800'
+                              : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
                         }`}
                       >
-                        <div className="flex items-center gap-2">
-                          {rowIndex > 0 && (
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => toggleRowSelection(rowIndex)}
-                              onClick={(event) => event.stopPropagation()}
-                              className="h-3.5 w-3.5"
-                            />
-                          )}
-                          <span>{rowIndex + 1}</span>
+                        <div className="flex items-center justify-center gap-1.5 h-full">
+                          <span className="min-w-[1.5rem] text-center">{rowIndex + 1}</span>
                         </div>
                       </th>
                       {row.map((value, colIndex) => {
@@ -1599,6 +2361,14 @@ export function DatabaseSpreadsheet() {
                           searchTerms.some((term) =>
                             normalizeText(value, normalizeOptions).includes(term),
                           );
+                        const isHighlighted = highlightedCol === colIndex;
+                        const cellBackground = isSelected
+                          ? 'bg-blue-50 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.6)]'
+                          : cellMatchesSearch
+                            ? 'bg-amber-50'
+                            : isHighlighted
+                              ? 'bg-purple-50'
+                              : 'bg-white';
 
                         return (
                           <td
@@ -1643,58 +2413,72 @@ export function DatabaseSpreadsheet() {
                               width: getColumnWidth(colIndex),
                               minWidth: getColumnWidth(colIndex),
                             }}
-                            className={`border border-gray-100 p-0 ${
-                              isSelected
-                                ? 'bg-blue-100 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.6)]'
-                                : cellMatchesSearch
-                                  ? 'bg-amber-50'
-                                  : 'bg-white'
-                            }`}
+                            className={`border-b border-r border-gray-100 p-0 align-top ${cellBackground}`}
                           >
-                            <input
-                              value={value}
-                              onChange={(event) =>
-                                handleValueChange(rowIndex, colIndex, event.target.value)
-                              }
-                              onFocus={() => handleCellFocus(rowIndex, colIndex)}
-                              onKeyDown={handleKeyDown}
-                              onPaste={handlePaste}
-                              className={`h-9 w-full bg-transparent px-2 text-sm text-gray-800 outline-none ${
-                                isActive
-                                  ? 'ring-2 ring-blue-500 ring-inset'
-                                  : cellMatchesSearch
-                                    ? 'ring-1 ring-amber-300 ring-inset'
-                                    : ''
+                            {isActive ? (
+                              <textarea
+                                value={value}
+                                onChange={(event) => {
+                                  handleValueChange(rowIndex, colIndex, event.target.value);
+                                  event.target.style.height = 'auto';
+                                  event.target.style.height = `${event.target.scrollHeight}px`;
+                                }}
+                                onFocus={(e) => {
+                                  handleCellFocus(rowIndex, colIndex);
+                                  e.target.style.height = 'auto';
+                                  e.target.style.height = `${e.target.scrollHeight}px`;
+                                }}
+                                onKeyDown={handleKeyDown}
+                                onPaste={handlePaste}
+                                rows={1}
+                              wrap={wrapCells ? 'soft' : 'off'}
+                                autoFocus
+                              className={`w-full bg-transparent px-2 py-2 text-sm text-gray-900 outline-none resize-none min-h-[40px] leading-normal ring-2 ring-blue-500 ring-inset z-10 relative ${
+                                wrapCells
+                                  ? 'whitespace-pre-wrap break-words overflow-hidden'
+                                  : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
                               }`}
-                            />
+                              />
+                            ) : (
+                              <div
+                                className={`w-full h-full min-h-[40px] px-2 py-2 text-sm text-gray-900 leading-normal ${
+                                  wrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
+                                } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
+                                title={!wrapCells ? value : undefined}
+                              >
+                                {value}
+                              </div>
+                            )}
                           </td>
                         );
                       })}
-                      <td className="border border-gray-100 bg-gray-50" />
+                      <td className="border-b border-gray-100 bg-gray-50" />
                     </tr>
                   );
                 })}
                 {rowCount > 0 && (
                   <tr>
-                    <th className="sticky left-0 z-10 border border-gray-200 bg-gray-50 px-2 py-1">
-                      <button
-                        type="button"
-                        onClick={handleAddRow}
-                        className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-200 hover:text-gray-700"
-                        aria-label="Добавить строку"
-                      >
-                        <Plus className="h-4 w-4" />
-                      </button>
+                    <th className="sticky left-0 z-10 border-r border-gray-200 bg-gray-50 px-2 py-2">
+                      <div className="flex items-center justify-center h-full">
+                        <button
+                          type="button"
+                          onClick={handleAddRow}
+                          className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                          aria-label="Добавить строку"
+                        >
+                          +
+                        </button>
+                      </div>
                     </th>
                     {Array.from({ length: colCount }, (_, colIndex) => (
-                      <td key={`add-row-${colIndex}`} className="border border-gray-100 bg-gray-50" />
+                      <td key={`add-row-${colIndex}`} className="border-b border-r border-gray-100 bg-gray-50" />
                     ))}
-                    <td className="border border-gray-100 bg-gray-50" />
+                    <td className="border-b border-gray-100 bg-gray-50" />
                   </tr>
                 )}
                 {rowCount === 0 && (
                   <tr>
-                    <td className="px-4 py-6 text-center text-sm text-gray-500" colSpan={colCount + 2}>
+                    <td className="px-4 py-8 text-center text-sm text-gray-500" colSpan={colCount + 2}>
                       Таблица пуста. Добавьте строки или вкладку.
                     </td>
                   </tr>
@@ -1703,12 +2487,13 @@ export function DatabaseSpreadsheet() {
             </table>
           </div>
         </div>
-        <aside className="rounded-xl border border-gray-200 bg-white p-4">
-          <div className="flex items-center gap-2 rounded-lg bg-gray-100 p-1 text-xs">
+
+        <aside className="rounded-xl border border-gray-200 bg-white p-4 h-fit">
+          <div className="flex items-center gap-2 rounded-lg bg-gray-50 p-1 text-xs mb-4">
             <button
               type="button"
               onClick={() => setRightPanelTab('summary')}
-              className={`flex-1 rounded-md px-3 py-2 font-medium transition ${
+              className={`flex-1 rounded-md px-3 py-2 font-medium transition-all ${
                 rightPanelTab === 'summary'
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -1719,7 +2504,7 @@ export function DatabaseSpreadsheet() {
             <button
               type="button"
               onClick={() => setRightPanelTab('cleanup')}
-              className={`flex-1 rounded-md px-3 py-2 font-medium transition ${
+              className={`flex-1 rounded-md px-3 py-2 font-medium transition-all ${
                 rightPanelTab === 'cleanup'
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -1729,30 +2514,30 @@ export function DatabaseSpreadsheet() {
             </button>
           </div>
           {rightPanelTab === 'summary' ? (
-            <div className="mt-4">
+            <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">Сводка по компаниям</h3>
+                <h3 className="text-sm font-semibold text-gray-900">Сводка по компаниям</h3>
                 {groupByCol !== null && columnFilters[groupByCol] && (
                   <button
                     type="button"
                     onClick={() => resetFilter(groupByCol)}
-                    className="text-xs text-blue-600 hover:text-blue-700"
+                    className="text-xs font-medium text-blue-600 hover:text-blue-700"
                   >
-                    Сбросить фильтр
+                    Сбросить
                   </button>
                 )}
               </div>
               {colCount === 0 ? (
-                <div className="mt-3 rounded-md border border-dashed border-gray-200 p-3 text-center text-xs text-gray-400">
+                <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-6 text-center text-xs text-gray-400">
                   Нет колонок для группировки
                 </div>
               ) : (
                 <>
-                  <div className="mt-3 space-y-2">
+                  <div className="space-y-2">
                     <select
                       value={groupByCol ?? ''}
                       onChange={(event) => setGroupByCol(Number(event.target.value))}
-                      className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-700"
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 outline-none focus:border-gray-400 transition-all"
                     >
                       {headerLabels.map((label, index) => (
                         <option key={`group-col-${index}`} value={index}>
@@ -1763,17 +2548,17 @@ export function DatabaseSpreadsheet() {
                     <input
                       value={groupSearch}
                       onChange={(event) => setGroupSearch(event.target.value)}
-                      placeholder="Поиск по компании..."
-                      className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-700 outline-none focus:border-blue-500"
+                      placeholder="Поиск..."
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 outline-none focus:border-gray-400 transition-all"
                     />
                   </div>
-                  <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-semibold text-gray-400 tracking-wider px-1">
                     <span>Всего: {groupSummary.length}</span>
                     <span>Строк: {visibleRowIndices.length}</span>
                   </div>
-                  <div className="mt-3 max-h-[360px] space-y-1 overflow-auto">
+                  <div className="max-h-[360px] space-y-1 overflow-auto pr-1">
                     {filteredGroupSummary.length === 0 && (
-                      <div className="rounded-md border border-dashed border-gray-200 p-3 text-center text-xs text-gray-400">
+                      <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-center text-xs text-gray-400">
                         Нет данных
                       </div>
                     )}
@@ -1786,14 +2571,14 @@ export function DatabaseSpreadsheet() {
                           key={`group-${item.key}`}
                           type="button"
                           onClick={() => applyGroupFilter(item.key)}
-                          className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-xs ${
+                          className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-xs transition-all ${
                             isActive
-                              ? 'bg-blue-100 text-blue-800'
-                              : 'text-gray-700 hover:bg-gray-50'
+                              ? 'bg-gray-100 text-gray-900 font-medium'
+                              : 'text-gray-600 hover:bg-gray-50'
                           }`}
                         >
-                          <span className="truncate">{item.label}</span>
-                          <span className="ml-2 text-[10px] text-gray-500">{item.count}</span>
+                          <span className="truncate mr-2">{item.label}</span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white text-gray-900 border border-gray-200' : 'bg-gray-100 text-gray-500'}`}>{item.count}</span>
                         </button>
                       );
                     })}
@@ -1802,107 +2587,116 @@ export function DatabaseSpreadsheet() {
               )}
             </div>
           ) : (
-            <div className="mt-4 space-y-4 text-xs text-gray-600">
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-                Здесь действия могут менять таблицу: удаление дублей и нормализация.
-                Последнее действие можно отменить.
+            <div className="space-y-6 text-xs text-gray-600">
+              <div className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-amber-800 leading-relaxed">
+                Действия ниже необратимы для данных (кроме отмены последнего шага).
               </div>
+              
               {lastAction && (
-                <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] text-blue-800">
-                  <div className="flex items-center justify-between gap-2">
-                    <span>
-                      {lastAction.message} · {formatTime(lastAction.time)}
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                  <div className="flex flex-col gap-2">
+                    <span className="text-blue-900 font-medium">
+                      {lastAction.message}
                     </span>
-                    {lastUndo && (
-                      <button
-                        type="button"
-                        onClick={handleUndo}
-                        className="rounded border border-blue-200 bg-white px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100"
-                      >
-                        Отменить
-                      </button>
-                    )}
+                    <div className="flex items-center justify-between">
+                        <span className="text-blue-400 text-[10px]">{formatTime(lastAction.time)}</span>
+                        {lastUndo && (
+                        <button
+                            type="button"
+                            onClick={handleUndo}
+                            className="rounded bg-white px-2 py-1 text-[10px] font-semibold text-blue-700 shadow-sm border border-blue-100 hover:bg-blue-50 transition-colors"
+                        >
+                            Отменить
+                        </button>
+                        )}
+                    </div>
                   </div>
                 </div>
               )}
-              <div>
-                <div className="flex items-center gap-1 text-[11px] font-semibold uppercase text-gray-400">
-                  <span>Дубликаты</span>
-                  <HelpTip text="Удаление лишних строк: полные совпадения или совпадения с разными e-mail." />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-900">Дубликаты</span>
                 </div>
-                <div className="mt-2 flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleRemoveDuplicates}
-                      className="flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50"
-                    >
-                      Убрать дубликаты
-                    </button>
-                    <HelpTip text="Удаляет полностью одинаковые строки. Если строки совпадают по всем колонкам — остаётся одна." />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleRemoveDuplicatesByEmail}
-                      className="flex-1 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 transition hover:bg-blue-100"
-                    >
-                      По почте
-                    </button>
-                    <HelpTip text="Сначала удаляет дубликаты по e-mail (оставляет строку с большим числом заполненных ячеек), затем удаляет строки, совпадающие во всём, кроме почтовых колонок." />
-                  </div>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleRemoveDuplicates}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
+                  >
+                    Убрать полные дубликаты
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRemoveDuplicatesByEmail}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
+                  >
+                    Убрать дубликаты по Email
+                  </button>
                 </div>
               </div>
-              <div>
-                <div className="flex items-center gap-1 text-[11px] font-semibold uppercase text-gray-400">
-                  <span>Нормализация</span>
-                  <HelpTip text="Упрощает поиск: регистр, пробелы, эмодзи. Можно применить к данным." />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-900">Очистка</span>
                 </div>
-                <div className="mt-2 flex flex-col gap-2">
-                  <label className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <input
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleRemoveEmptyRows}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
+                  >
+                    Удалить пустые строки
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRemoveEmptyColumns}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
+                  >
+                    Удалить пустые колонки
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-900">Нормализация</span>
+                </div>
+                <div className="space-y-2 rounded-lg border border-gray-100 bg-gray-50 p-3">
+                  <label className="flex cursor-pointer items-center justify-between group">
+                    <span className="text-gray-600 group-hover:text-gray-900 transition-colors">Нижний регистр</span>
+                    <input
                         type="checkbox"
                         checked={normalizeLowercase}
                         onChange={(event) => setNormalizeLowercase(event.target.checked)}
-                        className="h-3.5 w-3.5"
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
-                      Нижний регистр
-                    </span>
-                    <HelpTip text="Приводит текст к нижнему регистру (для поиска и нормализации)." />
                   </label>
-                  <label className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <input
+                  <label className="flex cursor-pointer items-center justify-between group">
+                    <span className="text-gray-600 group-hover:text-gray-900 transition-colors">Убрать лишние пробелы</span>
+                    <input
                         type="checkbox"
                         checked={normalizeSpaces}
                         onChange={(event) => setNormalizeSpaces(event.target.checked)}
-                        className="h-3.5 w-3.5"
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
-                      Удалять лишние пробелы
-                    </span>
-                    <HelpTip text="Схлопывает повторяющиеся пробелы и удаляет пробелы по краям." />
                   </label>
-                  <label className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <input
+                  <label className="flex cursor-pointer items-center justify-between group">
+                    <span className="text-gray-600 group-hover:text-gray-900 transition-colors">Убрать эмодзи</span>
+                    <input
                         type="checkbox"
                         checked={normalizeEmoji}
                         onChange={(event) => setNormalizeEmoji(event.target.checked)}
-                        className="h-3.5 w-3.5"
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                       />
-                      Убирать эмодзи
-                    </span>
-                    <HelpTip text="Удаляет эмодзи из текста для более точного поиска." />
                   </label>
                   <button
                     type="button"
                     onClick={applyNormalizationToData}
-                    className="mt-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    className="mt-2 w-full rounded-md bg-white border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 hover:border-gray-300 transition-all"
                   >
-                    Применить к данным
+                    Применить
                   </button>
-                  <HelpTip text="Изменяет значения ячеек навсегда. Можно отменить последним действием." />
                 </div>
               </div>
             </div>
@@ -1911,12 +2705,12 @@ export function DatabaseSpreadsheet() {
       </div>
       {filterMenu && (
         <div
-          className="fixed z-50 w-72 rounded-lg border border-gray-200 bg-white shadow-lg"
+          className="fixed z-50 w-72 rounded-lg border border-gray-200 bg-white shadow-xl"
           style={{ top: filterMenu.y, left: filterMenu.x }}
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
-          <div className="border-b border-gray-100 px-3 py-2 text-xs font-semibold text-gray-500">
+          <div className="border-b border-gray-100 px-3 py-2 text-xs font-semibold text-gray-500 bg-gray-50 rounded-t-lg">
             Фильтр {toColumnLabel(filterMenu.col)}
           </div>
           <div className="px-3 pt-2">
@@ -1928,7 +2722,7 @@ export function DatabaseSpreadsheet() {
                 )
               }
               placeholder="Поиск значения..."
-              className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-700 outline-none focus:border-blue-500"
+              className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-xs text-gray-700 outline-none focus:border-gray-400"
             />
           </div>
           <div className="flex items-center justify-between px-3 py-2 text-[11px] text-gray-500">
@@ -1939,14 +2733,14 @@ export function DatabaseSpreadsheet() {
               <button
                 type="button"
                 onClick={() => resetFilter(filterMenu.col)}
-                className="text-gray-600 hover:text-gray-800"
+                className="text-gray-600 hover:text-gray-900"
               >
                 Сбросить
               </button>
               <button
                 type="button"
                 onClick={() => clearFilter(filterMenu.col)}
-                className="text-gray-600 hover:text-gray-800"
+                className="text-gray-600 hover:text-gray-900"
               >
                 Очистить
               </button>
@@ -1965,7 +2759,7 @@ export function DatabaseSpreadsheet() {
                   type="checkbox"
                   checked={selectedFilterKeys.has(option.key)}
                   onChange={() => toggleFilterOption(filterMenu.col, option.key, filterMenu.options)}
-                  className="h-3.5 w-3.5"
+                  className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                 />
                 <span className="truncate">{option.label}</span>
               </label>
@@ -1980,21 +2774,21 @@ export function DatabaseSpreadsheet() {
       )}
       {confirmState && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
-          <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-4 shadow-xl">
-            <h4 className="text-sm font-semibold text-gray-900">{confirmState.title}</h4>
+          <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 shadow-2xl">
+            <h4 className="text-base font-semibold text-gray-900">{confirmState.title}</h4>
             <p className="mt-2 text-sm text-gray-600">{confirmState.message}</p>
-            <div className="mt-4 flex items-center justify-end gap-2">
+            <div className="mt-6 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={handleCancelConfirm}
-                className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
               >
                 Отмена
               </button>
               <button
                 type="button"
                 onClick={handleConfirm}
-                className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors shadow-sm"
               >
                 {confirmState.confirmLabel}
               </button>
@@ -2004,7 +2798,7 @@ export function DatabaseSpreadsheet() {
       )}
       {contextMenu && (
         <div
-          className="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+          className="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white py-1 shadow-xl"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
@@ -2015,7 +2809,7 @@ export function DatabaseSpreadsheet() {
               void copySelection();
               setContextMenu(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+            className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors"
           >
             Копировать
           </button>
@@ -2025,10 +2819,151 @@ export function DatabaseSpreadsheet() {
               confirmDeleteSelection();
               setContextMenu(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+            className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 transition-colors"
           >
             Удалить
           </button>
+        </div>
+      )}
+      {personalization.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-900 text-white shadow-sm font-bold">
+                  AI
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Персонализация</h3>
+                  <p className="text-xs text-gray-500 font-medium">Генерация предложений на основе данных</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closePersonalizationModal}
+                disabled={personalization.isGenerating}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-6 px-6 py-6">
+              {personalization.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {personalization.error}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Столбец с данными
+                </label>
+                <div className="relative">
+                  <select
+                    value={personalization.sourceCol}
+                    onChange={(e) =>
+                      setPersonalization((prev) => ({
+                        ...prev,
+                        sourceCol: Number(e.target.value),
+                        error: null,
+                      }))
+                    }
+                    disabled={personalization.isGenerating}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={`pers-col-${index}`} value={index}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                    ▼
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 px-1">
+                  Источник данных: вакансии, описание компании или сфера деятельности
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Промпт для генерации
+                </label>
+                <div className="relative">
+                  <textarea
+                    value={personalization.prompt}
+                    onChange={(e) =>
+                      setPersonalization((prev) => ({
+                        ...prev,
+                        prompt: e.target.value,
+                        error: null,
+                      }))
+                    }
+                    disabled={personalization.isGenerating}
+                    placeholder="Например: Напиши короткое предложение о том, как наши услуги помогут компании..."
+                    rows={4}
+                    className="w-full resize-none rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-all placeholder:text-gray-400 focus:border-gray-400 disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              {personalization.isGenerating && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Генерация...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {personalization.currentRow} / {personalization.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-gray-900 transition-all duration-300 ease-out"
+                      style={{ width: `${personalization.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                Будет обработано: <span className="text-gray-900">{visibleRowIndices.length} строк</span>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closePersonalizationModal}
+                  disabled={personalization.isGenerating}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                >
+                  {personalization.isGenerating ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartPersonalization()}
+                  disabled={personalization.isGenerating || !personalization.prompt.trim()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-gray-900/20 transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {personalization.isGenerating ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Обработка...
+                    </>
+                  ) : (
+                    <>
+                      <span>AI</span>
+                      Сгенерировать
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

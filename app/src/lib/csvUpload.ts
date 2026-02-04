@@ -2,6 +2,7 @@ import Papa from 'papaparse';
 import { supabase } from '@/lib/supabaseClient';
 
 export interface Project {
+  client: string;
   name: string;
   description: string;
   region: string;
@@ -9,6 +10,7 @@ export interface Project {
   payment_method: string;
   work_format: string;
   budget: string;
+  margin: string;
   contract_date: string;
   launch_date: string;
   deadline: string;
@@ -83,6 +85,7 @@ export async function uploadCSV(file: File) {
             // But let's stick to key mapping for now.
             
             return {
+              client: getValue(row, 'Клиент') || name || '',
               name: name || '',
               description: getValue(row, 'Что за проект (краткое описание)') || '',
               region: getValue(row, 'Направление') || '',
@@ -90,17 +93,22 @@ export async function uploadCSV(file: File) {
               payment_method: getValue(row, 'Способ оплаты') || '',
               work_format: getValue(row, 'Формат работы') || '',
               budget: getValue(row, 'Сумма услуг') || '',
+              margin: getValue(row, 'Маржа') || '',
               contract_date: getValue(row, 'Дата договора') || '',
               launch_date: getValue(row, 'Дата запуска') || '',
               deadline: getValue(row, 'Дедлайн') || '',
               kpi_plan: getValue(row, 'KPI план (мес)') || '',
               kpi_fact: getValue(row, 'KPI факт') || '', // Simplified key for fuzzy match
-              status: getValue(row, 'Статус проекта') || 'New',
+              status: getValue(row, 'Статус проекта') || 'В работе',
               specialist: getValue(row, 'Спец проекта') || '',
               manager: getValue(row, 'Контролирует') || '',
               weekly_tasks: getValue(row, 'Задачи на неделю') || '',
+              hypotheses: getValue(row, 'Задачи на неделю') || '',
               comment_elvira: getValue(row, 'Комментарий от Эльвиры') || '',
-              comment_anya: getValue(row, 'Комментарий от Ани') || ''
+              comment_anya: getValue(row, 'Комментарий от Ани') || '',
+              comments: getValue(row, 'Комментарий') || getValue(row, 'Комментарии') || '',
+              contract_link: getValue(row, 'Ссылка на договор') || '',
+              handoff_link: getValue(row, 'Ссылка на передачу') || getValue(row, 'Ссылка на сообщение') || ''
             };
           }).filter(p => p.name && p.name.trim() !== ''); // Filter out empty rows
 

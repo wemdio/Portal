@@ -10,14 +10,17 @@ import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin } from '@/lib/roles';
 
 const navItems = [
-  { name: 'Проекты', href: '/', icon: FolderKanban },
-  { name: 'Команда', href: '/team', icon: Users },
-  { name: 'Инструменты', href: '/tools', icon: Wrench },
-  { name: 'Оплаты', href: '/payments', icon: CreditCard },
-  { name: 'Регламент', href: '/reglament', icon: FileText },
+  { name: 'Проекты', href: '/' },
+  { name: 'Аналитика проектов', href: '/analytics/projects' },
+  { name: 'Задачи', href: '/tasks' },
+  { name: 'Команда', href: '/team' },
+  { name: 'Финансы', href: '/finance' },
+  { name: 'Инструменты', href: '/tools' },
+  { name: 'Оплаты', href: '/payments' },
+  { name: 'Регламент', href: '/reglament' },
   { name: 'Парсеры', href: '/parsers', icon: Search },
-  { name: 'Админ', href: '/admin', icon: ShieldCheck, adminOnly: true },
-  { name: 'Настройки', href: '/settings', icon: Settings },
+  { name: 'Админ', href: '/admin', adminOnly: true },
+  { name: 'Настройки', href: '/settings' },
 ];
 
 export function Sidebar() {
@@ -79,12 +82,12 @@ export function Sidebar() {
   if (pathname === '/login') return null;
 
   return (
-    <div className="flex h-screen w-64 flex-col border-r bg-gray-900 text-white">
-      <div className="flex h-16 items-center px-6">
-        <LayoutDashboard className="h-6 w-6 text-blue-400 mr-2" />
-        <span className="text-xl font-bold">Portal</span>
+    <div className="flex h-screen w-64 flex-col border-r border-gray-200 bg-white text-gray-900">
+      <div className="flex h-16 items-center px-6 border-b border-gray-100">
+        <span className="text-lg font-bold tracking-tight">Portal</span>
       </div>
-      <nav className="flex-1 space-y-1 px-2 py-4">
+      
+      <nav className="flex-1 space-y-0.5 px-3 py-6">
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
 
@@ -93,33 +96,30 @@ export function Sidebar() {
             <Link
               key={item.name}
               href={item.href}
-              className={`group flex items-center rounded-md px-2 py-2 text-sm font-medium transition-colors
-                ${isActive ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}
+              className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
+                ${isActive 
+                  ? 'bg-gray-100 text-gray-900 font-medium' 
+                  : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'
+                }
               `}
             >
-              <item.icon className={`mr-3 h-5 w-5 ${isActive ? 'text-blue-400' : 'text-gray-400 group-hover:text-white'}`} />
               {item.name}
             </Link>
           );
         })}
       </nav>
-      <div className="p-4 border-t border-gray-800">
-        <div className="flex items-center mb-4">
-          <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-medium">
-            <UserCircle className="h-5 w-5" />
-          </div>
-          <div className="ml-3 overflow-hidden">
-            <p className="text-sm font-medium text-white truncate" title={userEmail || ''}>
-              {userEmail?.split('@')[0] || 'User'}
-            </p>
-            <p className="text-xs text-gray-400">{userRole ? ROLE_LABELS[userRole] : 'Загрузка...'}</p>
-          </div>
+
+      <div className="p-4 border-t border-gray-100">
+        <div className="mb-4 px-2">
+          <p className="text-sm font-medium text-gray-900 truncate" title={userEmail || ''}>
+            {userEmail?.split('@')[0] || 'User'}
+          </p>
+          <p className="text-xs text-gray-500 mt-0.5">{userRole ? ROLE_LABELS[userRole] : '...'}</p>
         </div>
         <button 
           onClick={handleSignOut}
-          className="flex w-full items-center rounded-md px-2 py-2 text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-white transition-colors"
+          className="flex w-full items-center rounded-md px-2 py-2 text-sm text-gray-500 hover:bg-gray-50 hover:text-red-600 transition-colors"
         >
-          <LogOut className="mr-3 h-5 w-5" />
           Выйти
         </button>
       </div>
