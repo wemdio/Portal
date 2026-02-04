@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { fetchVacancies } from '@/lib/parsers/hhParser';
+import { fetchVacancies, HHApiError } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
 
 export const dynamic = 'force-dynamic';
 
 const PARSER_TYPE = 'hh_vacancies' as const;
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+function jsonError(message: string, status: number, extra?: Record<string, unknown>) {
+  return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
 }
 
 async function getSupabase(req: NextRequest) {
@@ -109,19 +109,29 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ status: 'completed', found, parsed: uniqueVacancies.length });
   } catch (err: unknown) {
-    const message =
-      err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Unknown error');
+    let message = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Unknown error');
+    let extra: Record<string, unknown> | undefined;
+    let jobMessage = message;
+
+    if (err instanceof HHApiError) {
+      message = err.message;
+      jobMessage = err.captchaUrl ? 'HH API требует капчу' : message;
+      extra = {
+        ...(err.captchaUrl ? { captcha_url: err.captchaUrl } : {}),
+        ...(err.requestId ? { request_id: err.requestId } : {}),
+      };
+    }
 
     await supabase
       .from('parser_jobs')
       .update({
         status: 'failed',
         completed_at: new Date().toISOString(),
-        error_message: message,
+        error_message: jobMessage,
       })
       .eq('id', jobId);
 
-    return jsonError(message, 500);
+    return jsonError(message, 500, extra);
   }
 }
 

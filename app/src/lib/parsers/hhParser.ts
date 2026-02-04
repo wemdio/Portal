@@ -41,11 +41,82 @@ type HHApiVacanciesResponse = {
   items: HHApiVacancyItem[];
 };
 
+type HHApiErrorPayload = {
+  errors?: Array<{
+    value?: string;
+    type?: string;
+    captcha_url?: string;
+  }>;
+  request_id?: string;
+};
+
+export class HHApiError extends Error {
+  status: number;
+  type?: string;
+  captchaUrl?: string;
+  requestId?: string;
+
+  constructor(
+    message: string,
+    options: { status: number; type?: string; captchaUrl?: string; requestId?: string }
+  ) {
+    super(message);
+    this.name = 'HHApiError';
+    this.status = options.status;
+    this.type = options.type;
+    this.captchaUrl = options.captchaUrl;
+    this.requestId = options.requestId;
+  }
+}
+
 const HH_API_BASE = 'https://api.hh.ru';
 const FOUND_LIMIT = 2000;
+const MIN_REQUEST_INTERVAL_MS = 250;
+
+let throttleChain: Promise<void> = Promise.resolve();
+let lastRequestAt = 0;
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function safeJsonParse<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+function parseHhError(bodyText: string): { type?: string; captchaUrl?: string; requestId?: string } {
+  const payload = safeJsonParse<HHApiErrorPayload>(bodyText);
+  const entry =
+    payload?.errors?.find((item) => item.type === 'captcha_required' || item.value === 'captcha_required') ??
+    payload?.errors?.[0];
+  return {
+    type: entry?.type ?? entry?.value,
+    captchaUrl: entry?.captcha_url,
+    requestId: payload?.request_id,
+  };
+}
+
+function buildHhErrorMessage(status: number, details: { type?: string; captchaUrl?: string }, bodyText: string) {
+  if (details.type === 'captcha_required' || details.captchaUrl) {
+    return 'HH API требует капчу. Откройте ссылку ниже, решите капчу и повторите запрос.';
+  }
+  if (details.type) return `HH API error ${status}: ${details.type}`;
+  if (bodyText) return `HH API error ${status}: ${bodyText}`;
+  return `HH API error ${status}`;
+}
+
+async function throttleHhRequest() {
+  throttleChain = throttleChain.then(async () => {
+    const now = Date.now();
+    const wait = lastRequestAt + MIN_REQUEST_INTERVAL_MS - now;
+    if (wait > 0) await sleep(wait);
+    lastRequestAt = Date.now();
+  });
+  await throttleChain;
 }
 
 function toISODate(date: Date) {
@@ -118,6 +189,7 @@ export async function fetchWithRetry<T>(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
+      await throttleHhRequest();
       const res = await fetch(url, {
         headers: {
           'User-Agent': 'Portal/1.0 (HH parser)',
@@ -136,7 +208,14 @@ export async function fetchWithRetry<T>(
       const shouldRetry = res.status === 429 || (res.status >= 500 && res.status <= 599);
       if (!shouldRetry) {
         const bodyText = await res.text().catch(() => '');
-        throw new Error(`HH API error ${res.status}: ${bodyText}`);
+        const details = parseHhError(bodyText);
+        const message = buildHhErrorMessage(res.status, details, bodyText);
+        throw new HHApiError(message, {
+          status: res.status,
+          type: details.type,
+          captchaUrl: details.captchaUrl,
+          requestId: details.requestId,
+        });
       }
 
       const base = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** attempt);

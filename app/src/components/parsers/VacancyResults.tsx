@@ -1,7 +1,7 @@
 'use client';
 
 import type { HHVacancyRow } from '@/types';
-import { Download, ExternalLink, Loader2 } from 'lucide-react';
+import { Download, ExternalLink, Loader2, Copy } from 'lucide-react';
 
 type Props = {
   items: HHVacancyRow[];
@@ -9,8 +9,11 @@ type Props = {
   limit: number;
   offset: number;
   loading: boolean;
+  actionsBusy: boolean;
   onLoadMore: () => void;
   onExportCsv: () => void;
+  onExportExcel: () => void;
+  onCopy: () => void;
 };
 
 function formatSalary(v: HHVacancyRow) {
@@ -33,8 +36,23 @@ function formatDate(dateStr?: string | null) {
   }
 }
 
-export function VacancyResults({ items, count, limit, offset, loading, onLoadMore, onExportCsv }: Props) {
-  const shown = Math.min(count, offset + items.length);
+export function VacancyResults({
+  items,
+  count,
+  limit,
+  offset,
+  loading,
+  actionsBusy,
+  onLoadMore,
+  onExportCsv,
+  onExportExcel,
+  onCopy,
+}: Props) {
+  const hasItems = items.length > 0;
+  const shownFrom = hasItems ? offset + 1 : 0;
+  const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
+  const shownLabel = count ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`) : '—';
+  const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -42,17 +60,35 @@ export function VacancyResults({ items, count, limit, offset, loading, onLoadMor
         <div>
           <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
           <p className="text-sm text-gray-500">
-            {count ? `${shown} из ${count}` : '—'}
+            {shownLabel}
           </p>
         </div>
-        <button
-          onClick={onExportCsv}
-          disabled={items.length === 0}
-          className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-        >
-          <Download className="h-4 w-4 mr-2" />
-          CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onExportCsv}
+            disabled={actionsDisabled}
+            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            <Download className="h-4 w-4 mr-2" />
+            CSV
+          </button>
+          <button
+            onClick={onExportExcel}
+            disabled={actionsDisabled}
+            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            <Download className="h-4 w-4 mr-2" />
+            Excel
+          </button>
+          <button
+            onClick={onCopy}
+            disabled={actionsDisabled}
+            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            <Copy className="h-4 w-4 mr-2" />
+            Копировать
+          </button>
+        </div>
       </div>
 
       {items.length === 0 ? (
@@ -62,11 +98,11 @@ export function VacancyResults({ items, count, limit, offset, loading, onLoadMor
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Вакансия</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Компания</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Регион</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">ЗП</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">Дата</th>
+                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Вакансия</th>
+                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Компания</th>
+                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Регион</th>
+                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">ЗП</th>
+                <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-500 sticky top-0 bg-gray-50">Дата</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -77,16 +113,33 @@ export function VacancyResults({ items, count, limit, offset, loading, onLoadMor
                       href={v.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm font-medium text-blue-600 hover:underline inline-flex items-center gap-1"
+                      className="text-sm font-medium text-blue-600 hover:underline inline-flex items-start gap-1"
+                      title={v.name}
                     >
-                      {v.name}
-                      <ExternalLink className="h-3.5 w-3.5" />
+                      <span className="line-clamp-2">{v.name}</span>
+                      <ExternalLink className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
                     </a>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{v.company_name}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{v.area}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{formatSalary(v)}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{formatDate(v.published_at)}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700">
+                    {v.company_url ? (
+                      <a
+                        href={v.company_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:underline"
+                        title={v.company_name}
+                      >
+                        {v.company_name}
+                      </a>
+                    ) : (
+                      <span title={v.company_name}>{v.company_name}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-700" title={v.area}>
+                    {v.area}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatSalary(v)}</td>
+                  <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">{formatDate(v.published_at)}</td>
                 </tr>
               ))}
             </tbody>

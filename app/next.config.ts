@@ -13,6 +13,9 @@ config({ path: envPathFallback });
 
 const nextConfig: NextConfig = {
   /* config options here */
+  turbopack: {
+    root: __dirname,
+  },
   output: 'standalone', // Enable standalone output for Docker
   typedRoutes: true,
   experimental: {
