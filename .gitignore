@@ -9,7 +9,6 @@ app/.yarn/*
 !app/.yarn/versions
 
 regl.docx
-docs/
 
 # next.js
 app/.next/
