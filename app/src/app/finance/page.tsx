@@ -34,6 +34,16 @@ interface SpecialistFinancials {
   projectCount: number;
 }
 
+type ProjectRow = {
+  id?: string | number | null;
+  name?: string | null;
+  client?: string | null;
+  specialist?: string | null;
+  status?: string | null;
+  budget?: string | number | null;
+  margin?: string | number | null;
+};
+
 export default function FinancePage() {
   const [financials, setFinancials] = useState<ProjectFinancials[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,7 +60,8 @@ export default function FinancePage() {
 
       if (error) throw error;
 
-      const parsedData: ProjectFinancials[] = (data || []).map((p: any) => {
+      const rows = (data || []) as ProjectRow[];
+      const parsedData: ProjectFinancials[] = rows.map((p) => {
         // Parse Budget
         const budgetStr = p.budget?.toString().replace(/\s/g, '').replace(/[^0-9.]/g, '') || '0';
         const budget = parseFloat(budgetStr) || 0;
@@ -71,11 +82,11 @@ export default function FinancePage() {
         const roi = cost > 0 ? (marginValue / cost) * 100 : 0;
 
         return {
-          id: p.id,
+          id: String(p.id ?? ''),
           name: p.name || 'Без названия',
           client: p.client || 'Неизвестный клиент',
           specialist: p.specialist || 'Не назначен',
-          status: p.status,
+          status: p.status || 'Не указан',
           budget,
           marginPercent,
           marginValue,
