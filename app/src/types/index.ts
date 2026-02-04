@@ -6,6 +6,8 @@ export type ProjectStatus =
   | 'Завершен'
   | 'Отменен';
 
+export * from './parsers';
+
 export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer';
 
 export interface UserProfile {

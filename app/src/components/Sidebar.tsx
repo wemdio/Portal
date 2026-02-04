@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { LayoutDashboard, Users, FolderKanban, ShieldCheck, Wrench, CreditCard, LogOut, UserCircle, Settings, FileText, Search } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
@@ -17,6 +18,7 @@ const navItems = [
   { name: 'Инструменты', href: '/tools' },
   { name: 'Оплаты', href: '/payments' },
   { name: 'Регламент', href: '/reglament' },
+  { name: 'Парсеры', href: '/parsers', icon: Search },
   { name: 'Админ', href: '/admin', adminOnly: true },
   { name: 'Настройки', href: '/settings' },
 ];

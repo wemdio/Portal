@@ -23,7 +23,14 @@ const supabaseAnonKey =
 
 const nextConfig: NextConfig = {
   /* config options here */
+  turbopack: {
+    root: __dirname,
+  },
   output: 'standalone', // Enable standalone output for Docker
+  typedRoutes: true,
+  experimental: {
+    typedRoutes: true,
+  },
   env: {
     // Explicitly pass environment variables to Next.js
     NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
