@@ -2,24 +2,23 @@ import type { NextConfig } from "next";
 import { config } from 'dotenv';
 import { resolve } from 'path';
 
-// Load .env from current directory
-// This makes NEXT_PUBLIC_ variables available during build time
-const envPath = resolve(process.cwd(), '.env.local');
-const envResult = config({ path: envPath, override: true });
+const envCandidates = [
+  resolve(__dirname, '.env.local'),
+  resolve(__dirname, '.env'),
+  resolve(__dirname, '..', '.env.local'),
+  resolve(__dirname, '..', '.env'),
+];
 
-// Also try .env if .env.local doesn't exist
-const envPathFallback = resolve(process.cwd(), '.env');
-const fallbackResult = config({ path: envPathFallback, override: true });
+const parsedEnv: Record<string, string> = {};
+for (const envPath of envCandidates) {
+  const result = config({ path: envPath, override: false });
+  if (result.parsed) {
+    Object.assign(parsedEnv, result.parsed);
+  }
+}
 
-const supabaseUrl =
-  envResult.parsed?.NEXT_PUBLIC_SUPABASE_URL
-  ?? fallbackResult.parsed?.NEXT_PUBLIC_SUPABASE_URL
-  ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-
-const supabaseAnonKey =
-  envResult.parsed?.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  ?? fallbackResult.parsed?.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? parsedEnv.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? parsedEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 const nextConfig: NextConfig = {
   /* config options here */
