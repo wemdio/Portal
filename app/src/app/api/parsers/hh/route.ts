@@ -74,6 +74,8 @@ export async function POST(req: NextRequest) {
       user_id: user.id,
       parser_type: PARSER_TYPE,
       status: 'pending',
+      progress_stage: 'pending',
+      progress_percent: 0,
       config,
       total_found: null,
       total_parsed: null,
@@ -92,7 +94,7 @@ export async function POST(req: NextRequest) {
   await logAudit(
     'parser.hh.job.created',
     'HH parser job created',
-    { jobId: data?.id, parserType: PARSER_TYPE, config },
+    { jobId: data?.id, parserType: PARSER_TYPE, searchText: config.text, config },
     logMeta,
   );
   return NextResponse.json({ job: data });

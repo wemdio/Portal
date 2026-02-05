@@ -8,6 +8,8 @@ export interface ParserJob {
   config: HHSearchConfig;
   total_found?: number | null;
   total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;

@@ -1,7 +1,8 @@
 'use client';
 
-import type { HHVacancyRow } from '@/types';
-import { Download, ExternalLink, Loader2, Copy } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
+import { Download, ExternalLink, Copy, Check } from 'lucide-react';
 
 type Props = {
   items: HHVacancyRow[];
@@ -10,11 +11,117 @@ type Props = {
   offset: number;
   loading: boolean;
   actionsBusy: boolean;
-  onLoadMore: () => void;
+  jobId?: string | null;
+  jobStatus?: ParserJobStatus | null;
+  jobActionBusy?: boolean;
+  searchConfig?: HHSearchConfig | null;
+  currentPage: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
   onExportCsv: () => void;
   onExportExcel: () => void;
   onCopy: () => void;
+  onStopJob?: () => void;
+  onDeleteJob?: () => void;
 };
+
+const SEARCH_BASE_URL = 'https://hh.ru/search/vacancy';
+const KNOWN_PARAM_KEYS = new Set([
+  'text',
+  'area',
+  'salary',
+  'salary_from',
+  'currency',
+  'date_from',
+  'date_to',
+  'per_page',
+  'items_on_page',
+  'page',
+]);
+
+function appendParam(params: URLSearchParams, key: string, value: string | string[]) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const trimmed = String(item).trim();
+      if (trimmed) params.append(key, trimmed);
+    }
+    return;
+  }
+  const trimmed = String(value).trim();
+  if (trimmed) params.append(key, trimmed);
+}
+
+function appendParams(params: URLSearchParams, extras?: Record<string, string | string[]>) {
+  if (!extras) return;
+  for (const [key, value] of Object.entries(extras)) {
+    if (!key) continue;
+    appendParam(params, key, value);
+  }
+}
+
+function buildSearchUrl(config?: HHSearchConfig | null) {
+  if (!config) return null;
+  const params = new URLSearchParams();
+  appendParams(params, config.params);
+  for (const key of KNOWN_PARAM_KEYS) params.delete(key);
+
+  if (config.text) params.set('text', config.text);
+  if (config.salary_from !== undefined) params.set('salary', String(config.salary_from));
+  if (config.currency) params.set('currency', config.currency);
+  if (config.date_from) params.set('date_from', config.date_from);
+  if (config.date_to) params.set('date_to', config.date_to);
+  if (config.area) {
+    if (Array.isArray(config.area)) {
+      for (const area of config.area) {
+        const trimmed = String(area).trim();
+        if (trimmed) params.append('area', trimmed);
+      }
+    } else {
+      const trimmed = String(config.area).trim();
+      if (trimmed) params.set('area', trimmed);
+    }
+  }
+  if (config.per_page !== undefined) {
+    const key = config.params && Object.prototype.hasOwnProperty.call(config.params, 'items_on_page')
+      ? 'items_on_page'
+      : 'per_page';
+    params.set(key, String(config.per_page));
+  }
+
+  const query = params.toString();
+  if (!query) return null;
+  return `${SEARCH_BASE_URL}?${query}`;
+}
+
+function formatArea(area?: string | string[]) {
+  if (!area) return null;
+  if (Array.isArray(area)) return area.join(', ');
+  return area;
+}
+
+function buildFilters(config?: HHSearchConfig | null) {
+  if (!config) return [];
+  const filters: Array<{ label: string; value: string }> = [];
+  const text = config.text?.trim();
+  if (text) filters.push({ label: 'Запрос', value: text });
+  const area = formatArea(config.area);
+  if (area) filters.push({ label: 'Регион', value: area });
+  if (config.salary_from !== undefined) {
+    const currency = config.currency ? ` ${config.currency}` : '';
+    filters.push({ label: 'Зарплата от', value: `${config.salary_from}${currency}`.trim() });
+  } else if (config.currency && config.params && Object.prototype.hasOwnProperty.call(config.params, 'currency')) {
+    filters.push({ label: 'Валюта', value: config.currency });
+  }
+  if (config.date_from) filters.push({ label: 'Дата от', value: config.date_from });
+  if (config.date_to) filters.push({ label: 'Дата до', value: config.date_to });
+  if (config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
+  return filters;
+}
+
+function getExtraKeys(config?: HHSearchConfig | null) {
+  if (!config?.params) return [];
+  return Object.keys(config.params).filter((key) => key && !KNOWN_PARAM_KEYS.has(key));
+}
 
 function formatSalary(v: HHVacancyRow) {
   const from = v.salary_from ?? null;
@@ -43,17 +150,55 @@ export function VacancyResults({
   offset,
   loading,
   actionsBusy,
-  onLoadMore,
+  jobId,
+  jobStatus,
+  jobActionBusy,
+  searchConfig,
+  currentPage,
+  totalPages,
+  onPageChange,
   onExportCsv,
   onExportExcel,
   onCopy,
+  onStopJob,
+  onDeleteJob,
 }: Props) {
+  const [copied, setCopied] = useState(false);
+  const copiedTimeoutRef = useRef<number | null>(null);
   const hasItems = items.length > 0;
+  useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current !== null) {
+        window.clearTimeout(copiedTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
   const shownLabel = count ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`) : '—';
   const limitLabel = limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
+  const jobControlsDisabled = jobActionBusy || !jobId;
+  const searchUrl = buildSearchUrl(searchConfig);
+  const filters = buildFilters(searchConfig);
+  const extraKeys = getExtraKeys(searchConfig);
+  const canPrev = currentPage > 1;
+  const canNext = currentPage < totalPages;
+  const maxButtons = 5;
+  const pageButtons: Array<number | 'ellipsis'> = [];
+  const start = Math.max(1, Math.min(currentPage - 2, totalPages - maxButtons + 1));
+  const end = Math.min(totalPages, start + maxButtons - 1);
+
+  if (start > 1) {
+    pageButtons.push(1);
+    if (start > 2) pageButtons.push('ellipsis');
+  }
+  for (let i = start; i <= end; i += 1) pageButtons.push(i);
+  if (end < totalPages) {
+    if (end < totalPages - 1) pageButtons.push('ellipsis');
+    pageButtons.push(totalPages);
+  }
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -64,7 +209,27 @@ export function VacancyResults({
             {shownLabel}{limitLabel}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {jobId ? (
+            <>
+              {jobStatus === 'running' ? (
+                <button
+                  onClick={() => onStopJob?.()}
+                  disabled={jobControlsDisabled}
+                  className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                >
+                  Остановить
+                </button>
+              ) : null}
+              <button
+                onClick={() => onDeleteJob?.()}
+                disabled={jobControlsDisabled}
+                className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+              >
+                Удалить
+              </button>
+            </>
+          ) : null}
           <button
             onClick={onExportCsv}
             disabled={actionsDisabled}
@@ -91,6 +256,66 @@ export function VacancyResults({
           </button>
         </div>
       </div>
+
+      {searchConfig ? (
+        <div className="px-6 py-3 border-b border-gray-200 bg-gray-50 text-xs text-gray-600">
+          {searchUrl ? (
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-gray-500 whitespace-nowrap">Ссылка поиска:</span>
+              <a
+                href={searchUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline truncate min-w-0"
+                title={searchUrl}
+              >
+                {searchUrl.length > 100 ? `${searchUrl.slice(0, 100)}…` : searchUrl}
+              </a>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard?.writeText(searchUrl);
+                    setCopied(true);
+                    if (copiedTimeoutRef.current !== null) {
+                      window.clearTimeout(copiedTimeoutRef.current);
+                    }
+                    copiedTimeoutRef.current = window.setTimeout(() => {
+                      setCopied(false);
+                      copiedTimeoutRef.current = null;
+                    }, 5000);
+                  } catch {
+                    // ignore
+                  }
+                }}
+                className={`inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-300 ${
+                  copied
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                {copied ? (
+                  <Check className="h-3.5 w-3.5 mr-1 text-emerald-600" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5 mr-1" />
+                )}
+                {copied ? 'Скопировано' : 'Скопировать'}
+              </button>
+            </div>
+          ) : null}
+          <div className={`mt-2 flex flex-wrap gap-2 ${filters.length ? '' : 'text-gray-500'}`}>
+            {filters.length ? (
+              filters.map((item) => (
+                <span key={item.label} className="rounded-full border border-gray-200 bg-white px-2 py-0.5">
+                  {item.label}: {item.value}
+                </span>
+              ))
+            ) : (
+              <span>Фильтры не указаны</span>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {items.length === 0 ? (
         <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
@@ -151,15 +376,44 @@ export function VacancyResults({
         </div>
       )}
 
-      <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-center">
-        <button
-          onClick={onLoadMore}
-          disabled={loading || offset + items.length >= count}
-          className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
-        >
-          {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-          Загрузить ещё
-        </button>
+      <div className="px-6 py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-4">
+        <div className="text-sm text-gray-500">
+          Страница {Math.min(currentPage, totalPages)} из {totalPages}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={!canPrev || loading}
+            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            Назад
+          </button>
+          {pageButtons.map((page, index) => (
+            page === 'ellipsis' ? (
+              <span key={`ellipsis-${index}`} className="px-1 text-gray-400">…</span>
+            ) : (
+              <button
+                key={page}
+                onClick={() => onPageChange(page)}
+                disabled={loading}
+                className={`inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium ${
+                  page === currentPage
+                    ? 'bg-gray-900 text-white'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                {page}
+              </button>
+            )
+          ))}
+          <button
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={!canNext || loading}
+            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            Вперёд
+          </button>
+        </div>
       </div>
     </div>
   );

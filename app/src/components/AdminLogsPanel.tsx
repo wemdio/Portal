@@ -35,7 +35,14 @@ const SOURCE_LABELS: Record<LogEntry['source'], string> = {
 
 function formatTimestamp(value: string) {
   try {
-    return new Date(value).toLocaleString('ru-RU');
+    return new Date(value).toLocaleString('ru-RU', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
   } catch {
     return value;
   }
@@ -186,31 +193,31 @@ export function AdminLogsPanel({
   }, [logs, levelFilter, sourceFilter, search]);
 
   return (
-    <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+    <div className="bg-white p-7 rounded-xl border border-gray-200 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
-          <p className="text-sm text-gray-500">{description}</p>
+          <h2 className="text-2xl font-semibold text-gray-900">{title}</h2>
+          <p className="text-base text-gray-500">{description}</p>
         </div>
         <div className="flex items-center gap-2">
           {paused ? (
             <button
               onClick={resume}
-              className="rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+              className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
             >
               Возобновить{pending.length > 0 ? ` (${pending.length})` : ''}
             </button>
           ) : (
             <button
               onClick={() => setPaused(true)}
-              className="rounded-md bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200"
+              className="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
             >
               Пауза
             </button>
           )}
           <button
             onClick={() => { setLogs([]); setPending([]); }}
-            className="rounded-md bg-gray-100 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200"
+            className="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
           >
             Очистить
           </button>
@@ -221,7 +228,7 @@ export function AdminLogsPanel({
         <select
           value={levelFilter}
           onChange={(e) => setLevelFilter(e.target.value as 'all' | LogEntry['level'])}
-          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700"
+          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
         >
           <option value="all">Все уровни</option>
           <option value="info">Info</option>
@@ -231,7 +238,7 @@ export function AdminLogsPanel({
         <select
           value={sourceFilter}
           onChange={(e) => setSourceFilter(e.target.value as 'all' | LogEntry['source'])}
-          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700"
+          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
         >
           <option value="all">Все источники</option>
           <option value="server">Server</option>
@@ -242,7 +249,7 @@ export function AdminLogsPanel({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Поиск по событию, сообщению, маршруту..."
-          className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-xs text-gray-700"
+          className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-700"
         />
       </div>
 
@@ -253,20 +260,20 @@ export function AdminLogsPanel({
       )}
 
       {loading ? (
-        <div className="mt-6 text-sm text-gray-500">Загрузка логов...</div>
+        <div className="mt-6 text-base text-gray-500">Загрузка логов...</div>
       ) : (
-        <div className="mt-6 max-h-[420px] overflow-auto rounded-lg border border-gray-200">
+        <div className="mt-6 max-h-[520px] overflow-auto rounded-lg border border-gray-200">
           {filteredLogs.length === 0 ? (
-            <div className="p-4 text-sm text-gray-500">Логи не найдены</div>
+            <div className="p-4 text-base text-gray-500">Логи не найдены</div>
           ) : (
             <div className="divide-y divide-gray-100">
               {filteredLogs.map((log) => (
                 <div key={log.id} className="p-4">
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <div className="flex flex-wrap items-center gap-2 text-sm text-gray-500">
                         <span>{formatTimestamp(log.created_at)}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                           log.level === 'error'
                             ? 'bg-red-100 text-red-700'
                             : log.level === 'warn'
@@ -275,22 +282,22 @@ export function AdminLogsPanel({
                         }`}>
                           {LEVEL_LABELS[log.level]}
                         </span>
-                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-700">
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-700">
                           {SOURCE_LABELS[log.source]}
                         </span>
-                        {log.route && <span className="text-[11px] text-gray-400">{log.route}</span>}
+                        {log.route && <span className="text-xs text-gray-400">{log.route}</span>}
                       </div>
                       {getSearchText(log.context) ? (
-                        <div className="mt-1 text-xs text-gray-500">
+                        <div className="mt-1 text-sm text-gray-500">
                           Запрос: <span className="font-semibold text-gray-700">{getSearchText(log.context)}</span>
                         </div>
                       ) : null}
-                      <div className="mt-1 text-sm font-semibold text-gray-900">{log.event}</div>
-                      <div className="mt-1 text-sm text-gray-700 break-words">{log.message}</div>
+                      <div className="mt-1 text-base font-semibold text-gray-900">{log.event}</div>
+                      <div className="mt-1 text-base text-gray-700 break-words">{log.message}</div>
                     </div>
-                    <details className="shrink-0 text-xs text-gray-500">
+                    <details className="shrink-0 text-sm text-gray-500">
                       <summary className="cursor-pointer select-none">Детали</summary>
-                      <div className="mt-2 space-y-2 rounded-md border border-gray-200 bg-gray-50 p-2 text-[11px] text-gray-700">
+                      <div className="mt-2 space-y-2 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
                         {log.user_id && (
                           <div><span className="font-semibold">user_id:</span> {log.user_id}</div>
                         )}
@@ -301,7 +308,7 @@ export function AdminLogsPanel({
                           <div><span className="font-semibold">ip:</span> {log.ip}</div>
                         )}
                         {log.context && (
-                          <pre className="whitespace-pre-wrap break-words">{safeJson(log.context)}</pre>
+                          <pre className="whitespace-pre-wrap break-words text-sm">{safeJson(log.context)}</pre>
                         )}
                       </div>
                     </details>
