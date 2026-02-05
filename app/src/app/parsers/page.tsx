@@ -274,6 +274,26 @@ export default function ParsersPage() {
     void loadResults(activeJobId, 0, false);
   }, [activeJobId, loadResults]);
 
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (activeJob?.status !== 'running') return;
+    const interval = setInterval(() => {
+      void refreshJobs();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeJobId, activeJob?.status, refreshJobs]);
+
+  useEffect(() => {
+    if (!activeJob) return;
+    if (activeJob.status === 'completed') {
+      void loadResults(activeJob.id, 0, false);
+      return;
+    }
+    if (activeJob.status === 'failed' && activeJob.error_message) {
+      setError({ message: activeJob.error_message });
+    }
+  }, [activeJob, loadResults]);
+
   const start = useCallback(async (config: HHSearchConfig) => {
     setBusy(true);
     setError(null);
@@ -286,13 +306,18 @@ export default function ParsersPage() {
       const jobId = created.job.id;
       setActiveJobId(jobId);
 
-      await apiFetch<ExecuteResponse>('/api/parsers/hh/execute', {
+      void apiFetch<ExecuteResponse>('/api/parsers/hh/execute', {
         method: 'POST',
         body: JSON.stringify({ job_id: jobId }),
-      });
+      })
+        .then(() => refreshJobs())
+        .catch((e: unknown) => {
+          setError(toUiError(e, 'Ошибка запуска парсинга'));
+          void refreshJobs().catch(() => undefined);
+        });
 
       await refreshJobs();
-      await loadResults(jobId, 0, false);
+      void loadResults(jobId, 0, false);
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка запуска парсинга'));
       await refreshJobs().catch(() => undefined);
