@@ -49,6 +49,15 @@ function safeJson(value: unknown) {
   }
 }
 
+function getSearchText(context: LogEntry['context']) {
+  if (!context || typeof context !== 'object') return null;
+  const value =
+    (context as Record<string, unknown>).searchText ??
+    (context as Record<string, unknown>).text ??
+    (context as Record<string, unknown>).query;
+  return typeof value === 'string' ? value : null;
+}
+
 type AdminLogsPanelProps = {
   title?: string;
   description?: string;
@@ -271,6 +280,11 @@ export function AdminLogsPanel({
                         </span>
                         {log.route && <span className="text-[11px] text-gray-400">{log.route}</span>}
                       </div>
+                      {getSearchText(log.context) ? (
+                        <div className="mt-1 text-xs text-gray-500">
+                          Запрос: <span className="font-semibold text-gray-700">{getSearchText(log.context)}</span>
+                        </div>
+                      ) : null}
                       <div className="mt-1 text-sm font-semibold text-gray-900">{log.event}</div>
                       <div className="mt-1 text-sm text-gray-700 break-words">{log.message}</div>
                     </div>

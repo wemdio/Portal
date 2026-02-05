@@ -87,7 +87,13 @@ export async function POST(req: NextRequest) {
   if (job.parser_type !== PARSER_TYPE) return jsonError('Unsupported parser_type', 400);
 
   const config = job.config as HHSearchConfig;
-  await logAudit('parser.hh.execute.start', 'HH parser execution started', { jobId, config }, logMeta);
+  const searchText = config.text;
+  await logAudit(
+    'parser.hh.execute.start',
+    'HH parser execution started',
+    { jobId, searchText, config },
+    logMeta,
+  );
 
   const { error: startError } = await supabase
     .from('parser_jobs')
@@ -96,17 +102,37 @@ export async function POST(req: NextRequest) {
   if (startError) return jsonError(startError.message, 500);
 
   try {
-    const { found, vacancies } = await fetchVacancies(config, { jobId, logMeta });
-    await logInfo('parser.hh.fetch.completed', 'HH vacancies fetched', { jobId, found, fetched: vacancies.length }, logMeta);
+    const { found, vacancies } = await fetchVacancies(config, { jobId, logMeta, searchText });
+    await logInfo(
+      'parser.hh.fetch.completed',
+      'HH vacancies fetched',
+      { jobId, searchText, found, fetched: vacancies.length },
+      logMeta,
+    );
     const uniq = new Map<string, HHVacancy>();
     for (const v of vacancies) uniq.set(v.vacancy_id, v);
     const uniqueVacancies = Array.from(uniq.values());
-    await logInfo('parser.hh.dedupe.completed', 'HH vacancies deduplicated', { jobId, parsed: uniqueVacancies.length }, logMeta);
+    await logInfo(
+      'parser.hh.dedupe.completed',
+      'HH vacancies deduplicated',
+      { jobId, searchText, parsed: uniqueVacancies.length },
+      logMeta,
+    );
 
     const rows = uniqueVacancies.map((v) => toDbRow(jobId, v));
-    await logInfo('parser.hh.upsert.start', 'HH vacancies upsert started', { jobId, rows: rows.length }, logMeta);
+    await logInfo(
+      'parser.hh.upsert.start',
+      'HH vacancies upsert started',
+      { jobId, searchText, rows: rows.length },
+      logMeta,
+    );
     await upsertInBatches(supabase, rows);
-    await logInfo('parser.hh.upsert.completed', 'HH vacancies upsert completed', { jobId }, logMeta);
+    await logInfo(
+      'parser.hh.upsert.completed',
+      'HH vacancies upsert completed',
+      { jobId, searchText },
+      logMeta,
+    );
 
     const { error: doneError } = await supabase
       .from('parser_jobs')
@@ -125,6 +151,7 @@ export async function POST(req: NextRequest) {
       'HH parser execution completed',
       {
         jobId,
+        searchText,
         found,
         parsed: uniqueVacancies.length,
         elapsed_ms: Date.now() - startedAt,
@@ -160,6 +187,7 @@ export async function POST(req: NextRequest) {
       err,
       {
         jobId,
+        searchText,
         elapsed_ms: Date.now() - startedAt,
         message,
         ...(extra ?? {}),

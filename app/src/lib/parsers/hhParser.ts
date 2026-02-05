@@ -546,6 +546,7 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
 
 type FetchVacanciesOptions = {
   jobId?: string;
+  searchText?: string;
   logMeta?: {
     userId?: string | null;
     requestId?: string | null;
@@ -565,6 +566,7 @@ export async function fetchVacancies(
     'HH partitions prepared',
     {
       jobId: options?.jobId,
+      searchText: options?.searchText ?? normalized.text,
       count: partitions.length,
       text: normalized.text,
       area: normalized.area,
@@ -581,6 +583,7 @@ export async function fetchVacancies(
       'HH partition started',
       {
         jobId: options?.jobId,
+        searchText: options?.searchText ?? normalized.text,
         index: index + 1,
         total: partitions.length,
         part,
@@ -605,6 +608,7 @@ export async function fetchVacancies(
           'HH partition progress',
           {
             jobId: options?.jobId,
+            searchText: options?.searchText ?? normalized.text,
             index: index + 1,
             page: page + 1,
             totalPages,
@@ -619,6 +623,7 @@ export async function fetchVacancies(
       'HH partition completed',
       {
         jobId: options?.jobId,
+        searchText: options?.searchText ?? normalized.text,
         index: index + 1,
         total: partitions.length,
       },
@@ -634,7 +639,11 @@ export async function fetchVacancies(
     void logInfo(
       'parser.hh.employers.fetch.start',
       'HH employers fetch started',
-      { jobId: options?.jobId, count: employerIds.length },
+      {
+        jobId: options?.jobId,
+        searchText: options?.searchText ?? normalized.text,
+        count: employerIds.length,
+      },
       options?.logMeta,
     );
     const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
@@ -651,6 +660,7 @@ export async function fetchVacancies(
           'HH employers fetch progress',
           {
             jobId: options?.jobId,
+            searchText: options?.searchText ?? normalized.text,
             fetched: idx + 1,
             total: employerIds.length,
           },
