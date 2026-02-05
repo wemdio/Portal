@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,7 +24,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const auth = await getSupabase(req);
   if ('error' in auth) return auth.error;
 
-  const { supabase } = auth;
+  const { supabase, user } = auth;
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { userId: user.id, requestId, route, ip };
   const { jobId } = await ctx.params;
 
   const { data, error } = await supabase
@@ -32,7 +37,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .eq('id', jobId)
     .single();
 
-  if (error) return jsonError(error.message, 404);
+  if (error) {
+    await logError('parser.hh.job.fetch.failed', error, { jobId }, logMeta);
+    return jsonError(error.message, 404);
+  }
   return NextResponse.json({ job: data });
 }
 

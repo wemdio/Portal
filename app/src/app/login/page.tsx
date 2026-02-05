@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { logAudit, logError } from '@/lib/loggerClient';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -46,7 +47,7 @@ export default function LoginPage() {
             });
 
           if (profileError) {
-            console.error('Error creating profile:', profileError);
+            void logError('auth.profile.create.failed', profileError);
             // Don't throw - user is already created in auth, profile can be created later
           }
         }
@@ -54,10 +55,12 @@ export default function LoginPage() {
         // Check if session was created immediately (meaning email confirmation is off)
         if (data.session) {
              setMessage('Регистрация успешна! Входим...');
+             void logAudit('auth.signup.success', 'User signed up', { withSession: true });
              // Hard reload to ensure session is picked up by middleware
              window.location.href = '/';
         } else {
              setMessage('Регистрация успешна! Но Supabase требует подтверждения почты. Проверьте настройки проекта Supabase (Auth -> Providers -> Email -> Confirm email) и отключите это требование для теста.');
+             void logAudit('auth.signup.pending', 'User signed up without session', { withSession: false });
         }
 
       } else {
@@ -65,21 +68,20 @@ export default function LoginPage() {
           email,
           password,
         });
-        
-        console.log('Login response:', { error, data });
-        
+
         if (error) throw error;
         
         if (data.session) {
-          console.log('Session established, redirecting...');
+          void logAudit('auth.login.success', 'User logged in', { withSession: true });
           // Hard reload to ensure session is picked up by middleware
           window.location.href = '/';
         } else {
           setError('Сессия не создана. Попробуйте снова или проверьте настройки Supabase.');
+          void logAudit('auth.login.missing_session', 'Login completed without session', { withSession: false });
         }
       }
     } catch (caughtError) {
-        console.error('Auth error:', caughtError);
+        void logError('auth.login.failed', caughtError, { isSignUp });
         const errorMessage =
           caughtError instanceof Error
             ? caughtError.message

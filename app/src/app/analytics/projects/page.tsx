@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { Project } from '@/types';
+import { logError } from '@/lib/loggerClient';
 import {
   diffDaysFrom,
   formatDateLabel,
@@ -58,7 +59,7 @@ export default function ProjectsAnalyticsPage() {
         if (error) throw error;
         setProjects((data ?? []) as Project[]);
       } catch (error) {
-        console.error('Error fetching projects:', error);
+        void logError('analytics.projects.fetch.failed', error);
       } finally {
         setLoading(false);
       }

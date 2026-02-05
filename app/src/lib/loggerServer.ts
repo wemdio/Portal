@@ -1,0 +1,94 @@
+import 'server-only';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { normalizeError, sanitizeContext, truncateMessage, type LogContext, type LogLevel, type LogSource } from '@/lib/logger';
+
+type ServerLogPayload = {
+  level: LogLevel;
+  source: LogSource;
+  event: string;
+  message: string;
+  context?: LogContext;
+  userId?: string | null;
+  requestId?: string | null;
+  route?: string | null;
+  ip?: string | null;
+};
+
+async function writeLog(payload: ServerLogPayload) {
+  if (!payload.event || !payload.message) return;
+
+  try {
+    if (!supabaseAdmin) {
+      console.error('Supabase admin client is not configured. Set SUPABASE_SERVICE_ROLE_KEY.');
+      return;
+    }
+
+    const { error } = await supabaseAdmin
+      .from('application_logs')
+      .insert({
+        level: payload.level,
+        source: payload.source,
+        event: payload.event,
+        message: truncateMessage(payload.message),
+        context: sanitizeContext(payload.context) ?? {},
+        user_id: payload.userId ?? null,
+        request_id: payload.requestId ?? null,
+        route: payload.route ?? null,
+        ip: payload.ip ?? null,
+      });
+
+    if (error) {
+      console.error('Failed to write application log:', error);
+    }
+  } catch (error) {
+    console.error('Failed to write application log:', error);
+  }
+}
+
+export async function logInfo(event: string, message: string, context?: LogContext, meta?: Omit<ServerLogPayload, 'event' | 'message' | 'level' | 'source' | 'context'>) {
+  return writeLog({
+    level: 'info',
+    source: 'server',
+    event,
+    message,
+    context,
+    ...meta,
+  });
+}
+
+export async function logWarn(event: string, message: string, context?: LogContext, meta?: Omit<ServerLogPayload, 'event' | 'message' | 'level' | 'source' | 'context'>) {
+  return writeLog({
+    level: 'warn',
+    source: 'server',
+    event,
+    message,
+    context,
+    ...meta,
+  });
+}
+
+export async function logError(event: string, error: unknown, context?: LogContext, meta?: Omit<ServerLogPayload, 'event' | 'message' | 'level' | 'source' | 'context'>) {
+  const errorInfo = normalizeError(error);
+  return writeLog({
+    level: 'error',
+    source: 'server',
+    event,
+    message: errorInfo.message,
+    context: {
+      ...(context ?? {}),
+      error: errorInfo,
+    },
+    ...meta,
+  });
+}
+
+export async function logAudit(event: string, message: string, context?: LogContext, meta?: Omit<ServerLogPayload, 'event' | 'message' | 'level' | 'source' | 'context'>) {
+  return writeLog({
+    level: 'info',
+    source: 'audit',
+    event,
+    message,
+    context,
+    ...meta,
+  });
+}

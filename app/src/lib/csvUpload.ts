@@ -1,5 +1,6 @@
 import Papa from 'papaparse';
 import { supabase } from '@/lib/supabaseClient';
+import { logError, logInfo } from '@/lib/loggerClient';
 
 export interface Project {
   client: string;
@@ -53,7 +54,7 @@ export async function uploadCSV(file: File) {
 
           // Debugging: Get headers from the first row keys
           const actualHeaders = Object.keys(rawRows[0]);
-          console.log('Detected headers:', actualHeaders);
+          void logInfo('admin.csv.headers.detected', 'CSV headers detected', { headers: actualHeaders });
           
           // Create a map for normalized headers to actual headers of the first row
           const headerMap: Record<string, string> = {};
@@ -61,7 +62,7 @@ export async function uploadCSV(file: File) {
             headerMap[normalizeKey(key)] = key;
           });
 
-          console.log('Normalized Header Map:', headerMap);
+          void logInfo('admin.csv.headers.normalized', 'CSV headers normalized', { headers: Object.keys(headerMap) });
 
           // Helper to get value using normalized key
           const getValue = (row: CSVRow, targetKey: string) => {
@@ -112,7 +113,7 @@ export async function uploadCSV(file: File) {
             };
           }).filter(p => p.name && p.name.trim() !== ''); // Filter out empty rows
 
-          console.log('Formatted rows to insert:', formattedData.length);
+          void logInfo('admin.csv.rows.parsed', 'CSV rows parsed', { count: formattedData.length });
 
           if (formattedData.length === 0) {
              // Return headers to show to user for debugging
@@ -125,7 +126,7 @@ export async function uploadCSV(file: File) {
             .insert(formattedData);
 
           if (error) {
-            console.error('Supabase insert error:', error);
+            void logError('admin.csv.insert.failed', error, { count: formattedData.length });
             throw error;
           }
           

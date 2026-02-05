@@ -5,6 +5,7 @@ import { Project, ProjectStatus } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects } from '@/lib/roles';
+import { logAudit, logError } from '@/lib/loggerClient';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -143,7 +144,7 @@ export function ProjectList() {
       if (error) throw error;
       if (data) setProjects(data as Project[]);
     } catch (error) {
-      console.error('Error fetching projects:', error);
+      void logError('projects.list.fetch.failed', error);
     } finally {
       setLoading(false);
     }
@@ -162,8 +163,12 @@ export function ProjectList() {
       setProjects(prev => prev.map(p => 
         p.id === id ? { ...p, status: newStatus as ProjectStatus, updated_at: updatedAt } : p
       ));
+      void logAudit('projects.status.update.success', 'Project status updated', {
+        projectId: id,
+        status: newStatus,
+      });
     } catch (error) {
-      console.error('Error updating status:', error);
+      void logError('projects.status.update.failed', error, { projectId: id, status: newStatus });
     }
     setOpenMenuId(null);
   }
@@ -248,8 +253,12 @@ export function ProjectList() {
         prev.map((item) => (item.id === project.id ? { ...item, ...payload } : item)),
       );
       clearDraftFields(project.id, Object.keys(updates) as Array<keyof Project>);
+      void logAudit('projects.update.success', 'Project updated', {
+        projectId: project.id,
+        fields: Object.keys(payload).filter((field) => field !== 'updated_at'),
+      });
     } catch (error) {
-      console.error('Error updating project:', error);
+      void logError('projects.update.failed', error, { projectId: project.id });
     } finally {
       setSavingRows((prev) => ({ ...prev, [project.id]: false }));
     }

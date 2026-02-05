@@ -9,6 +9,7 @@ import {
   isWithinDays,
   parseFlexibleDate,
 } from '@/lib/dateUtils';
+import { logError } from '@/lib/loggerClient';
 
 type TaskItem = {
   id: string;
@@ -72,7 +73,7 @@ export default function TasksPage() {
         if (error) throw error;
         setProjects((data ?? []) as Project[]);
       } catch (error) {
-        console.error('Error fetching projects:', error);
+        void logError('tasks.projects.fetch.failed', error);
       } finally {
         setLoading(false);
       }

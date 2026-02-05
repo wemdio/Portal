@@ -1,5 +1,6 @@
 import type { Dispatcher } from 'undici';
 import { ProxyAgent } from 'undici';
+import { logInfo } from '@/lib/loggerServer';
 
 export type HHSearchConfig = {
   text: string;
@@ -543,20 +544,49 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
   };
 }
 
-export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: number; vacancies: HHVacancy[] }> {
+type FetchVacanciesOptions = {
+  jobId?: string;
+  logMeta?: {
+    userId?: string | null;
+    requestId?: string | null;
+    route?: string | null;
+    ip?: string | null;
+  };
+};
+
+export async function fetchVacancies(
+  config: HHSearchConfig,
+  options?: FetchVacanciesOptions,
+): Promise<{ found: number; vacancies: HHVacancy[] }> {
   const normalized = normalizeSearchParams(config);
   const partitions = await partitionQuery(normalized);
-  console.info('[hh] partitions', {
-    count: partitions.length,
-    text: normalized.text,
-    area: normalized.area,
-  });
+  void logInfo(
+    'parser.hh.partitions',
+    'HH partitions prepared',
+    {
+      jobId: options?.jobId,
+      count: partitions.length,
+      text: normalized.text,
+      area: normalized.area,
+    },
+    options?.logMeta,
+  );
 
   let totalFound = 0;
   const all: HHVacancy[] = [];
 
   for (const [index, part] of partitions.entries()) {
-    console.info('[hh] partition start', { index: index + 1, total: partitions.length, part });
+    void logInfo(
+      'parser.hh.partition.start',
+      'HH partition started',
+      {
+        jobId: options?.jobId,
+        index: index + 1,
+        total: partitions.length,
+        part,
+      },
+      options?.logMeta,
+    );
     const firstUrl = buildVacanciesUrl(part, 0);
     const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl);
     totalFound += first.found ?? 0;
@@ -570,15 +600,30 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
       const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
       for (const item of data.items ?? []) all.push(mapVacancy(item));
       if (page === totalPages - 1 || page % 5 === 0) {
-        console.info('[hh] partition progress', {
-          index: index + 1,
-          page: page + 1,
-          totalPages,
-          totalCollected: all.length,
-        });
+        void logInfo(
+          'parser.hh.partition.progress',
+          'HH partition progress',
+          {
+            jobId: options?.jobId,
+            index: index + 1,
+            page: page + 1,
+            totalPages,
+            totalCollected: all.length,
+          },
+          options?.logMeta,
+        );
       }
     }
-    console.info('[hh] partition done', { index: index + 1, total: partitions.length });
+    void logInfo(
+      'parser.hh.partition.completed',
+      'HH partition completed',
+      {
+        jobId: options?.jobId,
+        index: index + 1,
+        total: partitions.length,
+      },
+      options?.logMeta,
+    );
   }
 
   const employerIds = Array.from(
@@ -586,7 +631,12 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
   );
 
   if (employerIds.length > 0) {
-    console.info('[hh] employers fetch start', { count: employerIds.length });
+    void logInfo(
+      'parser.hh.employers.fetch.start',
+      'HH employers fetch started',
+      { jobId: options?.jobId, count: employerIds.length },
+      options?.logMeta,
+    );
     const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
     for (const [idx, employerId] of employerIds.entries()) {
       try {
@@ -596,10 +646,16 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
         employerCache.set(employerId, {});
       }
       if ((idx + 1) % 50 === 0 || idx === employerIds.length - 1) {
-        console.info('[hh] employers fetch progress', {
-          fetched: idx + 1,
-          total: employerIds.length,
-        });
+        void logInfo(
+          'parser.hh.employers.fetch.progress',
+          'HH employers fetch progress',
+          {
+            jobId: options?.jobId,
+            fetched: idx + 1,
+            total: employerIds.length,
+          },
+          options?.logMeta,
+        );
       }
     }
 
