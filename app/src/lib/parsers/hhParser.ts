@@ -16,8 +16,10 @@ export type HHVacancy = {
   salary_from?: number;
   salary_to?: number;
   salary_currency?: string;
+  employer_id?: string;
   company_name: string;
   company_url?: string;
+  company_site_url?: string;
   company_description?: string;
   area: string;
   industries: string[];
@@ -29,9 +31,15 @@ type HHApiVacancyItem = {
   name: string;
   alternate_url: string;
   salary: null | { from: number | null; to: number | null; currency: string };
-  employer: { name: string; alternate_url: string | null };
+  employer: { id?: string | null; name: string; alternate_url: string | null };
   area: { name: string };
   published_at?: string;
+};
+
+type HHApiEmployer = {
+  id: string;
+  site_url?: string | null;
+  industries?: Array<{ id?: string; name?: string }>;
 };
 
 type HHApiVacanciesResponse = {
@@ -379,6 +387,22 @@ async function fetchFound(config: HHSearchConfig): Promise<number> {
   return data.found ?? 0;
 }
 
+function normalizeIndustries(items?: Array<{ id?: string; name?: string }>): string[] {
+  if (!items || items.length === 0) return [];
+  return items.map((item) => item?.name).filter((name): name is string => Boolean(name));
+}
+
+async function fetchEmployerDetails(
+  employerId: string,
+): Promise<{ siteUrl?: string; industries?: string[] }> {
+  const url = `${HH_API_BASE}/employers/${employerId}`;
+  const data = await fetchWithRetry<HHApiEmployer>(url);
+  return {
+    siteUrl: data.site_url ?? undefined,
+    industries: normalizeIndustries(data.industries),
+  };
+}
+
 export async function partitionQuery(config: HHSearchConfig): Promise<HHSearchConfig[]> {
   const normalized = normalizeSearchParams(config);
   const found = await fetchFound(normalized);
@@ -479,6 +503,7 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
     salary_from: salary_from ?? undefined,
     salary_to: salary_to ?? undefined,
     salary_currency,
+    employer_id: item.employer?.id ?? undefined,
     company_name: item.employer?.name ?? '',
     company_url: item.employer?.alternate_url ?? undefined,
     area: item.area?.name ?? '',
@@ -507,6 +532,32 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
       const url = buildVacanciesUrl(part, page);
       const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
       for (const item of data.items ?? []) all.push(mapVacancy(item));
+    }
+  }
+
+  const employerIds = Array.from(
+    new Set(all.map((item) => item.employer_id).filter((id): id is string => Boolean(id))),
+  );
+
+  if (employerIds.length > 0) {
+    const employerCache = new Map<string, { siteUrl?: string; industries?: string[] }>();
+    for (const employerId of employerIds) {
+      try {
+        const info = await fetchEmployerDetails(employerId);
+        employerCache.set(employerId, info);
+      } catch {
+        employerCache.set(employerId, {});
+      }
+    }
+
+    for (const vacancy of all) {
+      if (!vacancy.employer_id) continue;
+      const info = employerCache.get(vacancy.employer_id);
+      if (!info) continue;
+      if (info.siteUrl) vacancy.company_site_url = info.siteUrl;
+      if (info.industries && info.industries.length > 0) {
+        vacancy.industries = info.industries;
+      }
     }
   }
 

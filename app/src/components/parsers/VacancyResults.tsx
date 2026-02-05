@@ -121,16 +121,19 @@ export function VacancyResults({
                     </a>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-700">
-                    {v.company_url ? (
-                      <a
-                        href={v.company_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="hover:underline"
-                        title={v.company_name}
-                      >
-                        {v.company_name}
-                      </a>
+                    {v.company_site_url || v.company_url ? (
+                      <div className="inline-flex items-center gap-2">
+                        <span title={v.company_name}>{v.company_name}</span>
+                        <a
+                          href={v.company_site_url ?? v.company_url ?? '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-blue-600 hover:underline"
+                          title="Открыть сайт компании"
+                        >
+                          сайт
+                        </a>
+                      </div>
                     ) : (
                       <span title={v.company_name}>{v.company_name}</span>
                     )}
