@@ -1,3 +1,6 @@
+import type { Dispatcher } from 'undici';
+import { ProxyAgent } from 'undici';
+
 export type HHSearchConfig = {
   text: string;
   area?: string | string[];
@@ -81,7 +84,16 @@ export class HHApiError extends Error {
 
 const HH_API_BASE = 'https://api.hh.ru';
 const FOUND_LIMIT = 2000;
-const MIN_REQUEST_INTERVAL_MS = 250;
+const MIN_REQUEST_INTERVAL_MS = (() => {
+  const raw = Number(process.env.HH_REQUEST_INTERVAL_MS ?? '250');
+  return Number.isFinite(raw) ? Math.max(100, raw) : 250;
+})();
+const MAX_RETRIES = (() => {
+  const raw = Number(process.env.HH_MAX_RETRIES ?? '5');
+  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 5;
+})();
+const PROXY_URL = process.env.HH_PROXY_URL?.trim();
+const PROXY_DISPATCHER: Dispatcher | undefined = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
 
 let throttleChain: Promise<void> = Promise.resolve();
 let lastRequestAt = 0;
@@ -329,7 +341,7 @@ export async function fetchWithRetry<T>(
   url: string,
   opts?: { maxRetries?: number; minDelayMs?: number; maxDelayMs?: number }
 ): Promise<T> {
-  const maxRetries = opts?.maxRetries ?? 5;
+  const maxRetries = opts?.maxRetries ?? MAX_RETRIES;
   const minDelayMs = opts?.minDelayMs ?? 500;
   const maxDelayMs = opts?.maxDelayMs ?? 20_000;
 
@@ -338,13 +350,15 @@ export async function fetchWithRetry<T>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       await throttleHhRequest();
-      const res = await fetch(url, {
+      const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         headers: {
           'User-Agent': 'Portal/1.0 (HH parser)',
           Accept: 'application/json',
         },
         cache: 'no-store',
-      });
+        ...(PROXY_DISPATCHER ? { dispatcher: PROXY_DISPATCHER } : {}),
+      };
+      const res = await fetch(url, fetchInit);
 
       if (res.ok) {
         return (await res.json()) as T;
@@ -532,11 +546,17 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
 export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: number; vacancies: HHVacancy[] }> {
   const normalized = normalizeSearchParams(config);
   const partitions = await partitionQuery(normalized);
+  console.info('[hh] partitions', {
+    count: partitions.length,
+    text: normalized.text,
+    area: normalized.area,
+  });
 
   let totalFound = 0;
   const all: HHVacancy[] = [];
 
-  for (const part of partitions) {
+  for (const [index, part] of partitions.entries()) {
+    console.info('[hh] partition start', { index: index + 1, total: partitions.length, part });
     const firstUrl = buildVacanciesUrl(part, 0);
     const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl);
     totalFound += first.found ?? 0;
@@ -549,7 +569,16 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
       const url = buildVacanciesUrl(part, page);
       const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
       for (const item of data.items ?? []) all.push(mapVacancy(item));
+      if (page === totalPages - 1 || page % 5 === 0) {
+        console.info('[hh] partition progress', {
+          index: index + 1,
+          page: page + 1,
+          totalPages,
+          totalCollected: all.length,
+        });
+      }
     }
+    console.info('[hh] partition done', { index: index + 1, total: partitions.length });
   }
 
   const employerIds = Array.from(
@@ -557,13 +586,20 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
   );
 
   if (employerIds.length > 0) {
+    console.info('[hh] employers fetch start', { count: employerIds.length });
     const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
-    for (const employerId of employerIds) {
+    for (const [idx, employerId] of employerIds.entries()) {
       try {
         const info = await fetchEmployerDetails(employerId);
         employerCache.set(employerId, info);
       } catch {
         employerCache.set(employerId, {});
+      }
+      if ((idx + 1) % 50 === 0 || idx === employerIds.length - 1) {
+        console.info('[hh] employers fetch progress', {
+          fetched: idx + 1,
+          total: employerIds.length,
+        });
       }
     }
 
