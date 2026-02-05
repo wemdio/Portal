@@ -44,6 +44,7 @@ npm install
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 ```
 
 #### Запуск в режиме разработки
@@ -77,6 +78,28 @@ docker-compose down
 ```bash
 docker-compose logs -f portal
 ```
+
+## Логирование и аудит
+
+- Логи приложения сохраняются в таблицу `application_logs` и доступны в админке (страница `/admin`).
+- Для серверного логирования и приема клиентских логов через API необходим `SUPABASE_SERVICE_ROLE_KEY`.
+- Realtime для логов включен миграцией, поэтому новые записи отображаются без обновления страницы.
+
+### Ретеншн логов
+
+Доступна функция очистки:
+
+```sql
+select public.cleanup_application_logs(30);
+```
+
+Для автоматизации можно настроить расписание через Supabase (pg_cron) на ежедневную очистку.
+
+### Проверка логирования (manual)
+
+1. Войдите под админом и откройте `/admin`.
+2. Выполните действие (например, импорт CSV или изменение проекта).
+3. Убедитесь, что новые записи появляются в блоке "Логи приложения" в realtime.
 
 ### Сборка для продакшена
 

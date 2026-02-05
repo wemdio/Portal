@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { logError } from '@/lib/loggerClient';
 
 interface ProjectData {
   id: string;
@@ -47,7 +48,7 @@ export default function TeamPage() {
         setCapacities(JSON.parse(stored));
       }
     } catch (e) {
-      console.error('Failed to load capacities', e);
+      void logError('team.capacity.load.failed', e);
     }
   };
 
@@ -66,7 +67,7 @@ export default function TeamPage() {
       if (error) throw error;
       setProjects(data || []);
     } catch (error) {
-      console.error('Error fetching team data:', error);
+      void logError('team.data.fetch.failed', error);
     } finally {
       setLoading(false);
     }

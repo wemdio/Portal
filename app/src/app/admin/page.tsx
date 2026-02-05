@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { uploadCSV } from '@/lib/csvUpload';
 import Link from 'next/link';
+import { logAudit, logError } from '@/lib/loggerClient';
+import { AdminLogsPanel } from '@/components/AdminLogsPanel';
 
 export default function AdminPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -23,20 +25,28 @@ export default function AdminPage() {
     setStatus({ type: null, message: '' });
 
     try {
+      void logAudit('admin.csv.upload.start', 'CSV upload started', {
+        fileName: file.name,
+        fileSize: file.size,
+      });
       const result = await uploadCSV(file);
       if (result.count > 0) {
         setStatus({ type: 'success', message: `Успешно импортировано проектов: ${result.count}` });
         setFile(null);
+        void logAudit('admin.csv.upload.success', 'CSV upload completed', { count: result.count });
       } else {
         setStatus({ 
           type: 'warning', 
           message: 'Файл прочитан, но проекты не найдены. Возможно, не совпали заголовки.',
           details: result.headers 
         });
+        void logAudit('admin.csv.upload.empty', 'CSV upload completed with no rows', {
+          headers: result.headers ?? [],
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ошибка при загрузке CSV';
-      console.error(error);
+      void logError('admin.csv.upload.failed', error, { fileName: file.name, fileSize: file.size });
       setStatus({ type: 'error', message });
     } finally {
       setUploading(false);
@@ -126,6 +136,10 @@ export default function AdminPage() {
             {status.message}
           </div>
         )}
+      </div>
+
+      <div className="mt-8">
+        <AdminLogsPanel />
       </div>
     </div>
   );

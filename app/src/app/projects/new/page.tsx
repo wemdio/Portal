@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { UserRole } from '@/types';
 import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles';
+import { logAudit, logError } from '@/lib/loggerClient';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 
@@ -94,9 +95,10 @@ export default function NewProjectPage() {
 
       if (error) throw error;
 
+      void logAudit('projects.create.success', 'Project created', { projectId: data.id });
       router.push(`/projects/${data.id}`);
     } catch (caughtError) {
-      console.error('Error creating project:', caughtError);
+      void logError('projects.create.failed', caughtError);
       const errorMessage =
         caughtError instanceof Error
           ? caughtError.message
