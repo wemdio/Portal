@@ -162,6 +162,7 @@ export async function POST(req: NextRequest) {
         jobId,
         elapsed_ms: Date.now() - startedAt,
         message,
+        ...(extra ?? {}),
       },
       logMeta,
     );
