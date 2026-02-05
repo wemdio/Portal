@@ -138,13 +138,8 @@ export default function AdminPage() {
         )}
       </div>
 
-      <div className="mt-8 space-y-6">
+      <div className="mt-8">
         <AdminLogsPanel />
-        <AdminLogsPanel
-          title="Логи парсинга"
-          description="События парсинга HH (parser.*)"
-          eventPrefix="parser."
-        />
       </div>
     </div>
   );

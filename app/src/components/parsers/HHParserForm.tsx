@@ -215,27 +215,29 @@ export function HHParserForm({ onStart, busy }: Props) {
             Ручной ввод
           </button>
         </div>
-        <div className="text-xs text-gray-500">
-          Основной вариант — вставка ссылки поиска HH.ru. Ручной ввод оставлен для точной настройки.
-        </div>
       </div>
 
       {mode === 'link' ? (
         <div className="mt-6 space-y-3">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Ссылка поиска HH.ru *</label>
-            <input
-              value={searchLink}
-              onChange={(e) => setSearchLink(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                value={searchLink}
+                onChange={(e) => setSearchLink(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
+              />
+              <button
+                type="button"
+                onClick={() => setSearchLink('')}
+                disabled={!searchLink}
+                className="inline-flex items-center rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+              >
+                Очистить
+              </button>
+            </div>
             {linkError ? <div className="mt-2 text-xs text-red-600">{linkError}</div> : null}
-            {!linkError ? (
-              <div className="mt-2 text-xs text-gray-500">
-                Все параметры из ссылки будут переданы в HH API. Ниже показываем основные.
-              </div>
-            ) : null}
           </div>
 
           {linkConfig && !linkError ? (
