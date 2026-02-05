@@ -101,7 +101,10 @@ function exportRow(v: HHVacancyRow) {
 }
 
 function csvCell(value: unknown) {
-  const text = String(value ?? '');
+  const text = String(value ?? '')
+    .replaceAll('\t', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('\r', ' ');
   return `"${text.replaceAll('"', '""')}"`;
 }
 
@@ -113,7 +116,11 @@ function tsvCell(value: unknown) {
 }
 
 function escapeHtml(value: unknown) {
-  return String(value ?? '')
+  const text = String(value ?? '')
+    .replaceAll('\t', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('\r', ' ');
+  return text
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -140,14 +147,18 @@ function buildTsv(items: HHVacancyRow[]) {
 }
 
 function buildExcelHtml(items: HHVacancyRow[]) {
-  const header = exportHeader.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+  const header = exportHeader
+    .map((h) => `<th style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(h)}</th>`)
+    .join('');
   const body = items
     .map((item) => {
-      const cells = exportRow(item).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('');
+      const cells = exportRow(item)
+        .map((cell) => `<td style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(cell)}</td>`)
+        .join('');
       return `<tr>${cells}</tr>`;
     })
     .join('');
-  return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table style="border-collapse:collapse;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 
 function downloadBlob(content: string, mime: string, filename: string) {
