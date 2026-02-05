@@ -49,7 +49,19 @@ function safeJson(value: unknown) {
   }
 }
 
-export function AdminLogsPanel() {
+type AdminLogsPanelProps = {
+  title?: string;
+  description?: string;
+  eventPrefix?: string;
+  routePrefix?: string;
+};
+
+export function AdminLogsPanel({
+  title = 'Логи приложения',
+  description = `Realtime поток логов (последние ${MAX_LOGS})`,
+  eventPrefix,
+  routePrefix,
+}: AdminLogsPanelProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [pending, setPending] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,9 +84,16 @@ export function AdminLogsPanel() {
       .slice(0, MAX_LOGS);
   }, []);
 
+  const matchesFilter = useCallback((entry: LogEntry) => {
+    if (eventPrefix && !entry.event.startsWith(eventPrefix)) return false;
+    if (routePrefix && !(entry.route ?? '').startsWith(routePrefix)) return false;
+    return true;
+  }, [eventPrefix, routePrefix]);
+
   const appendLog = useCallback((entry: LogEntry) => {
+    if (!matchesFilter(entry)) return;
     setLogs((prev) => mergeLogs([entry], prev));
-  }, [mergeLogs]);
+  }, [mergeLogs, matchesFilter]);
 
   useEffect(() => {
     let isMounted = true;
@@ -82,15 +101,25 @@ export function AdminLogsPanel() {
     const loadLogs = async () => {
       try {
         setLoading(true);
-        const { data, error: fetchError } = await supabase
+        let query = supabase
           .from('application_logs')
           .select('*')
           .order('created_at', { ascending: false })
           .limit(INITIAL_LOGS);
 
+        if (eventPrefix) {
+          query = query.ilike('event', `${eventPrefix}%`);
+        }
+        if (routePrefix) {
+          query = query.ilike('route', `${routePrefix}%`);
+        }
+
+        const { data, error: fetchError } = await query;
+
         if (fetchError) throw fetchError;
         if (isMounted) {
-          setLogs((data as LogEntry[]) ?? []);
+          const initial = (data as LogEntry[]) ?? [];
+          setLogs(initial.filter(matchesFilter));
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Не удалось загрузить логи';
@@ -110,6 +139,7 @@ export function AdminLogsPanel() {
         { event: 'INSERT', schema: 'public', table: 'application_logs' },
         (payload) => {
           const entry = payload.new as LogEntry;
+          if (!matchesFilter(entry)) return;
           if (pausedRef.current) {
             setPending((prev) => mergeLogs([entry], prev));
             return;
@@ -150,8 +180,8 @@ export function AdminLogsPanel() {
     <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-gray-900">Логи приложения</h2>
-          <p className="text-sm text-gray-500">Realtime поток логов (последние {MAX_LOGS})</p>
+          <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
+          <p className="text-sm text-gray-500">{description}</p>
         </div>
         <div className="flex items-center gap-2">
           {paused ? (
