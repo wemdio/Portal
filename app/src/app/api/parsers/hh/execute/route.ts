@@ -69,6 +69,8 @@ export async function POST(req: NextRequest) {
   const jobId = body.job_id;
   if (!jobId) return jsonError('Missing required field: job_id', 400);
 
+  const startedAt = Date.now();
+
   const { data: job, error: jobError } = await supabase
     .from('parser_jobs')
     .select('*')
@@ -80,6 +82,7 @@ export async function POST(req: NextRequest) {
   if (job.parser_type !== PARSER_TYPE) return jsonError('Unsupported parser_type', 400);
 
   const config = job.config as HHSearchConfig;
+  console.info('[hh] execute start', { jobId, userId: user.id, config });
 
   const { error: startError } = await supabase
     .from('parser_jobs')
@@ -89,12 +92,16 @@ export async function POST(req: NextRequest) {
 
   try {
     const { found, vacancies } = await fetchVacancies(config);
+    console.info('[hh] fetch done', { jobId, found, fetched: vacancies.length });
     const uniq = new Map<string, HHVacancy>();
     for (const v of vacancies) uniq.set(v.vacancy_id, v);
     const uniqueVacancies = Array.from(uniq.values());
+    console.info('[hh] dedupe done', { jobId, parsed: uniqueVacancies.length });
 
     const rows = uniqueVacancies.map((v) => toDbRow(jobId, v));
+    console.info('[hh] upsert start', { jobId, rows: rows.length });
     await upsertInBatches(supabase, rows);
+    console.info('[hh] upsert done', { jobId });
 
     const { error: doneError } = await supabase
       .from('parser_jobs')
@@ -108,6 +115,12 @@ export async function POST(req: NextRequest) {
       .eq('id', jobId);
     if (doneError) return jsonError(doneError.message, 500);
 
+    console.info('[hh] execute completed', {
+      jobId,
+      found,
+      parsed: uniqueVacancies.length,
+      elapsed_ms: Date.now() - startedAt,
+    });
     return NextResponse.json({ status: 'completed', found, parsed: uniqueVacancies.length });
   } catch (err: unknown) {
     let message = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Unknown error');
@@ -132,6 +145,11 @@ export async function POST(req: NextRequest) {
       })
       .eq('id', jobId);
 
+    console.error('[hh] execute failed', {
+      jobId,
+      elapsed_ms: Date.now() - startedAt,
+      message,
+    });
     return jsonError(message, 500, extra);
   }
 }
