@@ -39,6 +39,7 @@ type HHApiVacancyItem = {
 type HHApiEmployer = {
   id: string;
   site_url?: string | null;
+  description?: string | null;
   industries?: Array<{ id?: string; name?: string }>;
 };
 
@@ -392,14 +393,30 @@ function normalizeIndustries(items?: Array<{ id?: string; name?: string }>): str
   return items.map((item) => item?.name).filter((name): name is string => Boolean(name));
 }
 
+function stripHtml(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const withSpaces = raw.replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n');
+  const withoutTags = withSpaces.replace(/<[^>]*>/g, ' ');
+  const decoded = withoutTags
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+  const normalized = decoded.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/\s+/g, ' ').trim();
+  return normalized || undefined;
+}
+
 async function fetchEmployerDetails(
   employerId: string,
-): Promise<{ siteUrl?: string; industries?: string[] }> {
+): Promise<{ siteUrl?: string; industries?: string[]; description?: string }> {
   const url = `${HH_API_BASE}/employers/${employerId}`;
   const data = await fetchWithRetry<HHApiEmployer>(url);
   return {
     siteUrl: data.site_url ?? undefined,
     industries: normalizeIndustries(data.industries),
+    description: stripHtml(data.description),
   };
 }
 
@@ -540,7 +557,7 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
   );
 
   if (employerIds.length > 0) {
-    const employerCache = new Map<string, { siteUrl?: string; industries?: string[] }>();
+    const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
     for (const employerId of employerIds) {
       try {
         const info = await fetchEmployerDetails(employerId);
@@ -558,6 +575,7 @@ export async function fetchVacancies(config: HHSearchConfig): Promise<{ found: n
       if (info.industries && info.industries.length > 0) {
         vacancy.industries = info.industries;
       }
+      if (info.description) vacancy.company_description = info.description;
     }
   }
 
