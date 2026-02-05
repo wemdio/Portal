@@ -34,6 +34,7 @@ function toDbRow(jobId: string, v: HHVacancy) {
     salary_currency: v.salary_currency ?? null,
     company_name: v.company_name,
     company_url: v.company_url ?? null,
+    company_site_url: v.company_site_url ?? null,
     company_description: v.company_description ?? null,
     area: v.area,
     industries: v.industries ?? [],

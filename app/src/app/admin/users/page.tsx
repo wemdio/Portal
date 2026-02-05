@@ -82,12 +82,13 @@ export default function UsersPage() {
     setError('');
 
     try {
+      const fullName = newUser.full_name || newUser.email.split('@')[0];
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: newUser.email,
         password: newUser.password,
         options: {
           data: {
-            full_name: newUser.full_name || newUser.email.split('@')[0],
+            full_name: fullName,
             role: newUser.role,
           }
         }
@@ -102,7 +103,7 @@ export default function UsersPage() {
           id: authData.user.id,
           email: newUser.email,
           role: newUser.role,
-          full_name: newUser.full_name || newUser.email.split('@')[0],
+          full_name: fullName,
         });
 
       if (profileError) throw profileError;
