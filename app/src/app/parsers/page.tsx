@@ -9,7 +9,7 @@ import { VacancyResults } from '@/components/parsers/VacancyResults';
 
 type JobsResponse = { jobs: ParserJob[] };
 type CreateJobResponse = { job: ParserJob };
-type ExecuteResponse = { status: string; found: number; parsed: number };
+type ExecuteResponse = { status: string; found?: number; parsed?: number; job_id?: string };
 type ResultsResponse = { items: HHVacancyRow[]; count: number; limit: number; offset: number };
 type UiError = { message: string; captchaUrl?: string; requestId?: string };
 
@@ -196,9 +196,12 @@ export default function ParsersPage() {
   const [resultsCount, setResultsCount] = useState(0);
   const [resultsOffset, setResultsOffset] = useState(0);
   const resultsLimit = 50;
+  const [resultsPage, setResultsPage] = useState(1);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
+  const [jobActionId, setJobActionId] = useState<string | null>(null);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [activeJobId, jobs]);
 
@@ -267,7 +270,60 @@ export default function ParsersPage() {
   }, [refreshJobs]);
 
   useEffect(() => {
+    let isMounted = true;
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!isMounted) return;
+      setSessionUserId(session?.user?.id ?? null);
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionUserId) return;
+    const channel = supabase
+      .channel(`parser_jobs_${sessionUserId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'parser_jobs', filter: `user_id=eq.${sessionUserId}` },
+        (payload) => {
+          const payloadAny = payload as unknown as {
+            eventType?: string;
+            type?: string;
+            new?: ParserJob;
+            old?: { id?: string };
+          };
+          const eventType = payloadAny.eventType ?? payloadAny.type;
+          if (eventType === 'DELETE') {
+            const oldRow = payloadAny.old;
+            if (!oldRow?.id) return;
+            setJobs((prev) => prev.filter((job) => job.id !== oldRow.id));
+            return;
+          }
+          const nextJob = payloadAny.new;
+          if (!nextJob?.id) return;
+          setJobs((prev) => {
+            const existingIndex = prev.findIndex((job) => job.id === nextJob.id);
+            if (existingIndex === -1) {
+              return [nextJob, ...prev].sort((a, b) => b.created_at.localeCompare(a.created_at));
+            }
+            const next = [...prev];
+            next[existingIndex] = { ...prev[existingIndex], ...nextJob };
+            return next.sort((a, b) => b.created_at.localeCompare(a.created_at));
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [sessionUserId]);
+
+  useEffect(() => {
     if (!activeJobId) return;
+    setResultsPage(1);
     setResults([]);
     setResultsCount(0);
     setResultsOffset(0);
@@ -286,13 +342,34 @@ export default function ParsersPage() {
   useEffect(() => {
     if (!activeJob) return;
     if (activeJob.status === 'completed') {
-      void loadResults(activeJob.id, 0, false);
+      const offset = Math.max(0, (resultsPage - 1) * resultsLimit);
+      void loadResults(activeJob.id, offset, false);
       return;
     }
     if (activeJob.status === 'failed' && activeJob.error_message) {
       setError({ message: activeJob.error_message });
     }
-  }, [activeJob, loadResults]);
+  }, [activeJob, loadResults, resultsLimit, resultsPage]);
+
+  const totalPages = Math.max(1, Math.ceil(resultsCount / resultsLimit));
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (resultsPage <= totalPages) return;
+    const nextPage = totalPages;
+    setResultsPage(nextPage);
+    const offset = Math.max(0, (nextPage - 1) * resultsLimit);
+    void loadResults(activeJobId, offset, false);
+  }, [activeJobId, loadResults, resultsLimit, resultsPage, totalPages]);
+
+  const handlePageChange = useCallback((page: number) => {
+    if (!activeJobId) return;
+    const nextPage = Math.min(Math.max(page, 1), totalPages);
+    if (nextPage === resultsPage) return;
+    setResultsPage(nextPage);
+    const offset = Math.max(0, (nextPage - 1) * resultsLimit);
+    void loadResults(activeJobId, offset, false);
+  }, [activeJobId, loadResults, resultsLimit, resultsPage, totalPages]);
 
   const start = useCallback(async (config: HHSearchConfig) => {
     setBusy(true);
@@ -325,6 +402,42 @@ export default function ParsersPage() {
       setBusy(false);
     }
   }, [loadResults, refreshJobs]);
+
+  const stopJob = useCallback(async (jobId: string) => {
+    setJobActionId(jobId);
+    setError(null);
+    try {
+      await apiFetch(`/api/parsers/hh/${jobId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action: 'stop' }),
+      });
+      await refreshJobs();
+    } catch (e: unknown) {
+      setError(toUiError(e, 'Ошибка остановки job'));
+    } finally {
+      setJobActionId(null);
+    }
+  }, [refreshJobs]);
+
+  const deleteJob = useCallback(async (jobId: string) => {
+    if (!confirm('Удалить job и все результаты?')) return;
+    setJobActionId(jobId);
+    setError(null);
+    try {
+      await apiFetch(`/api/parsers/hh/${jobId}`, { method: 'DELETE' });
+      if (activeJobId === jobId) {
+        setActiveJobId(null);
+        setResults([]);
+        setResultsCount(0);
+        setResultsOffset(0);
+      }
+      await refreshJobs();
+    } catch (e: unknown) {
+      setError(toUiError(e, 'Ошибка удаления job'));
+    } finally {
+      setJobActionId(null);
+    }
+  }, [activeJobId, refreshJobs]);
 
   const exportCsv = useCallback(async () => {
     setExporting(true);
@@ -379,7 +492,7 @@ export default function ParsersPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Парсеры</h1>
-        <p className="text-sm text-gray-500 mt-1">Асинхронные задачи парсинга и результаты</p>
+        <p className="text-sm text-gray-500 mt-1">Запуск и результаты парсинга</p>
       </div>
 
       {error ? (
@@ -403,7 +516,7 @@ export default function ParsersPage() {
 
       <HHParserForm onStart={start} busy={busy} />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         <JobsList
           jobs={jobs}
           activeJobId={activeJobId}
@@ -419,14 +532,18 @@ export default function ParsersPage() {
           offset={resultsOffset}
           loading={resultsLoading}
           actionsBusy={actionsBusy}
-          onLoadMore={() => {
-            if (!activeJobId) return;
-            const nextOffset = resultsOffset + results.length;
-            void loadResults(activeJobId, nextOffset, true);
-          }}
+          jobId={activeJob?.id ?? null}
+          jobStatus={activeJob?.status ?? null}
+          jobActionBusy={jobActionId === activeJob?.id}
+          searchConfig={activeJob?.config ?? null}
+          currentPage={resultsPage}
+          totalPages={totalPages}
+          onPageChange={handlePageChange}
           onExportCsv={exportCsv}
           onExportExcel={exportExcel}
           onCopy={copyResults}
+          onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
+          onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
         />
       </div>
 

@@ -83,11 +83,43 @@ export class HHApiError extends Error {
   }
 }
 
+export class ParserJobCancelledError extends Error {
+  constructor(message = 'Job cancelled') {
+    super(message);
+    this.name = 'ParserJobCancelledError';
+  }
+}
+
+export type ParserProgressStage =
+  | 'pending'
+  | 'fetching_vacancies'
+  | 'fetching_employers'
+  | 'saving'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
 const HH_API_BASE = 'https://api.hh.ru';
 const FOUND_LIMIT = 2000;
 const MIN_REQUEST_INTERVAL_MS = (() => {
   const raw = Number(process.env.HH_REQUEST_INTERVAL_MS ?? '250');
   return Number.isFinite(raw) ? Math.max(100, raw) : 250;
+})();
+const MAX_CONCURRENCY = (() => {
+  const raw = Number(process.env.HH_MAX_CONCURRENCY ?? '2');
+  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
+})();
+const PARTITION_CONCURRENCY = (() => {
+  const raw = Number(process.env.HH_PARTITION_CONCURRENCY ?? '2');
+  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
+})();
+const EMPLOYER_CONCURRENCY = (() => {
+  const raw = Number(process.env.HH_EMPLOYER_CONCURRENCY ?? String(MAX_CONCURRENCY));
+  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : MAX_CONCURRENCY;
+})();
+const PAGE_DELAY_MS = (() => {
+  const raw = Number(process.env.HH_PAGE_DELAY_MS ?? '0');
+  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
 })();
 const MAX_RETRIES = (() => {
   const raw = Number(process.env.HH_MAX_RETRIES ?? '5');
@@ -98,6 +130,8 @@ const PROXY_DISPATCHER: Dispatcher | undefined = PROXY_URL ? new ProxyAgent(PROX
 
 let throttleChain: Promise<void> = Promise.resolve();
 let lastRequestAt = 0;
+let activeSlots = 0;
+const slotQueue: Array<() => void> = [];
 
 type HHSearchParams = Record<string, string | string[]>;
 
@@ -135,6 +169,10 @@ function buildHhErrorMessage(status: number, details: { type?: string; captchaUr
 }
 
 async function throttleHhRequest() {
+  if (activeSlots >= MAX_CONCURRENCY) {
+    await new Promise<void>((resolve) => slotQueue.push(resolve));
+  }
+  activeSlots += 1;
   throttleChain = throttleChain.then(async () => {
     const now = Date.now();
     const wait = lastRequestAt + MIN_REQUEST_INTERVAL_MS - now;
@@ -142,6 +180,11 @@ async function throttleHhRequest() {
     lastRequestAt = Date.now();
   });
   await throttleChain;
+  return () => {
+    activeSlots = Math.max(0, activeSlots - 1);
+    const next = slotQueue.shift();
+    if (next) next();
+  };
 }
 
 function toISODate(date: Date) {
@@ -349,8 +392,9 @@ export async function fetchWithRetry<T>(
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let release: (() => void) | null = null;
     try {
-      await throttleHhRequest();
+      release = await throttleHhRequest();
       const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         headers: {
           'User-Agent': 'Portal/1.0 (HH parser)',
@@ -391,6 +435,8 @@ export async function fetchWithRetry<T>(
       const base = Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(base + jitter);
+    } finally {
+      if (release) release();
     }
   }
 
@@ -546,6 +592,12 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
 
 type FetchVacanciesOptions = {
   jobId?: string;
+  searchText?: string;
+  shouldCancel?: () => Promise<boolean> | boolean;
+  cancelCheckIntervalMs?: number;
+  onProgress?: (progress: FetchVacanciesProgress) => void;
+  progressIntervalMs?: number;
+  onStage?: (stage: ParserProgressStage) => void;
   logMeta?: {
     userId?: string | null;
     requestId?: string | null;
@@ -554,10 +606,61 @@ type FetchVacanciesOptions = {
   };
 };
 
+type FetchVacanciesProgress = {
+  found?: number;
+  parsed?: number;
+  fetched?: number;
+  employersTotal?: number;
+  employersFetched?: number;
+};
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  const runWorker = async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex;
+      nextIndex += 1;
+      results[current] = await worker(items[current], current);
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return results;
+}
+
 export async function fetchVacancies(
   config: HHSearchConfig,
   options?: FetchVacanciesOptions,
 ): Promise<{ found: number; vacancies: HHVacancy[] }> {
+  const cancelInterval = options?.cancelCheckIntervalMs ?? 5000;
+  const progressInterval = options?.progressIntervalMs ?? 2000;
+  let lastCancelCheck = 0;
+  let lastProgressAt = 0;
+  const checkCancelled = async () => {
+    if (!options?.shouldCancel) return;
+    const now = Date.now();
+    if (now - lastCancelCheck < cancelInterval) return;
+    lastCancelCheck = now;
+    const cancelled = await options.shouldCancel();
+    if (cancelled) {
+      throw new ParserJobCancelledError();
+    }
+  };
+  const reportProgress = (payload: FetchVacanciesProgress, force = false) => {
+    if (!options?.onProgress) return;
+    const now = Date.now();
+    if (!force && now - lastProgressAt < progressInterval) return;
+    lastProgressAt = now;
+    options.onProgress(payload);
+  };
+
   const normalized = normalizeSearchParams(config);
   const partitions = await partitionQuery(normalized);
   void logInfo(
@@ -565,6 +668,7 @@ export async function fetchVacancies(
     'HH partitions prepared',
     {
       jobId: options?.jobId,
+      searchText: options?.searchText ?? normalized.text,
       count: partitions.length,
       text: normalized.text,
       area: normalized.area,
@@ -572,92 +676,149 @@ export async function fetchVacancies(
     options?.logMeta,
   );
 
+  await checkCancelled();
+
+  const uniqueVacancies = new Map<string, HHVacancy>();
   let totalFound = 0;
-  const all: HHVacancy[] = [];
+  let fetchedCount = 0;
 
-  for (const [index, part] of partitions.entries()) {
-    void logInfo(
-      'parser.hh.partition.start',
-      'HH partition started',
-      {
-        jobId: options?.jobId,
-        index: index + 1,
-        total: partitions.length,
-        part,
-      },
-      options?.logMeta,
-    );
-    const firstUrl = buildVacanciesUrl(part, 0);
-    const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl);
-    totalFound += first.found ?? 0;
-
-    for (const item of first.items ?? []) all.push(mapVacancy(item));
-
-    const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
-    for (let page = 1; page < totalPages; page++) {
-      await sleep(200);
-      const url = buildVacanciesUrl(part, page);
-      const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
-      for (const item of data.items ?? []) all.push(mapVacancy(item));
-      if (page === totalPages - 1 || page % 5 === 0) {
-        void logInfo(
-          'parser.hh.partition.progress',
-          'HH partition progress',
-          {
-            jobId: options?.jobId,
-            index: index + 1,
-            page: page + 1,
-            totalPages,
-            totalCollected: all.length,
-          },
-          options?.logMeta,
-        );
+  const registerItems = (items?: HHApiVacancyItem[]) => {
+    if (!items || items.length === 0) return;
+    for (const item of items) {
+      fetchedCount += 1;
+      const vacancy = mapVacancy(item);
+      const existing = uniqueVacancies.get(vacancy.vacancy_id);
+      if (!existing) {
+        uniqueVacancies.set(vacancy.vacancy_id, vacancy);
+      } else {
+        uniqueVacancies.set(vacancy.vacancy_id, { ...existing, ...vacancy });
       }
     }
-    void logInfo(
-      'parser.hh.partition.completed',
-      'HH partition completed',
-      {
-        jobId: options?.jobId,
-        index: index + 1,
-        total: partitions.length,
-      },
-      options?.logMeta,
-    );
-  }
+    reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
+  };
+
+  await mapWithConcurrency(
+    partitions,
+    PARTITION_CONCURRENCY,
+    async (part, index) => {
+      await checkCancelled();
+      void logInfo(
+        'parser.hh.partition.start',
+        'HH partition started',
+        {
+          jobId: options?.jobId,
+          searchText: options?.searchText ?? normalized.text,
+          index: index + 1,
+          total: partitions.length,
+          part,
+        },
+        options?.logMeta,
+      );
+
+      let partitionCollected = 0;
+      const firstUrl = buildVacanciesUrl(part, 0);
+      const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl);
+      const partFound = first.found ?? 0;
+      totalFound += partFound;
+      registerItems(first.items);
+      partitionCollected += first.items?.length ?? 0;
+      reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
+
+      const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
+      for (let page = 1; page < totalPages; page++) {
+        if (PAGE_DELAY_MS > 0) await sleep(PAGE_DELAY_MS);
+        await checkCancelled();
+        const url = buildVacanciesUrl(part, page);
+        const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
+        registerItems(data.items);
+        partitionCollected += data.items?.length ?? 0;
+        if (page === totalPages - 1 || page % 5 === 0) {
+          void logInfo(
+            'parser.hh.partition.progress',
+            'HH partition progress',
+            {
+              jobId: options?.jobId,
+              searchText: options?.searchText ?? normalized.text,
+              index: index + 1,
+              page: page + 1,
+              totalPages,
+              totalCollected: partitionCollected,
+              parsed: uniqueVacancies.size,
+            },
+            options?.logMeta,
+          );
+        }
+      }
+      void logInfo(
+        'parser.hh.partition.completed',
+        'HH partition completed',
+        {
+          jobId: options?.jobId,
+          searchText: options?.searchText ?? normalized.text,
+          index: index + 1,
+          total: partitions.length,
+          parsed: uniqueVacancies.size,
+        },
+        options?.logMeta,
+      );
+    },
+  );
+
+  const all = Array.from(uniqueVacancies.values());
 
   const employerIds = Array.from(
     new Set(all.map((item) => item.employer_id).filter((id): id is string => Boolean(id))),
   );
 
   if (employerIds.length > 0) {
+    await checkCancelled();
+    options?.onStage?.('fetching_employers');
+    reportProgress({ employersTotal: employerIds.length, employersFetched: 0 }, true);
     void logInfo(
       'parser.hh.employers.fetch.start',
       'HH employers fetch started',
-      { jobId: options?.jobId, count: employerIds.length },
+      {
+        jobId: options?.jobId,
+        searchText: options?.searchText ?? normalized.text,
+        count: employerIds.length,
+      },
       options?.logMeta,
     );
     const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
-    for (const [idx, employerId] of employerIds.entries()) {
-      try {
-        const info = await fetchEmployerDetails(employerId);
-        employerCache.set(employerId, info);
-      } catch {
-        employerCache.set(employerId, {});
-      }
-      if ((idx + 1) % 50 === 0 || idx === employerIds.length - 1) {
-        void logInfo(
-          'parser.hh.employers.fetch.progress',
-          'HH employers fetch progress',
-          {
-            jobId: options?.jobId,
-            fetched: idx + 1,
-            total: employerIds.length,
-          },
-          options?.logMeta,
-        );
-      }
-    }
+    let processed = 0;
+    await mapWithConcurrency(
+      employerIds,
+      EMPLOYER_CONCURRENCY,
+      async (employerId) => {
+        await checkCancelled();
+        try {
+          const info = await fetchEmployerDetails(employerId);
+          employerCache.set(employerId, info);
+        } catch {
+          employerCache.set(employerId, {});
+        } finally {
+          processed += 1;
+          reportProgress(
+            { employersTotal: employerIds.length, employersFetched: processed },
+            processed === employerIds.length,
+          );
+          if (processed % 50 === 0 || processed === employerIds.length) {
+            void logInfo(
+              'parser.hh.employers.fetch.progress',
+              'HH employers fetch progress',
+              {
+                jobId: options?.jobId,
+                searchText: options?.searchText ?? normalized.text,
+                fetched: processed,
+                total: employerIds.length,
+              },
+              options?.logMeta,
+            );
+          }
+        }
+        return null;
+      },
+    );
 
     for (const vacancy of all) {
       if (!vacancy.employer_id) continue;
@@ -669,8 +830,11 @@ export async function fetchVacancies(
       }
       if (info.description) vacancy.company_description = info.description;
     }
+  } else {
+    reportProgress({ employersTotal: 0, employersFetched: 0 }, true);
   }
 
+  reportProgress({ found: totalFound, parsed: all.length, fetched: fetchedCount }, true);
   return { found: totalFound, vacancies: all };
 }
 
