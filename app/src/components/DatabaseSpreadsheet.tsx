@@ -5,6 +5,7 @@ import type { ClipboardEvent, KeyboardEvent, MouseEvent } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabaseClient';
+import { logError } from '@/lib/loggerClient';
 
 type Sheet = {
   id: string;
@@ -803,7 +804,7 @@ export function DatabaseSpreadsheet() {
     try {
       await navigator.clipboard.writeText(text);
     } catch (error) {
-      console.error('Copy failed:', error);
+      void logError('spreadsheet.copy.failed', error);
     }
   };
 
@@ -968,7 +969,7 @@ export function DatabaseSpreadsheet() {
       applyRowsToNewTab(normalizedRows, file.name);
       finalizeImport('done', file.name);
     } catch (error) {
-      console.error('Import failed:', error);
+      void logError('spreadsheet.import.failed', error, { fileName: file.name });
       finalizeImport('error', file.name, 'Не удалось импортировать файл');
     }
   };
@@ -1850,7 +1851,7 @@ export function DatabaseSpreadsheet() {
         setWrapCells(stored === 'true');
       }
     } catch (error) {
-      console.error('Не удалось загрузить настройку переноса строк:', error);
+      void logError('spreadsheet.wrap.load.failed', error);
     }
   }, []);
 
@@ -1858,7 +1859,7 @@ export function DatabaseSpreadsheet() {
     try {
       window.localStorage.setItem(WRAP_STORAGE_KEY, String(wrapCells));
     } catch (error) {
-      console.error('Не удалось сохранить настройку переноса строк:', error);
+      void logError('spreadsheet.wrap.save.failed', error, { value: wrapCells });
     }
   }, [wrapCells]);
 
@@ -1970,7 +1971,7 @@ export function DatabaseSpreadsheet() {
           remoteState = readPersistedState(data[0].state);
         }
       } catch (error) {
-        console.error('Не удалось загрузить таблицу из Supabase:', error);
+        void logError('spreadsheet.state.load.failed', error);
       }
 
       const nextState = remoteState ?? localState;
@@ -1978,7 +1979,7 @@ export function DatabaseSpreadsheet() {
         try {
           window.localStorage.setItem(storageKey, JSON.stringify(nextState));
         } catch (error) {
-          console.error('Не удалось обновить локальное сохранение:', error);
+          void logError('spreadsheet.state.local_save.failed', error);
         }
       }
       applyState(nextState);
@@ -1991,7 +1992,7 @@ export function DatabaseSpreadsheet() {
             updated_at: new Date().toISOString(),
           });
         } catch (error) {
-          console.error('Не удалось сохранить таблицу в Supabase:', error);
+          void logError('spreadsheet.state.remote_save.failed', error);
         }
       }
     })();
@@ -2026,7 +2027,7 @@ export function DatabaseSpreadsheet() {
       try {
         window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
       } catch (error) {
-        console.error('Не удалось сохранить таблицу:', error);
+        void logError('spreadsheet.state.local_save.failed', error);
       }
       if (!userIdSnapshot) return;
       void supabase
@@ -2038,7 +2039,7 @@ export function DatabaseSpreadsheet() {
         })
         .then(({ error }) => {
           if (error) {
-            console.error('Не удалось сохранить таблицу в Supabase:', error);
+          void logError('spreadsheet.state.remote_save.failed', error);
           }
         });
     }, STORAGE_SAVE_DELAY);

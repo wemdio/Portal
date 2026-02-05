@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
+import { logAudit, logError } from '@/lib/loggerClient';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -42,6 +43,7 @@ export default function UsersPage() {
       if (error) throw error;
       setUsers((data as UserProfile[]) || []);
     } catch (err: unknown) {
+      void logError('admin.users.fetch.failed', err);
       setError(getErrorMessage(err) || 'Ошибка загрузки пользователей');
     }
   }, []);
@@ -63,6 +65,7 @@ export default function UsersPage() {
       await fetchUsers();
       setLoading(false);
     } catch (err: unknown) {
+      void logError('admin.users.access.check.failed', err);
       setError(getErrorMessage(err));
       setLoading(false);
     }
@@ -111,8 +114,13 @@ export default function UsersPage() {
       setShowCreateModal(false);
       setNewUser({ email: '', password: '', role: 'technician', full_name: '' });
       setSearchQuery(''); // Reset search when user is created
+      void logAudit('admin.users.create.success', 'User created', {
+        targetUserId: authData.user.id,
+        role: newUser.role,
+      });
       await fetchUsers();
     } catch (err: unknown) {
+      void logError('admin.users.create.failed', err, { role: newUser.role });
       const message = getErrorMessage(err);
       if (message.includes('already registered')) {
         setError('Пользователь с таким email уже существует');
@@ -137,7 +145,12 @@ export default function UsersPage() {
       setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
       setEditingUserId(null);
       setEditingRole(null);
+      void logAudit('admin.users.role.updated', 'User role updated', {
+        targetUserId: userId,
+        role: newRole,
+      });
     } catch (err: unknown) {
+      void logError('admin.users.role.update.failed', err, { targetUserId: userId, role: newRole });
       setError(getErrorMessage(err) || 'Ошибка обновления роли');
     } finally {
       setSaving(false);
@@ -166,7 +179,9 @@ export default function UsersPage() {
       // Remove from local state
       setUsers(users.filter(u => u.id !== userId));
       setDeletingUserId(null);
+      void logAudit('admin.users.delete.success', 'User deleted', { targetUserId: userId });
     } catch (err: unknown) {
+      void logError('admin.users.delete.failed', err, { targetUserId: userId });
       setError(getErrorMessage(err) || 'Ошибка удаления пользователя');
     } finally {
       setDeleting(false);

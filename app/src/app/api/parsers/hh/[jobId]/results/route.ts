@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,14 +17,18 @@ async function getSupabase(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: jsonError('Unauthorized', 401) };
 
-  return { supabase };
+  return { supabase, user };
 }
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await getSupabase(req);
   if ('error' in auth) return auth.error;
 
-  const { supabase } = auth;
+  const { supabase, user } = auth;
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { userId: user.id, requestId, route, ip };
   const { jobId } = await ctx.params;
 
   const sp = req.nextUrl.searchParams;
@@ -37,7 +42,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .order('published_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (error) return jsonError(error.message, 500);
+  if (error) {
+    await logError('parser.hh.results.fetch.failed', error, { jobId, limit, offset }, logMeta);
+    return jsonError(error.message, 500);
+  }
   return NextResponse.json({ items: data ?? [], count: count ?? 0, limit, offset });
 }
 

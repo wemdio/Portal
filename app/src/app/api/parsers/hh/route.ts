@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import type { HHSearchConfig } from '@/lib/parsers/hhParser';
+import { logAudit, logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,7 +27,12 @@ export async function GET(req: NextRequest) {
   const auth = await getSupabase(req);
   if ('error' in auth) return auth.error;
 
-  const { supabase } = auth;
+  const { supabase, user } = auth;
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { userId: user.id, requestId, route, ip };
+
   const { data, error } = await supabase
     .from('parser_jobs')
     .select('*')
@@ -34,7 +40,10 @@ export async function GET(req: NextRequest) {
     .order('created_at', { ascending: false })
     .limit(25);
 
-  if (error) return jsonError(error.message, 500);
+  if (error) {
+    await logError('parser.hh.jobs.list.failed', error, { parserType: PARSER_TYPE }, logMeta);
+    return jsonError(error.message, 500);
+  }
   return NextResponse.json({ jobs: data ?? [] });
 }
 
@@ -43,6 +52,10 @@ export async function POST(req: NextRequest) {
   if ('error' in auth) return auth.error;
 
   const { supabase, user } = auth;
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { userId: user.id, requestId, route, ip };
 
   let config: HHSearchConfig;
   try {
@@ -71,7 +84,17 @@ export async function POST(req: NextRequest) {
     .select('*')
     .single();
 
-  if (error) return jsonError(error.message, 500);
+  if (error) {
+    await logError('parser.hh.job.create.failed', error, { parserType: PARSER_TYPE }, logMeta);
+    return jsonError(error.message, 500);
+  }
+
+  await logAudit(
+    'parser.hh.job.created',
+    'HH parser job created',
+    { jobId: data?.id, parserType: PARSER_TYPE, config },
+    logMeta,
+  );
   return NextResponse.json({ job: data });
 }
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { logError } from '@/lib/loggerClient';
 
 interface ProjectFinancials {
   id: string;
@@ -103,7 +104,7 @@ export default function FinancePage() {
 
       setFinancials(activeFinancials);
     } catch (error) {
-      console.error('Error fetching financials:', error);
+      void logError('finance.data.fetch.failed', error);
     } finally {
       setLoading(false);
     }

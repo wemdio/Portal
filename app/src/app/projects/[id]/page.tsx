@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { Project, ProjectStatus } from '@/types';
 import Link from 'next/link';
 import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
+import { logAudit, logError } from '@/lib/loggerClient';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 
@@ -132,7 +133,7 @@ export default function ProjectPage() {
       setProject(normalized);
       setInitialProject(normalized);
     } catch (error) {
-      console.error('Error fetching project:', error);
+      void logError('projects.fetch.failed', error, { projectId });
       setMessage('Ошибка загрузки проекта');
     } finally {
       setLoading(false);
@@ -162,11 +163,12 @@ export default function ProjectPage() {
       setInitialProject(project);
       setMessage('Изменения сохранены');
       router.replace(pathname);
+      void logAudit('projects.update.success', 'Project updated', { projectId: project.id });
       
       // Auto-hide success message
       setTimeout(() => setMessage(''), 3000);
     } catch (error) {
-      console.error('Error updating project:', error);
+      void logError('projects.update.failed', error, { projectId: project.id });
       setMessage('Ошибка при сохранении');
     } finally {
       setSaving(false);
