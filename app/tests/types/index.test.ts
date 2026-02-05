@@ -34,11 +34,11 @@ describe('Type definitions', () => {
   describe('Project', () => {
     it('should have required fields', () => {
       const project: Project = {
-        id: 1,
+        id: 'project-id',
         name: 'Test Project',
         status: 'В работе',
       };
-      expect(project.id).toBe(1);
+      expect(project.id).toBe('project-id');
       expect(project.name).toBe('Test Project');
       expect(project.status).toBe('В работе');
     });
@@ -48,10 +48,11 @@ describe('Type definitions', () => {
     it('should accept valid status values', () => {
       const validStatuses: ProjectStatus[] = [
         'В работе',
-        'Тест',
+        'Тестирование',
         'На паузе',
         'Подготовка',
-        'Completed',
+        'Завершен',
+        'Отменен',
       ];
       validStatuses.forEach(status => {
         expect(status).toBeDefined();
