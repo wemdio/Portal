@@ -85,12 +85,24 @@ type PersonalizationState = {
   error: string | null;
 };
 
+type WebsiteEnrichmentState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isGenerating: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
 const OPENROUTER_API_KEY = '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';
 const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
 const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
+const ENRICHMENT_BATCH_SIZE = 5;
+const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 
 const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
@@ -123,6 +135,8 @@ const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}]/gu;
 const DEFAULT_COLUMN_WIDTH = 160;
 const MIN_COLUMN_WIDTH = 80;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
+const HEADER_LABEL_HINT_REGEX =
+  /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
 
 const DEFAULT_ROWS = 20;
 const DEFAULT_COLS = 10;
@@ -427,6 +441,16 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const personalizationAbortRef = useRef<AbortController | null>(null);
+  const [websiteEnrichment, setWebsiteEnrichment] = useState<WebsiteEnrichmentState>({
+    isOpen: false,
+    sourceCol: 0,
+    isGenerating: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const enrichmentAbortRef = useRef<AbortController | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -1410,6 +1434,31 @@ export function DatabaseSpreadsheet() {
     );
   };
 
+  const confirmClearSelection = () => {
+    if (!activeTab) return;
+    const rowsCount = normalizedSelection.endRow - normalizedSelection.startRow + 1;
+    const colsCount = normalizedSelection.endCol - normalizedSelection.startCol + 1;
+    const cellCount = rowsCount * colsCount;
+
+    if (cellCount <= 1) {
+      setUndoSnapshot('Очистка ячейки');
+      clearSelectedCells();
+      setLastAction({ message: 'Очищена ячейка', time: Date.now() });
+      return;
+    }
+
+    requestConfirm(
+      'Очистить выбранные ячейки?',
+      `Будет очищено ячеек: ${cellCount}.`,
+      () => {
+        setUndoSnapshot(`Очистка ячеек (${cellCount})`);
+        clearSelectedCells();
+        setLastAction({ message: `Очищено ячеек: ${cellCount}`, time: Date.now() });
+      },
+      'Очистить',
+    );
+  };
+
   const handleGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const isSelectAll =
       (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a';
@@ -1472,8 +1521,13 @@ export function DatabaseSpreadsheet() {
   const headerLabels = useMemo(() => {
     if (!activeTab) return [];
     const headerRow = activeTab.data[0] ?? [];
+    const headerHasHints = headerRow.some((cell) => {
+      const value = cell?.trim();
+      return value ? HEADER_LABEL_HINT_REGEX.test(value) : false;
+    });
     return Array.from({ length: colCount }, (_, index) => {
       const label = headerRow[index]?.trim();
+      if (!headerHasHints) return toColumnLabel(index);
       return label && label.length > 0 ? label : toColumnLabel(index);
     });
   }, [activeTab, colCount]);
@@ -1797,7 +1851,7 @@ export function DatabaseSpreadsheet() {
         }));
 
         if (batchStart + batchSize < rowsToProcess.length) {
-          await sleep(700);
+          await sleep(200);
         }
       }
 
@@ -1835,6 +1889,242 @@ export function DatabaseSpreadsheet() {
       }
     } finally {
       personalizationAbortRef.current = null;
+    }
+  };
+
+  // --- Website Enrichment ---
+
+  const openWebsiteEnrichmentModal = () => {
+    setWebsiteEnrichment({
+      isOpen: true,
+      sourceCol: 0,
+      isGenerating: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeWebsiteEnrichmentModal = () => {
+    if (enrichmentAbortRef.current) {
+      enrichmentAbortRef.current.abort();
+      enrichmentAbortRef.current = null;
+    }
+    setWebsiteEnrichment((prev) => ({
+      ...prev,
+      isOpen: false,
+      isGenerating: false,
+      error: null,
+    }));
+  };
+
+  const handleStartWebsiteEnrichment = async () => {
+    if (!activeTab || websiteEnrichment.isGenerating) return;
+
+    const dataRows = activeTab.data.slice(1).filter((row) => {
+      const value = row[websiteEnrichment.sourceCol]?.trim();
+      return value && value.length > 0;
+    });
+
+    if (dataRows.length === 0) {
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        error: 'Нет данных в выбранной колонке',
+      }));
+      return;
+    }
+
+    // Get auth token
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        error: 'Необходима авторизация',
+      }));
+      return;
+    }
+
+    enrichmentAbortRef.current = new AbortController();
+
+    setWebsiteEnrichment((prev) => ({
+      ...prev,
+      isGenerating: true,
+      progress: 0,
+      totalRows: dataRows.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Обогащение с сайта');
+
+    const newHeaderName = `Обогащение (${headerLabels[websiteEnrichment.sourceCol] || toColumnLabel(websiteEnrichment.sourceCol)})`;
+    const startCol = websiteEnrichment.sourceCol + 1;
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => {
+        const value = row[colIndex] ?? '';
+        return value.trim().length === 0;
+      });
+
+    let newColIndex = startCol;
+    while (!isColumnEmpty(newColIndex)) {
+      newColIndex += 1;
+    }
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= newColIndex) {
+        nextRow.push('');
+      }
+      if (rowIndex === 0) {
+        nextRow[newColIndex] = newHeaderName;
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    setHighlightedCol(newColIndex);
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedCol(null);
+    }, ENRICHMENT_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => {
+        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
+      });
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+    const batchSize = ENRICHMENT_BATCH_SIZE;
+    const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
+
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const sourceValue = activeTab.data[i][websiteEnrichment.sourceCol]?.trim();
+      if (sourceValue && sourceValue.length > 0) {
+        rowsToProcess.push({ rowIndex: i, sourceValue });
+      }
+    }
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += batchSize) {
+        if (enrichmentAbortRef.current?.signal.aborted) {
+          throw new Error('Отменено пользователем');
+        }
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + batchSize);
+
+        const results = await Promise.all(
+          batch.map(async ({ rowIndex, sourceValue }) => {
+            try {
+              const res = await fetch('/api/enrich/website', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({ url: sourceValue }),
+                signal: enrichmentAbortRef.current?.signal,
+              });
+
+              const data = await res.json() as { text?: string; error?: string };
+
+              if (data.error && !data.text) {
+                return { rowIndex, text: '', error: data.error };
+              }
+
+              return { rowIndex, text: data.text ?? '', error: data.error ?? null };
+            } catch (err) {
+              if (err instanceof Error && err.name === 'AbortError') throw err;
+              return {
+                rowIndex,
+                text: '',
+                error: err instanceof Error ? err.message : 'Ошибка',
+              };
+            }
+          }),
+        );
+
+        for (const result of results) {
+          if (result.error && !result.text) errorCount++;
+        }
+
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.map((row, idx) => {
+              const result = results.find((r) => r.rowIndex === idx);
+              if (!result) return row;
+              const newRow = [...row];
+              while (newRow.length <= newColIndex) {
+                newRow.push('');
+              }
+              newRow[newColIndex] =
+                result.error && !result.text
+                  ? `[Ошибка: ${result.error}]`
+                  : result.text;
+              return newRow;
+            });
+            return { ...tab, data: nextData };
+          }),
+        );
+
+        processedCount += batch.length;
+
+        setWebsiteEnrichment((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+
+        if (batchStart + batchSize < rowsToProcess.length) {
+          await sleep(700);
+        }
+      }
+
+      const successCount = processedCount - errorCount;
+
+      setLastAction({
+        message:
+          errorCount > 0
+            ? `Обогащение: ${successCount} успешно, ${errorCount} с ошибками`
+            : `Обогащение завершено: ${processedCount} строк`,
+        time: Date.now(),
+      });
+
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        isGenerating: false,
+        isOpen: false,
+      }));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({
+          message: `Обогащение отменено (обработано: ${processedCount})`,
+          time: Date.now(),
+        });
+        setWebsiteEnrichment((prev) => ({
+          ...prev,
+          isGenerating: false,
+          isOpen: false,
+        }));
+      } else {
+        setWebsiteEnrichment((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isGenerating: false,
+        }));
+      }
+    } finally {
+      enrichmentAbortRef.current = null;
     }
   };
 
@@ -2073,6 +2363,15 @@ export function DatabaseSpreadsheet() {
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={confirmClearSelection}
+              disabled={!activeTab || rowCount === 0 || colCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+            >
+              Очистить ячейки
+            </button>
+
             <div className="flex items-center rounded-lg bg-gray-100 p-1">
               <button
                 type="button"
@@ -2105,6 +2404,15 @@ export function DatabaseSpreadsheet() {
               className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300"
             >
               <span>Персонализация</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={openWebsiteEnrichmentModal}
+              disabled={colCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:bg-gray-300"
+            >
+              <span>Обогатить с сайта</span>
             </button>
           </div>
           {importStatus.status !== 'idle' && (
@@ -2989,6 +3297,132 @@ export function DatabaseSpreadsheet() {
                     <>
                       <span>AI</span>
                       Сгенерировать
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {websiteEnrichment.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm font-bold text-lg">
+                  W
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Обогатить с сайта</h3>
+                  <p className="text-xs text-gray-500 font-medium">Парсинг информации о компании с сайта</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeWebsiteEnrichmentModal}
+                disabled={websiteEnrichment.isGenerating}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-6 px-6 py-6">
+              {websiteEnrichment.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {websiteEnrichment.error}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Столбец с сайтами
+                </label>
+                <div className="relative">
+                  <select
+                    value={websiteEnrichment.sourceCol}
+                    onChange={(e) =>
+                      setWebsiteEnrichment((prev) => ({
+                        ...prev,
+                        sourceCol: Number(e.target.value),
+                        error: null,
+                      }))
+                    }
+                    disabled={websiteEnrichment.isGenerating}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={`enrich-col-${index}`} value={index}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                    ▼
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 px-1">
+                  В ячейках должны быть URL компаний (example.com или https://...)
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                <p className="text-xs text-blue-700 leading-relaxed">
+                  Для каждого URL будет загружена главная страница и страница «О компании» (/about).
+                  Извлечённый текст будет добавлен в новую колонку.
+                </p>
+              </div>
+
+              {websiteEnrichment.isGenerating && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Обогащение...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {websiteEnrichment.currentRow} / {websiteEnrichment.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                      style={{ width: `${websiteEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                Будет обработано: <span className="text-gray-900">{visibleRowIndices.length} строк</span>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeWebsiteEnrichmentModal}
+                  disabled={websiteEnrichment.isGenerating}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                >
+                  {websiteEnrichment.isGenerating ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartWebsiteEnrichment()}
+                  disabled={websiteEnrichment.isGenerating}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {websiteEnrichment.isGenerating ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Обработка...
+                    </>
+                  ) : (
+                    <>
+                      <span>W</span>
+                      Запустить обогащение
                     </>
                   )}
                 </button>
