@@ -149,7 +149,7 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
   }
 
   // First try UTF-8
-  let decoded = new TextDecoder('utf-8').decode(buffer);
+  const decoded = new TextDecoder('utf-8').decode(buffer);
   const metaCharset = extractCharsetFromMeta(decoded);
   if (metaCharset && metaCharset !== 'utf-8' && metaCharset !== 'utf8') {
     const metaDecoded = decodeWith(metaCharset);
