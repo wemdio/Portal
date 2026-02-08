@@ -42,3 +42,7 @@ app/next-env.d.ts
 docs/*.xlsx
 
 .cursorrules
+
+# doc env files with credentials
+doc_*.env
+*.env.bak

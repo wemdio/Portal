@@ -95,7 +95,19 @@ type WebsiteEnrichmentState = {
   error: string | null;
 };
 
-const OPENROUTER_API_KEY = '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';
+type BriefScoringState = {
+  isOpen: boolean;
+  briefText: string;
+  briefFileName: string;
+  isUploading: boolean;
+  isScoring: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
+const OPENROUTER_API_KEY = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
@@ -103,6 +115,10 @@ const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
 const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_BATCH_SIZE = 5;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
+const BRIEF_SCORING_BATCH_SIZE = 10;
+const BRIEF_SCORING_MAX_RETRIES = 2;
+const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
+const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 
 const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
@@ -451,6 +467,19 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const enrichmentAbortRef = useRef<AbortController | null>(null);
+  const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
+    isOpen: false,
+    briefText: '',
+    briefFileName: '',
+    isUploading: false,
+    isScoring: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const briefScoringAbortRef = useRef<AbortController | null>(null);
+  const briefFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -2128,6 +2157,330 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Brief Scoring (ЦА по брифу) ──────────────────────────────
+  const openBriefScoringModal = () => {
+    setBriefScoring({
+      isOpen: true,
+      briefText: '',
+      briefFileName: '',
+      isUploading: false,
+      isScoring: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeBriefScoringModal = () => {
+    if (briefScoringAbortRef.current) {
+      briefScoringAbortRef.current.abort();
+      briefScoringAbortRef.current = null;
+    }
+    setBriefScoring((prev) => ({
+      ...prev,
+      isOpen: false,
+      isScoring: false,
+      isUploading: false,
+      error: null,
+    }));
+  };
+
+  const handleBriefFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+
+    setBriefScoring((prev) => ({
+      ...prev,
+      isUploading: true,
+      briefFileName: file.name,
+      briefText: '',
+      error: null,
+    }));
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setBriefScoring((prev) => ({ ...prev, isUploading: false, error: 'Необходима авторизация' }));
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/brief-scoring/parse-pdf', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const resData = (await res.json()) as { text?: string; pages?: number; error?: string };
+      if (!res.ok || resData.error) {
+        setBriefScoring((prev) => ({ ...prev, isUploading: false, error: resData.error || 'Ошибка при загрузке PDF' }));
+        return;
+      }
+
+      setBriefScoring((prev) => ({ ...prev, isUploading: false, briefText: resData.text ?? '' }));
+    } catch (err) {
+      setBriefScoring((prev) => ({
+        ...prev,
+        isUploading: false,
+        error: err instanceof Error ? err.message : 'Ошибка при загрузке файла',
+      }));
+    }
+  };
+
+  const handleStartBriefScoring = async () => {
+    if (!activeTab || briefScoring.isScoring) return;
+
+    if (!briefScoring.briefText.trim()) {
+      setBriefScoring((prev) => ({ ...prev, error: 'Загрузите PDF бриф' }));
+      return;
+    }
+
+    const dataRows = activeTab.data.slice(1).filter((row) => !isRowEmpty(row));
+    if (dataRows.length === 0) {
+      setBriefScoring((prev) => ({ ...prev, error: 'Нет данных для оценки' }));
+      return;
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setBriefScoring((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    briefScoringAbortRef.current = new AbortController();
+
+    setBriefScoring((prev) => ({
+      ...prev,
+      isScoring: true,
+      progress: 0,
+      totalRows: dataRows.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('ЦА по брифу');
+
+    // Add two new columns: Score and Reason
+    const scoreColIndex = activeTab.data[0].length;
+    const reasonColIndex = scoreColIndex + 1;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= reasonColIndex) nextRow.push('');
+      if (rowIndex === 0) {
+        nextRow[scoreColIndex] = 'ЦА Балл';
+        nextRow[reasonColIndex] = 'ЦА Причина';
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(scoreColIndex);
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), BRIEF_SCORING_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+    }
+
+    // Build list of rows to process with all their column data
+    const rowsToProcess: { rowIndex: number; data: Record<string, string> }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      if (isRowEmpty(row)) continue;
+      const rowData: Record<string, string> = {};
+      for (let c = 0; c < activeTab.data[0].length; c++) {
+        const header = headerLabels[c] || toColumnLabel(c);
+        const value = row[c]?.trim() ?? '';
+        if (value.length > 0) rowData[header] = value;
+      }
+      rowsToProcess.push({ rowIndex: i, data: rowData });
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += BRIEF_SCORING_BATCH_SIZE) {
+        if (briefScoringAbortRef.current?.signal.aborted) throw new Error('Отменено пользователем');
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + BRIEF_SCORING_BATCH_SIZE);
+        const companies = batch.map((item) => ({ idx: item.rowIndex, data: item.data }));
+
+        try {
+          let resData: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
+
+          for (let attempt = 0; attempt <= BRIEF_SCORING_MAX_RETRIES; attempt += 1) {
+            if (briefScoringAbortRef.current?.signal.aborted) {
+              throw new Error('Отменено пользователем');
+            }
+
+            let res: Response;
+            try {
+              res = await fetch('/api/brief-scoring/score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ briefText: briefScoring.briefText, companies }),
+                signal: briefScoringAbortRef.current?.signal,
+              });
+            } catch (error) {
+              if (error instanceof Error && error.name === 'AbortError') {
+                throw error;
+              }
+              if (attempt < BRIEF_SCORING_MAX_RETRIES) {
+                const retryDelay =
+                  BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+                  Math.floor(Math.random() * 300);
+                await sleep(retryDelay);
+                continue;
+              }
+              throw new Error('Не удалось отправить запрос к AI');
+            }
+
+            let parsed: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
+            try {
+              parsed = (await res.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
+            } catch {
+              parsed = null;
+            }
+
+            if (res.ok && parsed && !parsed.error) {
+              resData = parsed;
+              break;
+            }
+
+            const shouldRetry = [429, 500, 502, 503, 504].includes(res.status);
+            const errorMessage = parsed?.error || `Ошибка AI (${res.status})`;
+
+            if (shouldRetry && attempt < BRIEF_SCORING_MAX_RETRIES) {
+              const retryDelay =
+                BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+                Math.floor(Math.random() * 300);
+              await sleep(retryDelay);
+              continue;
+            }
+
+            resData = { error: errorMessage };
+            break;
+          }
+
+          if (!resData) {
+            throw new Error('Не удалось получить ответ от AI');
+          }
+
+          if (resData.error) {
+            errorCount += batch.length;
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== activeTabId) return tab;
+                const nextData = tab.data.map((row, idx) => {
+                  if (!batch.find((b) => b.rowIndex === idx)) return row;
+                  const newRow = [...row];
+                  while (newRow.length <= reasonColIndex) newRow.push('');
+                  newRow[scoreColIndex] = '⚠';
+                  newRow[reasonColIndex] = resData.error || 'Ошибка AI';
+                  return newRow;
+                });
+                return { ...tab, data: nextData };
+              }),
+            );
+          } else if (resData.scores) {
+            const scoresMap = new Map<number, { score: number; reason: string }>();
+            for (const s of resData.scores) scoresMap.set(s.idx, { score: s.score, reason: s.reason });
+
+            // Count missing scores
+            for (const item of batch) {
+              if (!scoresMap.has(item.rowIndex)) errorCount++;
+            }
+
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== activeTabId) return tab;
+                const nextData = tab.data.map((row, idx) => {
+                  const score = scoresMap.get(idx);
+                  if (!score) {
+                    if (batch.find((b) => b.rowIndex === idx)) {
+                      const newRow = [...row];
+                      while (newRow.length <= reasonColIndex) newRow.push('');
+                      newRow[scoreColIndex] = '?';
+                      newRow[reasonColIndex] = 'Нет оценки от AI';
+                      return newRow;
+                    }
+                    return row;
+                  }
+                  const newRow = [...row];
+                  while (newRow.length <= reasonColIndex) newRow.push('');
+                  newRow[scoreColIndex] = String(score.score);
+                  newRow[reasonColIndex] = score.reason;
+                  return newRow;
+                });
+                return { ...tab, data: nextData };
+              }),
+            );
+          }
+        } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError') throw err;
+          errorCount += batch.length;
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== activeTabId) return tab;
+              const nextData = tab.data.map((row, idx) => {
+                if (!batch.find((b) => b.rowIndex === idx)) return row;
+                const newRow = [...row];
+                while (newRow.length <= reasonColIndex) newRow.push('');
+                newRow[scoreColIndex] = '⚠';
+                newRow[reasonColIndex] = err instanceof Error ? err.message : 'Ошибка';
+                return newRow;
+              });
+              return { ...tab, data: nextData };
+            }),
+          );
+        }
+
+        processedCount += batch.length;
+        setBriefScoring((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+
+        if (batchStart + BRIEF_SCORING_BATCH_SIZE < rowsToProcess.length) await sleep(500);
+      }
+
+      const successCount = processedCount - errorCount;
+      setLastAction({
+        message: errorCount > 0
+          ? `ЦА по брифу: ${successCount} успешно, ${errorCount} с ошибками`
+          : `ЦА по брифу завершено: ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `ЦА по брифу отменено (обработано: ${processedCount})`, time: Date.now() });
+        setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
+      } else {
+        setBriefScoring((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isScoring: false,
+        }));
+      }
+    } finally {
+      briefScoringAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -2414,6 +2767,15 @@ export function DatabaseSpreadsheet() {
             >
               <span>Обогатить с сайта</span>
             </button>
+
+            <button
+              type="button"
+              onClick={openBriefScoringModal}
+              disabled={colCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:bg-gray-300"
+            >
+              <span>ЦА по брифу</span>
+            </button>
           </div>
           {importStatus.status !== 'idle' && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
@@ -2552,6 +2914,13 @@ export function DatabaseSpreadsheet() {
           void handleImportFile(file);
           event.currentTarget.value = '';
         }}
+      />
+      <input
+        ref={briefFileInputRef}
+        type="file"
+        accept=".pdf"
+        className="hidden"
+        onChange={(e) => void handleBriefFileUpload(e)}
       />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -3423,6 +3792,154 @@ export function DatabaseSpreadsheet() {
                     <>
                       <span>W</span>
                       Запустить обогащение
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Brief Scoring Modal ─────────────────────────────── */}
+      {briefScoring.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm font-bold text-lg">
+                  🎯
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">ЦА по брифу</h3>
+                  <p className="text-xs text-gray-500 font-medium">Оценка релевантности компаний по брифу клиента</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeBriefScoringModal}
+                disabled={briefScoring.isScoring}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              {/* Upload area */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  PDF бриф от клиента
+                </label>
+                {!briefScoring.briefText ? (
+                  <button
+                    type="button"
+                    onClick={() => briefFileInputRef.current?.click()}
+                    disabled={briefScoring.isUploading || briefScoring.isScoring}
+                    className="w-full rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-8 text-center transition hover:border-emerald-400 hover:bg-emerald-50/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {briefScoring.isUploading ? (
+                      <div className="flex flex-col items-center gap-2">
+                        <span className="animate-spin text-2xl">⟳</span>
+                        <span className="text-sm text-gray-500">Загрузка {briefScoring.briefFileName}...</span>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2">
+                        <span className="text-3xl">📄</span>
+                        <span className="text-sm font-medium text-gray-600">Нажмите для загрузки PDF</span>
+                        <span className="text-xs text-gray-400">Макс. размер: 20 МБ</span>
+                      </div>
+                    )}
+                  </button>
+                ) : (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">✅</span>
+                        <span className="text-sm font-medium text-emerald-800">{briefScoring.briefFileName}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBriefScoring((prev) => ({ ...prev, briefText: '', briefFileName: '', error: null }));
+                        }}
+                        disabled={briefScoring.isScoring}
+                        className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                      >
+                        Заменить
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500 line-clamp-3">{briefScoring.briefText.slice(0, 300)}...</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Info */}
+              <div className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
+                <p>
+                  AI оценит каждую компанию в базе по шкале 0-10 на основе брифа.
+                </p>
+                <p>
+                  Будут добавлены колонки: <span className="font-medium">ЦА Балл</span> и{' '}
+                  <span className="font-medium">ЦА Причина</span>.
+                </p>
+                <p>
+                  Строк для обработки: <span className="font-semibold text-gray-900">{visibleRowIndices.length}</span>
+                </p>
+              </div>
+
+              {/* Progress */}
+              {briefScoring.isScoring && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-600">
+                    <span>Обработка...</span>
+                    <span>{briefScoring.currentRow} / {briefScoring.totalRows}</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                      style={{ width: `${briefScoring.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Error */}
+              {briefScoring.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {briefScoring.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs text-gray-500">
+                Batch: {BRIEF_SCORING_BATCH_SIZE} строк
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeBriefScoringModal}
+                  disabled={briefScoring.isScoring}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                >
+                  {briefScoring.isScoring ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartBriefScoring()}
+                  disabled={briefScoring.isScoring || !briefScoring.briefText}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {briefScoring.isScoring ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Оценка...
+                    </>
+                  ) : (
+                    <>
+                      <span>🎯</span>
+                      Запустить оценку
                     </>
                   )}
                 </button>

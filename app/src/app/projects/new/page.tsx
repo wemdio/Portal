@@ -9,6 +9,12 @@ import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles'
 import { logAudit, logError } from '@/lib/loggerClient';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
+const PROJECT_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'Продажа', label: 'Продажа (новый клиент)' },
+  { value: 'Продление', label: 'Продление' },
+];
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -27,13 +33,20 @@ export default function NewProjectPage() {
     setCheckingAccess(false);
   }
 
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+
+  const toggleService = (service: string) => {
+    setSelectedServices((prev) =>
+      prev.includes(service) ? prev.filter((s) => s !== service) : [...prev, service]
+    );
+  };
+
   const [formData, setFormData] = useState({
     client: '',
     name: '',
     status: 'В работе',
     manager: '',
     specialist: '',
-    description: '',
     budget: '',
     margin: '',
     contract_link: '',
@@ -42,6 +55,12 @@ export default function NewProjectPage() {
     kpi_plan: '',
     work_format: '',
     comments: '',
+    lead_source: '',
+    project_type: '',
+
+    payment_date: '',
+    contract_date: '',
+    launch_date: '',
   });
 
   const statusOptions = [
@@ -63,8 +82,8 @@ export default function NewProjectPage() {
       return;
     }
 
-    if (!formData.name.trim()) {
-      setError('Проект / услуга обязательны');
+    if (selectedServices.length === 0) {
+      setError('Выберите хотя бы одну услугу');
       return;
     }
 
@@ -75,12 +94,11 @@ export default function NewProjectPage() {
       const { data, error } = await supabase
         .from('projects')
         .insert([{
-          name: formData.name,
+          name: selectedServices.join(', '),
           client: formData.client || null,
           status: formData.status,
           manager: formData.manager || null,
           specialist: formData.specialist || null,
-          description: formData.description || null,
           budget: formData.budget || null,
           margin: formData.margin || null,
           contract_link: formData.contract_link || null,
@@ -89,6 +107,12 @@ export default function NewProjectPage() {
           kpi_plan: formData.kpi_plan || null,
           work_format: formData.work_format || null,
           comments: formData.comments || null,
+          lead_source: formData.lead_source || null,
+          project_type: formData.project_type || null,
+
+          payment_date: formData.payment_date || null,
+          contract_date: formData.contract_date || null,
+          launch_date: formData.launch_date || null,
         }])
         .select()
         .single();
@@ -183,19 +207,49 @@ export default function NewProjectPage() {
           />
         </div>
 
-        {/* Project / Service */}
+        {/* Services multi-select */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Проект / услуга *
+            Услуга *
           </label>
-          <input
-            type="text"
-            name="name"
-            value={formData.name}
-            onChange={handleChange}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="Например: Продвижение в Telegram"
-          />
+          <div className="flex flex-wrap gap-2">
+            {SERVICE_OPTIONS.map((service) => {
+              const isSelected = selectedServices.includes(service);
+              return (
+                <button
+                  key={service}
+                  type="button"
+                  onClick={() => toggleService(service)}
+                  className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                    isSelected
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                  }`}
+                >
+                  {service}
+                </button>
+              );
+            })}
+          </div>
+          {selectedServices.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {selectedServices.map((service) => (
+                <span
+                  key={service}
+                  className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-1 rounded-full"
+                >
+                  {service}
+                  <button
+                    type="button"
+                    onClick={() => toggleService(service)}
+                    className="text-blue-600 hover:text-blue-800"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Status & Lead Row */}
@@ -263,19 +317,40 @@ export default function NewProjectPage() {
           </div>
         </div>
 
-        {/* Description */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Описание услуги
-          </label>
-          <textarea
-            name="description"
-            value={formData.description}
-            onChange={handleChange}
-            rows={3}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-            placeholder="Краткое описание услуги или проекта"
-          />
+        {/* Source & Type Row */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Тип проекта
+            </label>
+            <select
+              name="project_type"
+              value={formData.project_type}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            >
+              <option value="">Не выбрано</option>
+              {PROJECT_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Источник лида
+            </label>
+            <select
+              name="lead_source"
+              value={formData.lead_source}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            >
+              <option value="">Не выбрано</option>
+              {LEAD_SOURCE_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Budget, Margin & KPI Row */}
@@ -321,18 +396,60 @@ export default function NewProjectPage() {
           </div>
         </div>
 
-        {/* Deadline */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Дедлайн
-          </label>
-          <input
-            type="date"
-            name="deadline"
-            value={formData.deadline}
-            onChange={handleChange}
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
+        {/* Payment Date */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Дата оплаты
+            </label>
+            <input
+              type="date"
+              name="payment_date"
+              value={formData.payment_date}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+        </div>
+
+        {/* Dates */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Дата договора
+            </label>
+            <input
+              type="date"
+              name="contract_date"
+              value={formData.contract_date}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Дата запуска
+            </label>
+            <input
+              type="date"
+              name="launch_date"
+              value={formData.launch_date}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Дедлайн
+            </label>
+            <input
+              type="date"
+              name="deadline"
+              value={formData.deadline}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
         </div>
 
         {/* Links Row */}

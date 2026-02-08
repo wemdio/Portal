@@ -50,4 +50,7 @@ export interface Project {
   hypotheses_result?: string;
   subtasks?: string;
   materials_links?: string;
+  project_type?: 'Продажа' | 'Продление' | null;
+
+  payment_date?: string;
 }
