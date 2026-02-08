@@ -319,7 +319,7 @@ const parseJsonResponse = async <T,>(
   const text = await res.text();
   if (!text) return { error: 'Empty response from server' } as T & { error?: string };
   try {
-    return JSON.parse(text) as T;
+    return JSON.parse(text) as T & { error?: string };
   } catch (error) {
     void logError('spreadsheet.api.invalid_json', error, {
       context,
