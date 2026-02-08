@@ -169,7 +169,7 @@ export function AdminLogsPanel({
       isMounted = false;
       void supabase.removeChannel(channel);
     };
-  }, [appendLog, mergeLogs]);
+  }, [appendLog, mergeLogs, matchesFilter, eventPrefix, routePrefix]);
 
   const resume = () => {
     setLogs((prev) => mergeLogs(pending, prev));
