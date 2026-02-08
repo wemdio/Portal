@@ -116,7 +116,7 @@ export default function ProjectsAnalyticsPage() {
         return tasks.map((task, index) => ({
           id: `${project.id ?? 'project'}-${index}`,
           title: task,
-          projectName: project.name || 'Без названия',
+          projectName: project.client || 'Без названия',
           specialist: project.specialist || 'Без специалиста',
           deadlineDate: project.deadlineDate,
           status: project.status,
@@ -200,7 +200,7 @@ export default function ProjectsAnalyticsPage() {
                 <div key={project.id} className="px-6 py-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm font-medium text-gray-900">{project.name || 'Без названия'}</p>
+                      <p className="text-sm font-medium text-gray-900">{project.client || 'Без названия'}</p>
                       <p className="text-xs text-gray-500">
                         {project.specialist || 'Без специалиста'} · дедлайн {formatDateLabel(project.deadlineDate)}
                       </p>
@@ -256,7 +256,7 @@ export default function ProjectsAnalyticsPage() {
             return (
               <div key={project.id} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
                 <div>
-                  <p className="text-sm font-medium text-gray-900">{project.name || 'Без названия'}</p>
+                  <p className="text-sm font-medium text-gray-900">{project.client || 'Без названия'}</p>
                   <p className="text-xs text-gray-500">
                     {project.specialist || 'Без специалиста'} · дедлайн {formatDateLabel(project.deadlineDate)}
                   </p>

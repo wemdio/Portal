@@ -9,6 +9,18 @@ import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
+
+/** Parse a comma-separated services string into an array */
+const parseServices = (value: string | undefined | null): string[] => {
+  if (!value) return [];
+  return value.split(',').map((s) => s.trim()).filter(Boolean);
+};
+const PROJECT_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'Продажа', label: 'Продажа (новый клиент)' },
+  { value: 'Продление', label: 'Продление' },
+];
 
 const parseMaterials = (value: string | null | undefined) => {
   if (!value) return [];
@@ -103,6 +115,8 @@ export default function ProjectPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [canEdit, setCanEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -183,6 +197,26 @@ export default function ProjectPage() {
     router.replace(pathname);
   }
 
+  async function handleDelete() {
+    if (!project) return;
+    setDeleting(true);
+    try {
+      const { error } = await supabase
+        .from('projects')
+        .delete()
+        .eq('id', project.id);
+
+      if (error) throw error;
+      void logAudit('projects.delete.success', 'Project deleted', { projectId: project.id });
+      router.push('/projects' as any);
+    } catch (error) {
+      void logError('projects.delete.failed', error, { projectId: project.id });
+      setMessage('Ошибка при удалении проекта');
+      setDeleting(false);
+      setShowDeleteConfirm(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -210,10 +244,19 @@ export default function ProjectPage() {
             ← Назад
           </Link>
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">{project.client || project.name}</h1>
-            <p className="text-sm text-gray-500">
-              {project.client ? project.name : project.description}
-            </p>
+            <h1 className="text-2xl font-bold text-gray-900">{project.client || 'Без названия'}</h1>
+            {project.name && (
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {parseServices(project.name).map((service) => (
+                  <span
+                    key={service}
+                    className="inline-flex items-center bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full"
+                  >
+                    {service}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -231,6 +274,14 @@ export default function ProjectPage() {
               <>
                 <button
                   type="button"
+                  onClick={() => router.push(`${pathname}?mode=edit` as any)}
+                  className="flex items-center gap-2 bg-gray-900 text-white px-4 py-2 rounded-md hover:bg-gray-800 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                  Редактировать
+                </button>
+                <button
+                  type="button"
                   onClick={handleCancelEdit}
                   className="flex items-center gap-2 border border-gray-200 px-4 py-2 rounded-md text-gray-700 hover:bg-gray-50"
                 >
@@ -243,6 +294,14 @@ export default function ProjectPage() {
                   className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
                 >
                   {saving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="flex items-center gap-2 border border-red-200 text-red-600 px-4 py-2 rounded-md hover:bg-red-50 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  Удалить
                 </button>
               </>
             )}
@@ -262,6 +321,14 @@ export default function ProjectPage() {
                   className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
                 >
                   {saving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="flex items-center gap-2 border border-red-200 text-red-600 px-4 py-2 rounded-md hover:bg-red-50 transition-colors"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  Удалить
                 </button>
               </>
             )}
@@ -287,15 +354,35 @@ export default function ProjectPage() {
                   className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Проект / услуга</label>
-                <input
-                  type="text"
-                  value={project.name}
-                  onChange={(e) => setProject({ ...project, name: e.target.value })}
-                  disabled={!canEdit}
-                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
-                />
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Услуга</label>
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {SERVICE_OPTIONS.map((service) => {
+                    const services = parseServices(project.name);
+                    const isSelected = services.includes(service);
+                    return (
+                      <button
+                        key={service}
+                        type="button"
+                        disabled={!canEdit}
+                        onClick={() => {
+                          const current = parseServices(project.name);
+                          const updated = current.includes(service)
+                            ? current.filter((s) => s !== service)
+                            : [...current, service];
+                          setProject({ ...project, name: updated.join(', ') });
+                        }}
+                        className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                          isSelected
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                        }`}
+                      >
+                        {service}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Статус</label>
@@ -338,17 +425,6 @@ export default function ProjectPage() {
                 />
               </div>
 
-              <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Описание услуги</label>
-                <textarea
-                  rows={3}
-                  value={project.description}
-                  onChange={(e) => setProject({ ...project, description: e.target.value })}
-                  disabled={!canEdit}
-                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
-                />
-              </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Где ведется проект</label>
                 <select
@@ -368,21 +444,56 @@ export default function ProjectPage() {
 
                <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Источник лида</label>
-                <input
-                  type="text"
-                  value={project.lead_source}
+                <select
+                  value={project.lead_source || ''}
                   onChange={(e) => setProject({ ...project, lead_source: e.target.value })}
+                  disabled={!canEdit}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+                >
+                  <option value="">Не выбрано</option>
+                  {LEAD_SOURCE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+
+            </div>
+          </div>
+
+          {/* Finance */}
+          <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+            <h3 className="text-lg font-semibold mb-4 text-gray-900">Финансы</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Тип проекта</label>
+                <select
+                  value={project.project_type || ''}
+                  onChange={(e) => setProject({ ...project, project_type: (e.target.value || null) as Project['project_type'] })}
+                  disabled={!canEdit}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+                >
+                  <option value="">Не выбрано</option>
+                  {PROJECT_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Дата оплаты</label>
+                <input
+                  type="date"
+                  value={project.payment_date || ''}
+                  onChange={(e) => setProject({ ...project, payment_date: e.target.value })}
                   disabled={!canEdit}
                   className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
               </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Регион</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Дата договора</label>
                 <input
-                  type="text"
-                  value={project.region}
-                  onChange={(e) => setProject({ ...project, region: e.target.value })}
+                  type="date"
+                  value={project.contract_date || ''}
+                  onChange={(e) => setProject({ ...project, contract_date: e.target.value })}
                   disabled={!canEdit}
                   className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
@@ -736,6 +847,42 @@ export default function ProjectPage() {
               )}
             </div>
           </SectionCard>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/50" onClick={() => !deleting && setShowDeleteConfirm(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center justify-center w-12 h-12 mx-auto rounded-full bg-red-100 mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 text-center">Удалить проект?</h3>
+            <p className="mt-2 text-sm text-gray-500 text-center">
+              Вы уверены, что хотите удалить проект <span className="font-medium text-gray-700">{project?.client || 'Без названия'}</span>? Это действие нельзя отменить.
+            </p>
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={deleting}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting}
+                className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {deleting ? 'Удаление...' : 'Да, удалить'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -11,6 +11,12 @@ type ViewMode = 'table' | 'cards' | 'kanban';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 
+/** Parse comma-separated services string into array */
+const parseServices = (value: string | undefined | null): string[] => {
+  if (!value) return [];
+  return value.split(',').map((s) => s.trim()).filter(Boolean);
+};
+
 function resolveWorkFormat(value: string) {
   if (!value) return '';
   const match = WORK_FORMAT_OPTIONS.find(
@@ -121,6 +127,8 @@ export function ProjectList() {
   const [savingRows, setSavingRows] = useState<Record<string, boolean>>({});
   const [isTableEditing, setIsTableEditing] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetchProjects();
@@ -171,6 +179,28 @@ export function ProjectList() {
       void logError('projects.status.update.failed', error, { projectId: id, status: newStatus });
     }
     setOpenMenuId(null);
+  }
+
+  async function deleteProject(id: string) {
+    setDeleting(true);
+    try {
+      const { error } = await supabase
+        .from('projects')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+      if (selectedProjectId === id) setSelectedProjectId(null);
+      void logAudit('projects.delete.success', 'Project deleted', { projectId: id });
+    } catch (error) {
+      void logError('projects.delete.failed', error, { projectId: id });
+    } finally {
+      setDeleting(false);
+      setDeleteConfirmId(null);
+      setOpenMenuId(null);
+    }
   }
 
   const setDraftValue = (id: string, field: keyof Project, value: string) => {
@@ -292,8 +322,7 @@ export function ProjectList() {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch = !normalizedSearch
       || [
-        project.name,
-        project.description,
+        project.client,
         project.name,
         project.budget,
         project.contract_link,
@@ -471,6 +500,8 @@ export function ProjectList() {
               onStatusChange={updateProjectStatus}
               openMenuId={openMenuId}
               setOpenMenuId={setOpenMenuId}
+              onDeleteRequest={(id) => setDeleteConfirmId(id)}
+              canDelete={canEdit}
             />
           ))}
         </div>
@@ -501,6 +532,8 @@ export function ProjectList() {
                     project={project}
                     onStatusChange={updateProjectStatus}
                     columns={kanbanColumns}
+                    onDeleteRequest={(id) => setDeleteConfirmId(id)}
+                    canDelete={canEdit}
                   />
                 ))}
               </div>
@@ -517,7 +550,6 @@ export function ProjectList() {
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Проект</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Описание услуги</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Сумма</th>
                   <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Договор</th>
                   <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Передача</th>
@@ -535,7 +567,6 @@ export function ProjectList() {
                   const isSaving = Boolean(savingRows[project.id]);
                   const isDisabled = !canEdit || isSaving;
                   const nameValue = getDraftValue(project, 'name');
-                  const descriptionValue = getDraftValue(project, 'description');
                   const budgetValue = getDraftValue(project, 'budget');
                   const contractValue = getDraftValue(project, 'contract_link');
                   const handoffValue = getDraftValue(project, 'handoff_link');
@@ -549,8 +580,8 @@ export function ProjectList() {
                   const contractHref = normalizeUrl(project.contract_link);
                   const handoffHref = normalizeUrl(project.handoff_link);
                   const platformConfig = getPlatformConfig(project.work_format);
-                  const readOnlyName = project.name || '—';
-                  const readOnlyDescription = project.description || '—';
+                  const readOnlyProjectTitle = project.client || '—';
+                  const services = parseServices(project.name);
                   const readOnlyBudget = project.budget || '—';
                   const readOnlyDeadline = project.deadline || '—';
                   const readOnlyKpi = project.kpi_plan || '—';
@@ -585,26 +616,21 @@ export function ProjectList() {
                           <button
                             type="button"
                             onClick={() => setSelectedProjectId(project.id)}
-                            className="text-left font-medium text-gray-900 hover:text-blue-600 transition-colors flex items-start gap-2 group/btn"
+                            className="text-left font-medium text-gray-900 hover:text-blue-600 transition-colors group/btn"
                           >
-                            <span className="break-words">{readOnlyName}</span>
-                            <span className="opacity-0 group-hover/btn:opacity-100 transition-opacity text-gray-400 mt-1 flex-shrink-0 text-xs">↗</span>
+                            <div className="flex items-start gap-2">
+                              <span className="break-words">{readOnlyProjectTitle}</span>
+                              <span className="opacity-0 group-hover/btn:opacity-100 transition-opacity text-gray-400 mt-1 flex-shrink-0 text-xs">↗</span>
+                            </div>
+                            {services.length > 0 && (
+                              <span className="flex flex-wrap gap-1 mt-1">
+                                {services.map((s) => (
+                                  <span key={s} className="inline-flex items-center bg-blue-50 text-blue-700 text-[10px] font-medium px-1.5 py-0.5 rounded">{s}</span>
+                                ))}
+                              </span>
+                            )}
                           </button>
                       )}
-                    </td>
-                      <td className="px-4 py-3 align-top min-w-[180px]">
-                        {isTableEditing ? (
-                          <InlineTextarea
-                            value={descriptionValue}
-                            onChange={(value) => setDraftValue(project.id, 'description', value)}
-                            onCommit={(value) => void commitProjectUpdate(project, { description: value })}
-                            disabled={isDisabled}
-                            placeholder="Описание услуги"
-                            rows={2}
-                          />
-                        ) : (
-                          <span className="text-gray-600 line-clamp-3 leading-relaxed break-words text-xs" title={readOnlyDescription}>{readOnlyDescription}</span>
-                        )}
                     </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
@@ -787,8 +813,15 @@ export function ProjectList() {
               <div className="flex-1 pr-8">
                 <div className="flex items-center gap-3 mb-2">
                   <h2 className="text-2xl font-bold text-gray-900 leading-tight">
-                    {selectedProject.name || 'Без названия'}
+                    {selectedProject.client || 'Без названия'}
                   </h2>
+                  {selectedProject.name && (
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {parseServices(selectedProject.name).map((service) => (
+                        <span key={service} className="inline-flex items-center bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">{service}</span>
+                      ))}
+                    </div>
+                  )}
                   {selectedProject.status && (
                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset ${
                         getStatusConfig(selectedProject.status).bg.replace('bg-', 'bg-').replace('text-', 'text-').replace('border-', 'ring-')
@@ -808,13 +841,25 @@ export function ProjectList() {
                    )}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedProjectId(null)}
-                className="group relative rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500 transition-all text-xl leading-none"
-              >
-                &times;
-              </button>
+              <div className="flex items-center gap-2">
+                {canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => setDeleteConfirmId(selectedProject.id)}
+                    className="rounded-full p-2 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-all"
+                    title="Удалить проект"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedProjectId(null)}
+                  className="group relative rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500 transition-all text-xl leading-none"
+                >
+                  &times;
+                </button>
+              </div>
             </div>
 
             <div className="p-8 space-y-10 bg-white min-h-[500px]">
@@ -1009,6 +1054,46 @@ export function ProjectList() {
                   Готово
                 </button>
              </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/50" onClick={() => !deleting && setDeleteConfirmId(null)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
+            <div className="flex items-center justify-center w-12 h-12 mx-auto rounded-full bg-red-100 mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 text-center">Удалить проект?</h3>
+            <p className="mt-2 text-sm text-gray-500 text-center">
+              Вы уверены, что хотите удалить проект{' '}
+              <span className="font-medium text-gray-700">
+                {projects.find((p) => p.id === deleteConfirmId)?.client || 'Без названия'}
+              </span>
+              ? Это действие нельзя отменить.
+            </p>
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmId(null)}
+                disabled={deleting}
+                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteConfirmId && deleteProject(deleteConfirmId)}
+                disabled={deleting}
+                className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {deleting ? 'Удаление...' : 'Да, удалить'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1228,11 +1313,15 @@ function ProjectCard({
   onStatusChange,
   openMenuId,
   setOpenMenuId,
+  onDeleteRequest,
+  canDelete,
 }: { 
   project: Project; 
   onStatusChange: (id: string, status: string) => void;
   openMenuId: string | null;
   setOpenMenuId: (id: string | null) => void;
+  onDeleteRequest?: (id: string) => void;
+  canDelete?: boolean;
 }) {
   const statusConfig = getStatusConfig(project.status);
   const deadlineStatus = getDeadlineStatus(project.deadline);
@@ -1243,9 +1332,8 @@ function ProjectCard({
   const deadlineLabel = project.deadline ? formatDate(project.deadline) : '';
   const contractHref = normalizeUrl(project.contract_link);
   const handoffHref = normalizeUrl(project.handoff_link);
-  const cardTitle = project.client || project.name || 'Без названия';
-  const cardSubtitle =
-    project.client && project.name && project.client !== project.name ? project.name : '';
+  const cardTitle = project.client || 'Без названия';
+  const cardServices = parseServices(project.name);
 
   const deadlineClassName =
     deadlineStatus === 'overdue'
@@ -1269,8 +1357,12 @@ function ProjectCard({
           <h3 className="text-base font-semibold text-gray-900 hover:text-blue-600 transition-colors truncate">
             {cardTitle}
           </h3>
-          {cardSubtitle && (
-            <p className="text-xs text-gray-400 truncate mt-0.5">{cardSubtitle}</p>
+          {cardServices.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {cardServices.map((s) => (
+                <span key={s} className="inline-flex items-center bg-blue-50 text-blue-700 text-[10px] font-medium px-1.5 py-0.5 rounded">{s}</span>
+              ))}
+            </div>
           )}
         </Link>
         <div className="flex items-center gap-2">
@@ -1312,6 +1404,18 @@ function ProjectCard({
                     {config.label}
                   </button>
                 ))}
+                {canDelete && onDeleteRequest && (
+                  <>
+                    <div className="border-t border-gray-100 my-1" />
+                    <button
+                      onClick={() => onDeleteRequest(project.id)}
+                      className="w-full flex items-center px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                      Удалить
+                    </button>
+                  </>
+                )}
               </div>
             </>
           )}
@@ -1320,12 +1424,6 @@ function ProjectCard({
       </div>
 
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        <InfoItem
-          label="Описание услуги"
-          value={project.description}
-          className="md:col-span-2 xl:col-span-2"
-          valueClassName="text-gray-700"
-        />
         <InfoItem label="Сумма договора" value={project.budget} />
         <InfoItem label="Маржа" value={project.margin} />
         <InfoItem label="KPI" value={kpiValue} />
@@ -1378,11 +1476,15 @@ function ProjectCard({
 function KanbanCard({ 
   project,
   onStatusChange,
-  columns
+  columns,
+  onDeleteRequest,
+  canDelete,
 }: { 
   project: Project;
   onStatusChange: (id: string, status: string) => void;
   columns: Array<{ key: string; label: string }>;
+  onDeleteRequest?: (id: string) => void;
+  canDelete?: boolean;
 }) {
   const [showMenu, setShowMenu] = useState(false);
   const deadlineStatus = getDeadlineStatus(project.deadline);
@@ -1396,8 +1498,15 @@ function KanbanCard({
       <div className="flex items-start justify-between">
         <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
           <h4 className="text-sm font-medium text-gray-900 group-hover:text-blue-600 truncate">
-            {project.name}
+            {project.client || 'Без названия'}
           </h4>
+          {project.name && (
+            <div className="flex flex-wrap gap-1 mt-0.5">
+              {parseServices(project.name).map((s) => (
+                <span key={s} className="inline-flex items-center bg-blue-50 text-blue-700 text-[9px] font-medium px-1 py-0.5 rounded">{s}</span>
+              ))}
+            </div>
+          )}
         </Link>
         <div className="relative">
           <button 
@@ -1419,6 +1528,17 @@ function KanbanCard({
                     {col.label}
                   </button>
                 ))}
+                {canDelete && onDeleteRequest && (
+                  <>
+                    <div className="border-t border-gray-100 my-1" />
+                    <button
+                      onClick={() => { onDeleteRequest(project.id); setShowMenu(false); }}
+                      className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
+                    >
+                      Удалить
+                    </button>
+                  </>
+                )}
               </div>
             </>
           )}

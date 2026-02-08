@@ -112,8 +112,8 @@ export function Sidebar() {
       <div className="p-4 border-t border-gray-100">
         <div className="mb-4 px-2">
           <p className="text-sm font-medium text-gray-900 truncate" title={userEmail || ''}>
-            {userEmail?.split('@')[0] || 'User'}
-          </p>
+              {userEmail?.split('@')[0] || 'User'}
+            </p>
           <p className="text-xs text-gray-500 mt-0.5">{userRole ? ROLE_LABELS[userRole] : '...'}</p>
         </div>
         <button 

@@ -92,7 +92,7 @@ export default function TasksPage() {
         id: `${project.id ?? 'project'}-${index}`,
         title,
         projectId: project.id ?? 'project',
-        projectName: project.name || 'Без названия',
+        projectName: project.client || 'Без названия',
         specialist: project.specialist || 'Без специалиста',
         manager: project.manager || 'Без менеджера',
         deadlineDate: parseFlexibleDate(project.deadline),
@@ -213,7 +213,7 @@ export default function TasksPage() {
               <div key={project.id} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900">{project.name || 'Без названия'}</h3>
+                    <h3 className="text-lg font-semibold text-gray-900">{project.client || 'Без названия'}</h3>
                     <p className="text-xs text-gray-500">
                       {project.specialist || 'Без специалиста'} · дедлайн {formatDateLabel(deadlineDate)}
                     </p>
