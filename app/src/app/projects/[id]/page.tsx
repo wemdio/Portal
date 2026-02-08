@@ -208,7 +208,7 @@ export default function ProjectPage() {
 
       if (error) throw error;
       void logAudit('projects.delete.success', 'Project deleted', { projectId: project.id });
-      router.push('/projects' as any);
+      router.push('/projects');
     } catch (error) {
       void logError('projects.delete.failed', error, { projectId: project.id });
       setMessage('Ошибка при удалении проекта');
@@ -274,7 +274,7 @@ export default function ProjectPage() {
               <>
                 <button
                   type="button"
-                  onClick={() => router.push(`${pathname}?mode=edit` as any)}
+                  onClick={() => router.push(`${pathname}?mode=edit`)}
                   className="flex items-center gap-2 bg-gray-900 text-white px-4 py-2 rounded-md hover:bg-gray-800 transition-colors"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
