@@ -317,7 +317,7 @@ const parseJsonResponse = async <T,>(
   context: string,
 ): Promise<T & { error?: string }> => {
   const text = await res.text();
-  if (!text) return {} as T;
+  if (!text) return { error: 'Empty response from server' } as T & { error?: string };
   try {
     return JSON.parse(text) as T;
   } catch (error) {
