@@ -1,6 +1,6 @@
 import type { Dispatcher } from 'undici';
 import { ProxyAgent } from 'undici';
-import { logInfo } from '@/lib/loggerServer';
+import { logInfo, logError } from '@/lib/loggerServer';
 
 export type HHSearchConfig = {
   text: string;
@@ -11,6 +11,11 @@ export type HHSearchConfig = {
   date_to?: string;
   per_page?: number;
   params?: Record<string, string | string[]>;
+  /**
+   * Fetch employer details (site/description/industries).
+   * When false, parsing is significantly faster.
+   */
+  fetch_employers?: boolean;
 };
 
 export type HHVacancy = {
@@ -125,13 +130,26 @@ const MAX_RETRIES = (() => {
   const raw = Number(process.env.HH_MAX_RETRIES ?? '5');
   return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 5;
 })();
+const REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HH_REQUEST_TIMEOUT_MS ?? '10000');
+  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 10000;
+})();
+const VACANCY_REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HH_VACANCY_REQUEST_TIMEOUT_MS ?? String(REQUEST_TIMEOUT_MS));
+  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : REQUEST_TIMEOUT_MS;
+})();
+const EMPLOYER_REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HH_EMPLOYER_REQUEST_TIMEOUT_MS ?? '14000');
+  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 14000;
+})();
 const PROXY_URL = process.env.HH_PROXY_URL?.trim();
 const PROXY_DISPATCHER: Dispatcher | undefined = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
 
-let throttleChain: Promise<void> = Promise.resolve();
 let lastRequestAt = 0;
 let activeSlots = 0;
 const slotQueue: Array<() => void> = [];
+/** Global backoff: when a 429 is received, all requests pause until this time */
+let globalBackoffUntil = 0;
 
 type HHSearchParams = Record<string, string | string[]>;
 
@@ -159,9 +177,14 @@ function parseHhError(bodyText: string): { type?: string; captchaUrl?: string; r
   };
 }
 
-function buildHhErrorMessage(status: number, details: { type?: string; captchaUrl?: string }, bodyText: string) {
+function buildHhErrorMessage(
+  status: number,
+  details: { type?: string; captchaUrl?: string },
+  bodyText: string,
+) {
   if (details.type === 'captcha_required' || details.captchaUrl) {
-    return 'HH API требует капчу. Откройте ссылку ниже, решите капчу и повторите запрос.';
+    const link = details.captchaUrl ? ` ${details.captchaUrl}` : '';
+    return `HH API требует капчу.${link}`;
   }
   if (details.type) return `HH API error ${status}: ${details.type}`;
   if (bodyText) return `HH API error ${status}: ${bodyText}`;
@@ -169,22 +192,39 @@ function buildHhErrorMessage(status: number, details: { type?: string; captchaUr
 }
 
 async function throttleHhRequest() {
+  // Wait for a free concurrency slot
   if (activeSlots >= MAX_CONCURRENCY) {
     await new Promise<void>((resolve) => slotQueue.push(resolve));
   }
   activeSlots += 1;
-  throttleChain = throttleChain.then(async () => {
-    const now = Date.now();
-    const wait = lastRequestAt + MIN_REQUEST_INTERVAL_MS - now;
-    if (wait > 0) await sleep(wait);
-    lastRequestAt = Date.now();
-  });
-  await throttleChain;
+
+  // Respect global backoff (e.g. after 429)
+  const backoffWait = globalBackoffUntil - Date.now();
+  if (backoffWait > 0) {
+    await sleep(backoffWait);
+  }
+
+  // Enforce minimum interval between requests
+  const now = Date.now();
+  const intervalWait = lastRequestAt + MIN_REQUEST_INTERVAL_MS - now;
+  if (intervalWait > 0) {
+    await sleep(intervalWait);
+  }
+  lastRequestAt = Date.now();
+
   return () => {
     activeSlots = Math.max(0, activeSlots - 1);
     const next = slotQueue.shift();
     if (next) next();
   };
+}
+
+/** Set a global backoff so all concurrent requests pause */
+function setGlobalBackoff(durationMs: number) {
+  const until = Date.now() + durationMs;
+  if (until > globalBackoffUntil) {
+    globalBackoffUntil = until;
+  }
 }
 
 function toISODate(date: Date) {
@@ -383,24 +423,29 @@ function buildVacanciesUrl(config: HHSearchConfig, page: number): string {
 
 export async function fetchWithRetry<T>(
   url: string,
-  opts?: { maxRetries?: number; minDelayMs?: number; maxDelayMs?: number }
+  opts?: { maxRetries?: number; minDelayMs?: number; maxDelayMs?: number; timeoutMs?: number }
 ): Promise<T> {
   const maxRetries = opts?.maxRetries ?? MAX_RETRIES;
   const minDelayMs = opts?.minDelayMs ?? 500;
   const maxDelayMs = opts?.maxDelayMs ?? 20_000;
+  const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let release: (() => void) | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
     try {
       release = await throttleHhRequest();
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         headers: {
           'User-Agent': 'Portal/1.0 (HH parser)',
           Accept: 'application/json',
         },
         cache: 'no-store',
+        signal: controller.signal,
         ...(PROXY_DISPATCHER ? { dispatcher: PROXY_DISPATCHER } : {}),
       };
       const res = await fetch(url, fetchInit);
@@ -412,7 +457,7 @@ export async function fetchWithRetry<T>(
       const retryAfter = res.headers.get('retry-after');
       const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : null;
 
-      const shouldRetry = res.status === 429 || (res.status >= 500 && res.status <= 599);
+      const shouldRetry = res.status === 429 || res.status === 403 || (res.status >= 500 && res.status <= 599);
       if (!shouldRetry) {
         const bodyText = await res.text().catch(() => '');
         const details = parseHhError(bodyText);
@@ -425,17 +470,28 @@ export async function fetchWithRetry<T>(
         });
       }
 
+      // On 429/403 set global backoff so ALL concurrent requests also pause
+      if (res.status === 429 || res.status === 403) {
+        const backoff = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** (attempt + 2));
+        setGlobalBackoff(backoff);
+      }
+
       const base = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(base + jitter);
       continue;
     } catch (err) {
-      lastError = err;
+      if (err instanceof Error && err.name === 'AbortError') {
+        lastError = new Error('HH API request timed out');
+      } else {
+        lastError = err;
+      }
       if (attempt === maxRetries) break;
       const base = Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(base + jitter);
     } finally {
+      if (timeoutId) clearTimeout(timeoutId);
       if (release) release();
     }
   }
@@ -445,7 +501,9 @@ export async function fetchWithRetry<T>(
 
 async function fetchFound(config: HHSearchConfig): Promise<number> {
   const url = buildVacanciesUrl({ ...config, per_page: 1 }, 0);
-  const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
+  const data = await fetchWithRetry<HHApiVacanciesResponse>(url, {
+    timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
+  });
   return data.found ?? 0;
 }
 
@@ -473,7 +531,9 @@ async function fetchEmployerDetails(
   employerId: string,
 ): Promise<{ siteUrl?: string; industries?: string[]; description?: string }> {
   const url = `${HH_API_BASE}/employers/${employerId}`;
-  const data = await fetchWithRetry<HHApiEmployer>(url);
+  const data = await fetchWithRetry<HHApiEmployer>(url, {
+    timeoutMs: EMPLOYER_REQUEST_TIMEOUT_MS,
+  });
   return {
     siteUrl: data.site_url ?? undefined,
     industries: normalizeIndustries(data.industries),
@@ -662,6 +722,7 @@ export async function fetchVacancies(
   };
 
   const normalized = normalizeSearchParams(config);
+  const shouldFetchEmployers = normalized.fetch_employers !== false;
   const partitions = await partitionQuery(normalized);
   void logInfo(
     'parser.hh.partitions',
@@ -672,6 +733,7 @@ export async function fetchVacancies(
       count: partitions.length,
       text: normalized.text,
       area: normalized.area,
+      fetch_employers: shouldFetchEmployers,
     },
     options?.logMeta,
   );
@@ -697,6 +759,8 @@ export async function fetchVacancies(
     reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
   };
 
+  let partitionErrors = 0;
+
   await mapWithConcurrency(
     partitions,
     PARTITION_CONCURRENCY,
@@ -715,54 +779,105 @@ export async function fetchVacancies(
         options?.logMeta,
       );
 
-      let partitionCollected = 0;
-      const firstUrl = buildVacanciesUrl(part, 0);
-      const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl);
-      const partFound = first.found ?? 0;
-      totalFound += partFound;
-      registerItems(first.items);
-      partitionCollected += first.items?.length ?? 0;
-      reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
+      try {
+        let partitionCollected = 0;
+        const firstUrl = buildVacanciesUrl(part, 0);
+        const first = await fetchWithRetry<HHApiVacanciesResponse>(firstUrl, {
+          timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
+        });
+        const partFound = first.found ?? 0;
+        totalFound += partFound;
+        registerItems(first.items);
+        partitionCollected += first.items?.length ?? 0;
+        reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
 
-      const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
-      for (let page = 1; page < totalPages; page++) {
-        if (PAGE_DELAY_MS > 0) await sleep(PAGE_DELAY_MS);
-        await checkCancelled();
-        const url = buildVacanciesUrl(part, page);
-        const data = await fetchWithRetry<HHApiVacanciesResponse>(url);
-        registerItems(data.items);
-        partitionCollected += data.items?.length ?? 0;
-        if (page === totalPages - 1 || page % 5 === 0) {
-          void logInfo(
-            'parser.hh.partition.progress',
-            'HH partition progress',
-            {
-              jobId: options?.jobId,
-              searchText: options?.searchText ?? normalized.text,
-              index: index + 1,
-              page: page + 1,
-              totalPages,
-              totalCollected: partitionCollected,
-              parsed: uniqueVacancies.size,
-            },
-            options?.logMeta,
-          );
+        const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
+        for (let page = 1; page < totalPages; page++) {
+          if (PAGE_DELAY_MS > 0) await sleep(PAGE_DELAY_MS);
+          await checkCancelled();
+          try {
+            const url = buildVacanciesUrl(part, page);
+            const data = await fetchWithRetry<HHApiVacanciesResponse>(url, {
+              timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
+            });
+            registerItems(data.items);
+            partitionCollected += data.items?.length ?? 0;
+          } catch (pageErr) {
+            // Log page error but continue with next pages
+            if (pageErr instanceof ParserJobCancelledError) throw pageErr;
+            void logError(
+              'parser.hh.partition.page.failed',
+              pageErr,
+              {
+                jobId: options?.jobId,
+                searchText: options?.searchText ?? normalized.text,
+                index: index + 1,
+                page: page + 1,
+                totalPages,
+              },
+              options?.logMeta,
+            );
+            // If it's a captcha error, stop this partition entirely
+            if (pageErr instanceof HHApiError && pageErr.captchaUrl) break;
+          }
+          if (page === totalPages - 1 || page % 5 === 0) {
+            void logInfo(
+              'parser.hh.partition.progress',
+              'HH partition progress',
+              {
+                jobId: options?.jobId,
+                searchText: options?.searchText ?? normalized.text,
+                index: index + 1,
+                page: page + 1,
+                totalPages,
+                totalCollected: partitionCollected,
+                parsed: uniqueVacancies.size,
+              },
+              options?.logMeta,
+            );
+          }
         }
+        void logInfo(
+          'parser.hh.partition.completed',
+          'HH partition completed',
+          {
+            jobId: options?.jobId,
+            searchText: options?.searchText ?? normalized.text,
+            index: index + 1,
+            total: partitions.length,
+            parsed: uniqueVacancies.size,
+          },
+          options?.logMeta,
+        );
+      } catch (partErr) {
+        // Re-throw cancellation
+        if (partErr instanceof ParserJobCancelledError) throw partErr;
+
+        // Log and continue — one failed partition shouldn't kill the whole job
+        partitionErrors += 1;
+        void logError(
+          'parser.hh.partition.failed',
+          partErr,
+          {
+            jobId: options?.jobId,
+            searchText: options?.searchText ?? normalized.text,
+            index: index + 1,
+            total: partitions.length,
+            collected: uniqueVacancies.size,
+          },
+          options?.logMeta,
+        );
       }
-      void logInfo(
-        'parser.hh.partition.completed',
-        'HH partition completed',
-        {
-          jobId: options?.jobId,
-          searchText: options?.searchText ?? normalized.text,
-          index: index + 1,
-          total: partitions.length,
-          parsed: uniqueVacancies.size,
-        },
-        options?.logMeta,
-      );
     },
   );
+
+  // If ALL partitions failed and we got nothing, throw the error
+  if (uniqueVacancies.size === 0 && partitionErrors > 0) {
+    throw new HHApiError(
+      `Все ${partitionErrors} партиций завершились с ошибками`,
+      { status: 0 },
+    );
+  }
 
   const all = Array.from(uniqueVacancies.values());
 
@@ -770,7 +885,7 @@ export async function fetchVacancies(
     new Set(all.map((item) => item.employer_id).filter((id): id is string => Boolean(id))),
   );
 
-  if (employerIds.length > 0) {
+  if (employerIds.length > 0 && shouldFetchEmployers) {
     await checkCancelled();
     options?.onStage?.('fetching_employers');
     reportProgress({ employersTotal: employerIds.length, employersFetched: 0 }, true);
@@ -832,6 +947,18 @@ export async function fetchVacancies(
     }
   } else {
     reportProgress({ employersTotal: 0, employersFetched: 0 }, true);
+    if (!shouldFetchEmployers) {
+      void logInfo(
+        'parser.hh.employers.fetch.skipped',
+        'HH employers fetch skipped',
+        {
+          jobId: options?.jobId,
+          searchText: options?.searchText ?? normalized.text,
+          count: employerIds.length,
+        },
+        options?.logMeta,
+      );
+    }
   }
 
   reportProgress({ found: totalFound, parsed: all.length, fetched: fetchedCount }, true);

@@ -153,6 +153,7 @@ export function HHParserForm({ onStart, busy }: Props) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [perPage, setPerPage] = useState('50');
+  const [fetchEmployers, setFetchEmployers] = useState(false);
 
   const manualConfig: HHSearchConfig = useMemo(() => {
     const salary_from = salaryFrom.trim() ? Number(salaryFrom) : undefined;
@@ -166,8 +167,9 @@ export function HHParserForm({ onStart, busy }: Props) {
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
       per_page: Number.isFinite(per_page) ? per_page : undefined,
+      fetch_employers: fetchEmployers,
     };
-  }, [area, currency, dateFrom, dateTo, perPage, salaryFrom, text]);
+  }, [area, currency, dateFrom, dateTo, perPage, salaryFrom, text, fetchEmployers]);
 
   const linkParse = useMemo(() => parseHhSearchLink(searchLink), [searchLink]);
   const linkConfig = linkParse.config;
@@ -175,7 +177,12 @@ export function HHParserForm({ onStart, busy }: Props) {
   const linkReady = Boolean(linkConfig && !linkError);
 
   const canStart = mode === 'link' ? linkReady : Boolean(text.trim());
-  const activeConfig = mode === 'link' ? linkConfig : manualConfig;
+  const activeConfig = useMemo(() => {
+    if (mode === 'link') {
+      return linkConfig ? { ...linkConfig, fetch_employers: fetchEmployers } : undefined;
+    }
+    return { ...manualConfig, fetch_employers: fetchEmployers };
+  }, [fetchEmployers, linkConfig, manualConfig, mode]);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -215,6 +222,15 @@ export function HHParserForm({ onStart, busy }: Props) {
             Ручной ввод
           </button>
         </div>
+        <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={fetchEmployers}
+            onChange={(e) => setFetchEmployers(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          Подтягивать данные работодателей (дольше)
+        </label>
       </div>
 
       {mode === 'link' ? (

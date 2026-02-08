@@ -10,7 +10,24 @@ const MIN_TEXT_LENGTH = 30;
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-const ABOUT_PATHS = ['/about', '/about-us', '/aboutus', '/o-nas', '/company', '/о-компании'];
+const ABOUT_PATHS = [
+  '/about',
+  '/about-us',
+  '/about-company',
+  '/aboutus',
+  '/o-nas',
+  '/o-kompanii',
+  '/company',
+  '/company/about',
+  '/о-компании',
+  '/о-нас',
+  '/kompaniya',
+  '/info',
+  '/who-we-are',
+  '/our-story',
+  '/pages/about',
+  '/pages/about-us',
+];
 const URL_TOKEN_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/i;
 const META_DESCRIPTION_SELECTORS = [
   'meta[name="description"]',
@@ -65,6 +82,81 @@ export function normalizeUrl(raw: string): string {
 }
 
 /**
+ * Clean extracted text: remove web artifacts, stray symbols, fix formatting.
+ */
+export function sanitizeText(text: string): string {
+  let s = text;
+
+  // 1. Remove zero-width and invisible Unicode characters
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u200B\u200C\u200D\u200E\u200F\uFEFF\u00AD\u2060\u180E]/g, '');
+
+  // 2. Normalise whitespace characters to regular equivalents
+  //    Non-breaking spaces, thin/hair/en/em spaces → regular space
+  s = s.replace(/[\u00A0\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u202F\u205F]/g, ' ');
+
+  // 3. Decode common leftover HTML entities
+  s = s
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#039;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#\d{1,5};/g, '') // remove remaining numeric entities
+    .replace(/&[a-z]+;/gi, '');  // remove remaining named entities
+
+  // 4. Remove common decorative / UI symbols that clutter text
+  s = s.replace(/[★☆▶►▷▸▹◀◁◂◃♦♢♣♠❤❥✦✧✩✪✫✬✭✮✯✰⬤⬥⬧⬨⬩⭐⭑⭒🔸🔹🔶🔷]/g, '');
+
+  // 5. Normalise bullet-like characters to a simple dash
+  s = s.replace(/[•◦▪▫●○■□▲△▼▽◆◇⬜⬛⚫⚪🔴🟢🟡🔵⭕]/g, '- ');
+
+  // 6. Normalise dash/hyphen variants to a regular dash
+  s = s.replace(/[–—―‒⁃‣⁌⁍]/g, '-');
+
+  // 7. Normalise quote variants
+  s = s.replace(/[""„‟«»‹›❝❞❛❜''‚‛]/g, '"');
+
+  // 8. Normalise ellipsis
+  s = s.replace(/…/g, '...');
+  s = s.replace(/\.{4,}/g, '...');
+
+  // 9. Collapse repeated punctuation (!!!, ???, ?!?!)
+  s = s.replace(/!{2,}/g, '!');
+  s = s.replace(/\?{2,}/g, '?');
+  s = s.replace(/([?!])\1+/g, '$1');
+
+  // 10. Remove stray arrow/navigation symbols
+  s = s.replace(/[←→↑↓↔↕⇐⇒⇑⇓⇔⇕➔➜➡➤➥➦➧➨➩➪➫➬➭➮➯➱⟶⟵⟷⟹⟸⟺]/g, '');
+
+  // 11. Collapse whitespace
+  s = s.replace(/[\t ]+/g, ' ');
+  s = s.replace(/ ?\n ?/g, '\n');
+
+  // 12. Clean up each line
+  s = s
+    .split('\n')
+    .map((line) => line.trim())
+    // Remove lines that are only punctuation / symbols / very short noise
+    .filter((line) => {
+      if (line.length === 0) return true; // keep blank lines for paragraph separation
+      // Remove lines that are only symbols, punctuation, or whitespace
+      if (/^[\s\-_=|:;.,!?*#/\\<>@^~`'"()\[\]{}+&%$]+$/.test(line)) return false;
+      // Remove lines shorter than 3 chars (usually UI artefacts like "X", ">", "|")
+      if (line.length < 3) return false;
+      return true;
+    })
+    .join('\n');
+
+  // 13. Collapse 3+ blank lines → double newline
+  s = s.replace(/\n{3,}/g, '\n\n');
+
+  return s.trim();
+}
+
+/**
  * Extract readable text from an HTML string using cheerio.
  * Strips scripts, styles, nav, footer, etc.
  */
@@ -75,6 +167,12 @@ export function extractTextFromHtml(html: string): string {
   $('script, style, noscript, iframe, svg, link, meta, header, footer, nav').remove();
   $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
   $('form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
+  // Remove social sharing / widget blocks
+  $('[class*="share"], [class*="social"], [class*="widget"], [id*="sidebar"]').remove();
+  // Remove popup / modal overlays
+  $('[class*="popup"], [class*="modal"], [class*="overlay"], [class*="backdrop"]').remove();
+  // Remove breadcrumbs
+  $('[class*="breadcrumb"], [aria-label="breadcrumb"], nav, .pagination').remove();
 
   // Prefer main content areas if available
   let textSource = $('main, article, [role="main"]');
@@ -84,11 +182,7 @@ export function extractTextFromHtml(html: string): string {
 
   // Get text, collapsing whitespace
   const raw = textSource.text();
-  const cleaned = raw
-    .replace(/[\t ]+/g, ' ')
-    .replace(/ ?\n ?/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const cleaned = sanitizeText(raw);
 
   if (cleaned.length >= MIN_TEXT_LENGTH) return cleaned;
 
@@ -106,6 +200,14 @@ export function extractTextFromHtml(html: string): string {
 }
 
 /**
+ * Regex patterns to identify "about"-like links by href or link text.
+ */
+const ABOUT_HREF_PATTERN =
+  /\/(about|about[_-]?us|about[_-]?company|o[_-]?nas|o[_-]?kompanii|company|who[_-]?we[_-]?are|our[_-]?story|info|kompaniya|о-компании|о-нас)(\/|$|\?|#)/i;
+const ABOUT_TEXT_PATTERN =
+  /\b(about(\s+us)?|о\s*компании|о\s*нас|компания|кто\s+мы|наша\s+история|who\s+we\s+are|our\s+story|our\s+company)\b/i;
+
+/**
  * Build a list of candidate "about" page URLs for a given base URL.
  */
 export function getAboutCandidates(baseUrl: string): string[] {
@@ -113,6 +215,50 @@ export function getAboutCandidates(baseUrl: string): string[] {
   // Only use the origin (strip path, query, hash)
   const origin = parsed.origin;
   return ABOUT_PATHS.map((path) => `${origin}${path}`);
+}
+
+/**
+ * Discover "about" page links from the HTML of a fetched page.
+ * Returns unique absolute URLs that look like about pages.
+ */
+export function discoverAboutLinks(html: string, baseUrl: string): string[] {
+  const $ = cheerio.load(html);
+  const origin = new URL(baseUrl).origin;
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (!href) return;
+
+    // Skip anchors, mailto, tel, javascript
+    if (/^(#|mailto:|tel:|javascript:)/i.test(href.trim())) return;
+
+    const linkText = $(el).text().trim();
+    const hrefMatches = ABOUT_HREF_PATTERN.test(href);
+    const textMatches = ABOUT_TEXT_PATTERN.test(linkText);
+
+    if (!hrefMatches && !textMatches) return;
+
+    // Resolve relative URLs
+    let absoluteUrl: string;
+    try {
+      absoluteUrl = new URL(href, baseUrl).href;
+    } catch {
+      return;
+    }
+
+    // Only follow links on the same origin
+    if (!absoluteUrl.startsWith(origin)) return;
+
+    // Deduplicate
+    const normalized = absoluteUrl.replace(/[#?].*$/, '').replace(/\/+$/, '');
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    results.push(absoluteUrl);
+  });
+
+  return results;
 }
 
 /**
@@ -230,6 +376,7 @@ async function fetchHtmlWithRetry(
 
 /**
  * Fetch the main page and about page of a website and return combined extracted text.
+ * About pages are prioritised: fetched first and placed first in the output.
  */
 export async function fetchAndExtract(
   rawUrl: string,
@@ -243,10 +390,16 @@ export async function fetchAndExtract(
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
   const httpOrigin = origin.replace(/^https:\/\//i, 'http://');
 
-  // Fetch the main page
-  const mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
-  let mainText = mainHtml ? extractTextFromHtml(mainHtml.html) : '';
-  let hadAnyHtml = Boolean(mainHtml);
+  /* ── 1. Fetch the main page (needed both for text and for link discovery) ── */
+  let mainHtml: { html: string; status: number } | null = null;
+  let mainText = '';
+  let hadAnyHtml = false;
+
+  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  if (mainHtml) {
+    mainText = extractTextFromHtml(mainHtml.html);
+    hadAnyHtml = true;
+  }
   if (!mainText && tryWithWww) {
     const wwwHtml = await fetchHtmlWithRetry(`${wwwOrigin}`, {
       timeout,
@@ -254,6 +407,7 @@ export async function fetchAndExtract(
       allowHttpErrors: true,
     });
     if (wwwHtml) {
+      mainHtml = wwwHtml;
       mainText = extractTextFromHtml(wwwHtml.html);
       hadAnyHtml = true;
     }
@@ -265,18 +419,37 @@ export async function fetchAndExtract(
       allowHttpErrors: true,
     });
     if (httpHtml) {
+      mainHtml = httpHtml;
       mainText = extractTextFromHtml(httpHtml.html);
       hadAnyHtml = true;
     }
   }
 
-  // Try about pages
-  const candidates = getAboutCandidates(url);
-  const wwwCandidates = tryWithWww ? getAboutCandidates(wwwOrigin) : [];
-  const httpCandidates = origin.startsWith('https://') ? getAboutCandidates(httpOrigin) : [];
-  let aboutText = '';
+  /* ── 2. Discover about-page links from main page HTML ── */
+  const discoveredLinks = mainHtml ? discoverAboutLinks(mainHtml.html, url) : [];
 
-  for (const candidate of [...candidates, ...wwwCandidates, ...httpCandidates]) {
+  /* ── 3. Build about-page candidate list: discovered links first, then static paths ── */
+  const staticCandidates = [
+    ...getAboutCandidates(origin),
+    ...(tryWithWww ? getAboutCandidates(wwwOrigin) : []),
+    ...(origin.startsWith('https://') ? getAboutCandidates(httpOrigin) : []),
+  ];
+
+  // Deduplicate: discovered links have priority
+  const seen = new Set<string>();
+  const allCandidates: string[] = [];
+  for (const c of [...discoveredLinks, ...staticCandidates]) {
+    const key = c.replace(/\/+$/, '').replace(/^https?:\/\//i, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Skip candidates that are identical to the main page
+    if (c.replace(/\/+$/, '') === url.replace(/\/+$/, '')) continue;
+    allCandidates.push(c);
+  }
+
+  /* ── 4. Fetch about pages (priority!) ── */
+  let aboutText = '';
+  for (const candidate of allCandidates) {
     if (signal?.aborted) break;
     const html = await fetchHtmlWithRetry(candidate, { timeout, signal });
     if (html) {
@@ -289,10 +462,11 @@ export async function fetchAndExtract(
     }
   }
 
-  // Combine: prefer about if longer, otherwise main + about
+  /* ── 5. Combine: about page FIRST (priority), then main page ── */
   let combined: string;
   if (aboutText.length > 0 && mainText.length > 0) {
-    combined = `--- Главная ---\n${mainText}\n\n--- О компании ---\n${aboutText}`;
+    // About page content has priority — placed first so it doesn't get truncated
+    combined = `--- О компании ---\n${aboutText}\n\n--- Главная ---\n${mainText}`;
   } else if (aboutText.length > 0) {
     combined = aboutText;
   } else if (mainText.length > 0) {
@@ -302,6 +476,9 @@ export async function fetchAndExtract(
   } else {
     throw new Error('Не удалось получить HTML с сайта');
   }
+
+  // Final sanitization pass on the combined text
+  combined = sanitizeText(combined);
 
   // Truncate to max length
   if (combined.length > MAX_TEXT_LENGTH) {

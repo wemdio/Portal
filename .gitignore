@@ -9,6 +9,8 @@ app/.yarn/*
 !app/.yarn/versions
 
 regl.docx
+companies_5000.xlsx
+companies_10000.xlsx
 
 # next.js
 app/.next/

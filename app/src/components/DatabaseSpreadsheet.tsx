@@ -93,6 +93,7 @@ type WebsiteEnrichmentState = {
   totalRows: number;
   currentRow: number;
   error: string | null;
+  jobId: string | null;
 };
 
 const OPENROUTER_API_KEY = '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';
@@ -101,7 +102,9 @@ const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
 const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
-const ENRICHMENT_BATCH_SIZE = 5;
+const ENRICHMENT_PROGRESS_INTERVAL_MS = 200;
+const ENRICHMENT_UPDATE_FLUSH_MS = 250;
+const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 
@@ -293,6 +296,24 @@ const normalizeCellKey = (value: string) => value.trim().toLowerCase();
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const parseJsonResponse = async <T>(
+  res: Response,
+  context: string,
+): Promise<T & { error?: string }> => {
+  const text = await res.text();
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    void logError('spreadsheet.api.invalid_json', error, {
+      context,
+      status: res.status,
+      preview: text.slice(0, 200),
+    });
+    return { error: 'Сервер вернул некорректный ответ' } as T & { error?: string };
+  }
+};
+
 const buildFilterOptions = (data: string[][], colIndex: number) => {
   const map = new Map<string, string>();
   let overflow = false;
@@ -449,6 +470,7 @@ export function DatabaseSpreadsheet() {
     totalRows: 0,
     currentRow: 0,
     error: null,
+    jobId: null,
   });
   const enrichmentAbortRef = useRef<AbortController | null>(null);
 
@@ -1903,20 +1925,44 @@ export function DatabaseSpreadsheet() {
       totalRows: 0,
       currentRow: 0,
       error: null,
+      jobId: null,
     });
   };
 
   const closeWebsiteEnrichmentModal = () => {
+    setWebsiteEnrichment((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleStopWebsiteEnrichment = () => {
+    if (!websiteEnrichment.isGenerating || !websiteEnrichment.jobId) return;
+    if (
+      !window.confirm(
+        'Остановить обогащение? После отмены прогресс не сохранится и запустить придётся заново.',
+      )
+    ) {
+      return;
+    }
     if (enrichmentAbortRef.current) {
       enrichmentAbortRef.current.abort();
-      enrichmentAbortRef.current = null;
     }
-    setWebsiteEnrichment((prev) => ({
-      ...prev,
-      isOpen: false,
-      isGenerating: false,
-      error: null,
-    }));
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      let token = session?.access_token;
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token;
+      }
+      if (token) {
+        await fetch(`/api/enrich/website/jobs/${websiteEnrichment.jobId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+      }
+    })();
   };
 
   const handleStartWebsiteEnrichment = async () => {
@@ -1935,10 +1981,17 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    // Get auth token
-    const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
-    if (!token) {
+    // Get a fresh auth token (refresh the session to avoid stale JWTs)
+    const getFreshToken = async (): Promise<string | null> => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) return session.access_token;
+      // If cached session is stale, try explicit refresh
+      const { data: refreshed } = await supabase.auth.refreshSession();
+      return refreshed.session?.access_token ?? null;
+    };
+
+    let currentToken = await getFreshToken();
+    if (!currentToken) {
       setWebsiteEnrichment((prev) => ({
         ...prev,
         error: 'Необходима авторизация',
@@ -2004,7 +2057,8 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let errorCount = 0;
-    const batchSize = ENRICHMENT_BATCH_SIZE;
+    let jobId: string | null = null;
+
     const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
 
     for (let i = 1; i < activeTab.data.length; i++) {
@@ -2014,97 +2068,208 @@ export function DatabaseSpreadsheet() {
       }
     }
 
-    try {
-      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += batchSize) {
-        if (enrichmentAbortRef.current?.signal.aborted) {
-          throw new Error('Отменено пользователем');
-        }
+    const pendingUpdates = new Map<number, string>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastProgressAt = 0;
+    let cursor: string | null = null;
+    let pollDelayMs = 1000;
+    const maxPollDelayMs = 5000;
 
-        const batch = rowsToProcess.slice(batchStart, batchStart + batchSize);
-
-        const results = await Promise.all(
-          batch.map(async ({ rowIndex, sourceValue }) => {
-            try {
-              const res = await fetch('/api/enrich/website', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({ url: sourceValue }),
-                signal: enrichmentAbortRef.current?.signal,
-              });
-
-              const data = await res.json() as { text?: string; error?: string };
-
-              if (data.error && !data.text) {
-                return { rowIndex, text: '', error: data.error };
-              }
-
-              return { rowIndex, text: data.text ?? '', error: data.error ?? null };
-            } catch (err) {
-              if (err instanceof Error && err.name === 'AbortError') throw err;
-              return {
-                rowIndex,
-                text: '',
-                error: err instanceof Error ? err.message : 'Ошибка',
-              };
+    const flushUpdates = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pendingUpdates.size === 0) return;
+      const updates = new Map(pendingUpdates);
+      pendingUpdates.clear();
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== activeTabId) return tab;
+          const nextData = [...tab.data];
+          updates.forEach((text, rowIndex) => {
+            const existingRow = nextData[rowIndex];
+            if (!existingRow) return;
+            const newRow = [...existingRow];
+            while (newRow.length <= newColIndex) {
+              newRow.push('');
             }
-          }),
-        );
+            newRow[newColIndex] = text;
+            nextData[rowIndex] = newRow;
+          });
+          return { ...tab, data: nextData };
+        }),
+      );
+    };
 
-        for (const result of results) {
-          if (result.error && !result.text) errorCount++;
-        }
+    const scheduleFlush = () => {
+      if (pendingUpdates.size >= ENRICHMENT_UPDATE_BATCH) {
+        flushUpdates();
+        return;
+      }
+      if (!flushTimer) {
+        flushTimer = setTimeout(() => flushUpdates(), ENRICHMENT_UPDATE_FLUSH_MS);
+      }
+    };
 
-        setTabs((prev) =>
-          prev.map((tab) => {
-            if (tab.id !== activeTabId) return tab;
-            const nextData = tab.data.map((row, idx) => {
-              const result = results.find((r) => r.rowIndex === idx);
-              if (!result) return row;
-              const newRow = [...row];
-              while (newRow.length <= newColIndex) {
-                newRow.push('');
-              }
-              newRow[newColIndex] =
-                result.error && !result.text
-                  ? `[Ошибка: ${result.error}]`
-                  : result.text;
-              return newRow;
-            });
-            return { ...tab, data: nextData };
-          }),
-        );
+    const reportProgress = (total: number, force = false) => {
+      const now = Date.now();
+      if (!force && now - lastProgressAt < ENRICHMENT_PROGRESS_INTERVAL_MS) return;
+      lastProgressAt = now;
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        currentRow: processedCount,
+        progress: total > 0 ? Math.round((processedCount / total) * 100) : 0,
+      }));
+    };
 
-        processedCount += batch.length;
+    try {
+      const startRes = await fetch('/api/enrich/website/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          rows: rowsToProcess.map((row) => ({
+            rowIndex: row.rowIndex,
+            url: row.sourceValue,
+          })),
+        }),
+        signal: enrichmentAbortRef.current?.signal,
+      });
 
-        setWebsiteEnrichment((prev) => ({
-          ...prev,
-          currentRow: processedCount,
-          progress: Math.round((processedCount / rowsToProcess.length) * 100),
-        }));
+      const startData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error_count?: number;
+        error?: string;
+      }>(startRes, 'website_enrichment.start');
 
-        if (batchStart + batchSize < rowsToProcess.length) {
-          await sleep(700);
-        }
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
       }
 
-      const successCount = processedCount - errorCount;
-
-      setLastAction({
-        message:
-          errorCount > 0
-            ? `Обогащение: ${successCount} успешно, ${errorCount} с ошибками`
-            : `Обогащение завершено: ${processedCount} строк`,
-        time: Date.now(),
-      });
+      jobId = startData.job_id;
+      processedCount = startData.processed ?? 0;
+      errorCount = startData.error_count ?? 0;
+      const total = startData.total ?? rowsToProcess.length;
 
       setWebsiteEnrichment((prev) => ({
         ...prev,
-        isGenerating: false,
         isOpen: false,
+        isGenerating: true,
+        totalRows: total,
+        currentRow: processedCount,
+        progress: total > 0 ? Math.round((processedCount / total) * 100) : 0,
+        jobId,
+        error: null,
       }));
+
+      const signal = enrichmentAbortRef.current?.signal;
+
+      while (!signal?.aborted) {
+        const fetchResults = async (tkn: string) =>
+          fetch(
+            `/api/enrich/website/jobs/${jobId}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+            {
+              headers: {
+                Authorization: `Bearer ${tkn}`,
+              },
+              signal,
+            },
+          );
+
+        const reqStartedAt = Date.now();
+        let res = await fetchResults(currentToken);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) {
+            currentToken = refreshed;
+            res = await fetchResults(currentToken);
+          }
+        }
+
+        if (!res.ok) {
+          await sleep(1000);
+          continue;
+        }
+
+        const data = await parseJsonResponse<{
+          job?: {
+            status?: string;
+            total?: number;
+            processed?: number;
+            success_count?: number;
+            error_count?: number;
+            error_message?: string | null;
+          };
+          results?: Array<{
+            id: string;
+            row_index: number;
+            result_text: string | null;
+            status: string;
+            last_error: string | null;
+            updated_at: string;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'website_enrichment.results');
+
+        const resultsCount = data.results?.length ?? 0;
+        if (data.results && data.results.length > 0) {
+          for (const result of data.results) {
+            pendingUpdates.set(result.row_index, result.result_text ?? '');
+          }
+          scheduleFlush();
+        }
+
+        if (data.next_cursor) {
+          cursor = data.next_cursor;
+        }
+
+        if (data.job) {
+          const total = data.job.total ?? rowsToProcess.length;
+          processedCount = data.job.processed ?? processedCount;
+          errorCount = data.job.error_count ?? errorCount;
+          reportProgress(total);
+        }
+
+        const status = data.job?.status;
+        if (status && ['completed', 'failed', 'cancelled'].includes(status)) {
+          flushUpdates();
+          const total = data.job?.total ?? rowsToProcess.length;
+          const successCount = total - (data.job?.error_count ?? errorCount);
+          setLastAction({
+            message:
+              status === 'cancelled'
+                ? `Обогащение отменено (обработано: ${processedCount})`
+                : data.job?.error_count
+                  ? `Обогащение: ${successCount} успешно, ${data.job.error_count} с ошибками`
+                  : `Обогащение завершено: ${processedCount} строк`,
+            time: Date.now(),
+          });
+          setWebsiteEnrichment((prev) => ({
+            ...prev,
+            isGenerating: false,
+            isOpen: status === 'failed' ? prev.isOpen : false,
+            error: status === 'failed' ? data.job?.error_message ?? 'Произошла ошибка' : null,
+            jobId: null,
+          }));
+          break;
+        }
+
+        // Adaptive polling: slow down when no new results to reduce DB pressure
+        if (resultsCount === 0 && status === 'running') {
+          const elapsed = Date.now() - reqStartedAt;
+          pollDelayMs = Math.min(maxPollDelayMs, Math.max(pollDelayMs * 1.5, elapsed));
+        } else {
+          pollDelayMs = 1000;
+        }
+
+        await sleep(pollDelayMs);
+      }
+
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         setLastAction({
@@ -2115,12 +2280,14 @@ export function DatabaseSpreadsheet() {
           ...prev,
           isGenerating: false,
           isOpen: false,
+          jobId: null,
         }));
       } else {
         setWebsiteEnrichment((prev) => ({
           ...prev,
           error: err instanceof Error ? err.message : 'Произошла ошибка',
           isGenerating: false,
+          jobId: null,
         }));
       }
     } finally {
@@ -2422,6 +2589,20 @@ export function DatabaseSpreadsheet() {
                 <span className="max-w-[200px] truncate">· {importStatus.filename}</span>
               ) : null}
               {importStatus.status !== 'error' ? <span>{importStatus.progress}%</span> : null}
+            </div>
+          )}
+          {websiteEnrichment.isGenerating && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+              <span>
+                Обогащение: {websiteEnrichment.currentRow} / {websiteEnrichment.totalRows}
+              </span>
+              <button
+                type="button"
+                onClick={handleStopWebsiteEnrichment}
+                className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-600 transition hover:bg-red-100 hover:text-red-700 hover:shadow-sm"
+              >
+                Остановить
+              </button>
             </div>
           )}
         </div>
@@ -3321,8 +3502,7 @@ export function DatabaseSpreadsheet() {
               <button
                 type="button"
                 onClick={closeWebsiteEnrichmentModal}
-                disabled={websiteEnrichment.isGenerating}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
               >
                 &times;
               </button>
@@ -3367,12 +3547,20 @@ export function DatabaseSpreadsheet() {
                 </p>
               </div>
 
-              <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
-                <p className="text-xs text-blue-700 leading-relaxed">
-                  Для каждого URL будет загружена главная страница и страница «О компании» (/about).
-                  Извлечённый текст будет добавлен в новую колонку.
-                </p>
-              </div>
+              {websiteEnrichment.isGenerating ? (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Обогащение выполняется в фоне. Прогресс отображается справа сверху. Можно закрыть окно и продолжать работу.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Для каждого URL будет загружена главная страница и страница «О компании» (/about).
+                    Извлечённый текст будет добавлен в новую колонку.
+                  </p>
+                </div>
+              )}
 
               {websiteEnrichment.isGenerating && (
                 <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
@@ -3397,35 +3585,38 @@ export function DatabaseSpreadsheet() {
 
             <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
               <div className="text-xs font-medium text-gray-500">
-                Будет обработано: <span className="text-gray-900">{visibleRowIndices.length} строк</span>
+                {websiteEnrichment.isGenerating ? (
+                  <>Обработано: {websiteEnrichment.currentRow} / {websiteEnrichment.totalRows}</>
+                ) : (
+                  <>Будет обработано: <span className="text-gray-900">{visibleRowIndices.length} строк</span></>
+                )}
               </div>
               <div className="flex gap-3">
                 <button
                   type="button"
                   onClick={closeWebsiteEnrichmentModal}
-                  disabled={websiteEnrichment.isGenerating}
-                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
                 >
-                  {websiteEnrichment.isGenerating ? 'Отменить' : 'Закрыть'}
+                  Закрыть
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleStartWebsiteEnrichment()}
-                  disabled={websiteEnrichment.isGenerating}
-                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
-                >
-                  {websiteEnrichment.isGenerating ? (
-                    <>
-                      <span className="animate-spin">⟳</span>
-                      Обработка...
-                    </>
-                  ) : (
-                    <>
-                      <span>W</span>
-                      Запустить обогащение
-                    </>
-                  )}
-                </button>
+                {websiteEnrichment.isGenerating ? (
+                  <button
+                    type="button"
+                    onClick={handleStopWebsiteEnrichment}
+                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartWebsiteEnrichment()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <span>W</span>
+                    Запустить обогащение
+                  </button>
+                )}
               </div>
             </div>
           </div>

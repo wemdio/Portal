@@ -25,6 +25,11 @@ export interface HHSearchConfig {
   date_to?: string;
   per_page?: number;
   params?: Record<string, string | string[]>;
+  /**
+   * Fetch employer details (site/description/industries).
+   * When false, parsing is significantly faster.
+   */
+  fetch_employers?: boolean;
 }
 
 export interface HHVacancyRow {
