@@ -118,11 +118,6 @@ function buildFilters(config?: HHSearchConfig | null) {
   return filters;
 }
 
-function getExtraKeys(config?: HHSearchConfig | null) {
-  if (!config?.params) return [];
-  return Object.keys(config.params).filter((key) => key && !KNOWN_PARAM_KEYS.has(key));
-}
-
 function formatSalary(v: HHVacancyRow) {
   const from = v.salary_from ?? null;
   const to = v.salary_to ?? null;
@@ -182,7 +177,6 @@ export function VacancyResults({
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
   const filters = buildFilters(searchConfig);
-  const extraKeys = getExtraKeys(searchConfig);
   const canPrev = currentPage > 1;
   const canNext = currentPage < totalPages;
   const maxButtons = 5;
