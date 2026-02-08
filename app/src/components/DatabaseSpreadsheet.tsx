@@ -312,7 +312,7 @@ const normalizeCellKey = (value: string) => value.trim().toLowerCase();
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const parseJsonResponse = async <T>(
+const parseJsonResponse = async <T,>(
   res: Response,
   context: string,
 ): Promise<T & { error?: string }> => {
