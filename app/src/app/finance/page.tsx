@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import { logError } from '@/lib/loggerClient';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -196,7 +195,6 @@ export default function FinancePage() {
   const [loading, setLoading] = useState(true);
   const [allExpenses, setAllExpenses] = useState<Record<string, MonthlyExpenses>>({});
   const [selectedMonth, setSelectedMonth] = useState<string>('');
-  const [showExpenseEditor, setShowExpenseEditor] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'revenue' | 'expenses' | 'kpi'>('overview');
 
   // Generate month list
@@ -961,7 +959,6 @@ export default function FinancePage() {
       {/* ═══════════ EXPENSES TAB ═══════════ */}
       {activeTab === 'expenses' && (
         <ExpensesTab
-          month={selectedMonth}
           expenses={currentExpenses}
           summary={expenseSummary}
           onUpdate={(updated) => updateExpenses(selectedMonth, updated)}
@@ -1165,19 +1162,6 @@ function PnlRow({
   );
 }
 
-function KpiCard({ label, value, good, warn }: { label: string; value: string; good?: boolean; warn?: boolean }) {
-  return (
-    <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm">
-      <div className="text-sm font-medium text-gray-500 mb-1">{label}</div>
-      <p className={`text-2xl font-bold ${
-        warn ? 'text-red-600' : good ? 'text-emerald-600' : 'text-gray-900'
-      }`}>
-        {value}
-      </p>
-    </div>
-  );
-}
-
 function MetricRow({ label, value, highlight }: { label: string; value: string; highlight?: 'green' | 'red' | 'amber' }) {
   return (
     <div className="flex justify-between items-center py-2 border-b border-gray-50 last:border-0">
@@ -1199,9 +1183,8 @@ function MetricRow({ label, value, highlight }: { label: string; value: string; 
    ═══════════════════════════════════════════ */
 
 function ExpensesTab({
-  month, expenses, summary, onUpdate,
+  expenses, summary, onUpdate,
 }: {
-  month: string;
   expenses: MonthlyExpenses;
   summary: MonthlyExpensesSummary;
   onUpdate: (updated: MonthlyExpenses) => void;
