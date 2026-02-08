@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { uploadCSV } from '@/lib/csvUpload';
 import Link from 'next/link';
 import { logAudit, logError } from '@/lib/loggerClient';
-import { AdminLogsPanel } from '@/components/AdminLogsPanel';
+import { AdminTracesPanel } from '@/components/AdminTracesPanel';
 
 export default function AdminPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -54,7 +54,7 @@ export default function AdminPage() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto py-10 px-4">
+    <div className="max-w-6xl mx-auto py-10 px-4">
       <h1 className="text-3xl font-bold mb-8 text-gray-900">Админ панель</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -139,8 +139,9 @@ export default function AdminPage() {
       </div>
 
       <div className="mt-8">
-        <AdminLogsPanel />
+        <AdminTracesPanel />
       </div>
+
     </div>
   );
 }

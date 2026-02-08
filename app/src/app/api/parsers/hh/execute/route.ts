@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError, logInfo } from '@/lib/loggerServer';
 import { fetchVacancies, HHApiError, ParserJobCancelledError, type ParserProgressStage } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
+import { startTrace } from '@/lib/tracer';
 
 export const dynamic = 'force-dynamic';
 
@@ -88,7 +90,7 @@ function toDbRow(jobId: string, v: HHVacancy) {
 }
 
 async function upsertInBatches(
-  supabase: ReturnType<typeof createAuthedSupabaseClient>,
+  supabase: ReturnType<typeof createAuthedSupabaseClient> | NonNullable<typeof supabaseAdmin>,
   rows: Array<Record<string, unknown>>,
   onBatch?: (saved: number, total: number) => Promise<void> | void,
 ) {
@@ -140,8 +142,12 @@ export async function POST(req: NextRequest) {
   const searchText = config.text;
   const startedAt = Date.now();
 
+  // Use admin client for all background DB operations so the job doesn't die
+  // when the user's JWT expires (which happens after ~1h on large jobs).
+  const db = supabaseAdmin ?? supabase;
+
   const updateStage = async (stage: ParserProgressStage) => {
-    const { error } = await supabase
+    const { error } = await db
       .from('parser_jobs')
       .update({ progress_stage: stage })
       .eq('id', jobId);
@@ -150,7 +156,7 @@ export async function POST(req: NextRequest) {
     }
   };
 
-  const { error: startError } = await supabase
+  const { error: startError } = await db
     .from('parser_jobs')
     .update({
       status: 'running',
@@ -170,15 +176,35 @@ export async function POST(req: NextRequest) {
   );
 
   const runJob = async () => {
+    // Start root trace span for this job execution
+    const trace = await startTrace({
+      name: 'hh.execute',
+      input: {
+        jobId,
+        searchText,
+        config,
+        requestId,
+        route,
+        ip,
+        userId: user.id,
+      },
+      message: `Парсинг HH: ${searchText}`,
+      userId: user.id,
+      jobId,
+    });
+
     const shouldCancel = async () => {
-      const { data, error } = await supabase
-        .from('parser_jobs')
-        .select('status')
-        .eq('id', jobId)
-        .eq('user_id', user.id)
-        .single();
-      if (error || !data) return true;
-      return data.status !== 'running';
+      try {
+        const { data, error } = await db
+          .from('parser_jobs')
+          .select('status')
+          .eq('id', jobId)
+          .single();
+        if (error || !data) return false; // don't cancel on transient DB errors
+        return data.status !== 'running';
+      } catch {
+        return false; // don't cancel on network errors
+      }
     };
 
     let lastPercent: number | null = 0;
@@ -237,7 +263,7 @@ export async function POST(req: NextRequest) {
         lastSavedTotal = nextSavedTotal;
         lastSavedDone = nextSavedDone;
         lastPercent = nextPercent;
-        const { error } = await supabase
+        const { error } = await db
           .from('parser_jobs')
           .update({ total_found: nextFound, total_parsed: nextParsed, progress_percent: nextPercent })
           .eq('id', jobId);
@@ -246,7 +272,14 @@ export async function POST(req: NextRequest) {
         }
       };
 
+      // --- Phase 1: Fetch vacancies ---
       await updateStage('fetching_vacancies');
+      const fetchSpan = await trace?.startChild({
+        name: 'hh.fetch_vacancies',
+        input: { searchText, config },
+        message: 'Загрузка вакансий с HH API',
+      });
+
       const { found, vacancies } = await fetchVacancies(config, {
         jobId,
         logMeta,
@@ -271,11 +304,26 @@ export async function POST(req: NextRequest) {
         { found, parsed: vacancies.length, employersTotal, employersDone: employersTotal },
         true,
       );
+      await fetchSpan?.end(
+        { found, fetched: vacancies.length, uniqueEmployers: employersTotal },
+        `Загружено ${vacancies.length} вакансий из ${found} найденных`,
+      );
       await logInfo(
         'parser.hh.fetch.completed',
         'HH vacancies fetched',
         { jobId, searchText, found, fetched: vacancies.length },
         logMeta,
+      );
+
+      // --- Phase 2: Deduplicate ---
+      const dedupeSpan = await trace?.startChild({
+        name: 'hh.deduplicate',
+        input: { totalFetched: vacancies.length },
+        message: 'Дедупликация вакансий',
+      });
+      await dedupeSpan?.end(
+        { unique: vacancies.length },
+        `${vacancies.length} уникальных вакансий`,
       );
       await logInfo(
         'parser.hh.dedupe.completed',
@@ -284,7 +332,14 @@ export async function POST(req: NextRequest) {
         logMeta,
       );
 
+      // --- Phase 3: Save to DB ---
       await updateStage('saving');
+      const saveSpan = await trace?.startChild({
+        name: 'hh.save_to_db',
+        input: { rows: vacancies.length },
+        message: 'Сохранение в базу данных',
+      });
+
       const rows = vacancies.map((v) => toDbRow(jobId, v));
       await updateProgress({ savedTotal: rows.length, savedDone: 0 }, true);
       await logInfo(
@@ -293,8 +348,12 @@ export async function POST(req: NextRequest) {
         { jobId, searchText, rows: rows.length },
         logMeta,
       );
-      await upsertInBatches(supabase, rows, (saved, total) =>
+      await upsertInBatches(db, rows, (saved, total) =>
         updateProgress({ savedTotal: total, savedDone: saved }, saved === total),
+      );
+      await saveSpan?.end(
+        { savedRows: rows.length },
+        `Сохранено ${rows.length} записей`,
       );
       await logInfo(
         'parser.hh.upsert.completed',
@@ -303,7 +362,8 @@ export async function POST(req: NextRequest) {
         logMeta,
       );
 
-      const { error: doneError } = await supabase
+      // --- Finalize job ---
+      const { error: doneError } = await db
         .from('parser_jobs')
         .update({
           status: 'completed',
@@ -317,8 +377,14 @@ export async function POST(req: NextRequest) {
         .eq('id', jobId);
       if (doneError) {
         await logError('parser.hh.execute.update_failed', doneError, { jobId, searchText }, logMeta);
+        await trace?.fail(doneError);
         return;
       }
+
+      await trace?.end(
+        { found, parsed: vacancies.length, elapsed_ms: Date.now() - startedAt },
+        `Завершено: ${vacancies.length} вакансий за ${Math.round((Date.now() - startedAt) / 1000)}с`,
+      );
 
       await logAudit(
         'parser.hh.execute.completed',
@@ -327,7 +393,7 @@ export async function POST(req: NextRequest) {
           jobId,
           searchText,
           found,
-        parsed: vacancies.length,
+          parsed: vacancies.length,
           elapsed_ms: Date.now() - startedAt,
         },
         logMeta,
@@ -335,6 +401,7 @@ export async function POST(req: NextRequest) {
     } catch (err: unknown) {
       if (err instanceof ParserJobCancelledError) {
         await updateStage('cancelled');
+        await trace?.cancel('Задача отменена пользователем');
         await logAudit(
           'parser.hh.execute.cancelled',
           'HH parser execution cancelled',
@@ -357,7 +424,7 @@ export async function POST(req: NextRequest) {
         };
       }
 
-      await supabase
+      await db
         .from('parser_jobs')
         .update({
           status: 'failed',
@@ -367,6 +434,8 @@ export async function POST(req: NextRequest) {
           progress_stage: 'failed',
         })
         .eq('id', jobId);
+
+      await trace?.fail(err, extra);
 
       await logError(
         'parser.hh.execute.failed',
