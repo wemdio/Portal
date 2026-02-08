@@ -139,7 +139,7 @@ async function updateQueueItem(
       result_text: result.text ?? null,
       last_error: result.error ?? null,
       updated_at: now,
-      completed_at: status !== 'processing' ? now : null,
+      completed_at: now,
     })
     .eq('id', item.id);
 }
