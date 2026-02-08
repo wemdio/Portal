@@ -2,12 +2,7 @@ import type { NextConfig } from "next";
 import { config } from 'dotenv';
 import { resolve } from 'path';
 
-const envCandidates = [
-  resolve(__dirname, '.env.local'),
-  resolve(__dirname, '.env'),
-  resolve(__dirname, '..', '.env.local'),
-  resolve(__dirname, '..', '.env'),
-];
+const envCandidates = [resolve(__dirname, '..', '.env')];
 
 const parsedEnv: Record<string, string> = {};
 for (const envPath of envCandidates) {
