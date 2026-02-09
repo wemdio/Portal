@@ -189,7 +189,6 @@ export default function ParsersPage() {
   const [jobs, setJobs] = useState<ParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
 
@@ -211,14 +210,10 @@ export default function ParsersPage() {
 
   const refreshJobs = useCallback(async () => {
     const seq = ++refreshSeq.current;
-    setRefreshing(true);
-    try {
-      const data = await apiFetch<JobsResponse>('/api/parsers/hh', { method: 'GET' });
-      setJobs(data.jobs ?? []);
-      if (!activeJobId && data.jobs?.[0]?.id) setActiveJobId(data.jobs[0].id);
-    } finally {
-      if (refreshSeq.current === seq) setRefreshing(false);
-    }
+    const data = await apiFetch<JobsResponse>('/api/parsers/hh', { method: 'GET' });
+    if (refreshSeq.current !== seq) return;
+    setJobs(data.jobs ?? []);
+    if (!activeJobId && data.jobs?.[0]?.id) setActiveJobId(data.jobs[0].id);
   }, [activeJobId]);
 
   const handleManualRefresh = useCallback(async () => {
