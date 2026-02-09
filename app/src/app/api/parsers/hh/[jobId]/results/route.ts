@@ -5,19 +5,31 @@ import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+function jsonError(message: string, status: number, extra?: Record<string, unknown>) {
+  return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
 }
 
 async function getSupabase(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
-  if (!token) return { error: jsonError('Unauthorized', 401) };
+  if (!token) return { error: jsonError('Unauthorized', 401, { request_id: req.headers.get('x-request-id') ?? null }) };
 
   const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: jsonError('Unauthorized', 401) };
+  const requestId = req.headers.get('x-request-id') ?? null;
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { requestId, route, ip };
 
-  return { supabase, user };
+  try {
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) {
+      await logError('parser.hh.auth.failed', error ?? 'User not found', { hasUser: Boolean(data?.user) }, logMeta);
+      return { error: jsonError('Unauthorized', 401, { request_id: requestId }) };
+    }
+    return { supabase, user: data.user };
+  } catch (err) {
+    await logError('parser.hh.auth.exception', err, undefined, logMeta);
+    return { error: jsonError('Unauthorized', 401, { request_id: requestId }) };
+  }
 }
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
@@ -44,7 +56,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
   if (error) {
     await logError('parser.hh.results.fetch.failed', error, { jobId, limit, offset }, logMeta);
-    return jsonError(error.message, 500);
+    return jsonError(error.message, 500, { request_id: requestId });
   }
   return NextResponse.json({ items: data ?? [], count: count ?? 0, limit, offset });
 }
