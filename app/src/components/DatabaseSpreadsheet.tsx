@@ -2722,18 +2722,28 @@ export function DatabaseSpreadsheet() {
       });
 
       let resData: { text?: string; pages?: number; error?: string } | null = null;
+      let responseText = '';
       try {
-        resData = (await res.json()) as { text?: string; pages?: number; error?: string };
+        responseText = await res.text();
+        if (responseText) {
+          resData = JSON.parse(responseText) as { text?: string; pages?: number; error?: string };
+        }
       } catch {
         resData = null;
       }
 
       if (!res.ok || !resData || resData.error) {
+        const plainText = responseText
+          ? responseText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+          : '';
+        const textSnippet = plainText ? plainText.slice(0, 200) : '';
         const fallbackError = res.redirected
           ? 'Сессия истекла, войдите заново'
-          : res.ok
-            ? 'Сервер вернул некорректный ответ'
-            : `Ошибка при загрузке PDF (${res.status})`;
+          : textSnippet
+            ? `Ошибка при загрузке PDF (${res.status}): ${textSnippet}`
+            : res.ok
+              ? 'Сервер вернул некорректный ответ'
+              : `Ошибка при загрузке PDF (${res.status})`;
         setBriefScoring((prev) => ({
           ...prev,
           isUploading: false,
