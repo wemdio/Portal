@@ -520,7 +520,7 @@ type AdminTracesPanelProps = {
 
 export function AdminTracesPanel({
   title = 'Трассировки задач',
-  description = 'Дерево выполнения задач (аналог Logfire)',
+  description = 'Дерево выполнения задач',
   jobId,
 }: AdminTracesPanelProps) {
   const [traces, setTraces] = useState<TraceGroup[]>([]);
