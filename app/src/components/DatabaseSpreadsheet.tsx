@@ -143,6 +143,9 @@ const BRIEF_SCORING_BATCH_SIZE = 10;
 const BRIEF_SCORING_MAX_RETRIES = 2;
 const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
+const BRIEF_STORAGE_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
+const BRIEF_STORAGE_PREFIX = 'brief-scoring';
+const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
 const NAME_CLEANUP_BATCH_SIZE = 100;
 const NAME_CLEANUP_CONCURRENCY = 2;
 const NAME_CLEANUP_HIGHLIGHT_DURATION = 2500;
@@ -2672,18 +2675,44 @@ export function DatabaseSpreadsheet() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
-      if (!token) {
+      const userId = session?.user?.id;
+      if (!token || !userId) {
         setBriefScoring((prev) => ({ ...prev, isUploading: false, error: 'Необходима авторизация' }));
         return;
       }
 
-      const formData = new FormData();
-      formData.append('file', file);
+      if (file.size > MAX_BRIEF_FILE_BYTES) {
+        setBriefScoring((prev) => ({
+          ...prev,
+          isUploading: false,
+          error: 'Файл слишком большой (макс. 20MB)',
+        }));
+        return;
+      }
+
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const uploadPath = `${BRIEF_STORAGE_PREFIX}/${userId}/${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage
+        .from(BRIEF_STORAGE_BUCKET)
+        .upload(uploadPath, file, {
+          cacheControl: '3600',
+          upsert: false,
+          contentType: file.type || 'application/pdf',
+        });
+
+      if (uploadError) {
+        setBriefScoring((prev) => ({
+          ...prev,
+          isUploading: false,
+          error: `Не удалось загрузить PDF в хранилище: ${uploadError.message}`,
+        }));
+        return;
+      }
 
       const res = await fetch('/api/brief-scoring/parse-pdf', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bucket: BRIEF_STORAGE_BUCKET, path: uploadPath, fileName: file.name }),
       });
 
       let resData: { text?: string; pages?: number; error?: string } | null = null;
