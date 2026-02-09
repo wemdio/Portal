@@ -25,6 +25,35 @@ type Props = {
   onDeleteJob?: () => void;
 };
 
+const RUNNING_EMPTY_MESSAGES = [
+  'Ищем вакансии на HH.ru — первые результаты скоро появятся.',
+  'Собираем результаты по заданным фильтрам.',
+  'Парсинг в процессе, это может занять несколько минут.',
+  'Обновляем список вакансий, ожидайте.',
+  'Почти готово, осталось немного.',
+  'Финализируем выдачу и готовим результаты.',
+  'Синхронизируем данные с HH.ru.',
+  'Обрабатываем найденные вакансии.',
+  'Готовим результаты для отображения.',
+  'Еще чуть-чуть — скоро все появится.',
+] as const;
+
+function RunningEmptyState() {
+  const [index, setIndex] = useState(0);
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setIndex((prev) => (prev + 1) % RUNNING_EMPTY_MESSAGES.length);
+    }, 25000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+  return (
+    <div className="px-6 py-12 text-center text-gray-500">
+      <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+      <div className="text-sm">{RUNNING_EMPTY_MESSAGES[index]}</div>
+    </div>
+  );
+}
+
 const SEARCH_BASE_URL = 'https://hh.ru/search/vacancy';
 const KNOWN_PARAM_KEYS = new Set([
   'text',
@@ -162,7 +191,6 @@ export function VacancyResults({
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef<number | null>(null);
   const hasItems = items.length > 0;
-  const [emptyMessageIndex, setEmptyMessageIndex] = useState(0);
   useEffect(() => {
     return () => {
       if (copiedTimeoutRef.current !== null) {
@@ -170,28 +198,6 @@ export function VacancyResults({
       }
     };
   }, []);
-
-  const emptyMessages = [
-    'Ищем вакансии на HH.ru — первые результаты скоро появятся.',
-    'Собираем результаты по заданным фильтрам.',
-    'Парсинг в процессе, это может занять несколько минут.',
-    'Обновляем список вакансий, ожидайте.',
-    'Почти готово, осталось немного.',
-    'Финализируем выдачу и готовим результаты.',
-    'Синхронизируем данные с HH.ru.',
-    'Обрабатываем найденные вакансии.',
-    'Готовим результаты для отображения.',
-    'Еще чуть-чуть — скоро все появится.',
-  ];
-
-  useEffect(() => {
-    if (jobStatus !== 'running' || hasItems) return undefined;
-    setEmptyMessageIndex(0);
-    const intervalId = window.setInterval(() => {
-      setEmptyMessageIndex((prev) => (prev + 1) % emptyMessages.length);
-    }, 25000);
-    return () => window.clearInterval(intervalId);
-  }, [jobStatus, hasItems, emptyMessages.length]);
 
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
@@ -344,10 +350,7 @@ export function VacancyResults({
 
       {items.length === 0 ? (
         jobStatus === 'running' ? (
-          <div className="px-6 py-12 text-center text-gray-500">
-            <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
-            <div className="text-sm">{emptyMessages[emptyMessageIndex]}</div>
-          </div>
+          <RunningEmptyState key={jobId ?? 'running'} />
         ) : (
           <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
         )
