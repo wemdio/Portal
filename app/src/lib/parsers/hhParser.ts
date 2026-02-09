@@ -451,7 +451,15 @@ export async function fetchWithRetry<T>(
       const res = await fetch(url, fetchInit);
 
       if (res.ok) {
-        return (await res.json()) as T;
+        const bodyText = await res.text().catch(() => '');
+        const parsed = safeJsonParse<T>(bodyText);
+        if (parsed) return parsed;
+        const requestId = res.headers.get('x-request-id') ?? res.headers.get('x-hh-request-id') ?? undefined;
+        throw new HHApiError('HH API returned non-JSON response', {
+          status: res.status,
+          type: 'invalid_response',
+          requestId,
+        });
       }
 
       const retryAfter = res.headers.get('retry-after');
