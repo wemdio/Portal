@@ -511,12 +511,24 @@ export async function fetchWithRetry<T>(
   throw lastError instanceof Error ? lastError : new Error('HH API request failed');
 }
 
-async function fetchFound(config: HHSearchConfig): Promise<number> {
+async function fetchFound(config: HHSearchConfig, trace?: Span | null, label?: string): Promise<number> {
   const url = buildVacanciesUrl({ ...config, per_page: 1 }, 0);
-  const data = await fetchWithRetry<HHApiVacanciesResponse>(url, {
-    timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
+  const span = await trace?.startChild({
+    name: 'hh.fetch_found',
+    input: { url, text: config.text, area: config.area, date_from: config.date_from, date_to: config.date_to },
+    message: label ?? 'Проверка количества вакансий',
   });
-  return data.found ?? 0;
+  try {
+    const data = await fetchWithRetry<HHApiVacanciesResponse>(url, {
+      timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
+    });
+    const found = data.found ?? 0;
+    await span?.end({ found }, `Найдено ${found}`);
+    return found;
+  } catch (err) {
+    await span?.fail(err);
+    throw err;
+  }
 }
 
 function normalizeIndustries(items?: Array<{ id?: string; name?: string }>): string[] {
@@ -553,29 +565,35 @@ async function fetchEmployerDetails(
   };
 }
 
-export async function partitionQuery(config: HHSearchConfig): Promise<HHSearchConfig[]> {
+export async function partitionQuery(config: HHSearchConfig, trace?: Span | null): Promise<HHSearchConfig[]> {
   const normalized = normalizeSearchParams(config);
-  const found = await fetchFound(normalized);
+  const found = await fetchFound(normalized, trace);
   if (found <= FOUND_LIMIT) return [normalized];
 
   const dateFrom = normalized.date_from ? parseISODate(normalized.date_from) : null;
   const dateTo = normalized.date_to ? parseISODate(normalized.date_to) : null;
 
   if (dateFrom && dateTo && dateFrom < dateTo) {
-    return partitionByDate(normalized, dateFrom, dateTo, 0);
+    return partitionByDate(normalized, dateFrom, dateTo, 0, trace);
   }
 
   const fallback = await partitionFallback(normalized);
   return fallback.length > 0 ? fallback : [normalized];
 }
 
-async function partitionByDate(config: HHSearchConfig, from: Date, to: Date, depth: number): Promise<HHSearchConfig[]> {
+async function partitionByDate(
+  config: HHSearchConfig,
+  from: Date,
+  to: Date,
+  depth: number,
+  trace?: Span | null,
+): Promise<HHSearchConfig[]> {
   if (depth >= 14) return [config];
 
   const fromISO = toISODate(from);
   const toISO = toISODate(to);
   const current = { ...config, date_from: fromISO, date_to: toISO };
-  const found = await fetchFound(current);
+  const found = await fetchFound(current, trace, `Проверка диапазона ${fromISO} → ${toISO}`);
   if (found <= FOUND_LIMIT) return [current];
 
   const mid = midDate(from, to);
@@ -588,15 +606,18 @@ async function partitionByDate(config: HHSearchConfig, from: Date, to: Date, dep
   const left: HHSearchConfig = { ...config, date_from: fromISO, date_to: toISODate(mid) };
   const right: HHSearchConfig = { ...config, date_from: toISODate(rightFrom), date_to: toISO };
 
-  const [leftFound, rightFound] = await Promise.all([fetchFound(left), fetchFound(right)]);
+  const [leftFound, rightFound] = await Promise.all([
+    fetchFound(left, trace, `Левая половина ${left.date_from} → ${left.date_to}`),
+    fetchFound(right, trace, `Правая половина ${right.date_from} → ${right.date_to}`),
+  ]);
   if (leftFound === found && rightFound === found) {
     const fallback = await partitionFallback(current);
     return fallback.length > 0 ? fallback : [current];
   }
 
   const [leftParts, rightParts] = await Promise.all([
-    leftFound > FOUND_LIMIT ? partitionByDate(left, from, mid, depth + 1) : [{ ...left }],
-    rightFound > FOUND_LIMIT ? partitionByDate(right, mid, to, depth + 1) : [{ ...right }],
+    leftFound > FOUND_LIMIT ? partitionByDate(left, from, mid, depth + 1, trace) : [{ ...left }],
+    rightFound > FOUND_LIMIT ? partitionByDate(right, mid, to, depth + 1, trace) : [{ ...right }],
   ]);
 
   return [...leftParts, ...rightParts];
@@ -746,7 +767,7 @@ export async function fetchVacancies(
     },
     message: 'Подготовка разбиения запроса',
   });
-  const partitions = await partitionQuery(normalized);
+  const partitions = await partitionQuery(normalized, options?.trace);
   await partitionSpan?.end({ count: partitions.length }, `Подготовлено ${partitions.length} разбиений`);
   void logInfo(
     'parser.hh.partitions',
