@@ -6,6 +6,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { PDFParse } from 'pdf-parse';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const BRIEF_STORAGE_BUCKET = process.env.BRIEF_STORAGE_BUCKET ?? 'briefs';
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
