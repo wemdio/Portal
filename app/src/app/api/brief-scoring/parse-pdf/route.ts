@@ -3,7 +3,6 @@ import type { NextRequest } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { PDFParse } from 'pdf-parse';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -134,6 +133,7 @@ export async function POST(req: NextRequest) {
     }
 
     // --- Extract text ---
+    const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: buffer });
     let result: Awaited<ReturnType<typeof parser.getText>>;
     try {
