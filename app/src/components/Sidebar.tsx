@@ -21,6 +21,10 @@ const navItems = [
   { name: 'Настройки', href: '/settings' },
 ];
 
+const navActiveAliases: Record<string, string[]> = {
+  '/tools': ['/parsers'],
+};
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -89,9 +93,12 @@ export function Sidebar() {
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
 
+          const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
             ? pathname === '/'
-            : pathname === item.href || pathname.startsWith(`${item.href}/`);
+            : pathname === item.href ||
+              pathname.startsWith(`${item.href}/`) ||
+              aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
           return (
             <Link
               key={item.name}
