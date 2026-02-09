@@ -22,6 +22,15 @@ type Selection = {
 
 type SelectionMode = 'cell' | 'row' | 'col';
 
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(id);
+  }, [delayMs, value]);
+  return debounced;
+}
+
 type ContextMenuState = {
   x: number;
   y: number;
@@ -435,6 +444,9 @@ export function DatabaseSpreadsheet() {
   const [groupByCol, setGroupByCol] = useState<number | null>(null);
   const [groupSearch, setGroupSearch] = useState('');
   const [rightPanelTab, setRightPanelTab] = useState<'summary' | 'cleanup'>('summary');
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
+  const debouncedGroupSearch = useDebouncedValue(groupSearch, 300);
+  const debouncedFilterMenuSearch = useDebouncedValue(filterMenu?.search ?? '', 300);
   const [lastAction, setLastAction] = useState<ActionSummary | null>(null);
   const [lastUndo, setLastUndo] = useState<UndoState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -526,14 +538,42 @@ export function DatabaseSpreadsheet() {
     [normalizeLowercase, normalizeSpaces, normalizeEmoji],
   );
 
+  const normalizeSig = useMemo(
+    () => `${normalizeOptions.lower ? 1 : 0}${normalizeOptions.trim ? 1 : 0}${normalizeOptions.removeEmoji ? 1 : 0}`,
+    [normalizeOptions],
+  );
+
+  const normalizedCellCacheRef = useRef(
+    new Map<string, { raw: string; sig: string; normalized: string }>(),
+  );
+
+  useEffect(() => {
+    // Avoid leaking cache across tabs / normalization settings changes
+    normalizedCellCacheRef.current.clear();
+  }, [activeTabId, normalizeSig]);
+
+  const getNormalizedCell = useCallback(
+    (rowIndex: number, colIndex: number, raw: string) => {
+      const key = `${activeTabId}:${rowIndex}:${colIndex}`;
+      const cached = normalizedCellCacheRef.current.get(key);
+      if (cached && cached.raw === raw && cached.sig === normalizeSig) {
+        return cached.normalized;
+      }
+      const normalized = normalizeText(raw, normalizeOptions);
+      normalizedCellCacheRef.current.set(key, { raw, sig: normalizeSig, normalized });
+      return normalized;
+    },
+    [activeTabId, normalizeOptions, normalizeSig],
+  );
+
   const searchTerms = useMemo(() => {
-    const baseTerms = parseTerms(searchQuery);
+    const baseTerms = parseTerms(debouncedSearchQuery);
     if (baseTerms.length === 0) return [];
     const normalizedBase = baseTerms
       .map((term) => normalizeText(term, normalizeOptions))
       .filter((term) => term.length > 0);
     return Array.from(new Set(normalizedBase));
-  }, [searchQuery, normalizeOptions]);
+  }, [debouncedSearchQuery, normalizeOptions]);
 
   const handleUndo = useCallback(() => {
     if (!lastUndo) return;
@@ -1090,13 +1130,18 @@ export function DatabaseSpreadsheet() {
         if (!entry.values.has(cellKey)) return false;
       }
       if (searchOnlyMatches && searchTerms.length > 0) {
-        const normalizedRow = normalizeText(row.join(' '), normalizeOptions);
+        let normalizedRow = '';
+        for (let c = 0; c < row.length; c += 1) {
+          const raw = row[c] ?? '';
+          const normalizedCell = getNormalizedCell(rowIndex, c, raw);
+          if (normalizedCell) normalizedRow += `${normalizedCell} `;
+        }
         const matches = searchTerms.some((term) => normalizedRow.includes(term));
         if (!matches) return false;
       }
       return true;
     },
-    [filterEntries, normalizeOptions, searchOnlyMatches, searchTerms],
+    [filterEntries, getNormalizedCell, searchOnlyMatches, searchTerms],
   );
 
   const openFilterMenu = (event: MouseEvent, colIndex: number) => {
@@ -1559,7 +1604,7 @@ export function DatabaseSpreadsheet() {
 
   const rowCount = activeTab?.data.length ?? 0;
   const colCount = activeTab?.data[0]?.length ?? 0;
-  const filterSearch = filterMenu?.search.trim().toLowerCase() ?? '';
+  const filterSearch = debouncedFilterMenuSearch.trim().toLowerCase();
   const filteredFilterOptions = filterMenu
     ? filterMenu.options.filter((option) =>
         option.label.toLowerCase().includes(filterSearch),
@@ -1601,7 +1646,7 @@ export function DatabaseSpreadsheet() {
       .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru'));
   }, [activeTab, groupByCol, rowMatchesFilters]);
 
-  const normalizedGroupSearch = normalizeText(groupSearch, normalizeOptions);
+  const normalizedGroupSearch = normalizeText(debouncedGroupSearch, normalizeOptions);
   const filteredGroupSummary = useMemo(() => {
     if (normalizedGroupSearch.length === 0) return groupSummary;
     return groupSummary.filter((item) =>
@@ -1620,6 +1665,43 @@ export function DatabaseSpreadsheet() {
     }
     return indices;
   }, [activeTab, rowMatchesFilters]);
+
+  const ROW_CHUNK_SIZE = 100;
+  const [visibleRowLimit, setVisibleRowLimit] = useState(ROW_CHUNK_SIZE);
+
+  useEffect(() => {
+    // Reset chunked rendering when data/filters change
+    setVisibleRowLimit(ROW_CHUNK_SIZE);
+  }, [activeTabId, columnFilters, searchOnlyMatches, debouncedSearchQuery, groupByCol, debouncedGroupSearch, normalizeSig]);
+
+  const renderedRowIndices = useMemo(() => {
+    if (!activeTab) return [];
+    const slice = visibleRowIndices.slice(0, visibleRowLimit);
+    return [0, ...slice];
+  }, [activeTab, visibleRowIndices, visibleRowLimit]);
+
+  const canLoadMoreRows = visibleRowLimit < visibleRowIndices.length;
+
+  const loadMoreRows = useCallback(() => {
+    if (!canLoadMoreRows) return;
+    setVisibleRowLimit((prev) => Math.min(visibleRowIndices.length, prev + ROW_CHUNK_SIZE));
+  }, [canLoadMoreRows, visibleRowIndices.length]);
+
+  const scrollTickRef = useRef(false);
+  const handleTableScroll = useCallback(() => {
+    if (!canLoadMoreRows) return;
+    const el = tableWrapperRef.current;
+    if (!el) return;
+    if (scrollTickRef.current) return;
+    scrollTickRef.current = true;
+    window.requestAnimationFrame(() => {
+      scrollTickRef.current = false;
+      const thresholdPx = 320;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - thresholdPx) {
+        loadMoreRows();
+      }
+    });
+  }, [canLoadMoreRows, loadMoreRows]);
 
   const allVisibleSelected =
     visibleRowIndices.length > 0 &&
@@ -3109,6 +3191,7 @@ export function DatabaseSpreadsheet() {
           <div
             ref={tableWrapperRef}
             className="overflow-auto max-h-[calc(100vh-300px)]"
+            onScroll={handleTableScroll}
             onKeyDownCapture={handleGridKeyDown}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -3116,6 +3199,13 @@ export function DatabaseSpreadsheet() {
               setContextMenu({ x: event.clientX, y: event.clientY });
             }}
           >
+            {!isHydrated ? (
+              <div className="px-6 py-14 text-center text-gray-500">
+                <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+                <div className="text-sm font-medium text-gray-700">Загружаем вашу базу…</div>
+                <div className="mt-1 text-xs text-gray-500">Это может занять несколько секунд.</div>
+              </div>
+            ) : (
             <table className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
@@ -3193,8 +3283,10 @@ export function DatabaseSpreadsheet() {
                 </tr>
               </thead>
               <tbody>
-                {activeTab?.data.map((row, rowIndex) => {
-                  const isVisible = rowMatchesFilters(rowIndex, row);
+                {renderedRowIndices.map((rowIndex) => {
+                  const row = activeTab?.data[rowIndex];
+                  if (!row) return null;
+                  const isVisible = rowIndex === 0 ? true : rowMatchesFilters(rowIndex, row);
                   if (!isVisible) return null;
                   const isChecked = selectedRows.has(rowIndex);
                   const isHeaderRow = rowIndex === 0;
@@ -3248,7 +3340,7 @@ export function DatabaseSpreadsheet() {
                         const cellMatchesSearch =
                           searchTerms.length > 0 &&
                           searchTerms.some((term) =>
-                            normalizeText(value, normalizeOptions).includes(term),
+                            getNormalizedCell(rowIndex, colIndex, value ?? '').includes(term),
                           );
                         const isHighlighted = highlightedCol === colIndex;
                         const cellBackground = isSelected
@@ -3374,6 +3466,7 @@ export function DatabaseSpreadsheet() {
                 )}
               </tbody>
             </table>
+            )}
           </div>
         </div>
 

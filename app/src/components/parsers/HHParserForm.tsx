@@ -191,14 +191,16 @@ export function HHParserForm({ onStart, busy }: Props) {
           <h2 className="text-lg font-semibold text-gray-900">HH.ru парсер</h2>
           <p className="text-sm text-gray-500 mt-1">Запуск поиска вакансий через официальный API HH.ru</p>
         </div>
-        <button
-          onClick={() => (activeConfig ? onStart(activeConfig) : undefined)}
-          disabled={busy || !canStart}
-          className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
-          Запустить
-        </button>
+        {mode === 'manual' ? (
+          <button
+            onClick={() => (activeConfig ? onStart(activeConfig) : undefined)}
+            disabled={busy || !canStart}
+            className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
+            Запустить
+          </button>
+        ) : null}
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -227,21 +229,32 @@ export function HHParserForm({ onStart, busy }: Props) {
       {mode === 'link' ? (
         <div className="mt-6 space-y-3">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Ссылка поиска HH.ru *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Ссылка поиска HH.ru*</label>
             <div className="flex items-center gap-2">
-              <input
-                value={searchLink}
-                onChange={(e) => setSearchLink(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
-              />
+              <div className="relative w-full">
+                <input
+                  value={searchLink}
+                  onChange={(e) => setSearchLink(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-9 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
+                />
+                <button
+                  type="button"
+                  onClick={() => setSearchLink('')}
+                  disabled={!searchLink}
+                  aria-label="Очистить"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-1 text-gray-400 hover:text-gray-600 disabled:opacity-50"
+                >
+                  ×
+                </button>
+              </div>
               <button
-                type="button"
-                onClick={() => setSearchLink('')}
-                disabled={!searchLink}
-                className="inline-flex items-center rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                onClick={() => (activeConfig ? onStart(activeConfig) : undefined)}
+                disabled={busy || !canStart}
+                className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                Очистить
+                {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
+                Запустить
               </button>
             </div>
             {linkError ? <div className="mt-2 text-xs text-red-600">{linkError}</div> : null}

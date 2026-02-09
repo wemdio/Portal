@@ -114,7 +114,7 @@ export function JobsList({
                       <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
-                      <span className="font-medium text-gray-900">text:</span> {job.config?.text}
+                      <span className="font-medium text-gray-900">Запрос:</span> {job.config?.text}
                     </div>
                     <div className="mt-3">
                       <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
