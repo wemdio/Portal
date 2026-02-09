@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { Project, ProjectStatus } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
-import { getCurrentUserRole, canCreateProjects, canEditProjects } from '@/lib/roles';
+import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
@@ -123,12 +123,14 @@ export function ProjectList() {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [canCreate, setCanCreate] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
+  const [canDelete, setCanDelete] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, Partial<Project>>>({});
   const [savingRows, setSavingRows] = useState<Record<string, boolean>>({});
   const [isTableEditing, setIsTableEditing] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchProjects();
@@ -139,6 +141,7 @@ export function ProjectList() {
     const role = await getCurrentUserRole();
     setCanCreate(canCreateProjects(role));
     setCanEdit(canEditProjects(role));
+    setCanDelete(canDeleteProjects(role));
   }
 
   async function fetchProjects() {
@@ -183,25 +186,48 @@ export function ProjectList() {
 
   async function deleteProject(id: string) {
     setDeleting(true);
+    setDeleteError(null);
     try {
-      const { error } = await supabase
-        .from('projects')
-        .delete()
-        .eq('id', id);
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setDeleteError('Необходима авторизация');
+        return;
+      }
 
-      if (error) throw error;
+      const res = await fetch(`/api/projects/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!res.ok) {
+        let message = 'Не удалось удалить проект';
+        try {
+          const payload = (await res.json()) as { error?: string };
+          if (payload?.error) message = payload.error;
+        } catch {
+          // ignore JSON parse errors
+        }
+        throw new Error(message);
+      }
 
       setProjects((prev) => prev.filter((p) => p.id !== id));
       if (selectedProjectId === id) setSelectedProjectId(null);
       void logAudit('projects.delete.success', 'Project deleted', { projectId: id });
+      setDeleteConfirmId(null);
     } catch (error) {
       void logError('projects.delete.failed', error, { projectId: id });
+      setDeleteError(error instanceof Error ? error.message : 'Не удалось удалить проект');
     } finally {
       setDeleting(false);
-      setDeleteConfirmId(null);
       setOpenMenuId(null);
     }
   }
+
+  const requestDeleteProject = (id: string) => {
+    setDeleteError(null);
+    setDeleteConfirmId(id);
+  };
 
   const setDraftValue = (id: string, field: keyof Project, value: string) => {
     setDrafts((prev) => ({
@@ -500,8 +526,8 @@ export function ProjectList() {
               onStatusChange={updateProjectStatus}
               openMenuId={openMenuId}
               setOpenMenuId={setOpenMenuId}
-              onDeleteRequest={(id) => setDeleteConfirmId(id)}
-              canDelete={canEdit}
+              onDeleteRequest={requestDeleteProject}
+              canDelete={canDelete}
             />
           ))}
         </div>
@@ -532,8 +558,8 @@ export function ProjectList() {
                     project={project}
                     onStatusChange={updateProjectStatus}
                     columns={kanbanColumns}
-                    onDeleteRequest={(id) => setDeleteConfirmId(id)}
-                    canDelete={canEdit}
+                    onDeleteRequest={requestDeleteProject}
+                    canDelete={canDelete}
                   />
                 ))}
               </div>
@@ -842,10 +868,10 @@ export function ProjectList() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {canEdit && (
+                {canDelete && (
                   <button
                     type="button"
-                    onClick={() => setDeleteConfirmId(selectedProject.id)}
+                    onClick={() => requestDeleteProject(selectedProject.id)}
                     className="rounded-full p-2 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-all"
                     title="Удалить проект"
                   >
@@ -1061,7 +1087,15 @@ export function ProjectList() {
       {/* Delete confirmation modal */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
-          <div className="fixed inset-0 bg-black/50" onClick={() => !deleting && setDeleteConfirmId(null)} />
+          <div
+            className="fixed inset-0 bg-black/50"
+            onClick={() => {
+              if (!deleting) {
+                setDeleteConfirmId(null);
+                setDeleteError(null);
+              }
+            }}
+          />
           <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
             <div className="flex items-center justify-center w-12 h-12 mx-auto rounded-full bg-red-100 mb-4">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1076,10 +1110,18 @@ export function ProjectList() {
               </span>
               ? Это действие нельзя отменить.
             </p>
+            {deleteError && (
+              <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {deleteError}
+              </div>
+            )}
             <div className="mt-6 flex gap-3">
               <button
                 type="button"
-                onClick={() => setDeleteConfirmId(null)}
+                onClick={() => {
+                  setDeleteConfirmId(null);
+                  setDeleteError(null);
+                }}
                 disabled={deleting}
                 className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50"
               >
