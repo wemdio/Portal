@@ -34,6 +34,7 @@ type Props = {
   onSelect: (jobId: string) => void;
   onRefresh: () => void;
   busy: boolean;
+  refreshing?: boolean;
 };
 
 function formatDate(dateStr: string) {
@@ -50,12 +51,14 @@ function formatDate(dateStr: string) {
   }
 }
 
+
 export function JobsList({
   jobs,
   activeJobId,
   onSelect,
   onRefresh,
   busy,
+  refreshing,
 }: Props) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -70,7 +73,7 @@ export function JobsList({
           disabled={busy}
           className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
         >
-          <RefreshCw className={`h-4 w-4 mr-2 ${busy ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
           Обновить
         </button>
       </div>

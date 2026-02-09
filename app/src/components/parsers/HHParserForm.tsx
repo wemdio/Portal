@@ -232,7 +232,7 @@ export function HHParserForm({ onStart, busy }: Props) {
               <input
                 value={searchLink}
                 onChange={(e) => setSearchLink(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
               />
               <button
@@ -246,13 +246,17 @@ export function HHParserForm({ onStart, busy }: Props) {
             </div>
             {linkError ? <div className="mt-2 text-xs text-red-600">{linkError}</div> : null}
           </div>
-          <label className="inline-flex items-center gap-2 text-sm text-gray-700 ml-1">
-            <input
-              type="checkbox"
-              checked={fetchEmployers}
-              onChange={(e) => setFetchEmployers(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
+          <label className="inline-flex items-center gap-3 text-sm text-gray-700 ml-1">
+            <span className="relative inline-flex h-5 w-9 items-center">
+              <input
+                type="checkbox"
+                checked={fetchEmployers}
+                onChange={(e) => setFetchEmployers(e.target.checked)}
+                className="peer sr-only"
+              />
+              <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
+              <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+            </span>
             Подтягивать данные работодателей (дольше)
           </label>
 
@@ -299,7 +303,7 @@ export function HHParserForm({ onStart, busy }: Props) {
               <input
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="например: sales, маркетолог, b2b"
               />
             </div>
@@ -309,7 +313,7 @@ export function HHParserForm({ onStart, busy }: Props) {
               <input
                 value={area}
                 onChange={(e) => setArea(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="например: 1 или 1,2,3"
               />
             </div>
@@ -320,7 +324,7 @@ export function HHParserForm({ onStart, busy }: Props) {
                 value={salaryFrom}
                 onChange={(e) => setSalaryFrom(e.target.value)}
                 inputMode="numeric"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="например: 150000"
               />
             </div>
@@ -330,7 +334,7 @@ export function HHParserForm({ onStart, busy }: Props) {
               <select
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white"
               >
                 <option value="RUR">RUR</option>
                 <option value="USD">USD</option>
@@ -345,7 +349,7 @@ export function HHParserForm({ onStart, busy }: Props) {
                 onChange={(e) => setDateFrom(formatDateInput(e.target.value))}
                 inputMode="numeric"
                 maxLength={10}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="2026-01-01"
               />
             </div>
@@ -357,7 +361,7 @@ export function HHParserForm({ onStart, busy }: Props) {
                 onChange={(e) => setDateTo(formatDateInput(e.target.value))}
                 inputMode="numeric"
                 maxLength={10}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="2026-01-28"
               />
             </div>
@@ -368,18 +372,22 @@ export function HHParserForm({ onStart, busy }: Props) {
                 value={perPage}
                 onChange={(e) => setPerPage(e.target.value)}
                 inputMode="numeric"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                 placeholder="50"
               />
             </div>
           </div>
-          <label className="mt-3 inline-flex items-center gap-2 text-sm text-gray-700 ml-1">
-            <input
-              type="checkbox"
-              checked={fetchEmployers}
-              onChange={(e) => setFetchEmployers(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
+          <label className="mt-3 inline-flex items-center gap-3 text-sm text-gray-700 ml-1">
+            <span className="relative inline-flex h-5 w-9 items-center">
+              <input
+                type="checkbox"
+                checked={fetchEmployers}
+                onChange={(e) => setFetchEmployers(e.target.checked)}
+                className="peer sr-only"
+              />
+              <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
+              <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+            </span>
             Подтягивать данные работодателей (дольше)
           </label>
         </>
