@@ -3,12 +3,19 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import type { Route } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin } from '@/lib/roles';
 
-const navItems = [
+type NavItem = {
+  name: string;
+  href: string;
+  adminOnly?: boolean;
+};
+
+const navItems: NavItem[] = [
   { name: 'Проекты', href: '/' },
   { name: 'Аналитика проектов', href: '/analytics/projects' },
   { name: 'Задачи', href: '/tasks' },
@@ -81,7 +88,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
 
   async function handleSignOut() {
     await supabase.auth.signOut();
-    router.push('/login');
+    router.push('/login' as Route);
     router.refresh();
   }
 
@@ -107,7 +114,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
           return (
             <Link
               key={item.name}
-              href={item.href}
+              href={item.href as Route}
               className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
                 ${isActive
                   ? 'bg-gray-100 text-gray-900 font-medium'
