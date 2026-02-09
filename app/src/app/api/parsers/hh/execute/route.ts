@@ -161,7 +161,10 @@ export async function POST(req: NextRequest) {
   const updateStage = async (stage: ParserProgressStage) => {
     const { error } = await db
       .from('parser_jobs')
-      .update({ progress_stage: stage })
+      .update({
+        progress_stage: stage,
+        ...(stage === 'partitioning' ? { progress_percent: null } : {}),
+      })
       .eq('id', jobId);
     if (error) {
       await logError('parser.hh.stage.update.failed', error, { jobId, searchText, stage }, logMeta);
@@ -285,7 +288,7 @@ export async function POST(req: NextRequest) {
       };
 
       // --- Phase 1: Fetch vacancies ---
-      await updateStage('fetching_vacancies');
+      await updateStage('partitioning');
       const fetchSpan = await trace?.startChild({
         name: 'hh.fetch_vacancies',
         input: { searchText, config },

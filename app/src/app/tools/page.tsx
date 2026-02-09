@@ -27,6 +27,22 @@ export default function ToolsPage() {
             Открыть →
           </div>
         </Link>
+        <Link
+          href="/parsers"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+        >
+          <div className="flex items-start gap-3">
+            <div>
+              <p className="text-base font-semibold text-gray-900">Парсеры</p>
+              <p className="text-sm text-gray-500">
+                Парсер вакансий HH с запуском и выгрузкой результатов.
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
+            Открыть →
+          </div>
+        </Link>
       </div>
     </div>
   );

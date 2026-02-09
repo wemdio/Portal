@@ -98,6 +98,7 @@ export class ParserJobCancelledError extends Error {
 
 export type ParserProgressStage =
   | 'pending'
+  | 'partitioning'
   | 'fetching_vacancies'
   | 'fetching_employers'
   | 'saving'
@@ -118,6 +119,10 @@ const MAX_CONCURRENCY = (() => {
 const PARTITION_CONCURRENCY = (() => {
   const raw = Number(process.env.HH_PARTITION_CONCURRENCY ?? '2');
   return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
+})();
+const PARTITION_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HH_PARTITION_TIMEOUT_MS ?? '120000');
+  return Number.isFinite(raw) ? Math.max(30_000, Math.floor(raw)) : 120000;
 })();
 const EMPLOYER_CONCURRENCY = (() => {
   const raw = Number(process.env.HH_EMPLOYER_CONCURRENCY ?? String(MAX_CONCURRENCY));
@@ -156,6 +161,18 @@ type HHSearchParams = Record<string, string | string[]>;
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(onTimeout()), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function safeJsonParse<T>(text: string): T | null {
@@ -611,7 +628,7 @@ async function partitionByDate(
     fetchFound(right, trace, `Правая половина ${right.date_from} → ${right.date_to}`),
   ]);
   if (leftFound === found && rightFound === found) {
-    const fallback = await partitionFallback(current);
+    const fallback = await partitionFallback(current, false);
     return fallback.length > 0 ? fallback : [current];
   }
 
@@ -623,7 +640,7 @@ async function partitionByDate(
   return [...leftParts, ...rightParts];
 }
 
-async function partitionFallback(config: HHSearchConfig): Promise<HHSearchConfig[]> {
+async function partitionFallback(config: HHSearchConfig, allowDateFallback = true): Promise<HHSearchConfig[]> {
   if (Array.isArray(config.area) && config.area.length > 1) {
     const mid = Math.ceil(config.area.length / 2);
     const left = config.area.slice(0, mid);
@@ -642,21 +659,23 @@ async function partitionFallback(config: HHSearchConfig): Promise<HHSearchConfig
     if (parts.length > 1) return parts.map((t) => ({ ...config, text: t }));
   }
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const from = new Date(today);
-  from.setDate(from.getDate() - 30);
+  if (allowDateFallback && !config.date_from && !config.date_to) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const from = new Date(today);
+    from.setDate(from.getDate() - 30);
 
-  const withDates: HHSearchConfig = {
-    ...config,
-    date_from: config.date_from ?? toISODate(from),
-    date_to: config.date_to ?? toISODate(today),
-  };
+    const withDates: HHSearchConfig = {
+      ...config,
+      date_from: toISODate(from),
+      date_to: toISODate(today),
+    };
 
-  const dateFrom = withDates.date_from ? parseISODate(withDates.date_from) : null;
-  const dateTo = withDates.date_to ? parseISODate(withDates.date_to) : null;
-  if (dateFrom && dateTo && dateFrom < dateTo) {
-    return partitionByDate(withDates, dateFrom, dateTo, 0);
+    const dateFrom = withDates.date_from ? parseISODate(withDates.date_from) : null;
+    const dateTo = withDates.date_to ? parseISODate(withDates.date_to) : null;
+    if (dateFrom && dateTo && dateFrom < dateTo) {
+      return partitionByDate(withDates, dateFrom, dateTo, 0);
+    }
   }
 
   return [];
@@ -757,6 +776,7 @@ export async function fetchVacancies(
 
   const normalized = normalizeSearchParams(config);
   const shouldFetchEmployers = normalized.fetch_employers !== false;
+  options?.onStage?.('partitioning');
   const partitionSpan = await options?.trace?.startChild({
     name: 'hh.partition_query',
     input: {
@@ -767,8 +787,23 @@ export async function fetchVacancies(
     },
     message: 'Подготовка разбиения запроса',
   });
-  const partitions = await partitionQuery(normalized, options?.trace);
-  await partitionSpan?.end({ count: partitions.length }, `Подготовлено ${partitions.length} разбиений`);
+  let partitions: HHSearchConfig[];
+  try {
+    partitions = await withTimeout(
+      partitionQuery(normalized, options?.trace),
+      PARTITION_TIMEOUT_MS,
+      () =>
+        new HHApiError('HH partitioning timed out', {
+          status: 0,
+          type: 'partition_timeout',
+        }),
+    );
+    await partitionSpan?.end({ count: partitions.length }, `Подготовлено ${partitions.length} разбиений`);
+  } catch (err) {
+    await partitionSpan?.fail(err);
+    throw err;
+  }
+  options?.onStage?.('fetching_vacancies');
   void logInfo(
     'parser.hh.partitions',
     'HH partitions prepared',
@@ -787,6 +822,7 @@ export async function fetchVacancies(
 
   const uniqueVacancies = new Map<string, HHVacancy>();
   let totalFound = 0;
+  let totalFoundRaw = 0;
   let fetchedCount = 0;
 
   const registerItems = (items?: HHApiVacancyItem[]) => {
@@ -836,12 +872,28 @@ export async function fetchVacancies(
           timeoutMs: VACANCY_REQUEST_TIMEOUT_MS,
         });
         const partFound = first.found ?? 0;
-        totalFound += partFound;
+        const partFoundCapped = Math.min(partFound, FOUND_LIMIT);
+        totalFoundRaw += partFound;
+        totalFound += partFoundCapped;
         registerItems(first.items);
         partitionCollected += first.items?.length ?? 0;
         reportProgress({ found: totalFound, parsed: uniqueVacancies.size, fetched: fetchedCount });
 
         const totalPages = Math.min(first.pages ?? 0, Math.ceil(FOUND_LIMIT / (part.per_page ?? 50)));
+        if (partFound > FOUND_LIMIT) {
+          void logInfo(
+            'parser.hh.partition.capped',
+            'HH partition capped by limit',
+            {
+              jobId: options?.jobId,
+              searchText: options?.searchText ?? normalized.text,
+              index: index + 1,
+              found: partFound,
+              cappedTo: partFoundCapped,
+            },
+            options?.logMeta,
+          );
+        }
         for (let page = 1; page < totalPages; page++) {
           if (PAGE_DELAY_MS > 0) await sleep(PAGE_DELAY_MS);
           await checkCancelled();
@@ -896,11 +948,13 @@ export async function fetchVacancies(
             index: index + 1,
             total: partitions.length,
             parsed: uniqueVacancies.size,
+            found: partFoundCapped,
+            found_raw: partFound,
           },
           options?.logMeta,
         );
         await partSpan?.end(
-          { found: partFound, fetched: partitionCollected, pages: totalPages },
+          { found: partFoundCapped, found_raw: partFound, fetched: partitionCollected, pages: totalPages },
           `Разбиение ${index + 1}: ${partitionCollected} вакансий`,
         );
       } catch (partErr) {
@@ -1017,6 +1071,14 @@ export async function fetchVacancies(
   }
 
   reportProgress({ found: totalFound, parsed: all.length, fetched: fetchedCount }, true);
+  if (totalFoundRaw > totalFound) {
+    void logInfo(
+      'parser.hh.found.capped',
+      'HH total found capped by limit',
+      { jobId: options?.jobId, searchText: options?.searchText ?? normalized.text, found_raw: totalFoundRaw, found: totalFound },
+      options?.logMeta,
+    );
+  }
   return { found: totalFound, vacancies: all };
 }
 
