@@ -21,15 +21,20 @@ const navItems = [
   { name: 'Настройки', href: '/settings' },
 ];
 
+type SidebarProps = {
+  collapsed?: boolean;
+};
+
 const navActiveAliases: Record<string, string[]> = {
   '/tools': ['/parsers'],
 };
 
-export function Sidebar() {
+export function Sidebar({ collapsed = false }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [hovered, setHovered] = useState(false);
 
   async function fetchUserRole(userId: string) {
     const { data } = await supabase
@@ -83,13 +88,13 @@ export function Sidebar() {
   // Hide sidebar on login page
   if (pathname === '/login') return null;
 
-  return (
-    <div className="flex h-screen w-64 flex-col border-r border-gray-200 bg-white text-gray-900">
-      <div className="flex h-16 items-center px-6 border-b border-gray-100">
-        <span className="text-lg font-bold tracking-tight">Portal</span>
+  const sidebarContent = (
+    <>
+      <div className="flex h-12 items-center px-5 border-b border-gray-100 flex-shrink-0">
+        <span className="text-base font-bold tracking-tight">Portal</span>
       </div>
-      
-      <nav className="flex-1 space-y-0.5 px-3 py-6">
+
+      <nav className="flex-1 space-y-0.5 px-3 py-4 overflow-y-auto">
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
 
@@ -104,8 +109,8 @@ export function Sidebar() {
               key={item.name}
               href={item.href}
               className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
-                ${isActive 
-                  ? 'bg-gray-100 text-gray-900 font-medium' 
+                ${isActive
+                  ? 'bg-gray-100 text-gray-900 font-medium'
                   : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'
                 }
               `}
@@ -116,20 +121,52 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-gray-100">
-        <div className="mb-4 px-2">
+      <div className="p-3 border-t border-gray-100 flex-shrink-0">
+        <div className="mb-3 px-2">
           <p className="text-sm font-medium text-gray-900 truncate" title={userEmail || ''}>
-              {userEmail?.split('@')[0] || 'User'}
-            </p>
+            {userEmail?.split('@')[0] || 'User'}
+          </p>
           <p className="text-xs text-gray-500 mt-0.5">{userRole ? ROLE_LABELS[userRole] : '...'}</p>
         </div>
-        <button 
+        <button
           onClick={handleSignOut}
-          className="flex w-full items-center rounded-md px-2 py-2 text-sm text-gray-500 hover:bg-gray-50 hover:text-red-600 transition-colors"
+          className="flex w-full items-center rounded-md px-2 py-1.5 text-sm text-gray-500 hover:bg-gray-50 hover:text-red-600 transition-colors"
         >
           Выйти
         </button>
       </div>
+    </>
+  );
+
+  // Collapsed mode: hidden sidebar that appears on hover
+  if (collapsed) {
+    return (
+      <div
+        className="fixed left-0 top-0 h-screen z-50"
+        style={{ width: hovered ? 240 : 12 }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        {/* Thin hover trigger strip */}
+        {!hovered && (
+          <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
+        )}
+        {/* Sidebar overlay */}
+        <div
+          className={`absolute left-0 top-0 h-full w-60 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
+            transition-all duration-200 ease-out
+            ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
+        >
+          {sidebarContent}
+        </div>
+      </div>
+    );
+  }
+
+  // Normal sidebar
+  return (
+    <div className="flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+      {sidebarContent}
     </div>
   );
 }

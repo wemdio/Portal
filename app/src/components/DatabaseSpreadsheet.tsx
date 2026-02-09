@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ClipboardEvent, KeyboardEvent, MouseEvent } from 'react';
+import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabaseClient';
@@ -117,6 +117,18 @@ type BriefScoringState = {
   error: string | null;
 };
 
+type NameCleanupState = {
+  isOpen: boolean;
+  nameCol: number;
+  domainCol: number | null;
+  useDomain: boolean;
+  isProcessing: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
 const OPENROUTER_API_KEY = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
 const PERSONALIZATION_BATCH_SIZE = 2;
@@ -131,6 +143,12 @@ const BRIEF_SCORING_BATCH_SIZE = 10;
 const BRIEF_SCORING_MAX_RETRIES = 2;
 const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
+const NAME_CLEANUP_BATCH_SIZE = 100;
+const NAME_CLEANUP_CONCURRENCY = 2;
+const NAME_CLEANUP_HIGHLIGHT_DURATION = 2500;
+const VIRTUALIZATION_THRESHOLD = 1500;
+const VIRTUAL_ROW_HEIGHT = 32;
+const VIRTUAL_OVERSCAN = 10;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 
 const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
@@ -438,6 +456,11 @@ export function DatabaseSpreadsheet() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOnlyMatches, setSearchOnlyMatches] = useState(false);
   const [wrapCells, setWrapCells] = useState(true);
+  const [forceWrapLarge, setForceWrapLarge] = useState(false);
+  const [dragCol, setDragCol] = useState<number | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<number | null>(null);
+  const [dragRow, setDragRow] = useState<number | null>(null);
+  const [dragOverRow, setDragOverRow] = useState<number | null>(null);
   const [normalizeLowercase, setNormalizeLowercase] = useState(true);
   const [normalizeSpaces, setNormalizeSpaces] = useState(true);
   const [normalizeEmoji, setNormalizeEmoji] = useState(true);
@@ -463,6 +486,8 @@ export function DatabaseSpreadsheet() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const tableWrapperRef = useRef<HTMLDivElement | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
@@ -514,6 +539,18 @@ export function DatabaseSpreadsheet() {
   });
   const briefScoringAbortRef = useRef<AbortController | null>(null);
   const briefFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [nameCleanup, setNameCleanup] = useState<NameCleanupState>({
+    isOpen: false,
+    nameCol: 0,
+    domainCol: null,
+    useDomain: false,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const nameCleanupAbortRef = useRef<AbortController | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -528,6 +565,64 @@ export function DatabaseSpreadsheet() {
       endCol: Math.max(selection.startCol, selection.endCol),
     };
   }, [selection]);
+
+  const updateScrollMetrics = useCallback(() => {
+    const wrapper = tableWrapperRef.current;
+    if (!wrapper) return;
+    const next = { scrollTop: wrapper.scrollTop, height: wrapper.clientHeight };
+    setScrollMetrics((prev) =>
+      prev.scrollTop === next.scrollTop && prev.height === next.height ? prev : next,
+    );
+  }, []);
+
+  const handleTableScroll = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      updateScrollMetrics();
+    });
+  }, [updateScrollMetrics]);
+
+  useEffect(() => {
+    updateScrollMetrics();
+  }, [updateScrollMetrics, activeTabId]);
+
+  useEffect(() => {
+    const wrapper = tableWrapperRef.current;
+    if (!wrapper || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => updateScrollMetrics());
+    observer.observe(wrapper);
+    return () => {
+      observer.disconnect();
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, [updateScrollMetrics]);
+
+  const handleToggleWrapCells = () => {
+    if (isLargeTable && !forceWrapLarge) {
+      requestConfirm(
+        'Включить перенос строк?',
+        'Для больших таблиц перенос строк может сильно замедлить работу и зависнуть. Рекомендуем оставить как есть.',
+        () => {
+          setForceWrapLarge(true);
+          setWrapCells(true);
+        },
+        'Включить',
+      );
+      return;
+    }
+
+    if (isLargeTable && forceWrapLarge) {
+      setForceWrapLarge(false);
+      setWrapCells(false);
+      return;
+    }
+
+    setWrapCells((prev) => !prev);
+  };
 
   const normalizeOptions = useMemo(
     () => ({
@@ -756,6 +851,134 @@ export function DatabaseSpreadsheet() {
       ...sheet,
       data: sheet.data.map((row) => [...row, '']),
     }));
+  };
+
+  const handleInsertRowAbove = (rowIndex: number) => {
+    if (!activeTab) return;
+    setUndoSnapshot('Вставка строки выше');
+    updateActiveSheet((sheet) => {
+      const colLen = sheet.data[0]?.length ?? DEFAULT_COLS;
+      const newRow = Array.from({ length: colLen }, () => '');
+      const nextData = [...sheet.data];
+      nextData.splice(rowIndex, 0, newRow);
+      return { ...sheet, data: nextData };
+    });
+    setLastAction({ message: `Строка добавлена выше (${rowIndex + 1})`, time: Date.now() });
+  };
+
+  const handleInsertRowBelow = (rowIndex: number) => {
+    if (!activeTab) return;
+    setUndoSnapshot('Вставка строки ниже');
+    updateActiveSheet((sheet) => {
+      const colLen = sheet.data[0]?.length ?? DEFAULT_COLS;
+      const newRow = Array.from({ length: colLen }, () => '');
+      const nextData = [...sheet.data];
+      nextData.splice(rowIndex + 1, 0, newRow);
+      return { ...sheet, data: nextData };
+    });
+    setLastAction({ message: `Строка добавлена ниже (${rowIndex + 1})`, time: Date.now() });
+  };
+
+  const copyEntireTable = async () => {
+    if (!activeTab) return;
+    const text = activeTab.data.map((row) => row.join('\t')).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setLastAction({ message: 'Таблица скопирована в буфер обмена', time: Date.now() });
+    } catch (error) {
+      void logError('spreadsheet.copy_all.failed', error);
+    }
+  };
+
+  // --- Column drag reorder ---
+  const handleColDragStart = (e: DragEvent<HTMLTableCellElement>, colIndex: number) => {
+    setDragCol(colIndex);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(colIndex));
+  };
+
+  const handleColDragOver = (e: DragEvent<HTMLTableCellElement>, colIndex: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragCol !== null && dragCol !== colIndex) {
+      setDragOverCol(colIndex);
+    }
+  };
+
+  const handleColDrop = (e: DragEvent<HTMLTableCellElement>, targetCol: number) => {
+    e.preventDefault();
+    if (dragCol === null || dragCol === targetCol || !activeTab) {
+      setDragCol(null);
+      setDragOverCol(null);
+      return;
+    }
+    setUndoSnapshot('Перемещение колонки');
+    const srcCol = dragCol;
+    updateActiveSheet((sheet) => {
+      const nextData = sheet.data.map((row) => {
+        const newRow = [...row];
+        const [moved] = newRow.splice(srcCol, 1);
+        newRow.splice(targetCol, 0, moved);
+        return newRow;
+      });
+      return { ...sheet, data: nextData };
+    });
+    setColumnWidths((prev) => {
+      if (prev.length === 0) return prev;
+      const next = [...prev];
+      const [movedW] = next.splice(srcCol, 1);
+      next.splice(targetCol, 0, movedW);
+      return next;
+    });
+    setDragCol(null);
+    setDragOverCol(null);
+    setLastAction({ message: 'Колонка перемещена', time: Date.now() });
+  };
+
+  const handleColDragEnd = () => {
+    setDragCol(null);
+    setDragOverCol(null);
+  };
+
+  // --- Row drag reorder ---
+  const handleRowDragStart = (e: DragEvent<HTMLTableCellElement>, rowIndex: number) => {
+    if (rowIndex === 0) { e.preventDefault(); return; }
+    setDragRow(rowIndex);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(rowIndex));
+  };
+
+  const handleRowDragOver = (e: DragEvent<HTMLTableCellElement>, rowIndex: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragRow !== null && dragRow !== rowIndex && rowIndex !== 0) {
+      setDragOverRow(rowIndex);
+    }
+  };
+
+  const handleRowDrop = (e: DragEvent<HTMLTableCellElement>, targetRow: number) => {
+    e.preventDefault();
+    if (dragRow === null || dragRow === targetRow || targetRow === 0 || !activeTab) {
+      setDragRow(null);
+      setDragOverRow(null);
+      return;
+    }
+    setUndoSnapshot('Перемещение строки');
+    const srcRow = dragRow;
+    updateActiveSheet((sheet) => {
+      const nextData = [...sheet.data];
+      const [moved] = nextData.splice(srcRow, 1);
+      nextData.splice(targetRow, 0, moved);
+      return { ...sheet, data: nextData };
+    });
+    setDragRow(null);
+    setDragOverRow(null);
+    setLastAction({ message: 'Строка перемещена', time: Date.now() });
+  };
+
+  const handleRowDragEnd = () => {
+    setDragRow(null);
+    setDragOverRow(null);
   };
 
   const handleAddTab = () => {
@@ -1666,42 +1889,40 @@ export function DatabaseSpreadsheet() {
     return indices;
   }, [activeTab, rowMatchesFilters]);
 
-  const ROW_CHUNK_SIZE = 100;
-  const [visibleRowLimit, setVisibleRowLimit] = useState(ROW_CHUNK_SIZE);
-
-  useEffect(() => {
-    // Reset chunked rendering when data/filters change
-    setVisibleRowLimit(ROW_CHUNK_SIZE);
-  }, [activeTabId, columnFilters, searchOnlyMatches, debouncedSearchQuery, groupByCol, debouncedGroupSearch, normalizeSig]);
-
-  const renderedRowIndices = useMemo(() => {
+  const allRowIndices = useMemo(() => {
     if (!activeTab) return [];
-    const slice = visibleRowIndices.slice(0, visibleRowLimit);
-    return [0, ...slice];
-  }, [activeTab, visibleRowIndices, visibleRowLimit]);
+    return [0, ...visibleRowIndices];
+  }, [activeTab, visibleRowIndices]);
 
-  const canLoadMoreRows = visibleRowLimit < visibleRowIndices.length;
+  const isLargeTable = allRowIndices.length > VIRTUALIZATION_THRESHOLD;
+  const shouldVirtualize = isLargeTable && !forceWrapLarge;
+  const effectiveWrapCells = shouldVirtualize ? false : wrapCells;
+  const wrapLabel = isLargeTable
+    ? forceWrapLarge
+      ? 'вкл (медленно)'
+      : 'выкл (большая таблица)'
+    : wrapCells
+      ? 'вкл'
+      : 'выкл';
 
-  const loadMoreRows = useCallback(() => {
-    if (!canLoadMoreRows) return;
-    setVisibleRowLimit((prev) => Math.min(visibleRowIndices.length, prev + ROW_CHUNK_SIZE));
-  }, [canLoadMoreRows, visibleRowIndices.length]);
+  const virtualRange = useMemo(() => {
+    if (!shouldVirtualize || allRowIndices.length === 0) {
+      return { start: 0, end: Math.max(0, allRowIndices.length - 1), top: 0, bottom: 0 };
+    }
+    const { scrollTop, height } = scrollMetrics;
+    const start = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+    const end = Math.min(
+      allRowIndices.length - 1,
+      Math.ceil((scrollTop + height) / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN,
+    );
+    const top = start * VIRTUAL_ROW_HEIGHT;
+    const bottom = Math.max(0, (allRowIndices.length - end - 1) * VIRTUAL_ROW_HEIGHT);
+    return { start, end, top, bottom };
+  }, [shouldVirtualize, allRowIndices.length, scrollMetrics]);
 
-  const scrollTickRef = useRef(false);
-  const handleTableScroll = useCallback(() => {
-    if (!canLoadMoreRows) return;
-    const el = tableWrapperRef.current;
-    if (!el) return;
-    if (scrollTickRef.current) return;
-    scrollTickRef.current = true;
-    window.requestAnimationFrame(() => {
-      scrollTickRef.current = false;
-      const thresholdPx = 320;
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - thresholdPx) {
-        loadMoreRows();
-      }
-    });
-  }, [canLoadMoreRows, loadMoreRows]);
+  const rowIndicesToRender = shouldVirtualize
+    ? allRowIndices.slice(virtualRange.start, virtualRange.end + 1)
+    : allRowIndices;
 
   const allVisibleSelected =
     visibleRowIndices.length > 0 &&
@@ -2730,6 +2951,250 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Name Cleanup (Очистка названий) ──────────────────────────────
+
+  const openNameCleanupModal = () => {
+    setNameCleanup({
+      isOpen: true,
+      nameCol: 0,
+      domainCol: null,
+      useDomain: false,
+      isProcessing: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeNameCleanupModal = () => {
+    if (nameCleanupAbortRef.current) {
+      nameCleanupAbortRef.current.abort();
+      nameCleanupAbortRef.current = null;
+    }
+    setNameCleanup((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartNameCleanup = async () => {
+    if (!activeTab || nameCleanup.isProcessing) return;
+
+    let token = '';
+    let tokenExpiresAt = 0;
+    const TOKEN_REFRESH_SAFETY_MS = 2 * 60 * 1000;
+
+    const loadSessionToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return null;
+      token = session.access_token;
+      tokenExpiresAt = session.expires_at ? session.expires_at * 1000 : 0;
+      return token;
+    };
+
+    const refreshAuthToken = async () => {
+      const { data: refreshed, error } = await supabase.auth.refreshSession();
+      if (error || !refreshed.session?.access_token) return null;
+      token = refreshed.session.access_token;
+      tokenExpiresAt = refreshed.session.expires_at ? refreshed.session.expires_at * 1000 : 0;
+      return token;
+    };
+
+    const ensureValidToken = async () => {
+      if (!token) {
+        const loaded = await loadSessionToken();
+        if (!loaded) return null;
+      }
+      if (tokenExpiresAt && Date.now() > tokenExpiresAt - TOKEN_REFRESH_SAFETY_MS) {
+        const refreshed = await refreshAuthToken();
+        if (!refreshed) return null;
+      }
+      return token;
+    };
+
+    const dataRows = activeTab.data.slice(1).filter((row) => {
+      const nameValue = row[nameCleanup.nameCol]?.trim();
+      return nameValue && nameValue.length > 0;
+    });
+
+    if (dataRows.length === 0) {
+      setNameCleanup((prev) => ({
+        ...prev,
+        error: 'Нет данных для очистки в выбранной колонке',
+      }));
+      return;
+    }
+
+    // Get a fresh auth token
+    const initialToken = await ensureValidToken();
+    if (!initialToken) {
+      setNameCleanup((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    nameCleanupAbortRef.current = new AbortController();
+
+    setNameCleanup((prev) => ({
+      ...prev,
+      isProcessing: true,
+      progress: 0,
+      totalRows: dataRows.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Очистка названий');
+
+    // Overwrite in the same column instead of creating a new one
+    const targetCol = nameCleanup.nameCol;
+
+    // Build the list of rows to process
+    const rowsToProcess: { rowIndex: number; name: string; domain?: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const nameValue = activeTab.data[i][nameCleanup.nameCol]?.trim();
+      if (nameValue && nameValue.length > 0) {
+        const domain = nameCleanup.useDomain && nameCleanup.domainCol !== null
+          ? activeTab.data[i][nameCleanup.domainCol]?.trim() || undefined
+          : undefined;
+        rowsToProcess.push({ rowIndex: i, name: nameValue, domain });
+      }
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      const batches: typeof rowsToProcess[] = [];
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += NAME_CLEANUP_BATCH_SIZE) {
+        batches.push(rowsToProcess.slice(batchStart, batchStart + NAME_CLEANUP_BATCH_SIZE));
+      }
+
+      let nextBatchIndex = 0;
+
+      const processBatch = async (batch: typeof rowsToProcess) => {
+        if (nameCleanupAbortRef.current?.signal.aborted) {
+          throw new Error('Отменено пользователем');
+        }
+
+        const companies = batch.map((item) => ({
+          idx: item.rowIndex,
+          name: item.name,
+          domain: item.domain,
+        }));
+
+        try {
+          const validToken = await ensureValidToken();
+          if (!validToken) {
+            throw new Error('Необходима авторизация');
+          }
+
+          let response = await fetch('/api/cleanup-names', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${validToken}`,
+            },
+            body: JSON.stringify({ companies }),
+            signal: nameCleanupAbortRef.current?.signal,
+          });
+
+          if (response.status === 401) {
+            const refreshedToken = await refreshAuthToken();
+            if (!refreshedToken) {
+              throw new Error('Необходима авторизация');
+            }
+            response = await fetch('/api/cleanup-names', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${refreshedToken}`,
+              },
+              body: JSON.stringify({ companies }),
+              signal: nameCleanupAbortRef.current?.signal,
+            });
+          }
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `Ошибка API: ${response.status}`);
+          }
+
+          const data = await response.json();
+          const results: { idx: number; cleanedName: string }[] = data.results;
+
+          // Update the spreadsheet data
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== activeTabId) return tab;
+              const nextData = tab.data.map((row, idx) => {
+                const result = results.find((r) => r.idx === idx);
+                if (!result) return row;
+                const newRow = [...row];
+                newRow[targetCol] = result.cleanedName;
+                return newRow;
+              });
+              return { ...tab, data: nextData };
+            }),
+          );
+        } catch (err) {
+          if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) throw err;
+          if (err instanceof Error && err.message === 'Необходима авторизация') throw err;
+          errorCount += batch.length;
+        }
+
+        processedCount += batch.length;
+        setNameCleanup((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+      };
+
+      const runWorker = async () => {
+        while (true) {
+          if (nameCleanupAbortRef.current?.signal.aborted) {
+            throw new Error('Отменено пользователем');
+          }
+          const batchIndex = nextBatchIndex;
+          if (batchIndex >= batches.length) return;
+          nextBatchIndex += 1;
+          await processBatch(batches[batchIndex]);
+        }
+      };
+
+      const workerCount = Math.min(NAME_CLEANUP_CONCURRENCY, batches.length);
+      const workers = Array.from({ length: workerCount }, () => runWorker());
+      await Promise.all(workers);
+
+      // Highlight the column
+      setHighlightedCol(targetCol);
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      highlightTimeoutRef.current = setTimeout(() => {
+        setHighlightedCol(null);
+      }, NAME_CLEANUP_HIGHLIGHT_DURATION);
+
+      const successCount = processedCount - errorCount;
+      setLastAction({
+        message: errorCount > 0
+          ? `Очистка названий: ${successCount} успешно, ${errorCount} с ошибками`
+          : `Очистка названий завершена: ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setNameCleanup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `Очистка названий отменена (обработано: ${processedCount})`, time: Date.now() });
+        setNameCleanup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      } else {
+        setNameCleanup((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isProcessing: false,
+        }));
+      }
+    } finally {
+      nameCleanupAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -2944,160 +3409,176 @@ export function DatabaseSpreadsheet() {
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between border-b border-gray-100 pb-6">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Работа с базами</h1>
-          <p className="text-sm text-gray-500 max-w-2xl">
-            Табличный редактор. Поддерживает Ctrl/Cmd+C/V и Ctrl/Cmd+Z.
-          </p>
-        </div>
-        
-        <div className="flex flex-col items-end gap-2">
-          <div className="flex flex-wrap items-center gap-3">
-            {selectedRows.size > 0 && (
-              <button
-                type="button"
-                onClick={confirmRemoveSelectedRows}
-                className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
-              >
-                Удалить ({selectedRows.size})
-              </button>
-            )}
+    <div className="space-y-0.5 h-[calc(100vh-0.75rem)] flex flex-col">
+      <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
+        <span className="text-xs font-semibold text-gray-500 mr-1">Базы</span>
 
-            <button
-              type="button"
-              onClick={confirmClearSelection}
-              disabled={!activeTab || rowCount === 0 || colCount === 0}
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
-            >
-              Очистить ячейки
-            </button>
-
-            <div className="flex items-center rounded-lg bg-gray-100 p-1">
-              <button
-                type="button"
-                onClick={() => importInputRef.current?.click()}
-                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-              >
-                Импорт
-              </button>
-              <div className="h-4 w-px bg-gray-300 mx-1" />
-              <button
-                type="button"
-                onClick={handleExportCsv}
-                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-              >
-                CSV
-              </button>
-              <button
-                type="button"
-                onClick={handleExportXlsx}
-                className="rounded-md px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-white hover:text-gray-900 hover:shadow-sm"
-              >
-                Excel
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={openPersonalizationModal}
-              disabled={colCount === 0}
-              className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300"
-            >
-              <span>Персонализация</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={openWebsiteEnrichmentModal}
-              disabled={colCount === 0}
-              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:bg-gray-300"
-            >
-              <span>Обогатить с сайта</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={openBriefScoringModal}
-              disabled={colCount === 0}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:bg-gray-300"
-            >
-              <span>ЦА по брифу</span>
-            </button>
-          </div>
-          {importStatus.status !== 'idle' && (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-              <span>{formatProgressLabel(importStatus)}</span>
-              {importStatus.filename ? (
-                <span className="max-w-[200px] truncate">· {importStatus.filename}</span>
-              ) : null}
-              {importStatus.status !== 'error' ? <span>{importStatus.progress}%</span> : null}
-            </div>
-          )}
-          {websiteEnrichment.isGenerating && (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-              <span>
-                Обогащение: {websiteEnrichment.currentRow} / {websiteEnrichment.totalRows}
-              </span>
-              <button
-                type="button"
-                onClick={handleStopWebsiteEnrichment}
-                className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-600 transition hover:bg-red-100 hover:text-red-700 hover:shadow-sm"
-              >
-                Остановить
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center justify-between bg-white rounded-xl p-4 border border-gray-200">
-        <div className="flex items-center gap-2 flex-1 w-full lg:w-auto">
-          <div className="relative flex-1 lg:max-w-md">
-            <input
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Поиск по всем колонкам..."
-              className="w-full rounded-lg border border-gray-200 bg-gray-50 py-2 px-3 text-sm text-gray-900 outline-none transition focus:border-gray-400 focus:bg-white placeholder:text-gray-400"
-            />
-            {searchQuery.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 text-lg leading-none"
-                aria-label="Очистить поиск"
-              >
-                &times;
-              </button>
-            )}
-          </div>
-          
-          <label className="flex items-center gap-2 cursor-pointer select-none rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 transition-all">
-            <input
-              type="checkbox"
-              checked={searchOnlyMatches}
-              onChange={(event) => setSearchOnlyMatches(event.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>Только совпадения</span>
-          </label>
-
+        {selectedRows.size > 0 && (
           <button
             type="button"
-            onClick={() => setWrapCells((prev) => !prev)}
-            aria-pressed={wrapCells}
-            className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
-              wrapCells
-                ? 'border-gray-900 bg-gray-900 text-white'
-                : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
-            }`}
+            onClick={confirmRemoveSelectedRows}
+            className="inline-flex items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 transition hover:bg-red-100"
           >
-            Перенос строк: {wrapCells ? 'вкл' : 'выкл'}
+            Удалить ({selectedRows.size})
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={confirmClearSelection}
+          disabled={!activeTab || rowCount === 0 || colCount === 0}
+          className="inline-flex items-center rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+        >
+          Очистить
+        </button>
+
+        <div className="flex items-center rounded bg-gray-100 p-0.5">
+          <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            className="rounded px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
+          >
+            Импорт
+          </button>
+          <div className="h-3 w-px bg-gray-300 mx-0.5" />
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
+          >
+            CSV
+          </button>
+          <button
+            type="button"
+            onClick={handleExportXlsx}
+            className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
+          >
+            Excel
           </button>
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto max-w-full pb-1 lg:pb-0">
+        <button
+          type="button"
+          onClick={() => void copyEntireTable()}
+          disabled={!activeTab || rowCount === 0}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+          title="Копировать всю таблицу в буфер обмена"
+        >
+          📋 Копировать
+        </button>
+
+        <div className="h-4 w-px bg-gray-200 mx-0.5" />
+
+        <button
+          type="button"
+          onClick={openPersonalizationModal}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-gray-900 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-gray-800 disabled:bg-gray-300"
+        >
+          Персонализация
+        </button>
+
+        <button
+          type="button"
+          onClick={openWebsiteEnrichmentModal}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-blue-700 disabled:bg-gray-300"
+        >
+          Обогатить
+        </button>
+
+        <button
+          type="button"
+          onClick={openBriefScoringModal}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-emerald-700 disabled:bg-gray-300"
+        >
+          ЦА по брифу
+        </button>
+
+        <button
+          type="button"
+          onClick={openNameCleanupModal}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-amber-700 disabled:bg-gray-300"
+        >
+          Чистка названий
+        </button>
+
+        {importStatus.status !== 'idle' && (
+          <>
+            <div className="h-4 w-px bg-gray-200 mx-0.5" />
+            <span className="text-[10px] text-gray-500">{formatProgressLabel(importStatus)} {importStatus.progress}%</span>
+          </>
+        )}
+        {websiteEnrichment.isGenerating && (
+          <>
+            <div className="h-4 w-px bg-gray-200 mx-0.5" />
+            <span className="text-[10px] text-gray-500">
+              Обогащение: {websiteEnrichment.currentRow}/{websiteEnrichment.totalRows}
+            </span>
+            <button
+              type="button"
+              onClick={handleStopWebsiteEnrichment}
+              className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600 hover:bg-red-100"
+            >
+              Стоп
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1.5 bg-white rounded border border-gray-200 px-1.5 py-1 flex-shrink-0">
+        <div className="relative flex-1 max-w-xs">
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Поиск..."
+            className="w-full rounded border border-gray-200 bg-gray-50 py-1 px-2 text-[11px] text-gray-900 outline-none transition focus:border-gray-400 focus:bg-white placeholder:text-gray-400"
+          />
+          {searchQuery.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 text-xs leading-none"
+              aria-label="Очистить поиск"
+            >
+              &times;
+            </button>
+          )}
+        </div>
+        
+        <label className="flex items-center gap-1 cursor-pointer select-none text-[11px] text-gray-600 whitespace-nowrap">
+          <input
+            type="checkbox"
+            checked={searchOnlyMatches}
+            onChange={(event) => setSearchOnlyMatches(event.target.checked)}
+            className="h-3 w-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          Совпадения
+        </label>
+
+        <button
+          type="button"
+          onClick={handleToggleWrapCells}
+          aria-pressed={effectiveWrapCells}
+          className={`rounded border px-2 py-1 text-[11px] font-medium transition whitespace-nowrap ${
+            effectiveWrapCells
+              ? 'border-gray-900 bg-gray-900 text-white'
+              : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+          }`}
+          title={
+            isLargeTable && !forceWrapLarge
+              ? 'Нажмите, чтобы включить перенос (может замедлить)'
+              : undefined
+          }
+        >
+          Перенос: {wrapLabel}
+        </button>
+
+        <div className="h-4 w-px bg-gray-200 mx-0.5" />
+
+        <div className="flex items-center gap-1 overflow-x-auto">
           {tabs.map((tab) => {
             const isActive = tab.id === activeTabId;
             const isEditing = editingTabId === tab.id;
@@ -3106,7 +3587,7 @@ export function DatabaseSpreadsheet() {
                 key={tab.id}
                 type="button"
                 onClick={() => setActiveTabId(tab.id)}
-                className={`group flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all whitespace-nowrap ${
+                className={`group flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-all whitespace-nowrap ${
                   isActive
                     ? 'bg-gray-100 text-gray-900'
                     : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'
@@ -3128,7 +3609,7 @@ export function DatabaseSpreadsheet() {
                       }
                     }}
                     onClick={(event) => event.stopPropagation()}
-                    className="w-24 bg-transparent border-b border-blue-500 text-gray-900 outline-none p-0"
+                    className="w-20 bg-transparent border-b border-blue-500 text-gray-900 text-[11px] outline-none p-0"
                     autoFocus
                   />
                 ) : (
@@ -3147,7 +3628,7 @@ export function DatabaseSpreadsheet() {
                       event.stopPropagation();
                       handleRemoveTab(tab.id);
                     }}
-                    className="flex h-4 w-4 items-center justify-center rounded-full text-base leading-none opacity-0 group-hover:opacity-100 transition-opacity hover:bg-gray-200 hover:text-red-600"
+                    className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-[10px] leading-none opacity-0 group-hover:opacity-100 transition-opacity hover:bg-gray-200 hover:text-red-600"
                   >
                     &times;
                   </span>
@@ -3158,7 +3639,7 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={handleAddTab}
-            className="flex items-center justify-center h-9 w-9 rounded-lg border border-dashed border-gray-300 text-gray-400 hover:border-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
+            className="flex items-center justify-center h-6 w-6 rounded border border-dashed border-gray-300 text-gray-400 text-xs hover:border-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
             title="Новая вкладка"
           >
             +
@@ -3186,13 +3667,13 @@ export function DatabaseSpreadsheet() {
         onChange={(e) => void handleBriefFileUpload(e)}
       />
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
+        <div className="rounded border border-gray-200 bg-white overflow-hidden">
           <div
             ref={tableWrapperRef}
-            className="overflow-auto max-h-[calc(100vh-300px)]"
-            onScroll={handleTableScroll}
+            className="overflow-auto h-full"
             onKeyDownCapture={handleGridKeyDown}
+            onScroll={handleTableScroll}
             onContextMenu={(event) => {
               event.preventDefault();
               setFilterMenu(null);
@@ -3209,7 +3690,7 @@ export function DatabaseSpreadsheet() {
             <table className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
-                  <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-2 py-2 text-xs font-semibold text-gray-500 w-10 min-w-[40px]">
+                  <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-1 py-0.5 text-[10px] font-semibold text-gray-500 w-9 min-w-[36px]">
                     <div className="flex items-center justify-center h-full">
                       <input
                         ref={selectAllRef}
@@ -3217,7 +3698,7 @@ export function DatabaseSpreadsheet() {
                         checked={allVisibleSelected}
                         onChange={toggleSelectAllVisible}
                         onClick={(event) => event.stopPropagation()}
-                        className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        className="h-3 w-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                         aria-label="Выбрать все видимые строки"
                       />
                     </div>
@@ -3228,6 +3709,11 @@ export function DatabaseSpreadsheet() {
                     return (
                       <th
                         key={`col-${colIndex}`}
+                        draggable
+                        onDragStart={(e) => handleColDragStart(e, colIndex)}
+                        onDragOver={(e) => handleColDragOver(e, colIndex)}
+                        onDrop={(e) => handleColDrop(e, colIndex)}
+                        onDragEnd={handleColDragEnd}
                         onClick={(event) => handleColumnHeaderClick(colIndex, event.shiftKey)}
                         onContextMenu={(event) => {
                           if (
@@ -3242,14 +3728,16 @@ export function DatabaseSpreadsheet() {
                           openContextMenu(event, 'col');
                         }}
                         style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`sticky top-0 z-10 relative cursor-pointer border-b border-r border-gray-200 px-2 py-2 text-xs font-semibold text-gray-700 transition select-none ${
-                          selectionMode === 'col' &&
-                          colIndex >= normalizedSelection.startCol &&
-                          colIndex <= normalizedSelection.endCol
-                            ? 'bg-blue-100 text-blue-900'
-                            : isHighlighted
-                              ? 'bg-purple-100 text-purple-900'
-                              : 'bg-gray-50 hover:bg-gray-100'
+                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-1 text-[10px] font-semibold text-gray-700 transition select-none ${
+                          dragOverCol === colIndex
+                            ? 'bg-blue-200 border-l-2 border-l-blue-500'
+                            : selectionMode === 'col' &&
+                              colIndex >= normalizedSelection.startCol &&
+                              colIndex <= normalizedSelection.endCol
+                              ? 'bg-blue-100 text-blue-900'
+                              : isHighlighted
+                                ? 'bg-purple-100 text-purple-900'
+                                : 'bg-gray-50 hover:bg-gray-100'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-1">
@@ -3270,11 +3758,11 @@ export function DatabaseSpreadsheet() {
                       </th>
                     );
                   })}
-                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-2 py-2 w-10">
+                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-1 py-1 w-8">
                     <button
                       type="button"
                       onClick={handleAddColumn}
-                      className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                      className="flex h-4 w-4 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors text-xs"
                       aria-label="Добавить колонку"
                     >
                       +
@@ -3283,16 +3771,28 @@ export function DatabaseSpreadsheet() {
                 </tr>
               </thead>
               <tbody>
-                {renderedRowIndices.map((rowIndex) => {
+                {shouldVirtualize && virtualRange.top > 0 && (
+                  <tr aria-hidden>
+                    <td colSpan={colCount + 2} style={{ height: virtualRange.top }} />
+                  </tr>
+                )}
+                {rowIndicesToRender.map((rowIndex) => {
                   const row = activeTab?.data[rowIndex];
                   if (!row) return null;
-                  const isVisible = rowIndex === 0 ? true : rowMatchesFilters(rowIndex, row);
-                  if (!isVisible) return null;
                   const isChecked = selectedRows.has(rowIndex);
                   const isHeaderRow = rowIndex === 0;
                   return (
-                    <tr key={`row-${rowIndex}`} className="group">
+                    <tr
+                      key={`row-${rowIndex}`}
+                      className="group"
+                      style={shouldVirtualize ? { height: VIRTUAL_ROW_HEIGHT } : undefined}
+                    >
                       <th
+                        draggable={!isHeaderRow}
+                        onDragStart={(e) => handleRowDragStart(e, rowIndex)}
+                        onDragOver={(e) => handleRowDragOver(e, rowIndex)}
+                        onDrop={(e) => handleRowDrop(e, rowIndex)}
+                        onDragEnd={handleRowDragEnd}
                         onClick={(event) => handleRowHeaderClick(rowIndex, event.shiftKey)}
                         onContextMenu={(event) => {
                           if (
@@ -3306,17 +3806,21 @@ export function DatabaseSpreadsheet() {
                           }
                           openContextMenu(event, 'row');
                         }}
-                        className={`sticky left-0 z-10 cursor-pointer border-b border-r border-gray-200 px-2 py-2 text-xs font-medium transition-colors select-none ${
-                          selectionMode === 'row' &&
-                          rowIndex >= normalizedSelection.startRow &&
-                          rowIndex <= normalizedSelection.endRow
-                            ? 'bg-blue-100 text-blue-900'
-                            : isChecked 
-                              ? 'bg-blue-50 text-blue-800'
-                              : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
+                        className={`sticky left-0 z-10 border-b border-r border-gray-200 px-1 py-0.5 text-[10px] font-medium transition-colors select-none ${
+                          isHeaderRow ? 'cursor-default' : 'cursor-grab'
+                        } ${
+                          dragOverRow === rowIndex
+                            ? 'bg-blue-200 border-t-2 border-t-blue-500'
+                            : selectionMode === 'row' &&
+                              rowIndex >= normalizedSelection.startRow &&
+                              rowIndex <= normalizedSelection.endRow
+                              ? 'bg-blue-100 text-blue-900'
+                              : isChecked 
+                                ? 'bg-blue-50 text-blue-800'
+                                : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
                         }`}
                       >
-                        <div className="flex items-center justify-center gap-1.5 h-full">
+                        <div className="flex items-center justify-center gap-1 h-full">
                           <input
                             type="checkbox"
                             checked={isChecked}
@@ -3401,31 +3905,41 @@ export function DatabaseSpreadsheet() {
                                 value={value}
                                 onChange={(event) => {
                                   handleValueChange(rowIndex, colIndex, event.target.value);
-                                  event.target.style.height = 'auto';
-                                  event.target.style.height = `${event.target.scrollHeight}px`;
+                                  if (!shouldVirtualize) {
+                                    event.target.style.height = 'auto';
+                                    event.target.style.height = `${event.target.scrollHeight}px`;
+                                  }
                                 }}
                                 onFocus={(e) => {
                                   handleCellFocus(rowIndex, colIndex);
-                                  e.target.style.height = 'auto';
-                                  e.target.style.height = `${e.target.scrollHeight}px`;
+                                  if (!shouldVirtualize) {
+                                    e.target.style.height = 'auto';
+                                    e.target.style.height = `${e.target.scrollHeight}px`;
+                                  }
                                 }}
                                 onKeyDown={handleKeyDown}
                                 onPaste={handlePaste}
                                 rows={1}
-                              wrap={wrapCells ? 'soft' : 'off'}
+                              wrap={effectiveWrapCells ? 'soft' : 'off'}
                                 autoFocus
-                              className={`w-full bg-transparent px-2 py-2 text-sm text-gray-900 outline-none resize-none min-h-[40px] leading-normal ring-2 ring-blue-500 ring-inset z-10 relative ${
-                                wrapCells
+                                suppressHydrationWarning
+                                spellCheck={false}
+                                data-gramm="false"
+                                data-gramm_editor="false"
+                                data-enable-grammarly="false"
+                                data-lt-active="false"
+                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[24px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
+                                effectiveWrapCells
                                   ? 'whitespace-pre-wrap break-words overflow-hidden'
                                   : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
                               }`}
                               />
                             ) : (
                               <div
-                                className={`w-full h-full min-h-[40px] px-2 py-2 text-sm text-gray-900 leading-normal ${
-                                  wrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
+                                className={`w-full h-full min-h-[24px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
+                                  effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
                                 } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
-                                title={!wrapCells ? value : undefined}
+                                title={!effectiveWrapCells ? value : undefined}
                               >
                                 {value}
                               </div>
@@ -3437,14 +3951,19 @@ export function DatabaseSpreadsheet() {
                     </tr>
                   );
                 })}
+                {shouldVirtualize && virtualRange.bottom > 0 && (
+                  <tr aria-hidden>
+                    <td colSpan={colCount + 2} style={{ height: virtualRange.bottom }} />
+                  </tr>
+                )}
                 {rowCount > 0 && (
                   <tr>
-                    <th className="sticky left-0 z-10 border-r border-gray-200 bg-gray-50 px-2 py-2">
+                    <th className="sticky left-0 z-10 border-r border-gray-200 bg-gray-50 px-1 py-0.5">
                       <div className="flex items-center justify-center h-full">
                         <button
                           type="button"
                           onClick={handleAddRow}
-                          className="flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                          className="flex h-4 w-4 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors text-xs"
                           aria-label="Добавить строку"
                         >
                           +
@@ -3470,12 +3989,12 @@ export function DatabaseSpreadsheet() {
           </div>
         </div>
 
-        <aside className="rounded-xl border border-gray-200 bg-white p-4 h-fit">
-          <div className="flex items-center gap-2 rounded-lg bg-gray-50 p-1 text-xs mb-4">
+        <aside className="rounded border border-gray-200 bg-white p-2 h-fit text-xs">
+          <div className="flex items-center gap-1 rounded bg-gray-50 p-0.5 text-[10px] mb-2">
             <button
               type="button"
               onClick={() => setRightPanelTab('summary')}
-              className={`flex-1 rounded-md px-3 py-2 font-medium transition-all ${
+              className={`flex-1 rounded px-2 py-1 font-medium transition-all ${
                 rightPanelTab === 'summary'
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -3486,7 +4005,7 @@ export function DatabaseSpreadsheet() {
             <button
               type="button"
               onClick={() => setRightPanelTab('cleanup')}
-              className={`flex-1 rounded-md px-3 py-2 font-medium transition-all ${
+              className={`flex-1 rounded px-2 py-1 font-medium transition-all ${
                 rightPanelTab === 'cleanup'
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -3780,7 +4299,7 @@ export function DatabaseSpreadsheet() {
       )}
       {contextMenu && (
         <div
-          className="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white py-1 shadow-xl"
+          className="fixed z-50 w-44 rounded border border-gray-200 bg-white py-0.5 shadow-xl"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
@@ -3791,17 +4310,39 @@ export function DatabaseSpreadsheet() {
               void copySelection();
               setContextMenu(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+            className="w-full px-2.5 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition-colors"
           >
             Копировать
           </button>
+          <div className="my-0.5 border-t border-gray-100" />
+          <button
+            type="button"
+            onClick={() => {
+              handleInsertRowAbove(normalizedSelection.startRow);
+              setContextMenu(null);
+            }}
+            className="w-full px-2.5 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            Вставить строку выше
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              handleInsertRowBelow(normalizedSelection.endRow);
+              setContextMenu(null);
+            }}
+            className="w-full px-2.5 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            Вставить строку ниже
+          </button>
+          <div className="my-0.5 border-t border-gray-100" />
           <button
             type="button"
             onClick={() => {
               confirmDeleteSelection();
               setContextMenu(null);
             }}
-            className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 transition-colors"
+            className="w-full px-2.5 py-1.5 text-left text-[11px] text-red-600 hover:bg-red-50 transition-colors"
           >
             Удалить
           </button>
@@ -4224,6 +4765,178 @@ export function DatabaseSpreadsheet() {
                     <>
                       <span>🎯</span>
                       Запустить оценку
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Name Cleanup Modal ─────────────────────────────── */}
+      {nameCleanup.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-600 text-white shadow-sm font-bold text-lg">
+                  ✨
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Очистка названий</h3>
+                  <p className="text-xs text-gray-500 font-medium">Очистка и форматирование названий компаний</p>
+                </div>
+              </div>
+                <button
+                  type="button"
+                  onClick={closeNameCleanupModal}
+                  className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+                >
+                  &times;
+                </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              {/* Name column selector */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с названиями компаний
+                </label>
+                <select
+                  value={nameCleanup.nameCol}
+                  onChange={(e) => setNameCleanup((prev) => ({ ...prev, nameCol: Number(e.target.value), error: null }))}
+                  disabled={nameCleanup.isProcessing}
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-amber-400 focus:ring-2 focus:ring-amber-100 focus:outline-none disabled:bg-gray-50 disabled:text-gray-400"
+                >
+                  {headerLabels.map((label, i) => (
+                    <option key={i} value={i}>
+                      {label || toColumnLabel(i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Domain toggle */}
+              <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={nameCleanup.useDomain}
+                    onChange={(e) =>
+                      setNameCleanup((prev) => ({
+                        ...prev,
+                        useDomain: e.target.checked,
+                        domainCol: e.target.checked ? (prev.domainCol ?? 0) : null,
+                        error: null,
+                      }))
+                    }
+                    disabled={nameCleanup.isProcessing}
+                    className="h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-700">Использовать домены</span>
+                    <p className="text-xs text-gray-500 mt-0.5">Домены помогут точнее определить правильное название</p>
+                  </div>
+                </label>
+              </div>
+
+              {/* Domain column selector */}
+              {nameCleanup.useDomain && (
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Столбец с доменами
+                  </label>
+                  <select
+                    value={nameCleanup.domainCol ?? 0}
+                    onChange={(e) => setNameCleanup((prev) => ({ ...prev, domainCol: Number(e.target.value), error: null }))}
+                    disabled={nameCleanup.isProcessing}
+                    className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-amber-400 focus:ring-2 focus:ring-amber-100 focus:outline-none disabled:bg-gray-50 disabled:text-gray-400"
+                  >
+                    {headerLabels.map((label, i) => (
+                      <option key={i} value={i}>
+                        {label || toColumnLabel(i)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="rounded-lg bg-amber-50 border border-amber-100 p-3 text-xs text-amber-800 space-y-1">
+                <p>
+                  AI очистит названия компаний: уберёт юр. формы (Inc, Ltd, LLC), лишние описания, 
+                  символы и приведёт к красивому короткому виду для персонализации писем.
+                </p>
+                <p>
+                  Результат <span className="font-semibold">заменит</span> текущие значения в выбранном столбце.
+                </p>
+                <p>
+                  Строк для обработки: <span className="font-semibold text-gray-900">{
+                    activeTab ? activeTab.data.slice(1).filter((row) => {
+                      const v = row[nameCleanup.nameCol]?.trim();
+                      return v && v.length > 0;
+                    }).length : 0
+                  }</span>
+                </p>
+              </div>
+
+              {/* Progress */}
+              {nameCleanup.isProcessing && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-600">
+                    <span className="flex items-center gap-2">
+                      <span className="animate-pulse">●</span>
+                      Очистка...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {nameCleanup.currentRow} / {nameCleanup.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-amber-500 transition-all duration-300"
+                      style={{ width: `${nameCleanup.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Error */}
+              {nameCleanup.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {nameCleanup.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs text-gray-500">
+                Batch: {NAME_CLEANUP_BATCH_SIZE} строк
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeNameCleanupModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  {nameCleanup.isProcessing ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartNameCleanup()}
+                  disabled={nameCleanup.isProcessing}
+                  className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-amber-600/20 transition-all hover:bg-amber-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {nameCleanup.isProcessing ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Очистка...
+                    </>
+                  ) : (
+                    <>
+                      <span>✨</span>
+                      Запустить очистку
                     </>
                   )}
                 </button>
