@@ -219,6 +219,15 @@ export default function ParsersPage() {
     }
   }, [activeJobId]);
 
+  useEffect(() => {
+    if (!activeJobId) return undefined;
+    if (!activeJob || (activeJob.status !== 'running' && activeJob.status !== 'pending')) return undefined;
+    const intervalId = window.setInterval(() => {
+      void refreshJobs();
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [activeJob, activeJobId, refreshJobs]);
+
   const loadResults = useCallback(async (jobId: string, offset: number, append: boolean) => {
     setResultsLoading(true);
     try {
