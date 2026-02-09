@@ -1,6 +1,7 @@
 import type { Dispatcher } from 'undici';
 import { ProxyAgent } from 'undici';
 import { logInfo, logError } from '@/lib/loggerServer';
+import type { Span } from '@/lib/tracer';
 
 export type HHSearchConfig = {
   text: string;
@@ -669,6 +670,7 @@ type FetchVacanciesOptions = {
   onProgress?: (progress: FetchVacanciesProgress) => void;
   progressIntervalMs?: number;
   onStage?: (stage: ParserProgressStage) => void;
+  trace?: Span | null;
   logMeta?: {
     userId?: string | null;
     requestId?: string | null;
@@ -734,7 +736,18 @@ export async function fetchVacancies(
 
   const normalized = normalizeSearchParams(config);
   const shouldFetchEmployers = normalized.fetch_employers !== false;
+  const partitionSpan = await options?.trace?.startChild({
+    name: 'hh.partition_query',
+    input: {
+      text: normalized.text,
+      area: normalized.area,
+      date_from: normalized.date_from,
+      date_to: normalized.date_to,
+    },
+    message: 'Подготовка разбиения запроса',
+  });
   const partitions = await partitionQuery(normalized);
+  await partitionSpan?.end({ count: partitions.length }, `Подготовлено ${partitions.length} разбиений`);
   void logInfo(
     'parser.hh.partitions',
     'HH partitions prepared',
@@ -777,6 +790,11 @@ export async function fetchVacancies(
     PARTITION_CONCURRENCY,
     async (part, index) => {
       await checkCancelled();
+      const partSpan = await options?.trace?.startChild({
+        name: 'hh.partition',
+        input: { index: index + 1, total: partitions.length, part },
+        message: `Разбиение ${index + 1}/${partitions.length}`,
+      });
       void logInfo(
         'parser.hh.partition.start',
         'HH partition started',
@@ -860,7 +878,12 @@ export async function fetchVacancies(
           },
           options?.logMeta,
         );
+        await partSpan?.end(
+          { found: partFound, fetched: partitionCollected, pages: totalPages },
+          `Разбиение ${index + 1}: ${partitionCollected} вакансий`,
+        );
       } catch (partErr) {
+        await partSpan?.fail(partErr);
         // Re-throw cancellation
         if (partErr instanceof ParserJobCancelledError) throw partErr;
 
