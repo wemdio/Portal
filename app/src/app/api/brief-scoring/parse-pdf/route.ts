@@ -133,6 +133,11 @@ export async function POST(req: NextRequest) {
     }
 
     // --- Extract text ---
+    if (!globalThis.DOMMatrix) {
+      const { default: DOMMatrix } = await import('@thednp/dommatrix');
+      globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
+    }
+
     const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: buffer });
     let result: Awaited<ReturnType<typeof parser.getText>>;
