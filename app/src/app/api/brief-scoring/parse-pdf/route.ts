@@ -139,7 +139,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { PDFParse } = await import('pdf-parse');
-    const parser = new PDFParse({ data: buffer });
+    const parser = new PDFParse({ data: buffer, disableWorker: true });
     let result: Awaited<ReturnType<typeof parser.getText>>;
     try {
       result = await parser.getText();
