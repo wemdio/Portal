@@ -463,7 +463,10 @@ export async function fetchWithRetry<T>(
       }
 
       const retryAfter = res.headers.get('retry-after');
-      const retryAfterMs = retryAfter ? Number(retryAfter) * 1000 : null;
+      const retryAfterMsRaw = retryAfter ? Number(retryAfter) * 1000 : null;
+      const retryAfterMs = retryAfterMsRaw != null && Number.isFinite(retryAfterMsRaw)
+        ? Math.min(retryAfterMsRaw, maxDelayMs)
+        : null;
 
       const shouldRetry = res.status === 429 || res.status === 403 || (res.status >= 500 && res.status <= 599);
       if (!shouldRetry) {
