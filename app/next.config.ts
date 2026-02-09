@@ -27,6 +27,7 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     typedRoutes: true,
+    proxyClientMaxBodySize: '25mb',
   },
   serverExternalPackages: ['pdf-parse', 'pdfjs-dist'],
   env: {
