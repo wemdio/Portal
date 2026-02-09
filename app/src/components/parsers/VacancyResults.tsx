@@ -25,6 +25,35 @@ type Props = {
   onDeleteJob?: () => void;
 };
 
+const RUNNING_EMPTY_MESSAGES = [
+  'Ищем вакансии на HH.ru — первые результаты скоро появятся.',
+  'Собираем результаты по заданным фильтрам.',
+  'Парсинг в процессе, это может занять несколько минут.',
+  'Обновляем список вакансий, ожидайте.',
+  'Почти готово, осталось немного.',
+  'Финализируем выдачу и готовим результаты.',
+  'Синхронизируем данные с HH.ru.',
+  'Обрабатываем найденные вакансии.',
+  'Готовим результаты для отображения.',
+  'Еще чуть-чуть — скоро все появится.',
+] as const;
+
+function RunningEmptyState() {
+  const [index, setIndex] = useState(0);
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setIndex((prev) => (prev + 1) % RUNNING_EMPTY_MESSAGES.length);
+    }, 25000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+  return (
+    <div className="px-6 py-12 text-center text-gray-500">
+      <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+      <div className="text-sm">{RUNNING_EMPTY_MESSAGES[index]}</div>
+    </div>
+  );
+}
+
 const SEARCH_BASE_URL = 'https://hh.ru/search/vacancy';
 const KNOWN_PARAM_KEYS = new Set([
   'text',
@@ -101,7 +130,7 @@ function formatArea(area?: string | string[]) {
 
 function buildFilters(config?: HHSearchConfig | null) {
   if (!config) return [];
-  const filters: Array<{ label: string; value: string }> = [];
+  const filters: Array<{ label: string; value: string; tone?: 'yellow' }> = [];
   const text = config.text?.trim();
   if (text) filters.push({ label: 'Запрос', value: text });
   const area = formatArea(config.area);
@@ -115,12 +144,8 @@ function buildFilters(config?: HHSearchConfig | null) {
   if (config.date_from) filters.push({ label: 'Дата от', value: config.date_from });
   if (config.date_to) filters.push({ label: 'Дата до', value: config.date_to });
   if (config.per_page !== undefined) filters.push({ label: 'Per page', value: String(config.per_page) });
+  if (config.fetch_employers) filters.push({ label: 'Работодатели', value: 'с деталями', tone: 'yellow' });
   return filters;
-}
-
-function getExtraKeys(config?: HHSearchConfig | null) {
-  if (!config?.params) return [];
-  return Object.keys(config.params).filter((key) => key && !KNOWN_PARAM_KEYS.has(key));
 }
 
 function formatSalary(v: HHVacancyRow) {
@@ -182,7 +207,6 @@ export function VacancyResults({
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
   const filters = buildFilters(searchConfig);
-  const extraKeys = getExtraKeys(searchConfig);
   const canPrev = currentPage > 1;
   const canNext = currentPage < totalPages;
   const maxButtons = 5;
@@ -306,7 +330,14 @@ export function VacancyResults({
           <div className={`mt-2 flex flex-wrap gap-2 ${filters.length ? '' : 'text-gray-500'}`}>
             {filters.length ? (
               filters.map((item) => (
-                <span key={item.label} className="rounded-full border border-gray-200 bg-white px-2 py-0.5">
+                <span
+                  key={item.label}
+                  className={`rounded-full border px-2 py-0.5 ${
+                    item.tone === 'yellow'
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : 'border-gray-200 bg-white text-gray-700'
+                  }`}
+                >
                   {item.label}: {item.value}
                 </span>
               ))
@@ -318,7 +349,11 @@ export function VacancyResults({
       ) : null}
 
       {items.length === 0 ? (
-        <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
+        jobStatus === 'running' ? (
+          <RunningEmptyState key={jobId ?? 'running'} />
+        ) : (
+          <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
+        )
       ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">

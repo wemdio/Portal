@@ -189,7 +189,7 @@ export default function ParsersPage() {
   const [jobs, setJobs] = useState<ParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
 
   const [results, setResults] = useState<HHVacancyRow[]>([]);
@@ -202,6 +202,7 @@ export default function ParsersPage() {
   const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [activeJobId, jobs]);
 
@@ -209,15 +210,29 @@ export default function ParsersPage() {
 
   const refreshJobs = useCallback(async () => {
     const seq = ++refreshSeq.current;
-    setRefreshing(true);
-    try {
-      const data = await apiFetch<JobsResponse>('/api/parsers/hh', { method: 'GET' });
-      setJobs(data.jobs ?? []);
-      if (!activeJobId && data.jobs?.[0]?.id) setActiveJobId(data.jobs[0].id);
-    } finally {
-      if (refreshSeq.current === seq) setRefreshing(false);
-    }
+    const data = await apiFetch<JobsResponse>('/api/parsers/hh', { method: 'GET' });
+    if (refreshSeq.current !== seq) return;
+    setJobs(data.jobs ?? []);
+    if (!activeJobId && data.jobs?.[0]?.id) setActiveJobId(data.jobs[0].id);
   }, [activeJobId]);
+
+  const handleManualRefresh = useCallback(async () => {
+    setManualRefreshing(true);
+    try {
+      await refreshJobs();
+    } finally {
+      setManualRefreshing(false);
+    }
+  }, [refreshJobs]);
+
+  useEffect(() => {
+    if (!activeJobId) return undefined;
+    if (!activeJob || (activeJob.status !== 'running' && activeJob.status !== 'pending')) return undefined;
+    const intervalId = window.setInterval(() => {
+      void refreshJobs();
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [activeJob, activeJobId, refreshJobs]);
 
   const loadResults = useCallback(async (jobId: string, offset: number, append: boolean) => {
     setResultsLoading(true);
@@ -419,8 +434,7 @@ export default function ParsersPage() {
     }
   }, [refreshJobs]);
 
-  const deleteJob = useCallback(async (jobId: string) => {
-    if (!confirm('Удалить job и все результаты?')) return;
+  const runDeleteJob = useCallback(async (jobId: string) => {
     setJobActionId(jobId);
     setError(null);
     try {
@@ -438,6 +452,20 @@ export default function ParsersPage() {
       setJobActionId(null);
     }
   }, [activeJobId, refreshJobs]);
+
+  const deleteJob = useCallback((jobId: string) => {
+    setDeleteCandidateId(jobId);
+  }, []);
+
+  const confirmDeleteJob = useCallback(async () => {
+    if (!deleteCandidateId) return;
+    await runDeleteJob(deleteCandidateId);
+    setDeleteCandidateId(null);
+  }, [deleteCandidateId, runDeleteJob]);
+
+  const cancelDeleteJob = useCallback(() => {
+    setDeleteCandidateId(null);
+  }, []);
 
   const exportCsv = useCallback(async () => {
     setExporting(true);
@@ -521,8 +549,9 @@ export default function ParsersPage() {
           jobs={jobs}
           activeJobId={activeJobId}
           onSelect={(id) => setActiveJobId(id)}
-          onRefresh={() => void refreshJobs()}
-          busy={busy || refreshing}
+          onRefresh={() => void handleManualRefresh()}
+          busy={busy}
+          refreshing={manualRefreshing}
         />
 
         <VacancyResults
@@ -550,6 +579,41 @@ export default function ParsersPage() {
       {activeJob?.status === 'running' ? (
         <div className="text-sm text-gray-500">
           Job в статусе running — обновите список jobs или подождите завершения.
+        </div>
+      ) : null}
+
+      {deleteCandidateId ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
+            <div className="px-6 py-5">
+              <h3 className="text-lg font-semibold text-gray-900">Удалить запуск?</h3>
+              <p className="mt-2 text-sm text-gray-600">
+                Будут удалены job и все результаты парсинга. Действие необратимо.
+              </p>
+              {activeJob?.id === deleteCandidateId ? (
+                <div className="mt-3 text-xs text-gray-500">
+                  Запрос: {activeJob?.config?.text || '—'}
+                </div>
+              ) : null}
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={cancelDeleteJob}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteJob}
+                disabled={jobActionId === deleteCandidateId}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

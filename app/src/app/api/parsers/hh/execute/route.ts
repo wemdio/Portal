@@ -61,13 +61,25 @@ function jsonError(message: string, status: number, extra?: Record<string, unkno
 
 async function getSupabase(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
-  if (!token) return { error: jsonError('Unauthorized', 401) };
+  if (!token) return { error: jsonError('Unauthorized', 401, { request_id: req.headers.get('x-request-id') ?? null }) };
 
   const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: jsonError('Unauthorized', 401) };
+  const requestId = req.headers.get('x-request-id') ?? null;
+  const route = req.nextUrl.pathname;
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const logMeta = { requestId, route, ip };
 
-  return { supabase, user };
+  try {
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) {
+      await logError('parser.hh.auth.failed', error ?? 'User not found', { hasUser: Boolean(data?.user) }, logMeta);
+      return { error: jsonError('Unauthorized', 401, { request_id: requestId }) };
+    }
+    return { supabase, user: data.user };
+  } catch (err) {
+    await logError('parser.hh.auth.exception', err, undefined, logMeta);
+    return { error: jsonError('Unauthorized', 401, { request_id: requestId }) };
+  }
 }
 
 function toDbRow(jobId: string, v: HHVacancy) {
@@ -122,11 +134,11 @@ export async function POST(req: NextRequest) {
   try {
     body = (await req.json()) as { job_id?: string };
   } catch {
-    return jsonError('Invalid JSON body', 400);
+    return jsonError('Invalid JSON body', 400, { request_id: requestId });
   }
 
   const jobId = body.job_id;
-  if (!jobId) return jsonError('Missing required field: job_id', 400);
+  if (!jobId) return jsonError('Missing required field: job_id', 400, { request_id: requestId });
 
   const { data: job, error: jobError } = await supabase
     .from('parser_jobs')
@@ -135,8 +147,8 @@ export async function POST(req: NextRequest) {
     .eq('user_id', user.id)
     .single();
 
-  if (jobError || !job) return jsonError('Job not found', 404);
-  if (job.parser_type !== PARSER_TYPE) return jsonError('Unsupported parser_type', 400);
+  if (jobError || !job) return jsonError('Job not found', 404, { request_id: requestId });
+  if (job.parser_type !== PARSER_TYPE) return jsonError('Unsupported parser_type', 400, { request_id: requestId });
 
   const config = job.config as HHSearchConfig;
   const searchText = config.text;
@@ -149,7 +161,10 @@ export async function POST(req: NextRequest) {
   const updateStage = async (stage: ParserProgressStage) => {
     const { error } = await db
       .from('parser_jobs')
-      .update({ progress_stage: stage })
+      .update({
+        progress_stage: stage,
+        ...(stage === 'partitioning' ? { progress_percent: null } : {}),
+      })
       .eq('id', jobId);
     if (error) {
       await logError('parser.hh.stage.update.failed', error, { jobId, searchText, stage }, logMeta);
@@ -166,7 +181,7 @@ export async function POST(req: NextRequest) {
       progress_stage: 'fetching_vacancies',
     })
     .eq('id', jobId);
-  if (startError) return jsonError(startError.message, 500);
+  if (startError) return jsonError(startError.message, 500, { request_id: requestId });
 
   await logAudit(
     'parser.hh.execute.start',
@@ -273,7 +288,7 @@ export async function POST(req: NextRequest) {
       };
 
       // --- Phase 1: Fetch vacancies ---
-      await updateStage('fetching_vacancies');
+      await updateStage('partitioning');
       const fetchSpan = await trace?.startChild({
         name: 'hh.fetch_vacancies',
         input: { searchText, config },
@@ -284,6 +299,7 @@ export async function POST(req: NextRequest) {
         jobId,
         logMeta,
         searchText,
+        trace,
         shouldCancel,
         onProgress: (progress) => {
           void updateProgress({

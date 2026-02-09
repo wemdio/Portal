@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Search } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
@@ -18,13 +17,16 @@ const navItems = [
   { name: 'Инструменты', href: '/tools' },
   { name: 'Оплаты', href: '/payments' },
   { name: 'Регламент', href: '/reglament' },
-  { name: 'Парсеры', href: '/parsers', icon: Search },
   { name: 'Админ', href: '/admin', adminOnly: true },
   { name: 'Настройки', href: '/settings' },
 ];
 
 type SidebarProps = {
   collapsed?: boolean;
+};
+
+const navActiveAliases: Record<string, string[]> = {
+  '/tools': ['/parsers'],
 };
 
 export function Sidebar({ collapsed = false }: SidebarProps) {
@@ -96,7 +98,12 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
 
-          const isActive = pathname === item.href;
+          const aliases = navActiveAliases[item.href] ?? [];
+          const isActive = item.href === '/'
+            ? pathname === '/'
+            : pathname === item.href ||
+              pathname.startsWith(`${item.href}/`) ||
+              aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
           return (
             <Link
               key={item.name}
