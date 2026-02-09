@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { PDFParse } from 'pdf-parse';
@@ -19,6 +20,15 @@ function isPdfFileName(name: string) {
 
 function isPdfBuffer(buffer: Buffer) {
   return buffer.length >= 4 && buffer.toString('utf8', 0, 4) === '%PDF';
+}
+
+async function downloadFromStorage(client: SupabaseClient, bucket: string, path: string) {
+  const { data, error } = await client.storage.from(bucket).download(path);
+  if (error || !data) {
+    throw new Error(error?.message || 'Storage download failed');
+  }
+  const arrayBuffer = await data.arrayBuffer();
+  return Buffer.from(arrayBuffer);
 }
 
 export async function POST(req: NextRequest) {
@@ -54,22 +64,38 @@ export async function POST(req: NextRequest) {
       return jsonError('Missing required field: path', 400);
     }
 
-    if (!supabaseAdmin) {
-      return jsonError('Storage is not configured', 500);
-    }
-
     fileName = body.fileName?.trim() || path.split('/').pop() || fileName;
     if (!isPdfFileName(fileName)) {
       return jsonError('File must be a PDF', 400);
     }
 
-    const { data, error } = await supabaseAdmin.storage.from(bucket).download(path);
-    if (error || !data) {
-      return jsonError('Не удалось скачать PDF из хранилища', 400);
+    const downloadErrors: string[] = [];
+    let downloaded: Buffer | null = null;
+
+    if (supabaseAdmin) {
+      try {
+        downloaded = await downloadFromStorage(supabaseAdmin, bucket, path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'admin download failed';
+        downloadErrors.push(`admin: ${message}`);
+      }
     }
 
-    const arrayBuffer = await data.arrayBuffer();
-    buffer = Buffer.from(arrayBuffer);
+    if (!downloaded) {
+      try {
+        downloaded = await downloadFromStorage(supabase, bucket, path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'user download failed';
+        downloadErrors.push(`user: ${message}`);
+      }
+    }
+
+    if (!downloaded) {
+      const details = downloadErrors.length ? ` (${downloadErrors.join(' | ')})` : '';
+      return jsonError(`Не удалось скачать PDF из хранилища${details}`, 502);
+    }
+
+    buffer = downloaded;
     if (buffer.length > MAX_BRIEF_FILE_BYTES) {
       return jsonError('File too large (max 20MB)', 400);
     }
