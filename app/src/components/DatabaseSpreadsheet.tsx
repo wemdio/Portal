@@ -2686,9 +2686,24 @@ export function DatabaseSpreadsheet() {
         body: formData,
       });
 
-      const resData = (await res.json()) as { text?: string; pages?: number; error?: string };
-      if (!res.ok || resData.error) {
-        setBriefScoring((prev) => ({ ...prev, isUploading: false, error: resData.error || 'Ошибка при загрузке PDF' }));
+      let resData: { text?: string; pages?: number; error?: string } | null = null;
+      try {
+        resData = (await res.json()) as { text?: string; pages?: number; error?: string };
+      } catch {
+        resData = null;
+      }
+
+      if (!res.ok || !resData || resData.error) {
+        const fallbackError = res.redirected
+          ? 'Сессия истекла, войдите заново'
+          : res.ok
+            ? 'Сервер вернул некорректный ответ'
+            : `Ошибка при загрузке PDF (${res.status})`;
+        setBriefScoring((prev) => ({
+          ...prev,
+          isUploading: false,
+          error: resData?.error || fallbackError,
+        }));
         return;
       }
 
