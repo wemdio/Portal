@@ -2681,6 +2681,12 @@ export function DatabaseSpreadsheet() {
         return;
       }
 
+      const isPdf = file.type.includes('pdf') || file.name.toLowerCase().endsWith('.pdf');
+      if (!isPdf) {
+        setBriefScoring((prev) => ({ ...prev, isUploading: false, error: 'Файл должен быть PDF' }));
+        return;
+      }
+
       if (file.size > MAX_BRIEF_FILE_BYTES) {
         setBriefScoring((prev) => ({
           ...prev,
