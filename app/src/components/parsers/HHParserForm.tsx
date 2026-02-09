@@ -222,15 +222,6 @@ export function HHParserForm({ onStart, busy }: Props) {
             Ручной ввод
           </button>
         </div>
-        <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={fetchEmployers}
-            onChange={(e) => setFetchEmployers(e.target.checked)}
-            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-          />
-          Подтягивать данные работодателей (дольше)
-        </label>
       </div>
 
       {mode === 'link' ? (
@@ -255,6 +246,15 @@ export function HHParserForm({ onStart, busy }: Props) {
             </div>
             {linkError ? <div className="mt-2 text-xs text-red-600">{linkError}</div> : null}
           </div>
+          <label className="inline-flex items-center gap-2 text-sm text-gray-700 ml-1">
+            <input
+              type="checkbox"
+              checked={fetchEmployers}
+              onChange={(e) => setFetchEmployers(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            Подтягивать данные работодателей (дольше)
+          </label>
 
           {linkConfig && !linkError ? (
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
@@ -292,86 +292,97 @@ export function HHParserForm({ onStart, busy }: Props) {
           ) : null}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Текст поиска *</label>
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="например: sales, маркетолог, b2b"
-            />
-          </div>
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-6">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Текст поиска *</label>
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="например: sales, маркетолог, b2b"
+              />
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Регион (area id)</label>
-            <input
-              value={area}
-              onChange={(e) => setArea(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="например: 1 или 1,2,3"
-            />
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Регион (area id)</label>
+              <input
+                value={area}
+                onChange={(e) => setArea(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="например: 1 или 1,2,3"
+              />
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Зарплата от</label>
-            <input
-              value={salaryFrom}
-              onChange={(e) => setSalaryFrom(e.target.value)}
-              inputMode="numeric"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="например: 150000"
-            />
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Зарплата от</label>
+              <input
+                value={salaryFrom}
+                onChange={(e) => setSalaryFrom(e.target.value)}
+                inputMode="numeric"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="например: 150000"
+              />
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Валюта</label>
-            <select
-              value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
-            >
-              <option value="RUR">RUR</option>
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-            </select>
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Валюта</label>
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+              >
+                <option value="RUR">RUR</option>
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
+              </select>
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Дата от (YYYY-MM-DD)</label>
-            <input
-              value={dateFrom}
-              onChange={(e) => setDateFrom(formatDateInput(e.target.value))}
-              inputMode="numeric"
-              maxLength={10}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="2026-01-01"
-            />
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Дата от (YYYY-MM-DD)</label>
+              <input
+                value={dateFrom}
+                onChange={(e) => setDateFrom(formatDateInput(e.target.value))}
+                inputMode="numeric"
+                maxLength={10}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="2026-01-01"
+              />
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Дата до (YYYY-MM-DD)</label>
-            <input
-              value={dateTo}
-              onChange={(e) => setDateTo(formatDateInput(e.target.value))}
-              inputMode="numeric"
-              maxLength={10}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="2026-01-28"
-            />
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Дата до (YYYY-MM-DD)</label>
+              <input
+                value={dateTo}
+                onChange={(e) => setDateTo(formatDateInput(e.target.value))}
+                inputMode="numeric"
+                maxLength={10}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="2026-01-28"
+              />
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Per page</label>
-            <input
-              value={perPage}
-              onChange={(e) => setPerPage(e.target.value)}
-              inputMode="numeric"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="50"
-            />
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Per page</label>
+              <input
+                value={perPage}
+                onChange={(e) => setPerPage(e.target.value)}
+                inputMode="numeric"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder="50"
+              />
+            </div>
           </div>
-        </div>
+          <label className="mt-3 inline-flex items-center gap-2 text-sm text-gray-700 ml-1">
+            <input
+              type="checkbox"
+              checked={fetchEmployers}
+              onChange={(e) => setFetchEmployers(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            Подтягивать данные работодателей (дольше)
+          </label>
+        </>
       )}
     </div>
   );

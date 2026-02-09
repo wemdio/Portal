@@ -6,6 +6,7 @@ import { ChevronRight, RefreshCw } from 'lucide-react';
 
 const STAGE_LABELS: Record<string, string> = {
   pending: 'Ожидание',
+  partitioning: 'Подготавливаем запрос',
   fetching_vacancies: 'Ищем вакансии',
   fetching_employers: 'Подгружаем работодателей',
   saving: 'Сохраняем в базу',
@@ -131,9 +132,17 @@ export function JobsList({
                       </div>
                       <div className="mt-1 text-xs text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
                         <span>
-                          Прогресс: {hasProgress ? `${progressValue}%` : '—'}
-                          {stageLabel ? ` — ${stageLabel}` : ''}
+                          {hasProgress
+                            ? `Прогресс: ${progressValue}%${stageLabel ? ` — ${stageLabel}` : ''}`
+                            : stageLabel
+                              ? `Статус: ${stageLabel}`
+                              : 'Прогресс: —'}
                         </span>
+                        {totalFound != null || totalParsed != null ? (
+                          <span>
+                            Найдено: {totalFound ?? '—'} · Обработано: {totalParsed ?? '—'}
+                          </span>
+                        ) : null}
                         {job.error_message ? <span className="text-red-600 line-clamp-1">{job.error_message}</span> : null}
                       </div>
                     </div>
