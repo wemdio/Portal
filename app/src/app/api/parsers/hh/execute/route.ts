@@ -296,6 +296,7 @@ export async function POST(req: NextRequest) {
         jobId,
         logMeta,
         searchText,
+        trace,
         shouldCancel,
         onProgress: (progress) => {
           void updateProgress({
