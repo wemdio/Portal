@@ -2801,7 +2801,7 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    let currentToken = await getFreshToken();
+    const currentToken = await getFreshToken();
     if (!currentToken) {
       setWebsiteEnrichment((prev) => ({
         ...prev,
