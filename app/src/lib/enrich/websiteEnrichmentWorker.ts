@@ -29,9 +29,12 @@ const CACHE_SUCCESS_DAYS = Number(process.env.WEBSITE_ENRICHMENT_CACHE_DAYS ?? '
 const CACHE_ERROR_HOURS = Number(process.env.WEBSITE_ENRICHMENT_ERROR_TTL_HOURS ?? '6');
 const DOMAIN_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_DOMAIN_CONCURRENCY ?? '1');
 const FETCH_TIMEOUT_MS = Number(process.env.WEBSITE_ENRICHMENT_TIMEOUT_MS ?? '15000');
+const STALE_PROCESSING_MINUTES = Number(process.env.WEBSITE_ENRICHMENT_STALE_MINUTES ?? '10');
+const MAX_ATTEMPTS = Number(process.env.WEBSITE_ENRICHMENT_MAX_ATTEMPTS ?? '3');
 
 const cacheSuccessTtlMs = CACHE_SUCCESS_DAYS * 24 * 60 * 60 * 1000;
 const cacheErrorTtlMs = CACHE_ERROR_HOURS * 60 * 60 * 1000;
+const staleProcessingMs = STALE_PROCESSING_MINUTES * 60 * 1000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -89,6 +92,33 @@ async function acquireDomainSlot(domain: string): Promise<ReleaseFn> {
     const resolver = queue?.shift();
     if (resolver) resolver();
   };
+}
+
+type QueueStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'skipped';
+
+async function countQueue(jobId: string, status: QueueStatus): Promise<number> {
+  if (!supabaseAdmin) return 0;
+  const { count } = await supabaseAdmin
+    .from('website_enrichment_queue')
+    .select('id', { count: 'exact', head: true })
+    .eq('job_id', jobId)
+    .eq('status', status);
+  return count ?? 0;
+}
+
+async function getOldestProcessingUpdatedAt(jobId: string): Promise<Date | null> {
+  if (!supabaseAdmin) return null;
+  const { data } = await supabaseAdmin
+    .from('website_enrichment_queue')
+    .select('updated_at')
+    .eq('job_id', jobId)
+    .eq('status', 'processing')
+    .order('updated_at', { ascending: true })
+    .limit(1)
+    .maybeSingle<{ updated_at?: string | null }>();
+  if (!data?.updated_at) return null;
+  const parsed = new Date(data.updated_at);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 async function getCache(urlNormalized: string) {
@@ -194,7 +224,29 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       return;
     }
 
-    if (['completed', 'failed', 'cancelled'].includes(job.status)) return;
+    if (['failed', 'cancelled'].includes(job.status)) return;
+
+    let processed = job.processed ?? 0;
+    let success = job.success_count ?? 0;
+    let errors = job.error_count ?? 0;
+
+    if (job.status === 'completed') {
+      const [pendingCount, processingCount, completedCount, failedCount, skippedCount] = await Promise.all([
+        countQueue(jobId, 'pending'),
+        countQueue(jobId, 'processing'),
+        countQueue(jobId, 'completed'),
+        countQueue(jobId, 'failed'),
+        countQueue(jobId, 'skipped'),
+      ]);
+      if (pendingCount === 0 && processingCount === 0) return;
+      processed = completedCount + failedCount + skippedCount;
+      success = completedCount;
+      errors = failedCount + skippedCount;
+      await supabaseAdmin
+        .from('website_enrichment_jobs')
+        .update({ status: 'running', completed_at: null })
+        .eq('id', jobId);
+    }
 
     if (job.status === 'pending') {
       await supabaseAdmin
@@ -202,21 +254,15 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
         .update({ status: 'running', started_at: new Date().toISOString() })
         .eq('id', jobId);
     }
-
-    let processed = job.processed ?? 0;
-    let success = job.success_count ?? 0;
-    let errors = job.error_count ?? 0;
     let cancelled = false;
 
     // Reset stale processing items
     await supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
       p_job_id: jobId,
-      p_minutes: 10,
+      p_minutes: STALE_PROCESSING_MINUTES,
     });
 
     const inflight = new Map<string, Promise<FetchResult>>();
-    let emptyBatches = 0;
-
     while (true) {
       const { data: jobStatus } = await supabaseAdmin
         .from('website_enrichment_jobs')
@@ -241,12 +287,25 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
 
       const batch = (items as QueueItem[]) ?? [];
       if (batch.length === 0) {
-        emptyBatches += 1;
-        if (emptyBatches >= 3) break;
-        await sleep(400);
+        const [pendingCount, processingCount] = await Promise.all([
+          countQueue(jobId, 'pending'),
+          countQueue(jobId, 'processing'),
+        ]);
+        if (pendingCount === 0 && processingCount === 0) break;
+
+        if (processingCount > 0) {
+          const oldestProcessing = await getOldestProcessingUpdatedAt(jobId);
+          if (oldestProcessing && Date.now() - oldestProcessing.getTime() > staleProcessingMs) {
+            await supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
+              p_job_id: jobId,
+              p_minutes: STALE_PROCESSING_MINUTES,
+            });
+          }
+        }
+
+        await sleep(600);
         continue;
       }
-      emptyBatches = 0;
 
       await mapWithConcurrency(
         batch,
@@ -255,6 +314,15 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
           const domain = normalizeDomain(item.url_normalized || item.url_raw);
           const release = await acquireDomainSlot(domain);
           try {
+            if (MAX_ATTEMPTS > 0 && item.attempt_count > MAX_ATTEMPTS) {
+              errors += 1;
+              await updateQueueItem(
+                item,
+                { error: `Превышено число попыток (${MAX_ATTEMPTS})` },
+                'failed',
+              );
+              return;
+            }
             const result = await fetchWithCache(item, inflight);
             if (result.error && !result.text) {
               errors += 1;
@@ -280,23 +348,32 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
         .eq('id', jobId);
     }
 
+    const [completedCount, failedCount, skippedCount] = await Promise.all([
+      countQueue(jobId, 'completed'),
+      countQueue(jobId, 'failed'),
+      countQueue(jobId, 'skipped'),
+    ]);
+    const processedTotal = completedCount + failedCount + skippedCount;
+    const finalSuccess = completedCount;
+    const finalErrors = failedCount + skippedCount;
+
     const finalStatus: JobRow['status'] = cancelled ? 'cancelled' : 'completed';
     await supabaseAdmin
       .from('website_enrichment_jobs')
       .update({
         status: finalStatus,
-        processed,
-        success_count: success,
-        error_count: errors,
+        processed: processedTotal,
+        success_count: finalSuccess,
+        error_count: finalErrors,
         completed_at: new Date().toISOString(),
       })
       .eq('id', jobId);
 
     await logInfo('website.enrichment.worker.completed', 'Website enrichment job completed', {
       jobId,
-      processed,
-      success,
-      errors,
+      processed: processedTotal,
+      success: finalSuccess,
+      errors: finalErrors,
     });
   } catch (err) {
     await logError('website.enrichment.worker.failed', err, { jobId });
