@@ -14,7 +14,6 @@ for (const envPath of envCandidates) {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? parsedEnv.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? parsedEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const openrouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ?? parsedEnv.NEXT_PUBLIC_OPENROUTER_API_KEY ?? '';
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -39,7 +38,6 @@ const nextConfig: NextConfig = {
     // Server-only secrets must come from runtime process.env.
     NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
-    NEXT_PUBLIC_OPENROUTER_API_KEY: openrouterApiKey,
   },
 };
 
