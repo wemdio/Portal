@@ -147,8 +147,6 @@ type NameCleanupState = {
   error: string | null;
 };
 
-const OPENROUTER_API_KEY = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ?? '';
-const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -171,28 +169,6 @@ const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 32;
 const VIRTUAL_OVERSCAN = 10;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
-
-const SYSTEM_PROMPT = `Ты - помощник для персонализации холодного email-аутрича в B2B.
-
-КЛЮЧЕВАЯ ЗАДАЧА:
-- Генерируй короткие персонализированные фразы для email-аутрича на основе ДАННЫХ ИЗ СТОЛБЦА и промпта пользователя.
-
-КРИТИЧЕСКИ ВАЖНО:
-1. Используй ТОЛЬКО факты из входных данных. НИЧЕГО не выдумывай.
-2. Не добавляй названия компаний, имена, цифры, кейсы, сроки, технологии, если их нет в данных.
-3. Если данных мало - пиши нейтрально и обобщенно, без уточнений.
-4. Не добавляй приветствия, подписи, темы письма и служебные фразы.
-
-СТИЛЬ:
-- Пиши как живой человек, без канцелярита и шаблонов
-- СТРОГО соблюдай русскую грамматику, падежи и склонения
-- Используй ТОЛЬКО дефис "-", НИКОГДА не используй длинное тире "—"
-- 1-3 коротких предложения, конкретно по делу
-- Не используй восклицательные знаки в избытке
-- Избегай слов: "уникальный", "эксклюзивный", "лучший", "инновационный"
-- Фокусируйся на выгоде/ценности для клиента
-
-Ответ: только текст персонализации, без пояснений и нумерации.`;
 
 const EMAIL_HEADER_REGEX = /(e-?mail|email|почта|mail)/i;
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -2169,39 +2145,23 @@ export function DatabaseSpreadsheet() {
   const generatePersonalizedProposals = async (
     sourceData: string,
     userPrompt: string,
+    accessToken: string,
   ): Promise<string> => {
     const requestBody = {
-      model: OPENROUTER_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: SYSTEM_PROMPT,
-        },
-        {
-          role: 'user',
-          content: `Данные для персонализации: "${sourceData}"
-
-Задача от пользователя: ${userPrompt}
-
-Сгенерируй 1 персонализированное предложение.
-Не нумеруй варианты. Пиши только сами предложения без пояснений.`,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 500,
+      sourceData,
+      userPrompt,
     };
 
     for (let attempt = 0; attempt <= PERSONALIZATION_MAX_RETRIES; attempt += 1) {
       let response: Response;
+      let parsed: { proposal?: string; error?: string } | null = null;
 
       try {
-        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        response = await fetch('/api/personalization/generate', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000',
-            'X-Title': 'Portal - Database Personalization',
+            Authorization: `Bearer ${accessToken}`,
           },
           body: JSON.stringify(requestBody),
           signal: personalizationAbortRef.current?.signal,
@@ -2220,23 +2180,20 @@ export function DatabaseSpreadsheet() {
         throw new Error('Не удалось отправить запрос к API');
       }
 
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content?.trim() || '';
-        if (!content) {
-          throw new Error('Пустой ответ от API');
-        }
-        return content;
+      try {
+        parsed = (await response.json()) as { proposal?: string; error?: string };
+      } catch {
+        parsed = null;
       }
 
-      const shouldRetry = [429, 502, 503, 504].includes(response.status);
-      let errorMessage = `API ошибка: ${response.status}`;
-      try {
-        const errorData = await response.json();
-        errorMessage = errorData.error?.message || errorMessage;
-      } catch {
-        // ignore parse error
+      if (response.ok) {
+        const proposal = typeof parsed?.proposal === 'string' ? parsed.proposal.trim() : '';
+        if (proposal) return proposal;
+        throw new Error(parsed?.error || 'Пустой ответ от API');
       }
+
+      const shouldRetry = [429, 500, 502, 503, 504].includes(response.status);
+      const errorMessage = parsed?.error || `API ошибка: ${response.status}`;
 
       if (shouldRetry && attempt < PERSONALIZATION_MAX_RETRIES) {
         const retryDelay =
@@ -2272,6 +2229,16 @@ export function DatabaseSpreadsheet() {
       setPersonalization((prev) => ({
         ...prev,
         error: 'Введите промпт для генерации',
+      }));
+      return;
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setPersonalization((prev) => ({
+        ...prev,
+        error: 'Необходима авторизация',
       }));
       return;
     }
@@ -2344,6 +2311,7 @@ export function DatabaseSpreadsheet() {
               const proposal = await generatePersonalizedProposals(
                 sourceValue,
                 personalization.prompt,
+                token,
               );
               return { rowIndex, proposal, error: null };
             } catch (err) {
