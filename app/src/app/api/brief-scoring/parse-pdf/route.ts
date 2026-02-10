@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createRequire } from 'module';
-import { pathToFileURL } from 'url';
+import { join } from 'path';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -141,9 +140,8 @@ export async function POST(req: NextRequest) {
     }
 
     const { PDFParse } = await import('pdf-parse');
-    const require = createRequire(import.meta.url);
-    const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
-    PDFParse.setWorker(pathToFileURL(workerPath).href);
+    const workerPath = join(process.cwd(), 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs');
+    PDFParse.setWorker(workerPath);
 
     const parser = new PDFParse({ data: buffer });
     let result: Awaited<ReturnType<typeof parser.getText>>;
