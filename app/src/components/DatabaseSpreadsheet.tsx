@@ -2287,6 +2287,7 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let errorCount = 0;
+    let lastBatchError: string | null = null;
     const batchSize = PERSONALIZATION_BATCH_SIZE;
     const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
 
@@ -3495,7 +3496,10 @@ export function DatabaseSpreadsheet() {
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Ошибка API: ${response.status}`);
+            const fallbackMessage = response.status === 401
+              ? 'Необходима авторизация'
+              : `Ошибка API: ${response.status}`;
+            throw new Error(errorData.error || fallbackMessage);
           }
 
           const data = await response.json();
@@ -3518,6 +3522,7 @@ export function DatabaseSpreadsheet() {
         } catch (err) {
           if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) throw err;
           if (err instanceof Error && err.message === 'Необходима авторизация') throw err;
+          lastBatchError = err instanceof Error ? err.message : 'Ошибка';
           errorCount += batch.length;
         }
 
@@ -3559,7 +3564,18 @@ export function DatabaseSpreadsheet() {
           : `Очистка названий завершена: ${processedCount} строк`,
         time: Date.now(),
       });
-      setNameCleanup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      if (errorCount > 0 && successCount === 0) {
+        const errorMessage = lastBatchError
+          ? `Очистка не выполнена: ${lastBatchError}`
+          : 'Очистка не выполнена: произошла ошибка на стороне API';
+        setNameCleanup((prev) => ({
+          ...prev,
+          isProcessing: false,
+          error: errorMessage,
+        }));
+      } else {
+        setNameCleanup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      }
     } catch (err) {
       if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
         setLastAction({ message: `Очистка названий отменена (обработано: ${processedCount})`, time: Date.now() });
