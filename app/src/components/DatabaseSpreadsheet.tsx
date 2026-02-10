@@ -83,6 +83,21 @@ type PersistedSpreadsheetState = {
   columnWidths?: number[];
 };
 
+type PersistedEnrichmentRun = {
+  jobId: string;
+  tabId: string;
+  sourceCol: number;
+  targetCol: number;
+  headerLabel: string;
+  totalRows: number;
+  startedAt: string;
+};
+
+type PersistedEnrichmentState = {
+  version: number;
+  runs: PersistedEnrichmentRun[];
+};
+
 type PersonalizationState = {
   isOpen: boolean;
   sourceCol: number;
@@ -101,6 +116,7 @@ type WebsiteEnrichmentState = {
   progress: number;
   totalRows: number;
   currentRow: number;
+  retryCount: number;
   error: string | null;
   jobId: string | null;
 };
@@ -192,6 +208,8 @@ const DEFAULT_COLS = 10;
 const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 700;
+const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
+const ENRICHMENT_STORAGE_VERSION = 1;
 
 const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -221,6 +239,9 @@ const normalizeRows = (rows: string[][]) => {
 
 const buildStorageKey = (userId: string | null) =>
   `${STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
+
+const buildEnrichmentStorageKey = (userId: string | null) =>
+  `${ENRICHMENT_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
 const coerceRows = (rows: unknown) => {
   if (!Array.isArray(rows)) return [];
@@ -296,6 +317,42 @@ const readPersistedState = (raw: unknown): PersistedSpreadsheetState | null => {
   const tabCounter = deriveTabCounter(tabs, candidate.tabCounter);
   const columnWidths = sanitizeColumnWidths(candidate.columnWidths);
   return { version: STORAGE_VERSION, tabs, activeTabId, tabCounter, columnWidths };
+};
+
+const readPersistedEnrichment = (raw: unknown): PersistedEnrichmentState => {
+  if (!raw) return { version: ENRICHMENT_STORAGE_VERSION, runs: [] };
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { version: ENRICHMENT_STORAGE_VERSION, runs: [] };
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return { version: ENRICHMENT_STORAGE_VERSION, runs: [] };
+  const candidate = parsed as Partial<PersistedEnrichmentState>;
+  if (candidate.version !== ENRICHMENT_STORAGE_VERSION || !Array.isArray(candidate.runs)) {
+    return { version: ENRICHMENT_STORAGE_VERSION, runs: [] };
+  }
+  const runs = candidate.runs
+    .map((run) => {
+      if (!run || typeof run !== 'object') return null;
+      const value = run as Partial<PersistedEnrichmentRun>;
+      if (!value.jobId || !value.tabId) return null;
+      const sourceCol = Number(value.sourceCol ?? 0);
+      const targetCol = Number(value.targetCol ?? 0);
+      return {
+        jobId: String(value.jobId),
+        tabId: String(value.tabId),
+        sourceCol: Number.isFinite(sourceCol) ? sourceCol : 0,
+        targetCol: Number.isFinite(targetCol) ? targetCol : 0,
+        headerLabel: typeof value.headerLabel === 'string' ? value.headerLabel : '',
+        totalRows: typeof value.totalRows === 'number' && Number.isFinite(value.totalRows) ? value.totalRows : 0,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : new Date().toISOString(),
+      } satisfies PersistedEnrichmentRun;
+    })
+    .filter((run): run is PersistedEnrichmentRun => run !== null);
+  return { version: ENRICHMENT_STORAGE_VERSION, runs };
 };
 
 const trimTrailingEmptyRows = (rows: string[][]) => {
@@ -450,6 +507,7 @@ export function DatabaseSpreadsheet() {
   const [tabCounter, setTabCounter] = useState(1);
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const enrichmentStorageKey = useMemo(() => buildEnrichmentStorageKey(userId), [userId]);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('cell');
@@ -525,10 +583,13 @@ export function DatabaseSpreadsheet() {
     progress: 0,
     totalRows: 0,
     currentRow: 0,
+    retryCount: 0,
     error: null,
     jobId: null,
   });
+  const [enrichmentTargetOverride, setEnrichmentTargetOverride] = useState<number | null>(null);
   const enrichmentAbortRef = useRef<AbortController | null>(null);
+  const resumeEnrichmentRef = useRef<string | null>(null);
   const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
     isOpen: false,
     briefText: '',
@@ -554,6 +615,50 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const nameCleanupAbortRef = useRef<AbortController | null>(null);
+
+  const readEnrichmentStorage = useCallback(() => {
+    try {
+      return readPersistedEnrichment(window.localStorage.getItem(enrichmentStorageKey));
+    } catch (error) {
+      void logError('spreadsheet.enrichment.state.read_failed', error);
+      return { version: ENRICHMENT_STORAGE_VERSION, runs: [] };
+    }
+  }, [enrichmentStorageKey]);
+
+  const writeEnrichmentStorage = useCallback((state: PersistedEnrichmentState) => {
+    try {
+      window.localStorage.setItem(enrichmentStorageKey, JSON.stringify(state));
+    } catch (error) {
+      void logError('spreadsheet.enrichment.state.write_failed', error);
+    }
+  }, [enrichmentStorageKey]);
+
+  const upsertEnrichmentRun = useCallback((run: PersistedEnrichmentRun) => {
+    const current = readEnrichmentStorage();
+    const nextRuns = current.runs.filter(
+      (existing) => existing.jobId !== run.jobId && existing.tabId !== run.tabId,
+    );
+    nextRuns.push(run);
+    writeEnrichmentStorage({ version: ENRICHMENT_STORAGE_VERSION, runs: nextRuns });
+  }, [readEnrichmentStorage, writeEnrichmentStorage]);
+
+  const removeEnrichmentRun = useCallback((jobId: string) => {
+    const current = readEnrichmentStorage();
+    const nextRuns = current.runs.filter((run) => run.jobId !== jobId);
+    writeEnrichmentStorage({ version: ENRICHMENT_STORAGE_VERSION, runs: nextRuns });
+  }, [readEnrichmentStorage, writeEnrichmentStorage]);
+
+  const getEnrichmentRunForTab = useCallback((tabId: string) => {
+    const current = readEnrichmentStorage();
+    return current.runs.find((run) => run.tabId === tabId) ?? null;
+  }, [readEnrichmentStorage]);
+
+  const getFreshToken = useCallback(async (): Promise<string | null> => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) return session.access_token;
+    const { data: refreshed } = await supabase.auth.refreshSession();
+    return refreshed.session?.access_token ?? null;
+  }, []);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -589,6 +694,10 @@ export function DatabaseSpreadsheet() {
   useEffect(() => {
     updateScrollMetrics();
   }, [updateScrollMetrics, activeTabId]);
+
+  useEffect(() => {
+    setEnrichmentTargetOverride(null);
+  }, [activeTabId, websiteEnrichment.sourceCol]);
 
   useEffect(() => {
     const wrapper = tableWrapperRef.current;
@@ -1854,6 +1963,73 @@ export function DatabaseSpreadsheet() {
     });
   }, [activeTab, colCount]);
 
+  const enrichmentHeaderLabel = useMemo(() => {
+    const baseLabel = headerLabels[websiteEnrichment.sourceCol] || toColumnLabel(websiteEnrichment.sourceCol);
+    return `Обогащение (${baseLabel})`;
+  }, [headerLabels, websiteEnrichment.sourceCol]);
+
+  const enrichmentColumnStats = useMemo(() => {
+    if (!activeTab) return [];
+    const headerRow = activeTab.data[0] ?? [];
+    const stats = Array.from({ length: colCount }, (_, col) => {
+      const headerValue = String(headerRow[col] ?? '').trim();
+      const label = headerLabels[col] || toColumnLabel(col);
+      return {
+        col,
+        label,
+        headerValue,
+        filled: 0,
+        missing: 0,
+        isEnrichment: headerValue.toLowerCase().startsWith('обогащение'),
+        matchesSourceLabel: headerValue === enrichmentHeaderLabel,
+      };
+    });
+
+    for (let rowIndex = 1; rowIndex < activeTab.data.length; rowIndex += 1) {
+      const row = activeTab.data[rowIndex];
+      const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      for (const entry of stats) {
+        const existingValue = String(row?.[entry.col] ?? '').trim();
+        if (existingValue) entry.filled += 1;
+        else entry.missing += 1;
+      }
+    }
+
+    return stats;
+  }, [activeTab, colCount, headerLabels, enrichmentHeaderLabel, websiteEnrichment.sourceCol]);
+
+  const enrichmentOptions = useMemo(() => {
+    if (enrichmentColumnStats.length === 0) return [];
+    const primary = enrichmentColumnStats.filter((entry) => entry.isEnrichment);
+    const secondary = enrichmentColumnStats.filter((entry) => !entry.isEnrichment);
+    const sortBy = (a: typeof enrichmentColumnStats[number], b: typeof enrichmentColumnStats[number]) =>
+      b.filled - a.filled || a.missing - b.missing || a.col - b.col;
+    primary.sort(sortBy);
+    secondary.sort(sortBy);
+    return [...primary, ...secondary];
+  }, [enrichmentColumnStats]);
+
+  const defaultEnrichmentTarget = useMemo(() => {
+    if (enrichmentColumnStats.length === 0) return null;
+    const matching = enrichmentColumnStats.filter((candidate) => candidate.matchesSourceLabel);
+    const pool = matching.length > 0 ? matching : enrichmentColumnStats;
+    let best = pool[0];
+    for (const candidate of pool.slice(1)) {
+      if (candidate.filled > best.filled || (candidate.filled === best.filled && candidate.col > best.col)) {
+        best = candidate;
+      }
+    }
+    return best.col;
+  }, [enrichmentColumnStats]);
+
+  const enrichmentTargetCol = enrichmentTargetOverride ?? defaultEnrichmentTarget;
+  const selectedEnrichmentCandidate = useMemo(
+    () => enrichmentColumnStats.find((candidate) => candidate.col === enrichmentTargetCol) ?? null,
+    [enrichmentColumnStats, enrichmentTargetCol],
+  );
+  const missingEnrichmentCount = selectedEnrichmentCandidate?.missing ?? 0;
+
   const groupSummary = useMemo(() => {
     if (!activeTab || groupByCol === null) return [];
     const map = new Map<string, { label: string; count: number }>();
@@ -2259,6 +2435,7 @@ export function DatabaseSpreadsheet() {
       progress: 0,
       totalRows: 0,
       currentRow: 0,
+      retryCount: 0,
       error: null,
       jobId: null,
     });
@@ -2268,147 +2445,92 @@ export function DatabaseSpreadsheet() {
     setWebsiteEnrichment((prev) => ({ ...prev, isOpen: false }));
   };
 
-  const handleStopWebsiteEnrichment = () => {
-    if (!websiteEnrichment.isGenerating || !websiteEnrichment.jobId) return;
-    if (
-      !window.confirm(
-        'Остановить обогащение? После отмены прогресс не сохранится и запустить придётся заново.',
-      )
-    ) {
-      return;
-    }
-    if (enrichmentAbortRef.current) {
-      enrichmentAbortRef.current.abort();
-    }
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      let token = session?.access_token;
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token;
-      }
-      if (token) {
-        await fetch(`/api/enrich/website/jobs/${websiteEnrichment.jobId}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ status: 'cancelled' }),
+  const ensureEnrichmentColumn = useCallback((tabId: string, targetColIndex: number, headerLabel: string) => {
+    if (!headerLabel) return;
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const nextData = tab.data.map((row, rowIndex) => {
+          const nextRow = [...row];
+          while (nextRow.length <= targetColIndex) {
+            nextRow.push('');
+          }
+          if (rowIndex === 0) {
+            const existingHeader = String(nextRow[targetColIndex] ?? '').trim();
+            if (!existingHeader) {
+              nextRow[targetColIndex] = headerLabel;
+            }
+          }
+          return nextRow;
         });
-      }
-    })();
-  };
+        return { ...tab, data: nextData };
+      }),
+    );
+  }, [setTabs]);
 
-  const handleStartWebsiteEnrichment = async () => {
-    if (!activeTab || websiteEnrichment.isGenerating) return;
+  const runWebsiteEnrichmentPolling = useCallback(async (params: {
+    jobId: string;
+    tabId: string;
+    sourceCol: number;
+    targetColIndex: number;
+    totalRowsFallback: number;
+    headerLabel: string;
+    applyOnlyEmpty: boolean;
+    initialToken?: string | null;
+  }) => {
+    const {
+      jobId,
+      tabId,
+      sourceCol,
+      targetColIndex,
+      totalRowsFallback,
+      headerLabel,
+      applyOnlyEmpty,
+      initialToken,
+    } = params;
 
-    const dataRows = activeTab.data.slice(1).filter((row) => {
-      const value = row[websiteEnrichment.sourceCol]?.trim();
-      return value && value.length > 0;
-    });
-
-    if (dataRows.length === 0) {
+    const token = initialToken ?? (await getFreshToken());
+    if (!token) {
       setWebsiteEnrichment((prev) => ({
         ...prev,
-        error: 'Нет данных в выбранной колонке',
-      }));
-      return;
-    }
-
-    // Get a fresh auth token (refresh the session to avoid stale JWTs)
-    const getFreshToken = async (): Promise<string | null> => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.access_token) return session.access_token;
-      // If cached session is stale, try explicit refresh
-      const { data: refreshed } = await supabase.auth.refreshSession();
-      return refreshed.session?.access_token ?? null;
-    };
-
-    let currentToken = await getFreshToken();
-    if (!currentToken) {
-      setWebsiteEnrichment((prev) => ({
-        ...prev,
+        isGenerating: false,
         error: 'Необходима авторизация',
+        jobId: null,
       }));
       return;
     }
 
-    enrichmentAbortRef.current = new AbortController();
+    const controller = enrichmentAbortRef.current ?? new AbortController();
+    enrichmentAbortRef.current = controller;
+    const signal = controller.signal;
+    if (signal.aborted) {
+      setWebsiteEnrichment((prev) => ({ ...prev, isGenerating: false, jobId: null }));
+      return;
+    }
 
+    ensureEnrichmentColumn(tabId, targetColIndex, headerLabel);
+    setEnrichmentTargetOverride(targetColIndex);
     setWebsiteEnrichment((prev) => ({
       ...prev,
+      sourceCol,
       isGenerating: true,
-      progress: 0,
-      totalRows: dataRows.length,
-      currentRow: 0,
+      totalRows: totalRowsFallback,
+      currentRow: Math.min(prev.currentRow, totalRowsFallback),
+      progress: totalRowsFallback > 0 ? Math.round((Math.min(prev.currentRow, totalRowsFallback) / totalRowsFallback) * 100) : 0,
+      retryCount: 0,
       error: null,
+      jobId,
     }));
-
-    setUndoSnapshot('Обогащение с сайта');
-
-    const newHeaderName = `Обогащение (${headerLabels[websiteEnrichment.sourceCol] || toColumnLabel(websiteEnrichment.sourceCol)})`;
-    const startCol = websiteEnrichment.sourceCol + 1;
-    const isColumnEmpty = (colIndex: number) =>
-      activeTab.data.every((row) => {
-        const value = row[colIndex] ?? '';
-        return value.trim().length === 0;
-      });
-
-    let newColIndex = startCol;
-    while (!isColumnEmpty(newColIndex)) {
-      newColIndex += 1;
-    }
-
-    const baseData = activeTab.data.map((row, rowIndex) => {
-      const nextRow = [...row];
-      while (nextRow.length <= newColIndex) {
-        nextRow.push('');
-      }
-      if (rowIndex === 0) {
-        nextRow[newColIndex] = newHeaderName;
-      }
-      return nextRow;
-    });
-
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
-    );
-
-    if (highlightTimeoutRef.current) {
-      clearTimeout(highlightTimeoutRef.current);
-    }
-    setHighlightedCol(newColIndex);
-    highlightTimeoutRef.current = setTimeout(() => {
-      setHighlightedCol(null);
-    }, ENRICHMENT_HIGHLIGHT_DURATION);
-
-    if (tableWrapperRef.current) {
-      const wrapper = tableWrapperRef.current;
-      requestAnimationFrame(() => {
-        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
-      });
-    }
 
     let processedCount = 0;
     let errorCount = 0;
-    let jobId: string | null = null;
-
-    const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
-
-    for (let i = 1; i < activeTab.data.length; i++) {
-      const sourceValue = activeTab.data[i][websiteEnrichment.sourceCol]?.trim();
-      if (sourceValue && sourceValue.length > 0) {
-        rowsToProcess.push({ rowIndex: i, sourceValue });
-      }
-    }
-
-    const pendingUpdates = new Map<number, string>();
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastProgressAt = 0;
     let cursor: string | null = null;
     let pollDelayMs = 1000;
     const maxPollDelayMs = 5000;
+    const pendingUpdates = new Map<number, string>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastProgressAt = 0;
+    let currentToken = token;
 
     const flushUpdates = () => {
       if (flushTimer) {
@@ -2420,16 +2542,34 @@ export function DatabaseSpreadsheet() {
       pendingUpdates.clear();
       setTabs((prev) =>
         prev.map((tab) => {
-          if (tab.id !== activeTabId) return tab;
+          if (tab.id !== tabId) return tab;
           const nextData = [...tab.data];
+          if (headerLabel) {
+            const headerRow = nextData[0];
+            if (headerRow) {
+              const nextHeader = [...headerRow];
+              while (nextHeader.length <= targetColIndex) {
+                nextHeader.push('');
+              }
+              const existingHeader = String(nextHeader[targetColIndex] ?? '').trim();
+              if (!existingHeader) {
+                nextHeader[targetColIndex] = headerLabel;
+                nextData[0] = nextHeader;
+              }
+            }
+          }
           updates.forEach((text, rowIndex) => {
             const existingRow = nextData[rowIndex];
             if (!existingRow) return;
             const newRow = [...existingRow];
-            while (newRow.length <= newColIndex) {
+            while (newRow.length <= targetColIndex) {
               newRow.push('');
             }
-            newRow[newColIndex] = text;
+            if (applyOnlyEmpty) {
+              const existingValue = String(newRow[targetColIndex] ?? '').trim();
+              if (existingValue) return;
+            }
+            newRow[targetColIndex] = text;
             nextData[rowIndex] = newRow;
           });
           return { ...tab, data: nextData };
@@ -2451,59 +2591,19 @@ export function DatabaseSpreadsheet() {
       const now = Date.now();
       if (!force && now - lastProgressAt < ENRICHMENT_PROGRESS_INTERVAL_MS) return;
       lastProgressAt = now;
+      const safeTotal = Math.max(0, total);
+      const safeProcessed = Math.min(processedCount, safeTotal);
+      const retryCount = Math.max(0, processedCount - safeTotal);
       setWebsiteEnrichment((prev) => ({
         ...prev,
-        currentRow: processedCount,
-        progress: total > 0 ? Math.round((processedCount / total) * 100) : 0,
+        totalRows: safeTotal,
+        currentRow: safeProcessed,
+        progress: safeTotal > 0 ? Math.round((safeProcessed / safeTotal) * 100) : 0,
+        retryCount,
       }));
     };
 
     try {
-      const startRes = await fetch('/api/enrich/website/jobs', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${currentToken}`,
-        },
-        body: JSON.stringify({
-          rows: rowsToProcess.map((row) => ({
-            rowIndex: row.rowIndex,
-            url: row.sourceValue,
-          })),
-        }),
-        signal: enrichmentAbortRef.current?.signal,
-      });
-
-      const startData = await parseJsonResponse<{
-        job_id?: string;
-        total?: number;
-        processed?: number;
-        error_count?: number;
-        error?: string;
-      }>(startRes, 'website_enrichment.start');
-
-      if (!startRes.ok || !startData.job_id) {
-        throw new Error(startData.error ?? 'Не удалось создать задачу');
-      }
-
-      jobId = startData.job_id;
-      processedCount = startData.processed ?? 0;
-      errorCount = startData.error_count ?? 0;
-      const total = startData.total ?? rowsToProcess.length;
-
-      setWebsiteEnrichment((prev) => ({
-        ...prev,
-        isOpen: false,
-        isGenerating: true,
-        totalRows: total,
-        currentRow: processedCount,
-        progress: total > 0 ? Math.round((processedCount / total) * 100) : 0,
-        jobId,
-        error: null,
-      }));
-
-      const signal = enrichmentAbortRef.current?.signal;
-
       while (!signal?.aborted) {
         const fetchResults = async (tkn: string) =>
           fetch(
@@ -2564,7 +2664,7 @@ export function DatabaseSpreadsheet() {
         }
 
         if (data.job) {
-          const total = data.job.total ?? rowsToProcess.length;
+          const total = data.job.total ?? totalRowsFallback;
           processedCount = data.job.processed ?? processedCount;
           errorCount = data.job.error_count ?? errorCount;
           reportProgress(total);
@@ -2573,8 +2673,9 @@ export function DatabaseSpreadsheet() {
         const status = data.job?.status;
         if (status && ['completed', 'failed', 'cancelled'].includes(status)) {
           flushUpdates();
-          const total = data.job?.total ?? rowsToProcess.length;
+          const total = data.job?.total ?? totalRowsFallback;
           const successCount = total - (data.job?.error_count ?? errorCount);
+          reportProgress(total, true);
           setLastAction({
             message:
               status === 'cancelled'
@@ -2591,10 +2692,10 @@ export function DatabaseSpreadsheet() {
             error: status === 'failed' ? data.job?.error_message ?? 'Произошла ошибка' : null,
             jobId: null,
           }));
+          removeEnrichmentRun(jobId);
           break;
         }
 
-        // Adaptive polling: slow down when no new results to reduce DB pressure
         if (resultsCount === 0 && status === 'running') {
           const elapsed = Date.now() - reqStartedAt;
           pollDelayMs = Math.min(maxPollDelayMs, Math.max(pollDelayMs * 1.5, elapsed));
@@ -2604,11 +2705,248 @@ export function DatabaseSpreadsheet() {
 
         await sleep(pollDelayMs);
       }
-
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         setLastAction({
           message: `Обогащение отменено (обработано: ${processedCount})`,
+          time: Date.now(),
+        });
+        setWebsiteEnrichment((prev) => ({
+          ...prev,
+          isGenerating: false,
+          isOpen: false,
+          jobId: null,
+        }));
+        removeEnrichmentRun(jobId);
+      } else {
+        setWebsiteEnrichment((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isGenerating: false,
+          jobId: null,
+        }));
+      }
+    } finally {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+      }
+      enrichmentAbortRef.current = null;
+    }
+  }, [
+    ensureEnrichmentColumn,
+    getFreshToken,
+    removeEnrichmentRun,
+    setEnrichmentTargetOverride,
+    setLastAction,
+    setTabs,
+    setWebsiteEnrichment,
+  ]);
+
+  const handleStopWebsiteEnrichment = () => {
+    if (!websiteEnrichment.isGenerating || !websiteEnrichment.jobId) return;
+    if (
+      !window.confirm(
+        'Остановить обогащение? После отмены прогресс не сохранится и запустить придётся заново.',
+      )
+    ) {
+      return;
+    }
+    if (enrichmentAbortRef.current) {
+      enrichmentAbortRef.current.abort();
+    }
+    removeEnrichmentRun(websiteEnrichment.jobId);
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      let token = session?.access_token;
+      if (!token) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        token = refreshed.session?.access_token;
+      }
+      if (token) {
+        await fetch(`/api/enrich/website/jobs/${websiteEnrichment.jobId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+      }
+    })();
+  };
+
+  const handleStartWebsiteEnrichment = async (options?: { targetColIndex?: number; onlyEmpty?: boolean }) => {
+    if (!activeTab || websiteEnrichment.isGenerating) return;
+
+    const targetColIndex = typeof options?.targetColIndex === 'number' ? options.targetColIndex : null;
+    const onlyEmpty = Boolean(options?.onlyEmpty && targetColIndex !== null);
+    const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
+
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      if (onlyEmpty && targetColIndex !== null) {
+        const existingValue = String(row?.[targetColIndex] ?? '').trim();
+        if (existingValue.length > 0) continue;
+      }
+      rowsToProcess.push({ rowIndex: i, sourceValue });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        error: onlyEmpty ? 'Нет пустых ячеек для дозаполнения' : 'Нет данных в выбранной колонке',
+      }));
+      return;
+    }
+
+    let currentToken = await getFreshToken();
+    if (!currentToken) {
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        error: 'Необходима авторизация',
+      }));
+      return;
+    }
+
+    enrichmentAbortRef.current = new AbortController();
+
+    setWebsiteEnrichment((prev) => ({
+      ...prev,
+      isGenerating: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Обогащение с сайта');
+
+    const newHeaderName = enrichmentHeaderLabel;
+    const startCol = websiteEnrichment.sourceCol + 1;
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => {
+        const value = row[colIndex] ?? '';
+        return value.trim().length === 0;
+      });
+
+    let newColIndex = targetColIndex ?? startCol;
+    let baseData: string[][];
+
+    if (targetColIndex === null) {
+      while (!isColumnEmpty(newColIndex)) {
+        newColIndex += 1;
+      }
+
+      baseData = activeTab.data.map((row, rowIndex) => {
+        const nextRow = [...row];
+        while (nextRow.length <= newColIndex) {
+          nextRow.push('');
+        }
+        if (rowIndex === 0) {
+          nextRow[newColIndex] = newHeaderName;
+        }
+        return nextRow;
+      });
+    } else {
+      baseData = activeTab.data.map((row) => {
+        const nextRow = [...row];
+        while (nextRow.length <= newColIndex) {
+          nextRow.push('');
+        }
+        return nextRow;
+      });
+    }
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    setHighlightedCol(newColIndex);
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedCol(null);
+    }, ENRICHMENT_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => {
+        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
+      });
+    }
+
+    try {
+      const startRes = await fetch('/api/enrich/website/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          rows: rowsToProcess.map((row) => ({
+            rowIndex: row.rowIndex,
+            url: row.sourceValue,
+          })),
+        }),
+        signal: enrichmentAbortRef.current?.signal,
+      });
+
+      const startData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error_count?: number;
+        error?: string;
+      }>(startRes, 'website_enrichment.start');
+
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
+      }
+
+      const jobId = startData.job_id;
+      const total = startData.total ?? rowsToProcess.length;
+      const processedCount = startData.processed ?? 0;
+
+      const safeProcessed = Math.min(processedCount, total);
+      const retryCount = Math.max(0, processedCount - total);
+      setWebsiteEnrichment((prev) => ({
+        ...prev,
+        isOpen: false,
+        isGenerating: true,
+        totalRows: total,
+        currentRow: safeProcessed,
+        progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+        retryCount,
+        jobId,
+        error: null,
+      }));
+      setEnrichmentTargetOverride(newColIndex);
+      upsertEnrichmentRun({
+        jobId,
+        tabId: activeTabId,
+        sourceCol: websiteEnrichment.sourceCol,
+        targetCol: newColIndex,
+        headerLabel: newHeaderName,
+        totalRows: total,
+        startedAt: new Date().toISOString(),
+      });
+      await runWebsiteEnrichmentPolling({
+        jobId,
+        tabId: activeTabId,
+        sourceCol: websiteEnrichment.sourceCol,
+        targetColIndex: newColIndex,
+        totalRowsFallback: total,
+        headerLabel: newHeaderName,
+        applyOnlyEmpty: onlyEmpty,
+        initialToken: currentToken,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({
+          message: 'Обогащение отменено',
           time: Date.now(),
         });
         setWebsiteEnrichment((prev) => ({
@@ -3468,6 +3806,44 @@ export function DatabaseSpreadsheet() {
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
 
+  useEffect(() => {
+    if (!isHydrated || !activeTab || websiteEnrichment.isGenerating) return;
+    const run = getEnrichmentRunForTab(activeTabId);
+    if (!run) return;
+    if (resumeEnrichmentRef.current === run.jobId) return;
+    const tabExists = tabs.some((tab) => tab.id === run.tabId);
+    if (!tabExists) {
+      removeEnrichmentRun(run.jobId);
+      return;
+    }
+    const totalFallback = run.totalRows > 0 ? run.totalRows : Math.max(0, activeTab.data.length - 1);
+    const headerLabel = run.headerLabel || enrichmentHeaderLabel;
+    resumeEnrichmentRef.current = run.jobId;
+    setEnrichmentTargetOverride(run.targetCol);
+    void runWebsiteEnrichmentPolling({
+      jobId: run.jobId,
+      tabId: run.tabId,
+      sourceCol: run.sourceCol,
+      targetColIndex: run.targetCol,
+      totalRowsFallback: totalFallback,
+      headerLabel,
+      applyOnlyEmpty: true,
+    }).finally(() => {
+      resumeEnrichmentRef.current = null;
+    });
+  }, [
+    activeTab,
+    activeTabId,
+    enrichmentHeaderLabel,
+    getEnrichmentRunForTab,
+    isHydrated,
+    removeEnrichmentRun,
+    runWebsiteEnrichmentPolling,
+    setEnrichmentTargetOverride,
+    tabs,
+    websiteEnrichment.isGenerating,
+  ]);
+
   return (
     <div className="space-y-0.5 h-[calc(100vh-0.75rem)] flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
@@ -3577,6 +3953,17 @@ export function DatabaseSpreadsheet() {
             <span className="text-[10px] text-gray-500">
               Обогащение: {websiteEnrichment.currentRow}/{websiteEnrichment.totalRows}
             </span>
+            {websiteEnrichment.retryCount > 0 && (
+              <span className="text-[10px] text-amber-600">
+                Ретраи: {websiteEnrichment.retryCount}
+              </span>
+            )}
+            <div className="h-1 w-20 overflow-hidden rounded-full bg-gray-200">
+              <div
+                className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                style={{ width: `${websiteEnrichment.progress}%` }}
+              />
+            </div>
             <button
               type="button"
               onClick={handleStopWebsiteEnrichment}
@@ -4610,6 +4997,44 @@ export function DatabaseSpreadsheet() {
                 </p>
               </div>
 
+              {enrichmentOptions.length > 0 && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-semibold text-gray-700">
+                    Колонка для дозаполнения
+                  </label>
+                  <div className="relative">
+                    <select
+                      value={enrichmentTargetCol ?? ''}
+                      onChange={(e) => {
+                        const nextValue = Number(e.target.value);
+                        setEnrichmentTargetOverride(Number.isNaN(nextValue) ? null : nextValue);
+                      }}
+                      disabled={websiteEnrichment.isGenerating}
+                      className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                    >
+                      {enrichmentOptions.map((candidate) => (
+                        <option key={`enrich-target-${candidate.col}`} value={candidate.col}>
+                          {toColumnLabel(candidate.col)} — {candidate.label}
+                          {candidate.isEnrichment ? ' [Обогащение]' : ''} (пустых {candidate.missing})
+                        </option>
+                      ))}
+                    </select>
+                    <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                      ▼
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500 px-1">
+                    Дозаполнит только пустые ячейки в выбранной колонке.
+                  </p>
+                  {enrichmentTargetCol !== null && (
+                    <p className="text-xs text-gray-500 px-1">
+                      Пустых в колонке обогащения:{' '}
+                      <span className="font-semibold text-gray-700">{missingEnrichmentCount}</span>
+                    </p>
+                  )}
+                </div>
+              )}
+
               {websiteEnrichment.isGenerating ? (
                 <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
                   <p className="text-xs text-blue-700 leading-relaxed">
@@ -4636,6 +5061,11 @@ export function DatabaseSpreadsheet() {
                       {websiteEnrichment.currentRow} / {websiteEnrichment.totalRows}
                     </span>
                   </div>
+                  {websiteEnrichment.retryCount > 0 && (
+                    <div className="mb-2 text-xs text-amber-600">
+                      Ретраи: {websiteEnrichment.retryCount}
+                    </div>
+                  )}
                   <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
                     <div
                       className="h-full bg-blue-600 transition-all duration-300 ease-out"
@@ -4671,14 +5101,29 @@ export function DatabaseSpreadsheet() {
                     Остановить
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => void handleStartWebsiteEnrichment()}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
-                  >
-                    <span>W</span>
-                    Запустить обогащение
-                  </button>
+                  <>
+                    {enrichmentTargetCol !== null && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleStartWebsiteEnrichment({ targetColIndex: enrichmentTargetCol, onlyEmpty: true })
+                        }
+                        disabled={missingEnrichmentCount === 0}
+                        className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-4 py-2.5 text-sm font-medium text-blue-600 transition hover:bg-blue-50 disabled:opacity-50 disabled:hover:bg-white"
+                        title={missingEnrichmentCount === 0 ? 'Пустых ячеек нет' : 'Заполнить пустые ячейки'}
+                      >
+                        Дозаполнить пустые
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleStartWebsiteEnrichment()}
+                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+                    >
+                      <span>W</span>
+                      Запустить обогащение
+                    </button>
+                  </>
                 )}
               </div>
             </div>
