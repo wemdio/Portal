@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { join } from 'path';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -140,8 +139,8 @@ export async function POST(req: NextRequest) {
     }
 
     const { PDFParse } = await import('pdf-parse');
-    const workerPath = join(process.cwd(), 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs');
-    PDFParse.setWorker(workerPath);
+    const { getData } = await import('pdf-parse/worker');
+    PDFParse.setWorker(getData());
 
     const parser = new PDFParse({ data: buffer });
     let result: Awaited<ReturnType<typeof parser.getText>>;
