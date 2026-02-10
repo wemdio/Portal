@@ -27,6 +27,13 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     typedRoutes: true,
+    proxyClientMaxBodySize: '25mb',
+  },
+  outputFileTracingIncludes: {
+    '/api/brief-scoring/parse-pdf': [
+      './node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',
+      './node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs',
+    ],
   },
   serverExternalPackages: ['pdf-parse', 'pdfjs-dist'],
   env: {

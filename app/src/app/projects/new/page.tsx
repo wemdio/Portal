@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
@@ -15,6 +15,27 @@ const PROJECT_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'Продажа', label: 'Продажа (новый клиент)' },
   { value: 'Продление', label: 'Продление' },
 ];
+
+/* ── helpers for auto margin ── */
+function parseBudgetValue(raw: string): number {
+  if (!raw) return 0;
+  const cleaned = raw.replace(/\s/g, '').replace(/[^0-9.,]/g, '').replace(',', '.');
+  return parseFloat(cleaned) || 0;
+}
+
+function monthsBetween(startStr: string, endStr: string): number {
+  if (!startStr || !endStr) return 0;
+  const s = new Date(startStr);
+  const e = new Date(endStr);
+  if (isNaN(s.getTime()) || isNaN(e.getTime())) return 0;
+  const diffMs = e.getTime() - s.getTime();
+  if (diffMs <= 0) return 0;
+  // calc full months + fractional part
+  const months = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+  const dayFraction = (e.getDate() - s.getDate()) / 30;
+  const total = months + dayFraction;
+  return Math.max(total, 0);
+}
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -63,6 +84,28 @@ export default function NewProjectPage() {
     launch_date: '',
   });
 
+  /* monthly expense – used only for margin calculation, not persisted separately */
+  const [monthlyExpense, setMonthlyExpense] = useState('');
+  /* true while margin is driven by the auto formula; false if user overrides */
+  const [marginAuto, setMarginAuto] = useState(true);
+
+  /* recalculate margin whenever inputs change */
+  const recalcMargin = useCallback(() => {
+    if (!marginAuto) return;
+    const budget = parseBudgetValue(formData.budget);
+    const expense = parseBudgetValue(monthlyExpense);
+    const months = monthsBetween(formData.launch_date, formData.deadline);
+
+    if (budget > 0 && months > 0) {
+      const totalCost = expense * months;
+      const marginPct = ((budget - totalCost) / budget) * 100;
+      const rounded = Math.round(marginPct * 10) / 10;          // one decimal
+      setFormData((prev) => ({ ...prev, margin: `${rounded}%` }));
+    }
+  }, [formData.budget, monthlyExpense, formData.launch_date, formData.deadline, marginAuto]);
+
+  useEffect(() => { recalcMargin(); }, [recalcMargin]);
+
   const statusOptions = [
     'В работе',
     'Тестирование',
@@ -73,7 +116,12 @@ export default function NewProjectPage() {
   ];
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    // if user manually edits margin – disable auto-calculation
+    if (name === 'margin') {
+      setMarginAuto(false);
+    }
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSave = async () => {
@@ -353,7 +401,7 @@ export default function NewProjectPage() {
           </div>
         </div>
 
-        {/* Budget, Margin & KPI Row */}
+        {/* Budget & Monthly Expense Row */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -370,16 +418,19 @@ export default function NewProjectPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Маржа
+              Расход в мес (факт)
             </label>
             <input
               type="text"
-              name="margin"
-              value={formData.margin}
-              onChange={handleChange}
+              value={monthlyExpense}
+              onChange={(e) => {
+                setMonthlyExpense(e.target.value);
+                setMarginAuto(true); // re-enable auto when user edits expense
+              }}
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Например: 45%"
+              placeholder="Например: 500"
             />
+            <p className="mt-1 text-xs text-gray-400">Ежемесячный расход на проект (инструменты, домены и т.д.)</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -394,6 +445,77 @@ export default function NewProjectPage() {
               placeholder="Ключевые показатели эффективности"
             />
           </div>
+        </div>
+
+        {/* Margin (auto-calculated) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="relative">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Маржа
+              {marginAuto && formData.margin && (
+                <span className="ml-2 inline-flex items-center gap-1 text-xs font-normal text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  авто
+                </span>
+              )}
+            </label>
+            <input
+              type="text"
+              name="margin"
+              value={formData.margin}
+              onChange={handleChange}
+              className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                marginAuto && formData.margin ? 'border-green-300 bg-green-50/40' : 'border-gray-300'
+              }`}
+              placeholder="Автоматически или вручную"
+            />
+            {marginAuto && formData.margin ? (
+              <p className="mt-1 text-xs text-green-600">
+                Рассчитано: (Выручка − Расход × Мес.) / Выручка × 100
+              </p>
+            ) : !marginAuto ? (
+              <button
+                type="button"
+                onClick={() => { setMarginAuto(true); }}
+                className="mt-1 text-xs text-blue-600 hover:underline"
+              >
+                Вернуть автоматический расчёт
+              </button>
+            ) : (
+              <p className="mt-1 text-xs text-gray-400">
+                Заполните выручку, расход в мес, дату запуска и дедлайн для автоматического расчёта
+              </p>
+            )}
+          </div>
+          {/* Show breakdown when auto */}
+          {marginAuto && formData.margin && formData.budget && (
+            <div className="md:col-span-2 bg-gray-50 border border-gray-200 rounded-lg p-4 flex flex-wrap gap-x-8 gap-y-2 text-sm text-gray-600">
+              <div>
+                <span className="text-gray-400">Выручка:</span>{' '}
+                <span className="font-medium text-gray-900">{parseBudgetValue(formData.budget).toLocaleString('ru-RU')} ₽</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Расход/мес:</span>{' '}
+                <span className="font-medium text-gray-900">{parseBudgetValue(monthlyExpense).toLocaleString('ru-RU')} ₽</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Срок:</span>{' '}
+                <span className="font-medium text-gray-900">{monthsBetween(formData.launch_date, formData.deadline).toFixed(1)} мес.</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Общий расход:</span>{' '}
+                <span className="font-medium text-gray-900">
+                  {(parseBudgetValue(monthlyExpense) * monthsBetween(formData.launch_date, formData.deadline)).toLocaleString('ru-RU')} ₽
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-400">Прибыль:</span>{' '}
+                <span className="font-medium text-green-700">
+                  {(parseBudgetValue(formData.budget) - parseBudgetValue(monthlyExpense) * monthsBetween(formData.launch_date, formData.deadline)).toLocaleString('ru-RU')} ₽
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Payment Date */}
