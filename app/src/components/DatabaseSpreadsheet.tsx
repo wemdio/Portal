@@ -123,8 +123,10 @@ type WebsiteEnrichmentState = {
 
 type BriefScoringState = {
   isOpen: boolean;
+  inputMode: 'pdf' | 'text';
   briefText: string;
   briefFileName: string;
+  manualText: string;
   isUploading: boolean;
   isScoring: boolean;
   progress: number;
@@ -592,8 +594,10 @@ export function DatabaseSpreadsheet() {
   const resumeEnrichmentRef = useRef<string | null>(null);
   const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
     isOpen: false,
+    inputMode: 'pdf',
     briefText: '',
     briefFileName: '',
+    manualText: '',
     isUploading: false,
     isScoring: false,
     progress: 0,
@@ -2972,8 +2976,10 @@ export function DatabaseSpreadsheet() {
   const openBriefScoringModal = () => {
     setBriefScoring({
       isOpen: true,
+      inputMode: 'pdf',
       briefText: '',
       briefFileName: '',
+      manualText: '',
       isUploading: false,
       isScoring: false,
       progress: 0,
@@ -3103,8 +3109,17 @@ export function DatabaseSpreadsheet() {
   const handleStartBriefScoring = async () => {
     if (!activeTab || briefScoring.isScoring) return;
 
-    if (!briefScoring.briefText.trim()) {
-      setBriefScoring((prev) => ({ ...prev, error: 'Загрузите PDF бриф' }));
+    const effectiveBriefText = briefScoring.inputMode === 'text'
+      ? briefScoring.manualText.trim()
+      : briefScoring.briefText.trim();
+
+    if (!effectiveBriefText) {
+      setBriefScoring((prev) => ({
+        ...prev,
+        error: briefScoring.inputMode === 'text'
+          ? 'Введите описание целевой аудитории'
+          : 'Загрузите PDF бриф',
+      }));
       return;
     }
 
@@ -3132,7 +3147,7 @@ export function DatabaseSpreadsheet() {
       error: null,
     }));
 
-    setUndoSnapshot('ЦА по брифу');
+    setUndoSnapshot('Оценка ЦА');
 
     // Add two new columns: Score and Reason
     const scoreColIndex = activeTab.data[0].length;
@@ -3198,7 +3213,7 @@ export function DatabaseSpreadsheet() {
               res = await fetch('/api/brief-scoring/score', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                body: JSON.stringify({ briefText: briefScoring.briefText, companies }),
+                body: JSON.stringify({ briefText: effectiveBriefText, companies }),
                 signal: briefScoringAbortRef.current?.signal,
               });
             } catch (error) {
@@ -3328,14 +3343,14 @@ export function DatabaseSpreadsheet() {
       const successCount = processedCount - errorCount;
       setLastAction({
         message: errorCount > 0
-          ? `ЦА по брифу: ${successCount} успешно, ${errorCount} с ошибками`
-          : `ЦА по брифу завершено: ${processedCount} строк`,
+          ? `Оценка ЦА: ${successCount} успешно, ${errorCount} с ошибками`
+          : `Оценка ЦА завершено: ${processedCount} строк`,
         time: Date.now(),
       });
       setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
     } catch (err) {
       if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
-        setLastAction({ message: `ЦА по брифу отменено (обработано: ${processedCount})`, time: Date.now() });
+        setLastAction({ message: `Оценка ЦА отменено (обработано: ${processedCount})`, time: Date.now() });
         setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
       } else {
         setBriefScoring((prev) => ({
@@ -3929,7 +3944,7 @@ export function DatabaseSpreadsheet() {
           disabled={colCount === 0}
           className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-emerald-700 disabled:bg-gray-300"
         >
-          ЦА по брифу
+          Оценка ЦА
         </button>
 
         <button
@@ -5141,8 +5156,8 @@ export function DatabaseSpreadsheet() {
                   🎯
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-gray-900">ЦА по брифу</h3>
-                  <p className="text-xs text-gray-500 font-medium">Оценка релевантности компаний по брифу клиента</p>
+                  <h3 className="text-lg font-bold text-gray-900">Оценка ЦА</h3>
+                  <p className="text-xs text-gray-500 font-medium">Оценка релевантности компаний по брифу или описанию ЦА</p>
                 </div>
               </div>
               <button
@@ -5156,58 +5171,110 @@ export function DatabaseSpreadsheet() {
             </div>
 
             <div className="px-6 py-5 space-y-4">
-              {/* Upload area */}
+              {/* Mode switcher */}
+              <div className="flex rounded-lg bg-gray-100 p-1">
+                <button
+                  type="button"
+                  onClick={() => setBriefScoring((prev) => ({ ...prev, inputMode: 'pdf', error: null }))}
+                  disabled={briefScoring.isScoring}
+                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-all ${
+                    briefScoring.inputMode === 'pdf'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  } disabled:opacity-50`}
+                >
+                  📄 PDF бриф
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBriefScoring((prev) => ({ ...prev, inputMode: 'text', error: null }))}
+                  disabled={briefScoring.isScoring}
+                  className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-all ${
+                    briefScoring.inputMode === 'text'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  } disabled:opacity-50`}
+                >
+                  ✏️ Текстом
+                </button>
+              </div>
+
+              {/* Input area */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  PDF бриф от клиента
-                </label>
-                {!briefScoring.briefText ? (
-                  <button
-                    type="button"
-                    onClick={() => briefFileInputRef.current?.click()}
-                    disabled={briefScoring.isUploading || briefScoring.isScoring}
-                    className="w-full rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-8 text-center transition hover:border-emerald-400 hover:bg-emerald-50/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {briefScoring.isUploading ? (
-                      <div className="flex flex-col items-center gap-2">
-                        <span className="animate-spin text-2xl">⟳</span>
-                        <span className="text-sm text-gray-500">Загрузка {briefScoring.briefFileName}...</span>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center gap-2">
-                        <span className="text-3xl">📄</span>
-                        <span className="text-sm font-medium text-gray-600">Нажмите для загрузки PDF</span>
-                        <span className="text-xs text-gray-400">Макс. размер: 20 МБ</span>
-                      </div>
-                    )}
-                  </button>
-                ) : (
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">✅</span>
-                        <span className="text-sm font-medium text-emerald-800">{briefScoring.briefFileName}</span>
-                      </div>
+                {briefScoring.inputMode === 'pdf' ? (
+                  <>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      PDF бриф от клиента
+                    </label>
+                    {!briefScoring.briefText ? (
                       <button
                         type="button"
-                        onClick={() => {
-                          setBriefScoring((prev) => ({ ...prev, briefText: '', briefFileName: '', error: null }));
-                        }}
-                        disabled={briefScoring.isScoring}
-                        className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                        onClick={() => briefFileInputRef.current?.click()}
+                        disabled={briefScoring.isUploading || briefScoring.isScoring}
+                        className="w-full rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-8 text-center transition hover:border-emerald-400 hover:bg-emerald-50/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        Заменить
+                        {briefScoring.isUploading ? (
+                          <div className="flex flex-col items-center gap-2">
+                            <span className="animate-spin text-2xl">⟳</span>
+                            <span className="text-sm text-gray-500">Загрузка {briefScoring.briefFileName}...</span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center gap-2">
+                            <span className="text-3xl">📄</span>
+                            <span className="text-sm font-medium text-gray-600">Нажмите для загрузки PDF</span>
+                            <span className="text-xs text-gray-400">Макс. размер: 20 МБ</span>
+                          </div>
+                        )}
                       </button>
-                    </div>
-                    <p className="text-xs text-gray-500 line-clamp-3">{briefScoring.briefText.slice(0, 300)}...</p>
-                  </div>
+                    ) : (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-lg">✅</span>
+                            <span className="text-sm font-medium text-emerald-800">{briefScoring.briefFileName}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBriefScoring((prev) => ({ ...prev, briefText: '', briefFileName: '', error: null }));
+                            }}
+                            disabled={briefScoring.isScoring}
+                            className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                          >
+                            Заменить
+                          </button>
+                        </div>
+                        <p className="text-xs text-gray-500 line-clamp-3">{briefScoring.briefText.slice(0, 300)}...</p>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Опишите вашу идеальную целевую аудиторию
+                    </label>
+                    <textarea
+                      value={briefScoring.manualText}
+                      onChange={(e) =>
+                        setBriefScoring((prev) => ({ ...prev, manualText: e.target.value, error: null }))
+                      }
+                      disabled={briefScoring.isScoring}
+                      placeholder="Например: IT-компании от 50 сотрудников, работающие в сфере финтеха, с офисами в Москве и Санкт-Петербурге. Ищем компании с потребностью в автоматизации процессов..."
+                      className="w-full rounded-xl border border-gray-300 bg-white p-4 text-sm text-gray-800 placeholder:text-gray-400 transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed resize-none"
+                      rows={5}
+                    />
+                    <p className="mt-1.5 text-xs text-gray-400">
+                      Чем подробнее описание, тем точнее будет оценка
+                    </p>
+                  </>
                 )}
               </div>
 
               {/* Info */}
               <div className="rounded-lg bg-gray-50 p-3 text-xs text-gray-600 space-y-1">
                 <p>
-                  AI оценит каждую компанию в базе по шкале 0-10 на основе брифа.
+                  AI оценит каждую компанию в базе по шкале 0-10 на основе{' '}
+                  {briefScoring.inputMode === 'pdf' ? 'брифа' : 'описания ЦА'}.
                 </p>
                 <p>
                   Будут добавлены колонки: <span className="font-medium">ЦА Балл</span> и{' '}
@@ -5258,7 +5325,10 @@ export function DatabaseSpreadsheet() {
                 <button
                   type="button"
                   onClick={() => void handleStartBriefScoring()}
-                  disabled={briefScoring.isScoring || !briefScoring.briefText}
+                  disabled={
+                    briefScoring.isScoring ||
+                    (briefScoring.inputMode === 'pdf' ? !briefScoring.briefText : !briefScoring.manualText.trim())
+                  }
                   className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
                 >
                   {briefScoring.isScoring ? (
