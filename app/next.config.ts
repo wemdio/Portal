@@ -15,8 +15,6 @@ for (const envPath of envCandidates) {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? parsedEnv.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? parsedEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const openrouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY ?? parsedEnv.NEXT_PUBLIC_OPENROUTER_API_KEY ?? '';
-const openrouterBriefApiKey = process.env.OPENROUTER_BRIEF_API_KEY ?? parsedEnv.OPENROUTER_BRIEF_API_KEY ?? '';
-const openrouterCleanupApiKey = process.env.OPENROUTER_CLEANUP_API_KEY ?? parsedEnv.OPENROUTER_CLEANUP_API_KEY ?? '';
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -37,12 +35,11 @@ const nextConfig: NextConfig = {
   },
   serverExternalPackages: ['pdf-parse', 'pdfjs-dist'],
   env: {
-    // Explicitly pass environment variables to Next.js
+    // Explicitly pass only public environment variables to Next.js.
+    // Server-only secrets must come from runtime process.env.
     NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
     NEXT_PUBLIC_OPENROUTER_API_KEY: openrouterApiKey,
-    OPENROUTER_BRIEF_API_KEY: openrouterBriefApiKey, // Server-side only (for brief scoring API route)
-    OPENROUTER_CLEANUP_API_KEY: openrouterCleanupApiKey, // Server-side only (for name cleanup API route)
   },
 };
 
