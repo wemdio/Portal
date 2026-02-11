@@ -75,6 +75,11 @@ type ImportStatus = {
   message?: string;
 };
 
+type CopyNotice = {
+  message: string;
+  tone: 'success' | 'error';
+};
+
 type PersistedSpreadsheetState = {
   version: number;
   tabs: Sheet[];
@@ -165,6 +170,8 @@ const ENRICHMENT_PROGRESS_INTERVAL_MS = 200;
 const ENRICHMENT_UPDATE_FLUSH_MS = 250;
 const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
+const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
+const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
 const BRIEF_SCORING_BATCH_SIZE = 10;
 const BRIEF_SCORING_MAX_RETRIES = 2;
 const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
@@ -183,6 +190,7 @@ const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 32;
 const VIRTUAL_OVERSCAN = 10;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
+const COPY_NOTICE_DURATION_MS = 4000;
 
 const EMAIL_HEADER_REGEX = /(e-?mail|email|почта|mail)/i;
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -229,6 +237,69 @@ const normalizeRows = (rows: string[][]) => {
     if (row.length >= maxCols) return row;
     return [...row, ...Array.from({ length: maxCols - row.length }, () => '')];
   });
+};
+
+const normalizeClipboardCell = (value: unknown) =>
+  `${value ?? ''}`.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+const buildClipboardTsv = (rows: string[][]) =>
+  Papa.unparse(
+    rows.map((row) => row.map((cell) => normalizeClipboardCell(cell))),
+    {
+      delimiter: '\t',
+      newline: '\n',
+      header: false,
+    },
+  );
+
+const parseClipboardTsv = (text: string) => {
+  const parsed = Papa.parse<string[]>(text, {
+    delimiter: '\t',
+    skipEmptyLines: false,
+  });
+  const values = parsed.data.map((row) => row.map((cell) => `${cell ?? ''}`));
+
+  while (values.length > 0 && values[values.length - 1].every((cell) => cell.length === 0)) {
+    values.pop();
+  }
+
+  return values;
+};
+
+const writeTextToClipboard = async (text: string) => {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === 'undefined') {
+    throw new Error('Clipboard API unavailable');
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  textarea.style.top = '0';
+  textarea.style.left = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error('Clipboard API unavailable');
+  }
+};
+
+const buildCopySummary = (rows: number, cols: number) => {
+  const safeRows = Math.max(0, rows);
+  const safeCols = Math.max(0, cols);
+  const cells = safeRows * safeCols;
+  return `Скопировано: ${safeRows}x${safeCols} (${cells} ячеек)`;
 };
 
 const buildStorageKey = (userId: string | null) =>
@@ -540,6 +611,7 @@ export function DatabaseSpreadsheet() {
   const debouncedGroupSearch = useDebouncedValue(groupSearch, 300);
   const debouncedFilterMenuSearch = useDebouncedValue(filterMenu?.search ?? '', 300);
   const [lastAction, setLastAction] = useState<ActionSummary | null>(null);
+  const [copyNotice, setCopyNotice] = useState<CopyNotice | null>(null);
   const [lastUndo, setLastUndo] = useState<UndoState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
@@ -566,6 +638,7 @@ export function DatabaseSpreadsheet() {
   );
   const [isResizing, setIsResizing] = useState(false);
   const importTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastProgressRef = useRef(0);
   const [importStatus, setImportStatus] = useState<ImportStatus>({
     status: 'idle',
@@ -921,6 +994,14 @@ export function DatabaseSpreadsheet() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (copyNoticeTimeoutRef.current) {
+        clearTimeout(copyNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
     setSelectionAnchor({ row: 0, col: 0 });
     setActiveCell({ row: 0, col: 0 });
@@ -959,6 +1040,18 @@ export function DatabaseSpreadsheet() {
   const updateActiveSheet = (updater: (sheet: Sheet) => Sheet) => {
     setTabs((prev) => prev.map((tab) => (tab.id === activeTabId ? updater(tab) : tab)));
   };
+
+  const showCopyNotice = useCallback((message: string, tone: CopyNotice['tone']) => {
+    const now = Date.now();
+    setLastAction({ message, time: now });
+    setCopyNotice({ message, tone });
+    if (copyNoticeTimeoutRef.current) {
+      clearTimeout(copyNoticeTimeoutRef.current);
+    }
+    copyNoticeTimeoutRef.current = setTimeout(() => {
+      setCopyNotice(null);
+    }, COPY_NOTICE_DURATION_MS);
+  }, []);
 
   const ensureSize = (data: string[][], rows: number, cols: number) => {
     const targetRows = Math.max(rows, data.length);
@@ -1013,12 +1106,19 @@ export function DatabaseSpreadsheet() {
 
   const copyEntireTable = async () => {
     if (!activeTab) return;
-    const text = activeTab.data.map((row) => row.join('\t')).join('\n');
+    const rows = activeTab.data.map((row) => row.map((cell) => `${cell ?? ''}`));
+    const cols = activeTab.data[0]?.length ?? 0;
+    if (rows.length === 0 || cols === 0) {
+      showCopyNotice('Нет данных для копирования', 'error');
+      return;
+    }
+    const text = buildClipboardTsv(rows);
     try {
-      await navigator.clipboard.writeText(text);
-      setLastAction({ message: 'Таблица скопирована в буфер обмена', time: Date.now() });
+      await writeTextToClipboard(text);
+      showCopyNotice(buildCopySummary(rows.length, cols), 'success');
     } catch (error) {
       void logError('spreadsheet.copy_all.failed', error);
+      showCopyNotice('Не удалось скопировать таблицу в буфер обмена', 'error');
     }
   };
 
@@ -1261,29 +1361,30 @@ export function DatabaseSpreadsheet() {
   const copySelection = async () => {
     if (!activeTab) return;
     const { startRow, endRow, startCol, endCol } = normalizedSelection;
-    const lines: string[] = [];
+    const values: string[][] = [];
     for (let r = startRow; r <= endRow; r += 1) {
       const row = activeTab.data[r] ?? [];
       const cells: string[] = [];
       for (let c = startCol; c <= endCol; c += 1) {
         cells.push(row[c] ?? '');
       }
-      lines.push(cells.join('\t'));
+      values.push(cells);
     }
-    const text = lines.join('\n');
+    const text = buildClipboardTsv(values);
+    const rows = endRow - startRow + 1;
+    const cols = endCol - startCol + 1;
     try {
-      await navigator.clipboard.writeText(text);
+      await writeTextToClipboard(text);
+      showCopyNotice(buildCopySummary(rows, cols), 'success');
     } catch (error) {
       void logError('spreadsheet.copy.failed', error);
+      showCopyNotice('Не удалось скопировать выделение в буфер обмена', 'error');
     }
   };
 
   const applyPaste = (text: string) => {
     if (!activeTab) return;
-    const rows = text.replace(/\r/g, '').split('\n');
-    if (rows.length === 0) return;
-    if (rows[rows.length - 1] === '') rows.pop();
-    const values = rows.map((row) => row.split('\t'));
+    const values = parseClipboardTsv(text);
     if (values.length === 0) return;
     const maxCols = Math.max(1, ...values.map((row) => row.length));
 
@@ -2593,6 +2694,9 @@ export function DatabaseSpreadsheet() {
     const pendingUpdates = new Map<number, string>();
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     let lastProgressAt = 0;
+    let lastObservedProgressAt = Date.now();
+    let lastObservedProcessed = 0;
+    let consecutivePollingErrors = 0;
     let currentToken = token;
 
     const flushUpdates = () => {
@@ -2686,13 +2790,27 @@ export function DatabaseSpreadsheet() {
           if (refreshed) {
             currentToken = refreshed;
             res = await fetchResults(currentToken);
+          } else {
+            throw new Error('Сессия истекла во время обогащения. Войдите заново и перезапустите процесс.');
           }
         }
 
         if (!res.ok) {
+          consecutivePollingErrors += 1;
+          let responseError = `Ошибка API (${res.status})`;
+          try {
+            const errorData = await parseJsonResponse<{ error?: string }>(res, 'website_enrichment.poll.error');
+            if (errorData.error) responseError = errorData.error;
+          } catch {
+            // ignore parse error
+          }
+          if (consecutivePollingErrors >= ENRICHMENT_MAX_CONSECUTIVE_FAILURES) {
+            throw new Error(`Обогащение остановлено: ${responseError}`);
+          }
           await sleep(1000);
           continue;
         }
+        consecutivePollingErrors = 0;
 
         const data = await parseJsonResponse<{
           job?: {
@@ -2717,7 +2835,9 @@ export function DatabaseSpreadsheet() {
         const resultsCount = data.results?.length ?? 0;
         if (data.results && data.results.length > 0) {
           for (const result of data.results) {
-            pendingUpdates.set(result.row_index, result.result_text ?? '');
+            if (result.status === 'completed') {
+              pendingUpdates.set(result.row_index, result.result_text ?? '');
+            }
           }
           scheduleFlush();
         }
@@ -2730,6 +2850,10 @@ export function DatabaseSpreadsheet() {
           const total = data.job.total ?? totalRowsFallback;
           processedCount = data.job.processed ?? processedCount;
           errorCount = data.job.error_count ?? errorCount;
+          if (processedCount > lastObservedProcessed) {
+            lastObservedProcessed = processedCount;
+            lastObservedProgressAt = Date.now();
+          }
           reportProgress(total);
         }
 
@@ -2759,6 +2883,14 @@ export function DatabaseSpreadsheet() {
           break;
         }
 
+        if (
+          status === 'running' &&
+          processedCount < (data.job?.total ?? totalRowsFallback) &&
+          Date.now() - lastObservedProgressAt > ENRICHMENT_STALL_TIMEOUT_MS
+        ) {
+          throw new Error('Обогащение не продвигается более 3 минут. Проверьте серверные логи и перезапустите процесс.');
+        }
+
         if (resultsCount === 0 && status === 'running') {
           const elapsed = Date.now() - reqStartedAt;
           pollDelayMs = Math.min(maxPollDelayMs, Math.max(pollDelayMs * 1.5, elapsed));
@@ -2786,6 +2918,7 @@ export function DatabaseSpreadsheet() {
           ...prev,
           error: err instanceof Error ? err.message : 'Произошла ошибка',
           isGenerating: false,
+          isOpen: true,
           jobId: null,
         }));
       }
@@ -2805,7 +2938,7 @@ export function DatabaseSpreadsheet() {
     setWebsiteEnrichment,
   ]);
 
-  const handleStopWebsiteEnrichment = () => {
+  const handleStopWebsiteEnrichment = async () => {
     if (!websiteEnrichment.isGenerating || !websiteEnrichment.jobId) return;
     if (
       !window.confirm(
@@ -2814,28 +2947,49 @@ export function DatabaseSpreadsheet() {
     ) {
       return;
     }
+    const jobId = websiteEnrichment.jobId;
     if (enrichmentAbortRef.current) {
       enrichmentAbortRef.current.abort();
     }
-    removeEnrichmentRun(websiteEnrichment.jobId);
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      let token = session?.access_token;
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token;
+    removeEnrichmentRun(jobId);
+
+    const token = await getFreshToken();
+    if (!token) {
+      setLastAction({
+        message: 'Остановка отправлена локально, но сервер не подтвердил отмену (нужна авторизация)',
+        time: Date.now(),
+      });
+      return;
+    }
+
+    const cancelOnce = async () =>
+      fetch(`/api/enrich/website/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+
+    try {
+      let response = await cancelOnce();
+      if (!response.ok && [401, 502, 503, 504].includes(response.status)) {
+        await sleep(350);
+        response = await cancelOnce();
       }
-      if (token) {
-        await fetch(`/api/enrich/website/jobs/${websiteEnrichment.jobId}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ status: 'cancelled' }),
+      if (!response.ok) {
+        setLastAction({
+          message: `Отмена не подтверждена сервером (HTTP ${response.status})`,
+          time: Date.now(),
         });
       }
-    })();
+    } catch (error) {
+      setLastAction({
+        message: `Отмена не подтверждена сервером: ${error instanceof Error ? error.message : 'network error'}`,
+        time: Date.now(),
+      });
+    }
   };
 
   const handleStartWebsiteEnrichment = async (options?: { targetColIndex?: number; onlyEmpty?: boolean }) => {
@@ -4270,6 +4424,17 @@ export function DatabaseSpreadsheet() {
         >
           📋 Копировать
         </button>
+        {copyNotice && (
+          <span
+            className={`inline-flex items-center rounded border px-2 py-1 text-[10px] font-medium ${
+              copyNotice.tone === 'success'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}
+          >
+            {copyNotice.message}
+          </span>
+        )}
 
         <div className="h-4 w-px bg-gray-200 mx-0.5" />
 

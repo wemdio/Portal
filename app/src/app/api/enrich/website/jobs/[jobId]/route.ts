@@ -68,12 +68,34 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ jo
 
     if (jobError || !job) return jsonError('Job not found', 404);
 
+    const cancelledAt = new Date().toISOString();
+    const stopReason = 'Операция отменена пользователем';
+
     const { error } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+      .update({
+        status: 'cancelled',
+        completed_at: cancelledAt,
+        error_message: stopReason,
+      })
       .eq('id', jobId);
 
     if (error) return jsonError(error.message, 500);
+
+    const { error: queueError } = await supabaseAdmin
+      .from('website_enrichment_queue')
+      .update({
+        status: 'failed',
+        result_text: null,
+        last_error: stopReason,
+        updated_at: cancelledAt,
+        completed_at: cancelledAt,
+      })
+      .eq('job_id', jobId)
+      .in('status', ['pending', 'processing']);
+
+    if (queueError) return jsonError(queueError.message, 500);
+
     return NextResponse.json({ status: 'cancelled' });
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : 'Internal error', 500);
