@@ -1,11 +1,18 @@
 import * as cheerio from 'cheerio';
 import iconv from 'iconv-lite';
+import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_TEXT_LENGTH = 3000;
 const FETCH_RETRIES = 1;
 const FETCH_RETRY_DELAY_MS = 300;
 const MIN_TEXT_LENGTH = 30;
+const MAX_ABOUT_CANDIDATES = Number(
+  process.env.WEBSITE_ENRICHMENT_MAX_ABOUT_CANDIDATES ?? String(DEFAULT_MAX_ABOUT_CANDIDATES),
+);
+const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
+  process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
+);
 
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -424,6 +431,14 @@ export async function fetchAndExtract(
     }
   }
 
+  // If main page already contains enough text, avoid extra about-page crawling.
+  if (mainText.length >= MIN_MAIN_TEXT_TO_SKIP_ABOUT) {
+    if (mainText.length > MAX_TEXT_LENGTH) {
+      return mainText.slice(0, MAX_TEXT_LENGTH).trimEnd() + '…';
+    }
+    return mainText;
+  }
+
   /* ── 2. Discover about-page links from main page HTML ── */
   const discoveredLinks = mainHtml ? discoverAboutLinks(mainHtml.html, url) : [];
 
@@ -434,17 +449,12 @@ export async function fetchAndExtract(
     ...(origin.startsWith('https://') ? getAboutCandidates(httpOrigin) : []),
   ];
 
-  // Deduplicate: discovered links have priority
-  const seen = new Set<string>();
-  const allCandidates: string[] = [];
-  for (const c of [...discoveredLinks, ...staticCandidates]) {
-    const key = c.replace(/\/+$/, '').replace(/^https?:\/\//i, '').toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    // Skip candidates that are identical to the main page
-    if (c.replace(/\/+$/, '') === url.replace(/\/+$/, '')) continue;
-    allCandidates.push(c);
-  }
+  const allCandidates = buildAboutCandidates({
+    mainUrl: url,
+    discoveredLinks,
+    staticCandidates,
+    maxCandidates: MAX_ABOUT_CANDIDATES,
+  });
 
   /* ── 4. Fetch about pages (priority!) ── */
   let aboutText = '';
