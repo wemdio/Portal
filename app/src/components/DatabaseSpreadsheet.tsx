@@ -147,6 +147,16 @@ type NameCleanupState = {
   error: string | null;
 };
 
+type SiteAvailabilityState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isChecking: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -165,6 +175,10 @@ const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
 const NAME_CLEANUP_BATCH_SIZE = 100;
 const NAME_CLEANUP_CONCURRENCY = 2;
 const NAME_CLEANUP_HIGHLIGHT_DURATION = 2500;
+const SITE_AVAILABILITY_BATCH_SIZE = 50;
+const SITE_AVAILABILITY_MAX_RETRIES = 2;
+const SITE_AVAILABILITY_RETRY_BASE_DELAY = 1200;
+const SITE_AVAILABILITY_HIGHLIGHT_DURATION = 2500;
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 32;
 const VIRTUAL_OVERSCAN = 10;
@@ -595,6 +609,16 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const nameCleanupAbortRef = useRef<AbortController | null>(null);
+  const [siteAvailability, setSiteAvailability] = useState<SiteAvailabilityState>({
+    isOpen: false,
+    sourceCol: 0,
+    isChecking: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const siteAvailabilityAbortRef = useRef<AbortController | null>(null);
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -2287,7 +2311,6 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let errorCount = 0;
-    let lastBatchError: string | null = null;
     const batchSize = PERSONALIZATION_BATCH_SIZE;
     const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
 
@@ -3333,6 +3356,284 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Site Availability (Проверка сайтов) ──────────────────────────────
+
+  const openSiteAvailabilityModal = () => {
+    setSiteAvailability({
+      isOpen: true,
+      sourceCol: 0,
+      isChecking: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeSiteAvailabilityModal = () => {
+    if (siteAvailabilityAbortRef.current) {
+      siteAvailabilityAbortRef.current.abort();
+      siteAvailabilityAbortRef.current = null;
+    }
+    setSiteAvailability((prev) => ({
+      ...prev,
+      isOpen: false,
+      isChecking: false,
+      error: null,
+    }));
+  };
+
+  const handleStartSiteAvailability = async () => {
+    if (!activeTab || siteAvailability.isChecking) return;
+
+    const rowsToProcess: { rowIndex: number; url: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const rawUrl = activeTab.data[i][siteAvailability.sourceCol]?.trim();
+      if (rawUrl) rowsToProcess.push({ rowIndex: i, url: rawUrl });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setSiteAvailability((prev) => ({
+        ...prev,
+        error: 'Нет данных для проверки в выбранной колонке',
+      }));
+      return;
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setSiteAvailability((prev) => ({
+        ...prev,
+        error: 'Необходима авторизация',
+      }));
+      return;
+    }
+
+    siteAvailabilityAbortRef.current = new AbortController();
+
+    setSiteAvailability((prev) => ({
+      ...prev,
+      isChecking: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Проверка сайтов');
+
+    const statusColIndex = activeTab.data[0].length;
+    const detailsColIndex = statusColIndex + 1;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= detailsColIndex) nextRow.push('');
+      if (rowIndex === 0) {
+        nextRow[statusColIndex] = 'Сайт Статус';
+        nextRow[detailsColIndex] = 'Сайт Детали';
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(statusColIndex);
+    highlightTimeoutRef.current = setTimeout(
+      () => setHighlightedCol(null),
+      SITE_AVAILABILITY_HIGHLIGHT_DURATION,
+    );
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+    let lastBatchError: string | null = null;
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += SITE_AVAILABILITY_BATCH_SIZE) {
+        if (siteAvailabilityAbortRef.current?.signal.aborted) throw new Error('Отменено пользователем');
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + SITE_AVAILABILITY_BATCH_SIZE);
+        const sites = batch.map((item) => ({ idx: item.rowIndex, url: item.url }));
+
+        type SiteCheck = {
+          idx: number;
+          status: string;
+          code: number;
+          finalUrl: string;
+          durationMs: number;
+          error: string | null;
+        };
+
+        let resData: { results?: SiteCheck[]; error?: string } | null = null;
+
+        for (let attempt = 0; attempt <= SITE_AVAILABILITY_MAX_RETRIES; attempt += 1) {
+          if (siteAvailabilityAbortRef.current?.signal.aborted) {
+            throw new Error('Отменено пользователем');
+          }
+
+          let response: Response;
+          try {
+            response = await fetch('/api/site-availability/check', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ sites }),
+              signal: siteAvailabilityAbortRef.current?.signal,
+            });
+          } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+              throw error;
+            }
+            if (attempt < SITE_AVAILABILITY_MAX_RETRIES) {
+              const retryDelay =
+                SITE_AVAILABILITY_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+                Math.floor(Math.random() * 300);
+              await sleep(retryDelay);
+              continue;
+            }
+            throw new Error('Не удалось отправить запрос к API');
+          }
+
+          let parsed: { results?: SiteCheck[]; error?: string } | null = null;
+          try {
+            parsed = (await response.json()) as { results?: SiteCheck[]; error?: string };
+          } catch {
+            parsed = null;
+          }
+
+          if (response.ok && parsed && Array.isArray(parsed.results)) {
+            resData = parsed;
+            break;
+          }
+
+          const shouldRetry = [429, 500, 502, 503, 504].includes(response.status);
+          const errorMessage = parsed?.error || `Ошибка API (${response.status})`;
+
+          if (shouldRetry && attempt < SITE_AVAILABILITY_MAX_RETRIES) {
+            const retryDelay =
+              SITE_AVAILABILITY_RETRY_BASE_DELAY * Math.pow(2, attempt) +
+              Math.floor(Math.random() * 300);
+            await sleep(retryDelay);
+            continue;
+          }
+
+          resData = { error: errorMessage };
+          break;
+        }
+
+        if (!resData) {
+          throw new Error('Не удалось получить ответ от API');
+        }
+
+        if (resData.error) {
+          lastBatchError = resData.error;
+          errorCount += batch.length;
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== activeTabId) return tab;
+              const nextData = tab.data.map((row, idx) => {
+                if (!batch.find((b) => b.rowIndex === idx)) return row;
+                const nextRow = [...row];
+                while (nextRow.length <= detailsColIndex) nextRow.push('');
+                nextRow[statusColIndex] = '⚠';
+                nextRow[detailsColIndex] = resData?.error || 'Ошибка API';
+                return nextRow;
+              });
+              return { ...tab, data: nextData };
+            }),
+          );
+        } else if (resData.results) {
+          const resultMap = new Map<number, SiteCheck>();
+          for (const result of resData.results) resultMap.set(result.idx, result);
+
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== activeTabId) return tab;
+              const nextData = tab.data.map((row, idx) => {
+                const result = resultMap.get(idx);
+                if (!result) {
+                  if (batch.find((b) => b.rowIndex === idx)) {
+                    errorCount += 1;
+                    const nextRow = [...row];
+                    while (nextRow.length <= detailsColIndex) nextRow.push('');
+                    nextRow[statusColIndex] = '?';
+                    nextRow[detailsColIndex] = 'Нет данных от API';
+                    return nextRow;
+                  }
+                  return row;
+                }
+
+                const nextRow = [...row];
+                while (nextRow.length <= detailsColIndex) nextRow.push('');
+                const details: string[] = [];
+                if (result.code > 0) details.push(`Код ${result.code}`);
+                if (result.durationMs > 0) details.push(`${result.durationMs} мс`);
+                if (result.finalUrl) details.push(result.finalUrl);
+                if (result.error) details.push(`Ошибка: ${result.error}`);
+                nextRow[statusColIndex] = result.status;
+                nextRow[detailsColIndex] = details.join(' | ');
+                return nextRow;
+              });
+              return { ...tab, data: nextData };
+            }),
+          );
+        }
+
+        processedCount += batch.length;
+        setSiteAvailability((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+
+        if (batchStart + SITE_AVAILABILITY_BATCH_SIZE < rowsToProcess.length) await sleep(350);
+      }
+
+      const successCount = processedCount - errorCount;
+      setLastAction({
+        message: errorCount > 0
+          ? `Проверка сайтов: ${successCount} успешно, ${errorCount} с ошибками`
+          : `Проверка сайтов завершена: ${processedCount} строк`,
+        time: Date.now(),
+      });
+
+      if (errorCount > 0 && successCount === 0) {
+        setSiteAvailability((prev) => ({
+          ...prev,
+          isChecking: false,
+          error: lastBatchError
+            ? `Проверка не выполнена: ${lastBatchError}`
+            : 'Проверка не выполнена: произошла ошибка на стороне API',
+        }));
+      } else {
+        setSiteAvailability((prev) => ({ ...prev, isChecking: false, isOpen: false }));
+      }
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({
+          message: `Проверка сайтов отменена (обработано: ${processedCount})`,
+          time: Date.now(),
+        });
+        setSiteAvailability((prev) => ({ ...prev, isChecking: false, isOpen: false }));
+      } else {
+        setSiteAvailability((prev) => ({
+          ...prev,
+          isChecking: false,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+        }));
+      }
+    } finally {
+      siteAvailabilityAbortRef.current = null;
+    }
+  };
+
   // ── Name Cleanup (Очистка названий) ──────────────────────────────
 
   const openNameCleanupModal = () => {
@@ -3920,6 +4221,15 @@ export function DatabaseSpreadsheet() {
           className="inline-flex items-center rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-blue-700 disabled:bg-gray-300"
         >
           Обогатить
+        </button>
+
+        <button
+          type="button"
+          onClick={openSiteAvailabilityModal}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:bg-gray-300"
+        >
+          Проверка сайтов
         </button>
 
         <button
@@ -5324,6 +5634,124 @@ export function DatabaseSpreadsheet() {
                     <>
                       <span>🎯</span>
                       Запустить оценку
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Site Availability Modal ─────────────────────────────── */}
+      {siteAvailability.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm font-bold text-lg">
+                  🌐
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Проверка сайтов</h3>
+                  <p className="text-xs text-gray-500 font-medium">Проверка доступности и отклика сайтов</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeSiteAvailabilityModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с сайтами
+                </label>
+                <select
+                  value={siteAvailability.sourceCol}
+                  onChange={(e) =>
+                    setSiteAvailability((prev) => ({ ...prev, sourceCol: Number(e.target.value), error: null }))
+                  }
+                  disabled={siteAvailability.isChecking}
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 focus:outline-none disabled:bg-gray-50 disabled:text-gray-400"
+                >
+                  {headerLabels.map((label, i) => (
+                    <option key={i} value={i}>
+                      {label || toColumnLabel(i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-3 text-xs text-indigo-900 space-y-1">
+                <p>
+                  Система проверит доступность каждого сайта и добавит колонки:{' '}
+                  <span className="font-semibold">Сайт Статус</span> и{' '}
+                  <span className="font-semibold">Сайт Детали</span>.
+                </p>
+                <p>
+                  Строк для обработки: <span className="font-semibold text-gray-900">{
+                    activeTab ? activeTab.data.slice(1).filter((row) => {
+                      const v = row[siteAvailability.sourceCol]?.trim();
+                      return v && v.length > 0;
+                    }).length : 0
+                  }</span>
+                </p>
+              </div>
+
+              {siteAvailability.isChecking && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-600">
+                    <span>Проверка...</span>
+                    <span>{siteAvailability.currentRow} / {siteAvailability.totalRows}</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                      style={{ width: `${siteAvailability.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {siteAvailability.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {siteAvailability.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs text-gray-500">
+                Batch: {SITE_AVAILABILITY_BATCH_SIZE} строк
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeSiteAvailabilityModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  {siteAvailability.isChecking ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartSiteAvailability()}
+                  disabled={siteAvailability.isChecking}
+                  className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {siteAvailability.isChecking ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Проверка...
+                    </>
+                  ) : (
+                    <>
+                      <span>🌐</span>
+                      Проверить сайты
                     </>
                   )}
                 </button>
