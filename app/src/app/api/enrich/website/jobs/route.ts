@@ -4,6 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { normalizeUrl } from '@/lib/enrich/websiteParser';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
+import { extractActiveJobIds } from '@/lib/enrich/jobLifecycle';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,6 +43,53 @@ export async function POST(req: NextRequest) {
     }
 
     const now = new Date().toISOString();
+
+    // Ensure only one active enrichment per user to avoid stale parallel jobs.
+    const { data: existingJobs, error: existingJobsError } = await supabaseAdmin
+      .from('website_enrichment_jobs')
+      .select('id, status')
+      .eq('user_id', user.id)
+      .in('status', ['pending', 'running']);
+
+    if (existingJobsError) {
+      return jsonError(existingJobsError.message, 500);
+    }
+
+    const activeJobIds = extractActiveJobIds((existingJobs ?? []) as Array<{ id: string; status: string | null }>);
+    if (activeJobIds.length > 0) {
+      const cancelledAt = new Date().toISOString();
+      const stopReason = 'Операция остановлена: запущено новое обогащение';
+
+      const { error: cancelJobsError } = await supabaseAdmin
+        .from('website_enrichment_jobs')
+        .update({
+          status: 'cancelled',
+          completed_at: cancelledAt,
+          error_message: stopReason,
+        })
+        .in('id', activeJobIds);
+
+      if (cancelJobsError) {
+        return jsonError(cancelJobsError.message, 500);
+      }
+
+      const { error: cancelQueueError } = await supabaseAdmin
+        .from('website_enrichment_queue')
+        .update({
+          status: 'failed',
+          result_text: null,
+          last_error: stopReason,
+          updated_at: cancelledAt,
+          completed_at: cancelledAt,
+        })
+        .in('job_id', activeJobIds)
+        .in('status', ['pending', 'processing']);
+
+      if (cancelQueueError) {
+        return jsonError(cancelQueueError.message, 500);
+      }
+    }
+
     let invalidCount = 0;
 
     const queueItems = rows.map((row) => {
