@@ -3743,6 +3743,7 @@ export function DatabaseSpreadsheet() {
 
     let processedCount = 0;
     let errorCount = 0;
+    let lastBatchError: string | null = null;
 
     try {
       const batches: typeof rowsToProcess[] = [];
