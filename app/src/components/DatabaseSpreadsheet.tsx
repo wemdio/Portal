@@ -186,6 +186,8 @@ const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 
 const EMAIL_HEADER_REGEX = /(e-?mail|email|почта|mail)/i;
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const INVISIBLE_WHITESPACE_REGEX = /[\u200B-\u200F\uFEFF\u00AD\u2060\u180E]/g;
+const NON_STANDARD_SPACE_REGEX = /[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g;
 const MAX_FILTER_OPTIONS = 1000;
 const BLANK_FILTER_LABEL = '(пусто)';
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}]/gu;
@@ -380,6 +382,20 @@ const normalizeText = (
     next = next.toLowerCase();
   }
   return next;
+};
+
+const sanitizeCellWhitespaceForExport = (value: string, isEmailField: boolean) => {
+  let next = value
+    .replace(INVISIBLE_WHITESPACE_REGEX, '')
+    .replace(NON_STANDARD_SPACE_REGEX, ' ');
+
+  if (isEmailField) {
+    // Instantly is sensitive to any whitespace in email cells.
+    return next.replace(/\s+/g, '').trim();
+  }
+
+  next = next.replace(/[\t\r\n]+/g, ' ');
+  return next.trim();
 };
 
 const formatTime = (value: number) =>
@@ -1766,6 +1782,57 @@ export function DatabaseSpreadsheet() {
         setLastAction({ message: `Удалено пустых колонок: ${removed}`, time: Date.now() });
       },
       'Удалить',
+    );
+  };
+
+  const handleCleanInvisibleWhitespace = () => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const emailColumns = detectEmailColumns(data);
+
+    let changedCells = 0;
+    let changedRows = 0;
+
+    const nextData = data.map((row, rowIndex) => {
+      let rowChanged = false;
+      const nextRow = row.map((cell, colIndex) => {
+        const raw = cell ?? '';
+        const isEmailField = rowIndex > 0 && emailColumns.includes(colIndex);
+        const sanitized = sanitizeCellWhitespaceForExport(raw, isEmailField);
+        if (sanitized !== raw) {
+          changedCells += 1;
+          rowChanged = true;
+        }
+        return sanitized;
+      });
+      if (rowChanged) changedRows += 1;
+      return nextRow;
+    });
+
+    if (changedCells === 0) {
+      setLastAction({ message: 'Невидимые символы и лишние пробелы не найдены', time: Date.now() });
+      return;
+    }
+
+    const emailHint = emailColumns.length > 0
+      ? ` Email-колонок найдено: ${emailColumns.length}.`
+      : '';
+
+    requestConfirm(
+      'Очистить невидимые символы?',
+      `Будет обновлено ячеек: ${changedCells} (строк: ${changedRows}).${emailHint}`,
+      () => {
+        setUndoSnapshot(`Очистка whitespace (${changedCells} ячеек)`);
+        updateActiveSheet((sheet) => ({
+          ...sheet,
+          data: nextData,
+        }));
+        setLastAction({
+          message: `Очистка whitespace: ${changedCells} ячеек в ${changedRows} строках`,
+          time: Date.now(),
+        });
+      },
+      'Очистить',
     );
   };
 
@@ -4251,6 +4318,16 @@ export function DatabaseSpreadsheet() {
           Чистка названий
         </button>
 
+        <button
+          type="button"
+          onClick={handleCleanInvisibleWhitespace}
+          disabled={colCount === 0}
+          className="inline-flex items-center rounded bg-cyan-700 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-cyan-800 disabled:bg-gray-300"
+          title="Очистка невидимых символов и проблемных пробелов для экспорта в Instantly"
+        >
+          Whitespace Fix
+        </button>
+
         {importStatus.status !== 'idle' && (
           <>
             <div className="h-4 w-px bg-gray-200 mx-0.5" />
@@ -4912,6 +4989,13 @@ export function DatabaseSpreadsheet() {
                     className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
                   >
                     Удалить пустые колонки
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCleanInvisibleWhitespace}
+                    className="w-full text-left rounded-lg border border-cyan-200 bg-cyan-50/40 px-3 py-2 text-xs font-medium text-cyan-800 transition hover:bg-cyan-50 hover:border-cyan-300"
+                  >
+                    Очистить невидимые символы (Instantly)
                   </button>
                 </div>
               </div>
