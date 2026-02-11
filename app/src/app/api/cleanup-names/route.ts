@@ -5,7 +5,14 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 export const dynamic = 'force-dynamic';
 
 const OPENROUTER_CLEANUP_API_KEY = process.env.OPENROUTER_CLEANUP_API_KEY ?? '';
-const OPENROUTER_MODEL = 'x-ai/grok-4.1-fast';
+const OPENROUTER_CLEANUP_MODELS = (
+  process.env.OPENROUTER_CLEANUP_MODELS ??
+  process.env.OPENROUTER_CLEANUP_MODEL ??
+  'x-ai/grok-4.1-fast,google/gemini-3-flash-preview'
+)
+  .split(',')
+  .map((model) => model.trim())
+  .filter((model) => model.length > 0);
 const OPENROUTER_TIMEOUT_MS = 70000;
 
 function jsonError(message: string, status: number) {
@@ -80,6 +87,9 @@ export async function POST(req: NextRequest) {
   if (!OPENROUTER_CLEANUP_API_KEY) {
     return jsonError('OPENROUTER_CLEANUP_API_KEY not configured on server', 500);
   }
+  if (OPENROUTER_CLEANUP_MODELS.length === 0) {
+    return jsonError('OPENROUTER_CLEANUP_MODELS not configured on server', 500);
+  }
 
   // --- Parse body ---
   let body: RequestBody;
@@ -104,89 +114,109 @@ export async function POST(req: NextRequest) {
 
   const userMessage = companyLines.join('\n');
 
-  // --- Call OpenRouter with retries ---
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    let response: Response;
+  // --- Call OpenRouter with retries and model fallback ---
+  const modelErrors: string[] = [];
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
-          'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Name Cleanup',
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.1,
-          max_tokens: 4000,
-        }),
-      });
-      clearTimeout(timeout);
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
+  for (const model of OPENROUTER_CLEANUP_MODELS) {
+    let lastModelError = `Model ${model}: unknown error`;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      let response: Response;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      try {
+        const controller = new AbortController();
+        timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
+            'HTTP-Referer': 'https://portal.app',
+            'X-Title': 'Portal - Name Cleanup',
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: userMessage },
+            ],
+            temperature: 0.1,
+            max_tokens: 4000,
+          }),
+        });
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          lastModelError = 'Превышено время ожидания ответа от AI';
+        } else {
+          const msg = err instanceof Error ? err.message : 'Network error';
+          lastModelError = `Ошибка сети при обращении к AI: ${msg}`;
+        }
+
         if (attempt < MAX_RETRIES) {
           await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
           continue;
         }
-        return jsonError('Превышено время ожидания ответа от AI', 504);
+        break;
+      } finally {
+        if (timeout) clearTimeout(timeout);
       }
-      if (attempt < MAX_RETRIES) {
+
+      if (response.ok) {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+
+        if (!content) {
+          lastModelError = 'Пустой ответ от AI';
+          if (attempt < MAX_RETRIES) {
+            await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
+            continue;
+          }
+          break;
+        }
+
+        // Parse the response - each line is a cleaned name
+        const cleanedNames = content
+          .split('\n')
+          .map((line: string) => line.trim())
+          .filter((line: string) => line.length > 0);
+
+        // Map cleaned names back to indices
+        const results = companies.map((c, i) => ({
+          idx: c.idx,
+          cleanedName: cleanedNames[i] ?? c.name, // fallback to original if mismatch
+        }));
+
+        return NextResponse.json({ results });
+      }
+
+      let errorMessage = `API error: ${response.status}`;
+      try {
+        const errorData = await response.json() as { error?: { message?: string } | string };
+        if (typeof errorData.error === 'string') {
+          errorMessage = errorData.error;
+        } else if (typeof errorData.error?.message === 'string') {
+          errorMessage = errorData.error.message;
+        }
+      } catch {
+        // ignore
+      }
+
+      lastModelError = errorMessage;
+      const providerError = /provider returned error/i.test(errorMessage);
+      const shouldRetry = providerError || [429, 500, 502, 503, 504].includes(response.status);
+      if (shouldRetry && attempt < MAX_RETRIES) {
         await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
         continue;
       }
-      const msg = err instanceof Error ? err.message : 'Network error';
-      return jsonError(`Ошибка сети при обращении к AI: ${msg}`, 502);
+      break;
     }
 
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-
-      if (!content) {
-        return jsonError('Пустой ответ от AI', 502);
-      }
-
-      // Parse the response - each line is a cleaned name
-      const cleanedNames = content
-        .split('\n')
-        .map((line: string) => line.trim())
-        .filter((line: string) => line.length > 0);
-
-      // Map cleaned names back to indices
-      const results = companies.map((c, i) => ({
-        idx: c.idx,
-        cleanedName: cleanedNames[i] ?? c.name, // fallback to original if mismatch
-      }));
-
-      return NextResponse.json({ results });
-    }
-
-    const shouldRetry = [429, 502, 503, 504].includes(response.status);
-    if (shouldRetry && attempt < MAX_RETRIES) {
-      await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-      continue;
-    }
-
-    let errorMessage = `API error: ${response.status}`;
-    try {
-      const errorData = await response.json();
-      errorMessage = errorData.error?.message || errorMessage;
-    } catch {
-      // ignore
-    }
-    return jsonError(errorMessage, response.status >= 500 ? 502 : response.status);
+    modelErrors.push(`${model}: ${lastModelError}`);
   }
 
-  return jsonError('Не удалось получить ответ от AI после нескольких попыток', 502);
+  return jsonError(`Не удалось получить ответ от AI. ${modelErrors.join(' | ')}`, 502);
 }
 
 function sleep(ms: number) {
