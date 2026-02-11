@@ -4,9 +4,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
-import { UserRole } from '@/types';
+import { UserProfile, UserRole } from '@/types';
 import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { buildAssigneeOptions } from '@/lib/projectAssignees';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
@@ -43,15 +44,33 @@ export default function NewProjectPage() {
   const [error, setError] = useState('');
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [checkingAccess, setCheckingAccess] = useState(true);
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   
   useEffect(() => {
-    checkAccess();
+    void checkAccess();
+    void fetchAssigneeUsers();
   }, []);
 
   async function checkAccess() {
     const role = await getCurrentUserRole();
     setUserRole(role);
     setCheckingAccess(false);
+  }
+
+  async function fetchAssigneeUsers() {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('email, full_name');
+
+      if (error) throw error;
+      const options = buildAssigneeOptions(
+        ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
+      );
+      setAssigneeOptions(options);
+    } catch (fetchError) {
+      void logError('projects.assignees.fetch.failed', fetchError);
+    }
   }
 
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
@@ -321,14 +340,22 @@ export default function NewProjectPage() {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Лид (контролирует)
             </label>
-            <input
-              type="text"
+            <select
               name="manager"
               value={formData.manager}
               onChange={handleChange}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Имя лида"
-            />
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            >
+              <option value="">Не выбрано</option>
+              {assigneeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+            {assigneeOptions.length === 0 && (
+              <p className="mt-1 text-xs text-gray-500">Нет зарегистрированных пользователей</p>
+            )}
           </div>
         </div>
 
@@ -338,14 +365,22 @@ export default function NewProjectPage() {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Специалист
             </label>
-            <input
-              type="text"
+            <select
               name="specialist"
               value={formData.specialist}
               onChange={handleChange}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Имя специалиста"
-            />
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            >
+              <option value="">Не выбрано</option>
+              {assigneeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+            {assigneeOptions.length === 0 && (
+              <p className="mt-1 text-xs text-gray-500">Нет зарегистрированных пользователей</p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">

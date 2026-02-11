@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Project, ProjectStatus } from '@/types';
+import { Project, ProjectStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -131,10 +132,12 @@ export function ProjectList() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
 
   useEffect(() => {
-    fetchProjects();
-    checkPermissions();
+    void fetchProjects();
+    void checkPermissions();
+    void fetchAssigneeOptions();
   }, []);
 
   async function checkPermissions() {
@@ -158,6 +161,23 @@ export function ProjectList() {
       void logError('projects.list.fetch.failed', error);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchAssigneeOptions() {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('email, full_name');
+
+      if (error) throw error;
+      setAssigneeOptions(
+        buildAssigneeOptions(
+          ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
+        ),
+      );
+    } catch (error) {
+      void logError('projects.assignees.fetch.failed', error);
     }
   }
 
@@ -601,6 +621,8 @@ export function ProjectList() {
                   const kpiFactValue = getDraftValue(project, 'kpi_fact');
                   const specialistValue = getDraftValue(project, 'specialist');
                   const managerValue = getDraftValue(project, 'manager');
+                  const specialistSelectOptions = ensureCurrentAssigneeOption(assigneeOptions, specialistValue);
+                  const managerSelectOptions = ensureCurrentAssigneeOption(assigneeOptions, managerValue);
                   const commentsValue = getDraftValue(project, 'comments');
                   const workFormatValue = resolveWorkFormat(getDraftValue(project, 'work_format'));
                   const contractHref = normalizeUrl(project.contract_link);
@@ -748,12 +770,14 @@ export function ProjectList() {
                       </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
-                          <InlineInput
+                          <InlineSelect
                             value={specialistValue}
-                            onChange={(value) => setDraftValue(project.id, 'specialist', value)}
-                            onCommit={(value) => void commitProjectUpdate(project, { specialist: value })}
+                            options={specialistSelectOptions}
+                            onChange={(value) => {
+                              setDraftValue(project.id, 'specialist', value);
+                              void commitProjectUpdate(project, { specialist: value });
+                            }}
                             disabled={isDisabled}
-                            placeholder="Специалист"
                           />
                         ) : (
                           readOnlySpecialist !== '—' ? (
@@ -768,12 +792,14 @@ export function ProjectList() {
                       </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
-                          <InlineInput
+                          <InlineSelect
                             value={managerValue}
-                            onChange={(value) => setDraftValue(project.id, 'manager', value)}
-                            onCommit={(value) => void commitProjectUpdate(project, { manager: value })}
+                            options={managerSelectOptions}
+                            onChange={(value) => {
+                              setDraftValue(project.id, 'manager', value);
+                              void commitProjectUpdate(project, { manager: value });
+                            }}
                             disabled={isDisabled}
-                            placeholder="Лид (PM)"
                           />
                         ) : (
                            readOnlyManager !== '—' ? (
@@ -895,12 +921,17 @@ export function ProjectList() {
                   <div className="flex items-center gap-3 mb-3">
                     <label className="text-sm font-bold text-gray-700 tracking-wide uppercase">Специалист</label>
                   </div>
-                  <InlineInput
+                  <InlineSelect
                     value={getDraftValue(selectedProject, 'specialist')}
-                    onChange={(value) => setDraftValue(selectedProject.id, 'specialist', value)}
-                    onCommit={(value) => void commitProjectUpdate(selectedProject, { specialist: value })}
+                    options={ensureCurrentAssigneeOption(
+                      assigneeOptions,
+                      getDraftValue(selectedProject, 'specialist'),
+                    )}
+                    onChange={(value) => {
+                      setDraftValue(selectedProject.id, 'specialist', value);
+                      void commitProjectUpdate(selectedProject, { specialist: value });
+                    }}
                     disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                    placeholder="Не назначен"
                     className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 px-3 py-2 text-sm font-medium rounded-lg text-gray-900 placeholder:text-gray-400"
                   />
                 </div>
@@ -909,12 +940,17 @@ export function ProjectList() {
                   <div className="flex items-center gap-3 mb-3">
                     <label className="text-sm font-bold text-gray-700 tracking-wide uppercase">Лид (PM)</label>
                   </div>
-                  <InlineInput
+                  <InlineSelect
                     value={getDraftValue(selectedProject, 'manager')}
-                    onChange={(value) => setDraftValue(selectedProject.id, 'manager', value)}
-                    onCommit={(value) => void commitProjectUpdate(selectedProject, { manager: value })}
+                    options={ensureCurrentAssigneeOption(
+                      assigneeOptions,
+                      getDraftValue(selectedProject, 'manager'),
+                    )}
+                    onChange={(value) => {
+                      setDraftValue(selectedProject.id, 'manager', value);
+                      void commitProjectUpdate(selectedProject, { manager: value });
+                    }}
                     disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                    placeholder="Не назначен"
                     className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 px-3 py-2 text-sm font-medium rounded-lg text-gray-900 placeholder:text-gray-400"
                   />
                 </div>
