@@ -3,6 +3,17 @@
 :root {
   --foreground-rgb: 0, 0, 0;
   --background-rgb: 249, 250, 251; /* gray-50 */
+  --app-bg: rgb(var(--background-rgb));
+  --app-fg: rgb(var(--foreground-rgb));
+  --app-surface: #ffffff;
+  --app-surface-2: #f3f4f6; /* gray-100 */
+  --app-border: #e5e7eb; /* gray-200 */
+  --app-muted: #6b7280; /* gray-500 */
+  --app-primary: #111827; /* gray-900 */
+  --app-primary-contrast: #ffffff;
+  --app-danger: #dc2626; /* red-600 */
+  --app-viewport-height: 100vh;
+  --app-viewport-stable-height: 100vh;
 }
 
 @theme {
@@ -21,11 +32,45 @@
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: rgb(var(--background-rgb));
+  color: var(--app-fg);
+  background: var(--app-bg);
   font-family: Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  min-height: var(--app-viewport-height, 100vh);
+}
+
+html.tma body {
+  /* Fixed TMA palette (no Telegram theme vars) */
+  --app-bg: #0b1220;
+  --app-fg: #e5e7eb;
+  --app-surface: #111827;
+  --app-surface-2: rgba(255, 255, 255, 0.08);
+  --app-border: rgba(255, 255, 255, 0.10);
+  --app-muted: rgba(229, 231, 235, 0.70);
+  --app-primary: #ffffff;
+  --app-primary-contrast: #0b1220;
+  background: var(--app-bg);
+  color: var(--app-fg);
+}
+
+@layer utilities {
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }
 
 /* Custom scrollbar for better aesthetics */

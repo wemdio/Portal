@@ -11,6 +11,7 @@ app/.yarn/*
 regl.docx
 companies_5000.xlsx
 companies_10000.xlsx
+.cursor
 
 # next.js
 app/.next/

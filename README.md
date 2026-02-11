@@ -45,6 +45,7 @@ npm install
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 ```
 
 #### Запуск в режиме разработки
@@ -116,6 +117,30 @@ npm start
 ```bash
 docker-compose -f docker-compose.prod.yml up -d
 ```
+
+## Telegram Mini App (TMA)
+
+### Требования
+
+- Приложение должно быть доступно по HTTPS.
+- Нужен Telegram Bot Token (`TELEGRAM_BOT_TOKEN`).
+
+### Настройка бота (Menu Button)
+
+1. Создайте бота в BotFather.
+2. Задайте Menu Button для бота (WebApp) и укажите HTTPS URL вашего приложения.
+3. Откройте бота и запустите приложение через кнопку в меню.
+
+### Привязка Telegram к аккаунту
+
+- При запуске в Telegram WebApp выполняется верификация `initData`.
+- После логина в `/login` аккаунт автоматически привязывается к Telegram (если токен верифицирован).
+
+### Быстрая проверка
+
+1. Откройте бота и запустите WebApp через Menu Button.
+2. Войдите в аккаунт через `/login`.
+3. Проверьте, что привязка Telegram выполнена и доступ к защищенным страницам сохраняется.
 
 ## Тестирование
 

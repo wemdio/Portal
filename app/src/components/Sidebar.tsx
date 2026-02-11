@@ -8,35 +8,20 @@ import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin } from '@/lib/roles';
-
-type NavItem = {
-  name: string;
-  href: string;
-  adminOnly?: boolean;
-};
-
-const navItems: NavItem[] = [
-  { name: 'Проекты', href: '/' },
-  { name: 'Аналитика проектов', href: '/analytics/projects' },
-  { name: 'Задачи', href: '/tasks' },
-  { name: 'Команда', href: '/team' },
-  { name: 'Финансы', href: '/finance' },
-  { name: 'Инструменты', href: '/tools' },
-  { name: 'Оплаты', href: '/payments' },
-  { name: 'Регламент', href: '/reglament' },
-  { name: 'Админ', href: '/admin', adminOnly: true },
-  { name: 'Настройки', href: '/settings' },
-];
+import { navItems } from '@/lib/navigation';
 
 type SidebarProps = {
   collapsed?: boolean;
+  isTma?: boolean;
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 };
 
 const navActiveAliases: Record<string, string[]> = {
   '/tools': ['/parsers'],
 };
 
-export function Sidebar({ collapsed = false }: SidebarProps) {
+export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, onMobileClose }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | null>(null);
@@ -97,8 +82,23 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
 
   const sidebarContent = (
     <>
-      <div className="flex h-12 items-center px-5 border-b border-gray-100 flex-shrink-0">
-        <span className="text-base font-bold tracking-tight">Portal</span>
+      <div
+        className={`flex h-12 items-center px-5 border-b flex-shrink-0 safe-top ${
+          isTma ? 'border-black/10' : 'border-gray-100'
+        }`}
+        style={isTma ? { backgroundColor: 'var(--tg-bg-color)', color: 'var(--tg-text-color)' } : undefined}
+      >
+        <span className="text-base font-bold tracking-tight text-[color:var(--tg-text-color)]">Portal</span>
+        {isTma && (
+          <button
+            type="button"
+            onClick={() => onMobileClose?.()}
+            className="md:hidden ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-[color:var(--tg-text-color)] hover:bg-black/5"
+            aria-label="Закрыть меню"
+          >
+            ✕
+          </button>
+        )}
       </div>
 
       <nav className="flex-1 space-y-0.5 px-3 py-4 overflow-y-auto">
@@ -115,10 +115,15 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
             <Link
               key={item.name}
               href={item.href as Route}
+              onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
                 ${isActive
-                  ? 'bg-gray-100 text-gray-900 font-medium'
-                  : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'
+                  ? (isTma
+                      ? 'bg-[var(--tg-secondary-bg-color,#f3f4f6)] text-[color:var(--tg-text-color)] font-medium'
+                      : 'bg-gray-100 text-gray-900 font-medium')
+                  : (isTma
+                      ? 'text-[color:var(--tg-text-color)]/80 hover:bg-black/5 hover:text-[color:var(--tg-text-color)]'
+                      : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
                 }
               `}
             >
@@ -128,16 +133,25 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         })}
       </nav>
 
-      <div className="p-3 border-t border-gray-100 flex-shrink-0">
+      <div
+        className={`p-3 border-t flex-shrink-0 safe-bottom ${isTma ? 'border-black/10' : 'border-gray-100'}`}
+        style={isTma ? { backgroundColor: 'var(--tg-bg-color)', color: 'var(--tg-text-color)' } : undefined}
+      >
         <div className="mb-3 px-2">
-          <p className="text-sm font-medium text-gray-900 truncate" title={userEmail || ''}>
+          <p className="text-sm font-medium truncate text-[color:var(--tg-text-color)]" title={userEmail || ''}>
             {userEmail?.split('@')[0] || 'User'}
           </p>
-          <p className="text-xs text-gray-500 mt-0.5">{userRole ? ROLE_LABELS[userRole] : '...'}</p>
+          <p className="text-xs mt-0.5 text-[color:var(--tg-hint-color,#6b7280)]">
+            {userRole ? ROLE_LABELS[userRole] : '...'}
+          </p>
         </div>
         <button
           onClick={handleSignOut}
-          className="flex w-full items-center rounded-md px-2 py-1.5 text-sm text-gray-500 hover:bg-gray-50 hover:text-red-600 transition-colors"
+          className={`flex w-full items-center rounded-md px-2 py-1.5 text-sm transition-colors ${
+            isTma
+              ? 'text-[color:var(--tg-destructive-text-color,#dc2626)] hover:bg-black/5'
+              : 'text-gray-500 hover:bg-gray-50 hover:text-red-600'
+          }`}
         >
           Выйти
         </button>
@@ -145,35 +159,51 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
     </>
   );
 
-  // Collapsed mode: hidden sidebar that appears on hover
-  if (collapsed) {
-    return (
-      <div
-        className="fixed left-0 top-0 h-screen z-50"
-        style={{ width: hovered ? 240 : 12 }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-      >
-        {/* Thin hover trigger strip */}
-        {!hovered && (
-          <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
-        )}
-        {/* Sidebar overlay */}
+  if (!isTma) {
+    if (collapsed) {
+      return (
         <div
-          className={`absolute left-0 top-0 h-full w-60 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
-            transition-all duration-200 ease-out
-            ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
+          className="fixed left-0 top-0 h-screen z-50"
+          style={{ width: hovered ? 240 : 12 }}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
         >
-          {sidebarContent}
+          {!hovered && (
+            <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
+          )}
+          <div
+            className={`absolute left-0 top-0 h-full w-60 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
+              transition-all duration-200 ease-out
+              ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
+          >
+            {sidebarContent}
+          </div>
         </div>
+      );
+    }
+
+    return (
+      <div className="flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+        {sidebarContent}
       </div>
     );
   }
 
-  // Normal sidebar
-  return (
-    <div className="flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
-      {sidebarContent}
+  const mobileDrawer = (
+    <div className={`fixed inset-0 z-50 ${mobileOpen ? '' : 'pointer-events-none'}`}>
+      <div
+        className={`absolute inset-0 bg-black/40 transition-opacity ${mobileOpen ? 'opacity-100' : 'opacity-0'}`}
+        onClick={() => onMobileClose?.()}
+      />
+      <div
+        className={`absolute left-0 top-0 h-full w-full border-r shadow-2xl transition-transform ${
+          mobileOpen ? 'translate-x-0' : '-translate-x-full'
+        } ${isTma ? 'border-black/10 bg-[var(--tg-bg-color)] text-[color:var(--tg-text-color)]' : 'bg-white border-gray-200'}`}
+      >
+        <div className="flex h-full w-full flex-col">{sidebarContent}</div>
+      </div>
     </div>
   );
+
+  return mobileDrawer;
 }

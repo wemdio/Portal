@@ -68,13 +68,17 @@ export async function middleware(request: NextRequest) {
   )
 
   const { data: { user } } = await supabase.auth.getUser()
+  const isPublicPath =
+    pathname === '/login' ||
+    pathname.startsWith('/api/telegram/verify') ||
+    pathname.startsWith('/api/telegram/link')
 
   // Protect routes
-  if (!user && request.nextUrl.pathname !== '/login') {
+  if (!user && !isPublicPath) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  if (user && request.nextUrl.pathname === '/login') {
+  if (user && pathname === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
   }
 
