@@ -143,6 +143,22 @@ function parseHhSearchLink(value: string): LinkParseResult {
   };
 }
 
+function EmployersHint() {
+  return (
+    <span className="relative inline-flex items-center group">
+      <span
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 text-[10px] font-semibold text-gray-500"
+        aria-hidden="true"
+      >
+        ?
+      </span>
+      <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 w-64 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+        Дополнительно подгружаем информацию о компании: сайт, описание, отрасли. Это увеличивает время парсинга.
+      </span>
+    </span>
+  );
+}
+
 export function HHParserForm({ onStart, busy }: Props) {
   const [mode, setMode] = useState<'link' | 'manual'>('link');
   const [searchLink, setSearchLink] = useState('');
@@ -270,7 +286,10 @@ export function HHParserForm({ onStart, busy }: Props) {
               <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
               <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
             </span>
-            Подтягивать данные работодателей (дольше)
+            <span className="inline-flex items-center gap-1">
+              Подтягивать данные работодателей (дольше)
+              <EmployersHint />
+            </span>
           </label>
 
           {linkConfig && !linkError ? (
@@ -401,8 +420,12 @@ export function HHParserForm({ onStart, busy }: Props) {
               <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
               <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
             </span>
-            Подтягивать данные работодателей (дольше)
+            <span className="inline-flex items-center gap-1">
+              Подтягивать данные работодателей (дольше)
+              <EmployersHint />
+            </span>
           </label>
+          <EmployersExample />
         </>
       )}
     </div>

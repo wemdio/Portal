@@ -32,6 +32,31 @@ export interface HHSearchConfig {
   fetch_employers?: boolean;
 }
 
+export interface SearchParserJob {
+  id: string;
+  user_id: string;
+  status: ParserJobStatus;
+  config: { queries: string[] };
+  total_queries: number;
+  processed_queries: number;
+  total_results: number;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface SearchResult {
+  id: string;
+  job_id: string;
+  query: string;
+  title: string;
+  link: string;
+  snippet: string;
+  position: number;
+  created_at: string;
+}
+
 export interface HHVacancyRow {
   id: string;
   job_id: string;

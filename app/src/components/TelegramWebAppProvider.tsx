@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from 'react';
 
 type TelegramWebApp = {
   initData: string;
-  themeParams?: Record<string, string>;
   viewportHeight?: number;
   viewportStableHeight?: number;
   ready: () => void;
@@ -45,6 +44,9 @@ const STORAGE_KEYS = {
   user: 'tg_user',
   isWebApp: 'tg_is_webapp',
 } as const;
+const TMA_THEME_STORAGE_KEY = 'tma_theme';
+const TMA_MOBILE_MEDIA_QUERY = '(max-width: 900px)';
+const COARSE_POINTER_MEDIA_QUERY = '(pointer: coarse)';
 
 function storeLinkData(data: VerifyResponse) {
   if (!data.link_token || !data.link_expires_at) return;
@@ -73,16 +75,6 @@ function hasValidStoredToken() {
   return true;
 }
 
-function applyTheme(webApp: TelegramWebApp) {
-  const params = webApp.themeParams ?? {};
-  const root = document.documentElement.style;
-  // Intentionally ignore Telegram theme variables.
-  // We keep our own fixed palette so the UI looks consistent.
-  void params;
-  void root;
-  void webApp;
-}
-
 function applyViewport(webApp: TelegramWebApp) {
   const root = document.documentElement.style;
   if (webApp.viewportHeight) {
@@ -98,16 +90,48 @@ function isTelegramWebApp(): TelegramWebApp | null {
   return window.Telegram?.WebApp ?? null;
 }
 
-export function TelegramWebAppProvider() {
-  const [sdkReady, setSdkReady] = useState(false);
-  const initRef = useRef(false);
+function isLikelyMobileDevice() {
+  type NavigatorWithUserAgentData = Navigator & {
+    userAgentData?: {
+      mobile?: boolean;
+    };
+  };
 
-  useEffect(() => {
-    if (sdkReady || typeof window === 'undefined') return;
-    if (window.Telegram?.WebApp) {
-      setSdkReady(true);
-    }
-  }, [sdkReady]);
+  const nav = navigator as NavigatorWithUserAgentData;
+  if (typeof nav.userAgentData?.mobile === 'boolean') {
+    return nav.userAgentData.mobile;
+  }
+
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+function applyTmaMode() {
+  const root = document.documentElement;
+  root.dataset.tma = '1';
+  root.classList.add('tma');
+
+  const isMobileViewport = window.matchMedia(TMA_MOBILE_MEDIA_QUERY).matches;
+  const hasCoarsePointer = window.matchMedia(COARSE_POINTER_MEDIA_QUERY).matches;
+  const isMobileRuntime = isLikelyMobileDevice() || hasCoarsePointer;
+  if (!isMobileRuntime || !isMobileViewport) {
+    root.classList.remove('tma-mobile');
+    return;
+  }
+
+  root.classList.add('tma-mobile');
+  const savedTheme = window.localStorage.getItem(TMA_THEME_STORAGE_KEY);
+  const isSavedThemeValid = savedTheme === 'light' || savedTheme === 'dark';
+  const currentTheme = root.dataset.tmaTheme;
+  const isCurrentThemeValid = currentTheme === 'light' || currentTheme === 'dark';
+  root.dataset.tmaTheme = isSavedThemeValid ? savedTheme : (isCurrentThemeValid ? currentTheme : 'dark');
+}
+
+export function TelegramWebAppProvider() {
+  const [sdkReady, setSdkReady] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return Boolean(window.Telegram?.WebApp);
+  });
+  const initRef = useRef(false);
 
   useEffect(() => {
     if (!sdkReady || initRef.current) return;
@@ -115,8 +139,7 @@ export function TelegramWebAppProvider() {
 
     const webApp = isTelegramWebApp();
     if (!webApp) return;
-    document.documentElement.dataset.tma = '1';
-    document.documentElement.classList.add('tma');
+    applyTmaMode();
     window.dispatchEvent(new Event('tma-ready'));
 
     const initData = webApp.initData;
@@ -125,42 +148,47 @@ export function TelegramWebAppProvider() {
 
     webApp.ready();
     webApp.expand();
-    applyTheme(webApp);
     applyViewport(webApp);
 
-    const handleThemeChanged = () => applyTheme(webApp);
-    const handleViewportChanged = () => applyViewport(webApp);
-
-    webApp.onEvent('themeChanged', handleThemeChanged);
+    const handleViewportChanged = () => {
+      applyViewport(webApp);
+      applyTmaMode();
+      window.dispatchEvent(new Event('tma-ready'));
+    };
+    const handleWindowResize = () => {
+      applyTmaMode();
+      window.dispatchEvent(new Event('tma-ready'));
+    };
     webApp.onEvent('viewportChanged', handleViewportChanged);
-    if (hasValidStoredToken()) return;
-
-    void fetch('/api/telegram/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ init_data: initData }),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          clearLinkData();
-          return null;
-        }
-        return (await res.json()) as VerifyResponse;
+    window.addEventListener('resize', handleWindowResize);
+    if (!hasValidStoredToken()) {
+      void fetch('/api/telegram/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ init_data: initData }),
       })
-      .then((data) => {
-        if (!data?.verified) {
+        .then(async (res) => {
+          if (!res.ok) {
+            clearLinkData();
+            return null;
+          }
+          return (await res.json()) as VerifyResponse;
+        })
+        .then((data) => {
+          if (!data?.verified) {
+            clearLinkData();
+            return;
+          }
+          storeLinkData(data);
+        })
+        .catch(() => {
           clearLinkData();
-          return;
-        }
-        storeLinkData(data);
-      })
-      .catch(() => {
-        clearLinkData();
-      });
+        });
+    }
 
     return () => {
-      webApp.offEvent('themeChanged', handleThemeChanged);
       webApp.offEvent('viewportChanged', handleViewportChanged);
+      window.removeEventListener('resize', handleWindowResize);
     };
   }, [sdkReady]);
 

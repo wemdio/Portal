@@ -21,12 +21,25 @@ const navActiveAliases: Record<string, string[]> = {
   '/tools': ['/parsers'],
 };
 
+type TmaTheme = 'dark' | 'light';
+const TMA_THEME_STORAGE_KEY = 'tma_theme';
+
+function normalizeTmaTheme(value: string | null | undefined): TmaTheme {
+  return value === 'light' ? 'light' : 'dark';
+}
+
 export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, onMobileClose }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [hovered, setHovered] = useState(false);
+  const [tmaTheme, setTmaTheme] = useState<TmaTheme>(() => {
+    if (typeof window === 'undefined') return 'dark';
+    const root = document.documentElement;
+    const storedTheme = window.localStorage.getItem(TMA_THEME_STORAGE_KEY);
+    return normalizeTmaTheme(storedTheme ?? root.dataset.tmaTheme);
+  });
 
   async function fetchUserRole(userId: string) {
     const { data } = await supabase
@@ -71,6 +84,18 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     };
   }, []);
 
+  useEffect(() => {
+    if (!isTma || typeof window === 'undefined') return;
+    const root = document.documentElement;
+    root.dataset.tmaTheme = tmaTheme;
+    window.localStorage.setItem(TMA_THEME_STORAGE_KEY, tmaTheme);
+  }, [isTma, tmaTheme]);
+
+  function handleTmaThemeChange(nextTheme: TmaTheme) {
+    if (!isTma) return;
+    setTmaTheme(nextTheme);
+  }
+
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push('/login' as Route);
@@ -84,16 +109,16 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     <>
       <div
         className={`flex h-12 items-center px-5 border-b flex-shrink-0 safe-top ${
-          isTma ? 'border-black/10' : 'border-gray-100'
+          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
         }`}
-        style={isTma ? { backgroundColor: 'var(--tg-bg-color)', color: 'var(--tg-text-color)' } : undefined}
       >
-        <span className="text-base font-bold tracking-tight text-[color:var(--tg-text-color)]">Portal</span>
+        <span className={`text-base font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>Portal</span>
         {isTma && (
           <button
             type="button"
             onClick={() => onMobileClose?.()}
-            className="md:hidden ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-[color:var(--tg-text-color)] hover:bg-black/5"
+            className="md:hidden ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
+            style={{ color: 'var(--tma-fg)' }}
             aria-label="Закрыть меню"
           >
             ✕
@@ -119,10 +144,10 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
                 ${isActive
                   ? (isTma
-                      ? 'bg-[var(--tg-secondary-bg-color,#f3f4f6)] text-[color:var(--tg-text-color)] font-medium'
+                      ? 'tma-chip-active font-medium'
                       : 'bg-gray-100 text-gray-900 font-medium')
                   : (isTma
-                      ? 'text-[color:var(--tg-text-color)]/80 hover:bg-black/5 hover:text-[color:var(--tg-text-color)]'
+                      ? 'tma-nav-item'
                       : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
                 }
               `}
@@ -134,22 +159,53 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       </nav>
 
       <div
-        className={`p-3 border-t flex-shrink-0 safe-bottom ${isTma ? 'border-black/10' : 'border-gray-100'}`}
-        style={isTma ? { backgroundColor: 'var(--tg-bg-color)', color: 'var(--tg-text-color)' } : undefined}
+        className={`p-3 border-t flex-shrink-0 safe-bottom ${
+          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
+        }`}
       >
         <div className="mb-3 px-2">
-          <p className="text-sm font-medium truncate text-[color:var(--tg-text-color)]" title={userEmail || ''}>
+          <p className={`text-sm font-medium truncate ${isTma ? 'tma-text' : 'text-gray-900'}`} title={userEmail || ''}>
             {userEmail?.split('@')[0] || 'User'}
           </p>
-          <p className="text-xs mt-0.5 text-[color:var(--tg-hint-color,#6b7280)]">
+          <p className={`text-xs mt-0.5 ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
             {userRole ? ROLE_LABELS[userRole] : '...'}
           </p>
         </div>
+        {isTma && (
+          <div
+            className="mb-3 rounded-xl border p-2"
+            style={{ borderColor: 'var(--tma-border)', backgroundColor: 'var(--tma-surface-2)' }}
+          >
+            <p className="px-1 text-[11px] font-semibold uppercase tracking-wide tma-muted">
+              Тема интерфейса
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => handleTmaThemeChange('dark')}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  tmaTheme === 'dark' ? 'tma-chip-active' : 'tma-chip'
+                }`}
+              >
+                Тёмная
+              </button>
+              <button
+                type="button"
+                onClick={() => handleTmaThemeChange('light')}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  tmaTheme === 'light' ? 'tma-chip-active' : 'tma-chip'
+                }`}
+              >
+                Светлая
+              </button>
+            </div>
+          </div>
+        )}
         <button
           onClick={handleSignOut}
           className={`flex w-full items-center rounded-md px-2 py-1.5 text-sm transition-colors ${
             isTma
-              ? 'text-[color:var(--tg-destructive-text-color,#dc2626)] hover:bg-black/5'
+              ? 'tma-danger hover:bg-[color:var(--tma-surface-2)]'
               : 'text-gray-500 hover:bg-gray-50 hover:text-red-600'
           }`}
         >
@@ -183,7 +239,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     }
 
     return (
-      <div className="flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+      <div className="fixed left-0 top-0 z-40 flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
         {sidebarContent}
       </div>
     );
@@ -198,7 +254,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       <div
         className={`absolute left-0 top-0 h-full w-full border-r shadow-2xl transition-transform ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
-        } ${isTma ? 'border-black/10 bg-[var(--tg-bg-color)] text-[color:var(--tg-text-color)]' : 'bg-white border-gray-200'}`}
+        } ${isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'bg-white border-gray-200'}`}
       >
         <div className="flex h-full w-full flex-col">{sidebarContent}</div>
       </div>

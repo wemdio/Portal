@@ -54,6 +54,14 @@ function RunningEmptyState() {
   );
 }
 
+function LoadingEmptyState() {
+  return (
+    <div className="px-6 py-12 text-center text-gray-500">
+      <div className="mx-auto h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
+    </div>
+  );
+}
+
 const SEARCH_BASE_URL = 'https://hh.ru/search/vacancy';
 const KNOWN_PARAM_KEYS = new Set([
   'text',
@@ -191,6 +199,8 @@ export function VacancyResults({
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef<number | null>(null);
   const hasItems = items.length > 0;
+  const hasJob = Boolean(jobId);
+  const statsReady = hasJob && (!loading || count > 0);
   useEffect(() => {
     return () => {
       if (copiedTimeoutRef.current !== null) {
@@ -201,8 +211,10 @@ export function VacancyResults({
 
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
-  const shownLabel = count ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`) : '—';
-  const limitLabel = limit ? ` · по ${limit}` : '';
+  const shownLabel = statsReady
+    ? (hasItems ? `${shownFrom}–${shownTo} из ${count}` : `0 из ${count}`)
+    : '';
+  const limitLabel = statsReady && limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
@@ -351,6 +363,8 @@ export function VacancyResults({
       {items.length === 0 ? (
         jobStatus === 'running' ? (
           <RunningEmptyState key={jobId ?? 'running'} />
+        ) : (!hasJob || loading) ? (
+          <LoadingEmptyState />
         ) : (
           <div className="px-6 py-10 text-center text-gray-500">Нет результатов</div>
         )

@@ -20,26 +20,27 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     };
   }, [isTma, pathname]);
 
-  useEffect(() => {
-    // Close the drawer on route change in TMA
-    if (!isTma) return;
-    setTmaMenuOpen(false);
-  }, [isTma, pathname]);
-
   const contentPadding = isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : 'p-8');
   const contentWidth = 'w-full';
 
+  const shellClassName = isTma
+    ? 'flex min-h-screen overflow-hidden'
+    : 'flex min-h-screen overflow-x-hidden';
+
   return (
     <div
-      className="flex min-h-screen overflow-hidden"
+      className={shellClassName}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
       }}
     >
       {!isTma ? (
-        <Sidebar collapsed={isSpreadsheetPage} isTma={false} />
+        <>
+          <Sidebar collapsed={isSpreadsheetPage} isTma={false} />
+          <div className={`flex-shrink-0 hidden md:block ${isSpreadsheetPage ? 'w-3' : 'w-60'}`} />
+        </>
       ) : (
         <Sidebar
           isTma
@@ -49,7 +50,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       )}
       <div className="flex min-w-0 flex-1 flex-col">
         {isTma && <TmaHeader onMenuClick={() => setTmaMenuOpen(true)} />}
-        <main className={`flex-1 overflow-y-auto ${contentPadding}${isTma ? ' safe-bottom' : ''}`}>
+        <main className={`flex-1${isTma ? ' overflow-y-auto' : ''} ${contentPadding}${isTma ? ' safe-bottom' : ''}`}>
           <div className={contentWidth}>{children}</div>
         </main>
       </div>

@@ -20,29 +20,44 @@ create table if not exists public.trace_spans (
 );
 
 -- Indexes for efficient querying
-create index idx_trace_spans_trace_id on public.trace_spans(trace_id);
-create index idx_trace_spans_parent_span_id on public.trace_spans(parent_span_id);
-create index idx_trace_spans_job_id on public.trace_spans(job_id);
-create index idx_trace_spans_user_id on public.trace_spans(user_id);
-create index idx_trace_spans_started_at on public.trace_spans(started_at desc);
-create index idx_trace_spans_status on public.trace_spans(status);
+create index if not exists idx_trace_spans_trace_id on public.trace_spans(trace_id);
+create index if not exists idx_trace_spans_parent_span_id on public.trace_spans(parent_span_id);
+create index if not exists idx_trace_spans_job_id on public.trace_spans(job_id);
+create index if not exists idx_trace_spans_user_id on public.trace_spans(user_id);
+create index if not exists idx_trace_spans_started_at on public.trace_spans(started_at desc);
+create index if not exists idx_trace_spans_status on public.trace_spans(status);
 
 -- RLS: admins can read, service role can insert/update
 alter table public.trace_spans enable row level security;
 
+drop policy if exists trace_spans_select_admin on public.trace_spans;
 create policy trace_spans_select_admin on public.trace_spans
   for select using (
     exists (select 1 from public.profiles where profiles.id = auth.uid() and profiles.role = 'admin')
   );
 
+drop policy if exists trace_spans_insert_service on public.trace_spans;
 create policy trace_spans_insert_service on public.trace_spans
   for insert with check (true);
 
+drop policy if exists trace_spans_update_service on public.trace_spans;
 create policy trace_spans_update_service on public.trace_spans
   for update using (true);
 
 -- Enable realtime
-alter publication supabase_realtime add table public.trace_spans;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'trace_spans'
+  ) then
+    alter publication supabase_realtime add table public.trace_spans;
+  end if;
+end
+$$;
 
 -- Cleanup function
 create or replace function public.cleanup_trace_spans(retention_days integer default 30)
