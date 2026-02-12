@@ -13,9 +13,8 @@ blocks:
       prologue:
         commands:
           - checkout
-          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-          - cd $PROJECT_DIR
-          - 'if [ -d "app" ]; then APP_PATH="$(pwd)/app"; else APP_REL_PATH=$(find . -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$(pwd)/${APP_REL_PATH#./}"; else echo "app folder not found!"; exit 1; fi; fi'
+          - ROOT_DIR="$(pwd)"
+          - 'if [ -d "${ROOT_DIR}/app" ]; then APP_PATH="${ROOT_DIR}/app"; else APP_REL_PATH=$(find "${ROOT_DIR}" -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$APP_REL_PATH"; else echo "app folder not found!"; exit 1; fi; fi'
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - cd $APP_PATH
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
@@ -41,13 +40,11 @@ blocks:
         - name: Build and Push
           commands:
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
-            - "echo \"\U0001F4C1 Current directory: $(pwd)\""
-            - ls -la
-            - "echo \"\U0001F50D Searching for Dockerfile...\""
-            - find . -name "Dockerfile" -type f
-            - cd wendio/Portal && ls -la Dockerfile || cd Portal && ls -la Dockerfile || cd $(ls -d */ | head -n1) && ls -la Dockerfile
+            - DOCKERFILE_PATH="$(find . -name "Dockerfile" -type f | head -n1)"
+            - 'if [ -z "$DOCKERFILE_PATH" ]; then echo "Dockerfile not found!"; exit 1; fi'
+            - 'echo "Using Dockerfile: $DOCKERFILE_PATH"'
             - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --platform linux/amd64 -f "$DOCKERFILE_PATH" .'
   - name: Deploy to production
     dependencies:
       - Push Docker image
@@ -57,8 +54,6 @@ blocks:
       prologue:
         commands:
           - checkout
-          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-          - cd $PROJECT_DIR
       jobs:
         - name: SSH Deploy
           commands:
