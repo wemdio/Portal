@@ -15,7 +15,7 @@ blocks:
           - checkout
           - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
           - cd $PROJECT_DIR
-          - "if [ -d \"app\" ]; then\n  echo \"✅ app found in root\"\n  APP_PATH=\"$(pwd)/app\"\nelse\n  echo \"\U0001F50D Searching for app folder...\"\n  APP_REL_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1)\n  if [ -n \"$APP_REL_PATH\" ]; then\n    APP_PATH=\"$(pwd)/${APP_REL_PATH#./}\"\n    echo \"✅ app found at $APP_PATH\"\n  else\n    echo \"❌ app folder not found!\"\n    ls -la\n    exit 1\n  fi\nfi\n"
+          - "if [ -d \"app\" ]; then echo \"✅ app found in root\"; APP_PATH=\"$(pwd)/app\"; else echo \"\U0001F50D Searching for app folder...\"; APP_REL_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1); if [ -n \"$APP_REL_PATH\" ]; then APP_PATH=\"$(pwd)/${APP_REL_PATH#./}\"; echo \"✅ app found at $APP_PATH\"; else echo \"❌ app folder not found!\"; ls -la; exit 1; fi; fi"
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - echo "PROJECT_DIR=$PROJECT_DIR" >> /tmp/env_vars
           - cd $APP_PATH
@@ -66,15 +66,6 @@ blocks:
           commands:
             - sudo apt-get update && sudo apt-get install -y sshpass
             - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${USER}@${HOST}:/home/Portal/prod/'
-            - |
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "
-                set -e
-                cd /home/Portal/prod/
-                echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin
-                sudo docker compose version
-                sudo docker compose -p portal -f docker-compose.prod.yml pull portal
-                sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f
-                sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
-                sudo docker image prune -f
-                sudo docker volume prune -f
-              "
+            - >-
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin; sudo docker compose version; sudo docker compose -p portal -f docker-compose.prod.yml pull portal; sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps
+              --force-recreate portal; sudo docker image prune -f; sudo docker volume prune -f"
