@@ -15,12 +15,9 @@ blocks:
           - checkout
           - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
           - cd $PROJECT_DIR
-          - "if [ -d \"app\" ]; then echo \"✅ app found in root\"; APP_PATH=\"$(pwd)/app\"; else echo \"\U0001F50D Searching for app folder...\"; APP_REL_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1); if [ -n \"$APP_REL_PATH\" ]; then APP_PATH=\"$(pwd)/${APP_REL_PATH#./}\"; echo \"✅ app found at $APP_PATH\"; else echo \"❌ app folder not found!\"; ls -la; exit 1; fi; fi"
+          - 'if [ -d "app" ]; then APP_PATH="$(pwd)/app"; else APP_REL_PATH=$(find . -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$(pwd)/${APP_REL_PATH#./}"; else echo "app folder not found!"; exit 1; fi; fi'
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
-          - echo "PROJECT_DIR=$PROJECT_DIR" >> /tmp/env_vars
           - cd $APP_PATH
-          - echo "Current directory: $(pwd)"
-          - test -f package.json && echo "✅ package.json exists" || echo "❌ package.json NOT FOUND!"
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
           - npm ci
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
@@ -29,8 +26,6 @@ blocks:
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
-            - echo "Running lint and tests in: $(pwd)"
-            - ls -la package.json
             - npm run lint
             - npm test -- --watchAll=false
   - name: Push Docker image
