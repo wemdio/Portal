@@ -13,29 +13,17 @@ blocks:
       prologue:
         commands:
           - checkout
-          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-          - cd $PROJECT_DIR
-          - "if [ -d \"app\" ]; then\n  echo \"✅ app found in root\"\n  cd app\nelse\n  echo \"\U0001F50D Searching for app folder...\"\n  APP_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1)\n  if [ -n \"$APP_PATH\" ]; then\n    echo \"✅ app found at $APP_PATH\"\n    cd $APP_PATH\n  else\n    echo \"❌ app folder not found!\"\n    ls -la\n    exit 1\n  fi\nfi\n"
-          - pwd
+          - "PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\\/$//')\ncd $PROJECT_DIR\nif [ -d \"app\" ]; then\n  echo \"✅ app found in root\"\n  APP_PATH=\"$(pwd)/app\"\nelse\n  echo \"\U0001F50D Searching for app folder...\"\n  APP_REL_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1)\n  if [ -n \"$APP_REL_PATH\" ]; then\n    APP_PATH=\"$(pwd)/${APP_REL_PATH#./}\"\n    echo \"✅ app found at $APP_PATH\"\n  else\n    echo \"❌ app folder not found!\"\n    ls -la\n    exit 1\n  fi\nfi\n# Сохраняем путь в файл для использования в jobs\necho \"APP_PATH=$APP_PATH\" >> /tmp/env_vars\necho \"PROJECT_DIR=$PROJECT_DIR\" >> /tmp/env_vars\ncd $APP_PATH\necho \"Current directory: $(pwd)\"\necho \"package.json exists: $(test -f package.json && echo 'YES' || echo 'NO')\"\n"
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
           - npm ci
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       jobs:
         - name: Lint and Test
           commands:
-            - |
-              if [ ! -f "package.json" ]; then
-                PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-                cd $PROJECT_DIR
-                if [ -d "app" ]; then
-                  cd app
-                else
-                  APP_PATH=$(find . -type d -name "app" -not -path "*/node_modules/*" | head -n1)
-                  cd $APP_PATH
-                fi
-              fi
-            - pwd
-            - ls -la
+            - source /tmp/env_vars
+            - cd $APP_PATH
+            - echo "Running lint and tests in: $(pwd)"
+            - ls -la package.json || echo "package.json NOT FOUND!"
             - npm run lint
             - npm test -- --watchAll=false
   - name: Push Docker image
