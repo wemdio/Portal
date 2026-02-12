@@ -4,6 +4,9 @@ agent:
   machine:
     type: e1-standard-2
     os_image: ubuntu2004
+auto_promote:
+  - name: Deploy to Production
+    when: branch = 'main' AND result = 'passed'
 blocks:
   - name: Run tests
     dependencies: []
@@ -15,6 +18,7 @@ blocks:
           - checkout
           - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
           - cd $PROJECT_DIR
+          - "if [ -d \"app\" ]; then\n  echo \"✅ app found in root\"\nelse\n  echo \"\U0001F50D Searching for app folder...\"\n  APP_PATH=$(find . -type d -name \"app\" -not -path \"*/node_modules/*\" | head -n1)\n  if [ -n \"$APP_PATH\" ]; then\n    echo \"✅ app found at $APP_PATH\"\n    cd $APP_PATH/..\n  else\n    echo \"❌ app folder not found!\"\n    ls -la\n    exit 1\n  fi\nfi\n"
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json), node-modules'
           - cd app && npm ci
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json) app/node_modules
@@ -23,20 +27,29 @@ blocks:
           commands:
             - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
             - cd $PROJECT_DIR
-            - cd app && npm run lint
-            - cd app && npm test -- --watchAll=false
+            - |
+              if [ -d "app" ]; then
+                cd app
+              else
+                APP_PATH=$(find . -type d -name "app" -not -path "*/node_modules/*" | head -n1)
+                cd $APP_PATH
+              fi
+            - npm run lint
+            - npm test -- --watchAll=false
   - name: Push Docker image
     dependencies:
       - Run tests
     task:
       secrets:
         - name: portal-secrets
+      prologue:
+        commands:
+          - checkout
+          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+          - cd $PROJECT_DIR
       jobs:
         - name: Build and Push
           commands:
-            - checkout
-            - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-            - cd $PROJECT_DIR
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
             - docker buildx create --use
             - |
@@ -54,12 +67,14 @@ blocks:
     task:
       secrets:
         - name: portal-secrets
+      prologue:
+        commands:
+          - checkout
+          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+          - cd $PROJECT_DIR
       jobs:
         - name: SSH Deploy
           commands:
-            - checkout
-            - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
-            - cd $PROJECT_DIR
             - sudo apt-get update && sudo apt-get install -y sshpass
             - |
               sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
