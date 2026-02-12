@@ -1,21 +1,70 @@
 version: v1.0
-name: Python
+name: Auto (push main)
 agent:
   machine:
-    type: f1-standard-2
-    os_image: ubuntu2204
+    type: e1-standard-2
+    os_image: ubuntu2004
 blocks:
-  - name: Test
+  - name: Run tests
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - checkout
+          - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json), node-modules'
+          - cd app && npm ci
+          - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json) app/node_modules
+      jobs:
+        - name: Lint and Test
+          commands:
+            - cd app && npm run lint
+            - cd app && npm test -- --coverage --watchAll=false
+      epilogue:
+        always:
+          commands:
+            - checkout
+            - 'bash <(curl -s https://codecov.io/bash) -t $CODECOV_TOKEN -f app/coverage/coverage-final.json'
+  - name: Push Docker image
+    dependencies:
+      - Run tests
     task:
       jobs:
-        - name: pytest
+        - name: Build and Push
           commands:
-            - sem-version python 3.7
             - checkout
-            - python -m pip install --upgrade pip
-            - pip install -r requirements.txt
-            - pip install flake8
-            - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-            - flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-            - pip install pytest
-            - pytest
+            - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+            - docker buildx create --use
+            - |
+              docker buildx build \
+                --push \
+                --tag ${DOCKER_USERNAME}/portal:prod \
+                --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} \
+                --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} \
+                --platform linux/amd64 \
+                -f Dockerfile \
+                .
+  - name: Deploy to production
+    dependencies:
+      - Push Docker image
+    task:
+      jobs:
+        - name: SSH Deploy
+          commands:
+            - checkout
+            - |
+              sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
+                docker-compose.prod.yml \
+                ${USER}@${HOST}:/home/Portal/prod/
+            - |
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+                ${USER}@${HOST} '
+                set -e
+                cd /home/Portal/prod/
+                echo "${DOCKER_PASSWORD}" | sudo docker login --username "${DOCKER_USERNAME}" --password-stdin
+                sudo docker compose version
+                sudo docker compose -p portal -f docker-compose.prod.yml pull portal
+                sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
+                sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
+                sudo docker image prune --force
+                sudo docker volume prune --force
+              '
