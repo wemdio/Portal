@@ -8,6 +8,8 @@ blocks:
   - name: Run tests
     dependencies: []
     task:
+      secrets:
+        - name: portal-secrets
       prologue:
         commands:
           - checkout
@@ -18,16 +20,13 @@ blocks:
         - name: Lint and Test
           commands:
             - cd app && npm run lint
-            - cd app && npm test -- --coverage --watchAll=false
-      epilogue:
-        always:
-          commands:
-            - checkout
-            - 'bash <(curl -s https://codecov.io/bash) -t $CODECOV_TOKEN -f app/coverage/coverage-final.json'
+            - cd app && npm test -- --watchAll=false
   - name: Push Docker image
     dependencies:
       - Run tests
     task:
+      secrets:
+        - name: portal-secrets
       jobs:
         - name: Build and Push
           commands:
@@ -47,24 +46,27 @@ blocks:
     dependencies:
       - Push Docker image
     task:
+      secrets:
+        - name: portal-secrets
       jobs:
         - name: SSH Deploy
           commands:
             - checkout
+            - sudo apt-get update && sudo apt-get install -y sshpass
             - |
               sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
                 docker-compose.prod.yml \
                 ${USER}@${HOST}:/home/Portal/prod/
             - |
               sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no \
-                ${USER}@${HOST} '
+                ${USER}@${HOST} "
                 set -e
                 cd /home/Portal/prod/
-                echo "${DOCKER_PASSWORD}" | sudo docker login --username "${DOCKER_USERNAME}" --password-stdin
+                echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin
                 sudo docker compose version
                 sudo docker compose -p portal -f docker-compose.prod.yml pull portal
-                sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
+                sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f
                 sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
-                sudo docker image prune --force
-                sudo docker volume prune --force
-              '
+                sudo docker image prune -f
+                sudo docker volume prune -f
+              "
