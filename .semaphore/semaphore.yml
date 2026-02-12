@@ -45,7 +45,6 @@ blocks:
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
             - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
             - cd $PROJECT_DIR
-            - echo "✅ Building Docker image from: $(pwd)"
             - ls -la Dockerfile
             - docker buildx create --use
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --platform linux/amd64 -f Dockerfile .'
