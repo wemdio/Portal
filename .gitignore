@@ -14,6 +14,7 @@ companies_10000.xlsx
 .cursor
 .github/
 
+
 # next.js
 app/.next/
 app/out/
