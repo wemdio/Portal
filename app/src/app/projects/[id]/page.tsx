@@ -4,10 +4,11 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { Route } from 'next';
 import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
-import { Project, ProjectStatus } from '@/types';
+import { Project, ProjectStatus, UserProfile } from '@/types';
 import Link from 'next/link';
 import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
@@ -55,24 +56,42 @@ function EditableTile({
   onChange,
   disabled,
   placeholder,
+  options,
 }: {
   label: string;
   value?: string | null;
   onChange: (value: string) => void;
   disabled: boolean;
   placeholder?: string;
+  options?: string[];
 }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
       <label className="text-xs uppercase tracking-wide text-gray-400">{label}</label>
-      <input
-        type="text"
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        placeholder={placeholder}
-        className="mt-2 w-full rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
-      />
+      {options ? (
+        <select
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          className="mt-2 w-full rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+        >
+          <option value="">{placeholder || 'Не выбрано'}</option>
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={value || ''}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder={placeholder}
+          className="mt-2 w-full rounded-md border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+        />
+      )}
     </div>
   );
 }
@@ -118,17 +137,36 @@ export default function ProjectPage() {
   const [canEdit, setCanEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
 
   useEffect(() => {
     if (id) {
-      fetchProject(id);
-      checkPermissions();
+      void fetchProject(id);
+      void checkPermissions();
+      void fetchAssigneeUsers();
     }
   }, [id]);
 
   async function checkPermissions() {
     const role = await getCurrentUserRole();
     setCanEdit(canEditProjects(role));
+  }
+
+  async function fetchAssigneeUsers() {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('email, full_name');
+
+      if (error) throw error;
+      setAssigneeOptions(
+        buildAssigneeOptions(
+          ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
+        ),
+      );
+    } catch (fetchError) {
+      void logError('projects.assignees.fetch.failed', fetchError);
+    }
   }
 
   async function fetchProject(projectId: string) {
@@ -236,6 +274,8 @@ export default function ProjectPage() {
   }
 
   const materials = parseMaterials(project.materials_links);
+  const specialistOptions = ensureCurrentAssigneeOption(assigneeOptions, project.specialist);
+  const managerOptions = ensureCurrentAssigneeOption(assigneeOptions, project.manager);
 
   return (
     <div className="max-w-5xl mx-auto py-8 px-4">
@@ -683,23 +723,35 @@ export default function ProjectPage() {
             <div className="space-y-4">
                 <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Менеджер</label>
-                    <input
-                    type="text"
-                    value={project.manager}
-                    onChange={(e) => setProject({ ...project, manager: e.target.value })}
-                    disabled={!canEdit}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
-                    />
+                    <select
+                      value={project.manager || ''}
+                      onChange={(e) => setProject({ ...project, manager: e.target.value })}
+                      disabled={!canEdit}
+                      className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+                    >
+                      <option value="">Не выбрано</option>
+                      {managerOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
                 </div>
                  <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Специалист</label>
-                    <input
-                    type="text"
-                    value={project.specialist}
-                    onChange={(e) => setProject({ ...project, specialist: e.target.value })}
-                    disabled={!canEdit}
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
-                    />
+                    <select
+                      value={project.specialist || ''}
+                      onChange={(e) => setProject({ ...project, specialist: e.target.value })}
+                      disabled={!canEdit}
+                      className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+                    >
+                      <option value="">Не выбрано</option>
+                      {specialistOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
                 </div>
             </div>
            </div>
@@ -744,14 +796,16 @@ export default function ProjectPage() {
               value={project.specialist}
               onChange={(value) => setProject({ ...project, specialist: value })}
               disabled={!canEdit}
-              placeholder="Имя специалиста"
+              options={specialistOptions}
+              placeholder="Не назначен"
             />
             <EditableTile
               label="Лид (контролирует)"
               value={project.manager}
               onChange={(value) => setProject({ ...project, manager: value })}
               disabled={!canEdit}
-              placeholder="Имя лида"
+              options={managerOptions}
+              placeholder="Не назначен"
             />
           </div>
 

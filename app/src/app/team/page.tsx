@@ -4,6 +4,8 @@ import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
+import { UserProfile, UserRole } from '@/types';
+import { getAssigneeDisplayName } from '@/lib/projectAssignees';
 
 interface ProjectData {
   id: string;
@@ -12,6 +14,8 @@ interface ProjectData {
   manager: string | null;
   specialist: string | null;
 }
+
+type ProfileData = Pick<UserProfile, 'email' | 'full_name' | 'role'>;
 
 interface SpecialistStats {
   name: string;
@@ -31,15 +35,22 @@ interface ManagerStats {
 
 const STORAGE_KEY_CAPACITY = 'portal:team-capacity';
 const DEFAULT_CAPACITY = 4;
+const MANAGER_ROLES = new Set<UserRole>(['manager', 'director', 'admin']);
+const SPECIALIST_ROLES = new Set<UserRole>(['technician', 'marketer', 'sales']);
+
+function normalizeAssigneeName(value: string | null | undefined): string {
+  return value?.trim() || '';
+}
 
 export default function TeamPage() {
   const isTma = useIsTma();
   const [projects, setProjects] = useState<ProjectData[]>([]);
+  const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
   const [capacities, setCapacities] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     loadCapacities();
   }, []);
 
@@ -62,12 +73,20 @@ export default function TeamPage() {
 
   async function fetchData() {
     try {
-      const { data, error } = await supabase
-        .from('projects')
-        .select('id, name, status, manager, specialist');
+      const [projectsResult, profilesResult] = await Promise.all([
+        supabase
+          .from('projects')
+          .select('id, name, status, manager, specialist'),
+        supabase
+          .from('profiles')
+          .select('email, full_name, role'),
+      ]);
 
-      if (error) throw error;
-      setProjects(data || []);
+      if (projectsResult.error) throw projectsResult.error;
+      if (profilesResult.error) throw profilesResult.error;
+
+      setProjects((projectsResult.data as ProjectData[]) || []);
+      setProfiles((profilesResult.data as ProfileData[]) || []);
     } catch (error) {
       void logError('team.data.fetch.failed', error);
     } finally {
@@ -79,14 +98,41 @@ export default function TeamPage() {
     const statsMap = new Map<string, SpecialistStats>();
     const managerMap = new Map<string, ManagerStats>();
 
+    // Seed stats with registered users so users with zero active projects are visible.
+    profiles.forEach((profile) => {
+      const name = normalizeAssigneeName(getAssigneeDisplayName(profile));
+      if (!name) return;
+
+      if (profile.role && MANAGER_ROLES.has(profile.role)) {
+        managerMap.set(name, {
+          name,
+          fact: 0,
+          prep: 0,
+          plan: capacities[`manager:${name}`] || DEFAULT_CAPACITY,
+          activeProjects: [],
+        });
+      }
+
+      if (profile.role && SPECIALIST_ROLES.has(profile.role)) {
+        statsMap.set(name, {
+          name,
+          fact: 0,
+          prep: 0,
+          plan: capacities[`specialist:${name}`] || DEFAULT_CAPACITY,
+          activeProjects: [],
+        });
+      }
+    });
+
     projects.forEach((p) => {
       const status = p.status?.toLowerCase() || '';
       const isWorking = status.includes('работ') || status.includes('тест');
       const isPrep = status.includes('подготов');
 
       // Process Specialist
-      if (p.specialist) {
-        const name = p.specialist;
+      const specialistName = normalizeAssigneeName(p.specialist);
+      if (specialistName) {
+        const name = specialistName;
         const existing = statsMap.get(name) || {
           name,
           fact: 0,
@@ -106,8 +152,9 @@ export default function TeamPage() {
       }
 
       // Process Manager
-      if (p.manager) {
-        const name = p.manager;
+      const managerName = normalizeAssigneeName(p.manager);
+      if (managerName) {
+        const name = managerName;
         const existing = managerMap.get(name) || {
           name,
           fact: 0,
@@ -127,11 +174,15 @@ export default function TeamPage() {
       }
     });
 
-    const specialists = Array.from(statsMap.values()).sort((a, b) => b.fact - a.fact);
-    const managers = Array.from(managerMap.values()).sort((a, b) => b.fact - a.fact);
+    const specialists = Array.from(statsMap.values()).sort(
+      (a, b) => b.fact - a.fact || a.name.localeCompare(b.name, 'ru-RU'),
+    );
+    const managers = Array.from(managerMap.values()).sort(
+      (a, b) => b.fact - a.fact || a.name.localeCompare(b.name, 'ru-RU'),
+    );
 
     return { specialists, managers };
-  }, [projects, capacities]);
+  }, [projects, profiles, capacities]);
 
   const totalFact = specialistStats.specialists.reduce((sum, s) => sum + s.fact, 0);
   const totalPlan = specialistStats.specialists.reduce((sum, s) => sum + s.plan, 0);
