@@ -30,6 +30,8 @@ blocks:
   - name: Push Docker image
     dependencies:
       - Run tests
+    run:
+      when: "branch = 'main'"
     task:
       secrets:
         - name: portal-secrets
@@ -48,6 +50,8 @@ blocks:
   - name: Deploy to production
     dependencies:
       - Push Docker image
+    run:
+      when: "branch = 'main'"
     task:
       secrets:
         - name: portal-secrets
