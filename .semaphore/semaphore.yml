@@ -41,7 +41,7 @@ blocks:
         - name: Build and Push
           commands:
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
-            - "echo \"\U0001F4C1 Current directory": $(pwd)"
+            - "echo \"\U0001F4C1 Current directory: $(pwd)\""
             - ls -la
             - "echo \"\U0001F50D Searching for Dockerfile...\""
             - find . -name "Dockerfile" -type f
