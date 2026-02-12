@@ -13,14 +13,16 @@ blocks:
       prologue:
         commands:
           - checkout
-          - cd $SEMAPHORE_GIT_DIR
+          - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+          - cd $PROJECT_DIR
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json), node-modules'
           - cd app && npm ci
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum app/package-lock.json) app/node_modules
       jobs:
         - name: Lint and Test
           commands:
-            - cd $SEMAPHORE_GIT_DIR
+            - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+            - cd $PROJECT_DIR
             - cd app && npm run lint
             - cd app && npm test -- --watchAll=false
   - name: Push Docker image
@@ -33,7 +35,8 @@ blocks:
         - name: Build and Push
           commands:
             - checkout
-            - cd $SEMAPHORE_GIT_DIR
+            - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+            - cd $PROJECT_DIR
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
             - docker buildx create --use
             - |
@@ -55,7 +58,8 @@ blocks:
         - name: SSH Deploy
           commands:
             - checkout
-            - cd $SEMAPHORE_GIT_DIR
+            - PROJECT_DIR=$(ls -d */ | head -n1 | sed 's/\/$//')
+            - cd $PROJECT_DIR
             - sudo apt-get update && sudo apt-get install -y sshpass
             - |
               sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
