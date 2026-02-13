@@ -39,7 +39,7 @@ npm install
 
 #### Настройка переменных окружения
 
-Создайте файл `.env.local` в корне проекта:
+Создайте файл `.env.local` (или `.env`) в корне проекта:
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
@@ -51,6 +51,7 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 ```
 
 `SUPABASE_DB_URL` или `DATABASE_URL` используются для проверки соединения и автоприменения миграций при старте/деплое.
+Локально миграции запускаются автоматически при `npm run dev` и `npm start`.
 
 #### Запуск в режиме разработки
 

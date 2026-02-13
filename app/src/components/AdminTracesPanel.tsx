@@ -192,6 +192,8 @@ const LEVEL_DOT: Record<SpanRow['level'], string> = {
 function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const hasChildren = node.children.length > 0;
+  const hasDetails = !isEmptyObj(node.input) || !isEmptyObj(node.output) || Boolean(node.message);
+  const canExpand = hasChildren || hasDetails;
   const status = STATUS_CONFIG[node.status];
   const isRoot = node.depth === 0;
 
@@ -211,6 +213,19 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
 
       {/* Span row */}
       <div
+        role={canExpand ? 'button' : undefined}
+        tabIndex={canExpand ? 0 : undefined}
+        onClick={canExpand ? () => setExpanded(!expanded) : undefined}
+        onKeyDown={
+          canExpand
+            ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setExpanded(!expanded);
+                }
+              }
+            : undefined
+        }
         className={`group relative flex items-start gap-3 py-2.5 px-3 rounded-lg transition-colors ${
           node.status === 'failed'
             ? 'bg-red-50/50 hover:bg-red-50'
@@ -221,9 +236,12 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
       >
         {/* Expand toggle / status dot */}
         <div className="flex-shrink-0 mt-0.5">
-          {hasChildren ? (
+          {canExpand ? (
             <button
-              onClick={() => setExpanded(!expanded)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded(!expanded);
+              }}
               className="flex items-center justify-center w-5 h-5 rounded text-gray-500 hover:bg-gray-200 transition-colors"
             >
               <svg
@@ -280,7 +298,11 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
           )}
 
           {expanded && (
-            <div className="mt-2 space-y-2">
+            <div
+              className="mt-2 space-y-2"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
               {!isEmptyObj(node.input) && (
                 <details className="text-base">
                   <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none font-medium">
@@ -578,19 +600,38 @@ export function AdminTracesPanel({
         { event: '*', schema: 'public', table: 'trace_spans' },
         () => {
           // Debounce: refetch after a short delay to batch rapid updates
-          clearTimeout(refreshTimer);
-          refreshTimer = setTimeout(() => {
+          clearTimeout(realtimeRefreshTimer);
+          realtimeRefreshTimer = setTimeout(() => {
             if (mountedRef.current) void fetchTraces();
           }, 1500);
         },
       )
       .subscribe();
 
-    let refreshTimer: ReturnType<typeof setTimeout>;
+    // Also poll periodically (Google-like realtime can be flaky in some environments)
+    // Use jittered interval (5-7s) to avoid thundering herd.
+    let pollTimer: ReturnType<typeof setTimeout>;
+    const scheduleNextPoll = () => {
+      clearTimeout(pollTimer);
+      const delayMs = 5000 + Math.round(Math.random() * 2000);
+      pollTimer = setTimeout(() => {
+        if (!mountedRef.current) return;
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          scheduleNextPoll();
+          return;
+        }
+        void fetchTraces();
+        scheduleNextPoll();
+      }, delayMs);
+    };
+    scheduleNextPoll();
+
+    let realtimeRefreshTimer: ReturnType<typeof setTimeout>;
 
     return () => {
       mountedRef.current = false;
-      clearTimeout(refreshTimer);
+      clearTimeout(realtimeRefreshTimer);
+      clearTimeout(pollTimer);
       void supabase.removeChannel(channel);
     };
   }, [fetchTraces]);
@@ -630,13 +671,6 @@ export function AdminTracesPanel({
           <h2 className="text-2xl font-semibold text-gray-900">{title}</h2>
           <p className="text-base text-gray-500">{description}</p>
         </div>
-        <button
-          onClick={() => void fetchTraces()}
-          disabled={loading}
-          className="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50"
-        >
-          {loading ? 'Загрузка...' : 'Обновить'}
-        </button>
       </div>
 
       {/* Filters */}

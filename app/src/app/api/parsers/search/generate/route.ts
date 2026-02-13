@@ -5,20 +5,9 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 
 export const dynamic = 'force-dynamic';
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_SEARCH_PARSER_API_KEY || '';
-const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
-
-const SYSTEM_PROMPT = `Ты - эксперт по поиску B2B лидов и OSINT.
-Твоя задача: на основе описания компании или брифа составить список эффективных поисковых запросов для Google/Yandex, чтобы найти потенциальных клиентов или целевые компании.
-
-Правила:
-1. Используй продвинутые операторы поиска (site:, intitle:, inurl:, filetype:pdf, filetype:xls и др.).
-2. Цель: найти списки компаний, каталоги, профильные ассоциации, участников выставок, контакты ЛПР.
-3. Составь от 5 до 10 запросов.
-4. Ответ верни СТРОГО в формате JSON: { "queries": ["query1", "query2", ...] }. Без лишнего текста.
-5. Запросы должны быть на языке целевой аудитории (русский для РФ/СНГ).
-`;
-
+import { OPENROUTER_API_KEY, OPENROUTER_MODEL } from '@/lib/constants';
+import { SEARCH_PARSER_SYSTEM_PROMPT } from '@/lib/aiPrompts';
+import { buildSearchQueries } from '@/lib/parsers/searchQueryBuilder';
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
@@ -51,7 +40,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: SEARCH_PARSER_SYSTEM_PROMPT },
           { role: 'user', content: `Бриф клиента:\n${brief.slice(0, 4000)}` }
         ],
         temperature: 0.6,
@@ -68,21 +57,9 @@ export async function POST(req: NextRequest) {
     if (typeof content !== 'string' || !content.trim()) {
       return jsonError('Empty AI response', 502);
     }
-    
-    let parsed: { queries: string[] };
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-       // Fallback if AI didn't return strict JSON
-       const queries = content
-         .split('\n')
-         .map((line: string) => line.replace(/^[\s*\-•\d.]+/, '').trim())
-         .filter((line: string) => line.length > 5)
-         .slice(0, 10);
-       parsed = { queries };
-    }
 
-    return NextResponse.json({ queries: parsed.queries || [] });
+    const queries = buildSearchQueries(content, brief);
+    return NextResponse.json({ queries });
   } catch (err) {
     console.error('Generate queries error:', err);
     return jsonError('Failed to generate queries', 500);

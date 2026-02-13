@@ -159,6 +159,14 @@ function EmployersHint() {
   );
 }
 
+function EmployersExample() {
+  return (
+    <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+      Пример: включайте опцию, если нужен сайт/описание/отрасли компании. Это увеличит время выполнения.
+    </div>
+  );
+}
+
 export function HHParserForm({ onStart, busy }: Props) {
   const [mode, setMode] = useState<'link' | 'manual'>('link');
   const [searchLink, setSearchLink] = useState('');

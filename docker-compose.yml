@@ -9,6 +9,8 @@ services:
         - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
         - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
     container_name: portal
+    depends_on:
+      - yandexmaps
     ports:
       - "3000:3000"
     environment:
@@ -21,6 +23,19 @@ services:
       - HH_PROXY_URL=${HH_PROXY_URL}
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
+      - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
+      - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  yandexmaps:
+    build:
+      context: ./services/yandexmaps
+      dockerfile: Dockerfile
+    container_name: portal-yandexmaps
+    ports:
+      - "8000:8000"
     restart: unless-stopped
     networks:
       - portal-network

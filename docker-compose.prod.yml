@@ -4,6 +4,8 @@ services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
     container_name: portal
+    depends_on:
+      - yandexmaps
     env_file:
       - .env
     ports:
@@ -18,6 +20,15 @@ services:
       - HH_PROXY_URL=${HH_PROXY_URL}
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
+      - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
+      - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  yandexmaps:
+    image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
+    container_name: portal-yandexmaps
     restart: unless-stopped
     networks:
       - portal-network

@@ -9,7 +9,10 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return jsonError('Unauthorized', 401);
 
@@ -17,7 +20,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return jsonError('Unauthorized', 401);
 
-  const { id } = params;
+  const { id } = await params;
   
   const { data: results, error } = await supabase
     .from('search_results')

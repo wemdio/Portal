@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "postinstall": "playwright install chromium",
     "db:migrate": "node scripts/db/ensureDatabase.js",
     "predev": "node scripts/db/ensureDatabase.js",
     "dev": "next dev",
@@ -29,6 +30,7 @@
     "papaparse": "^5.5.3",
     "pdf-parse": "^2.4.5",
     "pg": "^8.18.0",
+    "playwright": "^1.58.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "tailwind-merge": "^3.4.0",

@@ -2,7 +2,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Loader2, Sparkles, Play, Plus, Trash2 } from 'lucide-react';
+import { Loader2, Sparkles, Play, Plus, Trash2, RefreshCcw } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
 interface Props {
@@ -17,6 +17,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
   const [queries, setQueries] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [regeneratingQueryIndex, setRegeneratingQueryIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const getAccessToken = async () => {
@@ -44,10 +45,40 @@ export function SearchParserForm({ onStart, busy }: Props) {
       if (data.queries && Array.isArray(data.queries)) {
         setQueries(data.queries);
       }
-    } catch (err) {
+    } catch {
       setError('Ошибка генерации запросов. Попробуйте еще раз.');
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleRegenerateQuery = async (index: number) => {
+    if (!brief.trim()) return;
+    setRegeneratingQueryIndex(index);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error('Not authenticated');
+      const res = await fetch('/api/parsers/search/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ brief: brief.trim() }),
+      });
+      if (!res.ok) throw new Error('Failed to regenerate query');
+      const data = await res.json();
+      if (data.queries && Array.isArray(data.queries) && data.queries.length > 0) {
+        const newQuery = data.queries[0];
+        const nextQueries = [...queries];
+        nextQueries[index] = newQuery;
+        setQueries(nextQueries);
+      }
+    } catch {
+      setError('Ошибка перегенерации запроса. Попробуйте еще раз.');
+    } finally {
+      setRegeneratingQueryIndex(null);
     }
   };
 
@@ -114,10 +145,10 @@ export function SearchParserForm({ onStart, busy }: Props) {
           <textarea
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
-            className="w-full h-32 rounded-lg border border-gray-300 p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             placeholder="Вставьте описание компании, продукта или ЦА из брифа..."
           />
-          <div className="mt-3 flex flex-wrap items-center gap-3">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             <input
               ref={fileInputRef}
               type="file"
@@ -132,7 +163,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={pdfUploading}
-              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-400 hover:shadow-sm disabled:opacity-50"
             >
               {pdfUploading ? <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" /> : null}
               Загрузить PDF бриф
@@ -178,6 +209,18 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <div className="space-y-2">
               {queries.map((q, idx) => (
                 <div key={idx} className="flex gap-2">
+                  <button
+                    onClick={() => handleRegenerateQuery(idx)}
+                    disabled={generating || regeneratingQueryIndex === idx || !brief.trim()}
+                    className="text-gray-400 hover:text-blue-500 p-2 disabled:opacity-50"
+                    title="Перегенерировать запрос"
+                  >
+                    {regeneratingQueryIndex === idx ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCcw className="h-4 w-4" />
+                    )}
+                  </button>
                   <input
                     value={q}
                     onChange={(e) => updateQuery(idx, e.target.value)}
@@ -206,9 +249,6 @@ export function SearchParserForm({ onStart, busy }: Props) {
                 )}
                 Запустить парсинг
               </button>
-              <p className="mt-2 text-xs text-center text-gray-500">
-                Внимание: прямой парсинг Google может быть нестабильным. Используйте VPN, если запросы блокируются.
-              </p>
             </div>
           </div>
         )}

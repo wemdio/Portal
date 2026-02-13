@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyTelegramLinkToken } from '@/lib/telegram';
+import { TELEGRAM_BOT_TOKEN } from '@/lib/constants';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -27,10 +28,9 @@ export async function POST(req: NextRequest) {
     return jsonError('Missing link_token', 400);
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) return jsonError('Telegram bot token is not configured', 500);
+  if (!TELEGRAM_BOT_TOKEN) return jsonError('Telegram bot token is not configured', 500);
 
-  const verified = verifyTelegramLinkToken(body.link_token, botToken);
+  const verified = verifyTelegramLinkToken(body.link_token, TELEGRAM_BOT_TOKEN);
   if (!verified.ok) return jsonError(verified.error, 401);
 
   if (!supabaseAdmin) return jsonError('Linking is not configured', 500);

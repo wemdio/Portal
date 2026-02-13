@@ -35,7 +35,7 @@ export default function ToolsPage() {
             <div>
               <p className="text-base font-semibold text-gray-900">Парсеры</p>
               <p className="text-sm text-gray-500">
-                Парсер вакансий HH с запуском и выгрузкой результатов.
+                Набор парсеров для сбора данных, запусков и выгрузки результатов.
               </p>
             </div>
           </div>

@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
+import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
