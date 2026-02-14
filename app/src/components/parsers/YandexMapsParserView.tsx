@@ -276,47 +276,63 @@ export function YandexMapsParserView() {
   const stage = (activeJob?.progress_stage ?? '').toString();
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1 space-y-4">
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <div className="text-sm font-semibold text-gray-900">Новый запуск</div>
-            <div className="text-xs text-gray-500 mt-1">Создай задачу, затем собери ссылки и запусти парсинг.</div>
-            <div className="mt-4">
-              <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
-            </div>
-          </div>
+    <div className="space-y-8">
+      {/* Top Section: New Run */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+          <h3 className="text-base font-semibold text-gray-900">Новый запуск</h3>
+        </div>
+        <div className="p-6">
+          <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
+        </div>
+      </div>
 
-          <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-gray-900">Запуски</div>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Left Sidebar: History */}
+        <div className="lg:col-span-4 space-y-6">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[800px]">
+            <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+              <h3 className="text-base font-semibold text-gray-900">История запусков</h3>
               <button
                 type="button"
-                className="inline-flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors bg-white border border-gray-200 rounded-md px-2.5 py-1.5 shadow-sm hover:bg-gray-50"
                 onClick={() => { void refreshJobs(); triggerRefreshed(); }}
               >
-                <RefreshCw className={`h-4 w-4 ${refreshed ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`h-3.5 w-3.5 ${refreshed ? 'animate-spin' : ''}`} />
                 Обновить
               </button>
             </div>
-            <div className="mt-3 space-y-2">
+            
+            <div className="flex-1 overflow-y-auto p-2 space-y-2">
               {jobs.length === 0 ? (
-                <div className="text-sm text-gray-500">Нет запусков</div>
+                <div className="flex flex-col items-center justify-center h-full text-gray-400 text-sm">
+                  <p>Нет запусков</p>
+                </div>
               ) : (
                 jobs.map((j) => (
                   <button
                     key={j.id}
                     type="button"
                     onClick={() => setActiveJobId(j.id)}
-                    className={`w-full text-left rounded-md border px-3 py-2 text-sm ${activeJobId === j.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}
+                    className={`w-full text-left rounded-lg border p-3 transition-all ${
+                      activeJobId === j.id 
+                        ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500/20' 
+                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-gray-900">#{j.id.slice(0, 6)}</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-mono text-xs font-medium text-gray-500">#{j.id.slice(0, 8)}</span>
                       <JobStatus status={j.status} errorMessage={j.error_message ?? null} />
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">{formatDate(j.created_at)}</div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      {j.total_organizations ? `Орг: ${j.processed_organizations}/${j.total_organizations}` : `Ссылки: ${j.total_links}`}
+                    
+                    <div className="flex items-center justify-between text-xs text-gray-600">
+                      <span>{formatDate(j.created_at)}</span>
+                      <span className="font-medium">
+                        {j.total_organizations 
+                          ? `${j.processed_organizations} / ${j.total_organizations} орг.` 
+                          : `${j.total_links} ссылок`
+                        }
+                      </span>
                     </div>
                   </button>
                 ))
@@ -325,139 +341,211 @@ export function YandexMapsParserView() {
           </div>
         </div>
 
-        <div className="lg:col-span-2 space-y-4">
+        {/* Right Content: Active Job Details */}
+        <div className="lg:col-span-8 space-y-6">
           {!activeJob ? (
-            <div className="bg-white rounded-lg border border-gray-200 p-6 text-sm text-gray-500">
-              Выбери запуск слева, чтобы управлять ссылками и результатами.
+            <div className="bg-white rounded-xl border border-dashed border-gray-300 p-12 text-center h-full flex flex-col items-center justify-center">
+              <div className="mx-auto h-12 w-12 text-gray-300 mb-4">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-medium text-gray-900">Нет выбранного запуска</h3>
+              <p className="mt-1 text-sm text-gray-500">Выберите запуск из списка слева, чтобы посмотреть детали.</p>
             </div>
           ) : (
             <>
-              <div className="bg-white rounded-lg border border-gray-200 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-1">
-                    <div className="text-sm font-semibold text-gray-900">Запуск #{activeJob.id.slice(0, 8)}</div>
-                    <div className="text-xs text-gray-500">
-                      Статус: <span className="font-medium">{activeJob.status}</span>{stage ? ` · ${stage}` : ''}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      Ссылки: <span className="font-medium">{totalLinks}</span> · Организации: <span className="font-medium">{processedOrgs}/{totalOrgs}</span>
-                    </div>
-                    {activeJob.error_message && !isStoppedByUser(activeJob.status, activeJob.error_message) ? (
-                      <div className="text-xs text-red-600">{activeJob.error_message}</div>
-                    ) : null}
-                  </div>
+              {/* Job Header & Actions */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-6 border-b border-gray-100">
+                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-3 mb-1">
+                        <h2 className="text-xl font-bold text-gray-900">Запуск #{activeJob.id.slice(0, 8)}</h2>
+                        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
+                          activeJob.status === 'completed' ? 'bg-green-50 text-green-700 ring-green-600/20' :
+                          activeJob.status === 'failed' ? 'bg-red-50 text-red-700 ring-red-600/20' :
+                          activeJob.status === 'running' ? 'bg-blue-50 text-blue-700 ring-blue-600/20' :
+                          'bg-gray-50 text-gray-600 ring-gray-500/10'
+                        }`}>
+                          {activeJob.status}
+                        </span>
+                      </div>
+                      
+                      <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500 mt-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                          Этап: <span className="font-medium text-gray-900">{stage || '—'}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                          Ссылки: <span className="font-medium text-gray-900">{totalLinks}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                          Организации: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span>
+                        </div>
+                      </div>
 
-                  <div className="flex flex-wrap gap-2 justify-end">
+                      {activeJob.error_message && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
+                        <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100">
+                          <span className="font-medium">Ошибка:</span> {activeJob.error_message}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {activeJob.status === 'running' ? (
+                        <button
+                          type="button"
+                          onClick={() => stopJob(activeJob.id)}
+                          disabled={jobActionId === activeJob.id}
+                          className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:opacity-50"
+                        >
+                          Остановить
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleCollectLinks}
+                            disabled={jobActionId === activeJob.id}
+                            className="inline-flex items-center justify-center rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:opacity-50"
+                          >
+                            Собрать ссылки
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleParse}
+                            disabled={jobActionId === activeJob.id}
+                            className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50"
+                          >
+                            Парсить
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteJob(activeJob.id)}
+                            disabled={jobActionId === activeJob.id}
+                            className="inline-flex items-center justify-center rounded-lg bg-red-50 border border-red-200 px-4 py-2 text-sm font-medium text-red-700 shadow-sm hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:opacity-50"
+                          >
+                            Удалить
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {error && <div className="mt-4 text-sm text-red-600 bg-red-50 p-2 rounded border border-red-100">{error}</div>}
+                </div>
+              </div>
+
+              {/* Links Editor */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                  <h3 className="text-base font-semibold text-gray-900">Ссылки организаций</h3>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-gray-500">
+                      {linksText.split('\n').map((s) => s.trim()).filter(Boolean).length} шт.
+                    </span>
                     <button
                       type="button"
-                      onClick={handleCollectLinks}
-                      disabled={jobActionId === activeJob.id || activeJob.status === 'running'}
-                      className="rounded-md bg-amber-500 text-white px-3 py-2 text-sm hover:bg-amber-400 disabled:opacity-60"
-                    >
-                      Собрать ссылки
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleParse}
-                      disabled={jobActionId === activeJob.id || activeJob.status === 'running'}
-                      className="rounded-md bg-green-600 text-white px-3 py-2 text-sm hover:bg-green-500 disabled:opacity-60"
-                    >
-                      Парсить организации
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => stopJob(activeJob.id)}
-                      disabled={jobActionId === activeJob.id || activeJob.status !== 'running'}
-                      className="rounded-md bg-gray-800 text-white px-3 py-2 text-sm hover:bg-gray-700 disabled:opacity-60"
-                    >
-                      Остановить
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteJob(activeJob.id)}
+                      onClick={handleSaveLinks}
                       disabled={jobActionId === activeJob.id}
-                      className="rounded-md bg-red-600 text-white px-3 py-2 text-sm hover:bg-red-500 disabled:opacity-60"
+                      className="inline-flex items-center justify-center rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50"
                     >
-                      Удалить
+                      Сохранить
                     </button>
                   </div>
                 </div>
-                {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
-              </div>
-
-              <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-gray-900">Ссылки организаций</div>
-                  <button
-                    type="button"
-                    onClick={handleSaveLinks}
-                    disabled={jobActionId === activeJob.id}
-                    className="rounded-md bg-blue-600 text-white px-3 py-2 text-sm hover:bg-blue-500 disabled:opacity-60"
-                  >
-                    Сохранить
-                  </button>
-                </div>
-                <textarea
-                  className="w-full h-44 rounded-md border border-gray-300 p-2 text-sm font-mono"
-                  value={linksText}
-                  onChange={(e) => setLinksText(e.target.value)}
-                  placeholder="https://yandex.ru/maps/org/.../12345/"
-                />
-                <div className="text-xs text-gray-500">
-                  Всего: {linksText.split('\n').map((s) => s.trim()).filter(Boolean).length}
+                <div className="p-0">
+                  <textarea
+                    className="block w-full h-48 border-0 p-4 text-sm font-mono focus:ring-0 resize-y"
+                    value={linksText}
+                    onChange={(e) => setLinksText(e.target.value)}
+                    placeholder="https://yandex.ru/maps/org/.../12345/"
+                  />
                 </div>
               </div>
 
-              <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-semibold text-gray-900">Результаты</div>
+              {/* Results Table */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[600px]">
+                <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                  <h3 className="text-base font-semibold text-gray-900">Результаты</h3>
                   <button
                     type="button"
                     onClick={handleExportCsv}
                     disabled={results.length === 0}
-                    className="inline-flex items-center gap-2 rounded-md bg-gray-900 text-white px-3 py-2 text-sm hover:bg-gray-800 disabled:opacity-60"
+                    className="inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors"
                   >
-                    <Download className="h-4 w-4" />
-                    CSV
+                    <Download className="h-3.5 w-3.5" />
+                    Скачать CSV
                   </button>
                 </div>
-                {loadingResults ? (
-                  <div className="text-sm text-gray-500">Загрузка...</div>
-                ) : results.length === 0 ? (
-                  <div className="text-sm text-gray-500">Пока нет результатов</div>
-                ) : (
-                  <div className="overflow-auto border border-gray-200 rounded-md">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-gray-50 text-gray-700">
+                
+                <div className="flex-1 overflow-auto relative">
+                  {loadingResults ? (
+                    <div className="absolute inset-0 flex items-center justify-center bg-white/80 z-10">
+                      <div className="flex flex-col items-center gap-2">
+                        <RefreshCw className="h-6 w-6 animate-spin text-blue-500" />
+                        <span className="text-sm text-gray-500">Загрузка данных...</span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {results.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-full text-gray-400 text-sm">
+                      <p>Нет результатов</p>
+                    </div>
+                  ) : (
+                    <table className="min-w-full text-sm divide-y divide-gray-200">
+                      <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm">
                         <tr>
-                          <th className="px-3 py-2 text-left">Название</th>
-                          <th className="px-3 py-2 text-left">Телефон</th>
-                          <th className="px-3 py-2 text-left">Сайт</th>
-                          <th className="px-3 py-2 text-left">Email</th>
-                          <th className="px-3 py-2 text-left">Адрес</th>
-                          <th className="px-3 py-2 text-left">Категории</th>
-                          <th className="px-3 py-2 text-left">Рейтинг</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Название</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Контакты</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Адрес</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Инфо</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-gray-200">
+                      <tbody className="bg-white divide-y divide-gray-200">
                         {results.slice(0, 500).map((r) => (
-                          <tr key={r.id} className="hover:bg-gray-50">
-                            <td className="px-3 py-2 whitespace-nowrap">{r.name ?? ''}</td>
-                            <td className="px-3 py-2 whitespace-nowrap">{r.phone ?? ''}</td>
-                            <td className="px-3 py-2 whitespace-nowrap">
-                              {r.website ? <a className="text-blue-600 hover:underline" href={r.website} target="_blank" rel="noreferrer">{r.website}</a> : ''}
+                          <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-4 py-3 align-top">
+                              <div className="font-medium text-gray-900">{r.name || '—'}</div>
+                              <div className="text-xs text-gray-500 mt-0.5">{r.categories}</div>
                             </td>
-                            <td className="px-3 py-2 whitespace-nowrap">{r.email ?? ''}</td>
-                            <td className="px-3 py-2">{r.address ?? ''}</td>
-                            <td className="px-3 py-2">{r.categories ?? ''}</td>
-                            <td className="px-3 py-2 whitespace-nowrap">{r.rating ?? ''}{r.reviews_count ? ` (${r.reviews_count})` : ''}</td>
+                            <td className="px-4 py-3 align-top">
+                              <div className="space-y-1">
+                                {r.phone && <div className="text-gray-900">{r.phone}</div>}
+                                {r.website && (
+                                  <div>
+                                    <a className="text-blue-600 hover:text-blue-800 hover:underline truncate max-w-[200px] block" href={r.website} target="_blank" rel="noreferrer">
+                                      {r.website}
+                                    </a>
+                                  </div>
+                                )}
+                                {r.email && <div className="text-gray-500 text-xs">{r.email}</div>}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 align-top text-gray-600 max-w-xs">
+                              {r.address || '—'}
+                            </td>
+                            <td className="px-4 py-3 align-top whitespace-nowrap">
+                              <div className="flex items-center gap-1">
+                                <span className="text-amber-500">★</span>
+                                <span className="font-medium text-gray-900">{r.rating || '—'}</span>
+                                <span className="text-gray-400 text-xs">({r.reviews_count || 0})</span>
+                              </div>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                  )}
+                </div>
+                {results.length > 500 && (
+                  <div className="p-2 border-t border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
+                    Показано 500 из {results.length} записей
                   </div>
                 )}
-                {results.length > 500 ? <div className="text-xs text-gray-500">Показано 500 из {results.length}</div> : null}
               </div>
             </>
           )}

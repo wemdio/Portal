@@ -145,7 +145,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
           <textarea
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
-            className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
             placeholder="Вставьте описание компании, продукта или ЦА из брифа..."
           />
           <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -224,7 +224,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
                   <input
                     value={q}
                     onChange={(e) => updateQuery(idx, e.target.value)}
-                    className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:ring-1 focus:ring-blue-500"
+                    className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
                   />
                   <button
                     onClick={() => removeQuery(idx)}
