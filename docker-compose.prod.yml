@@ -30,6 +30,8 @@ services:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
     restart: unless-stopped
+    ports:
+      - "8010:8000"
     networks:
       - portal-network
 
