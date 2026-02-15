@@ -240,10 +240,11 @@ export async function runSearchParserJob(jobId: string) {
     console.error('supabaseAdmin not configured');
     return;
   }
+  const admin = supabaseAdmin;
 
   try {
     // 1. Fetch job
-    const { data: job, error } = await supabaseAdmin
+    const { data: job, error } = await admin
       .from('search_parser_jobs')
       .select('*')
       .eq('id', jobId)
@@ -262,7 +263,7 @@ export async function runSearchParserJob(jobId: string) {
     const logMeta = { userId: job.user_id, requestId, route: 'search_parser_worker' };
 
     // 2. Set running
-    await supabaseAdmin
+    await admin
       .from('search_parser_jobs')
       .update({ status: 'running', started_at: new Date().toISOString() })
       .eq('id', jobId);
@@ -313,7 +314,7 @@ export async function runSearchParserJob(jobId: string) {
       if (cancelled) return;
 
       // Check for cancellation (best-effort)
-      const { data: currentJob } = await supabaseAdmin
+      const { data: currentJob } = await admin
         .from('search_parser_jobs')
         .select('status')
         .eq('id', jobId)
@@ -552,7 +553,7 @@ export async function runSearchParserJob(jobId: string) {
         }
 
         if (rowsToInsert.length > 0) {
-          const { error: insertError } = await supabaseAdmin.from('search_results').insert(rowsToInsert);
+          const { error: insertError } = await admin.from('search_results').insert(rowsToInsert);
           if (insertError) {
             hadQueryFailures = true;
             void logError('parser.search.insert.failed', insertError, { jobId, provider, query }, logMeta);
@@ -631,7 +632,7 @@ export async function runSearchParserJob(jobId: string) {
           if (insertedCount > 0) totalResults += insertedCount;
           if (hadQueryFailures) hadFailures = true;
         });
-        await supabaseAdmin
+        await admin
           .from('search_parser_jobs')
           .update({
             processed_queries: processedQueries,
@@ -660,9 +661,9 @@ export async function runSearchParserJob(jobId: string) {
     }
 
     // 4. Complete
-    await supabaseAdmin
+    await admin
       .from('search_parser_jobs')
-      .update({ 
+      .update({  
         status: 'completed',
         completed_at: new Date().toISOString(),
         processed_queries: processedQueries,
