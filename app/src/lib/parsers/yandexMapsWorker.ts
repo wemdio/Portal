@@ -226,7 +226,7 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
 
     const links = normalizeYandexOrgUrls((linkRows ?? []).map((r) => String((r as { link?: unknown }).link ?? '')).filter(Boolean));
     if (!links.length) {
-      await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала собери ссылки)' });
+      await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
       await trace?.fail(new Error('Missing links'));
       return;
     }
