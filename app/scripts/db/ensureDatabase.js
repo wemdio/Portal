@@ -56,12 +56,17 @@ async function ensureDatabase() {
 
   const dbUrl = resolveDbUrl();
   if (!dbUrl) {
-    throw new Error(
-      'Не задан URL базы данных. Укажите SUPABASE_DB_URL или DATABASE_URL.',
-    );
+    console.warn('[db] Не задан URL базы данных. Пропускаем миграции.');
+    return;
   }
 
   const migrationsDir = resolveMigrationsDir();
+  try {
+    await fs.access(migrationsDir);
+  } catch {
+    console.warn(`[db] Папка миграций не найдена: ${migrationsDir}. Пропускаем.`);
+    return;
+  }
   const ssl = shouldUseSsl(dbUrl) ? { rejectUnauthorized: false } : undefined;
   const client = new Client({ connectionString: dbUrl, ssl });
 
