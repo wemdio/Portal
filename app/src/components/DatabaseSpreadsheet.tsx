@@ -162,6 +162,11 @@ type SiteAvailabilityState = {
   error: string | null;
 };
 
+type EmailSplitState = {
+  isOpen: boolean;
+  sourceCol: number;
+};
+
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -708,6 +713,10 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const siteAvailabilityAbortRef = useRef<AbortController | null>(null);
+  const [emailSplit, setEmailSplit] = useState<EmailSplitState>({
+    isOpen: false,
+    sourceCol: 0,
+  });
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -3855,6 +3864,67 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Email Split (Разделение почт) ──────────────────────────────
+
+  const openEmailSplitModal = () => {
+    setEmailSplit({ isOpen: true, sourceCol: 0 });
+  };
+
+  const closeEmailSplitModal = () => {
+    setEmailSplit((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleSplitEmails = () => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const header = hasHeaderRow(data) ? data[0] : null;
+    const body = header ? data.slice(1) : data;
+    const col = emailSplit.sourceCol;
+
+    const newRows: string[][] = [];
+    let splitCount = 0;
+
+    for (const row of body) {
+      const cellValue = (row[col] ?? '').trim();
+      if (!cellValue) {
+        newRows.push(row);
+        continue;
+      }
+
+      const emails = cellValue
+        .split(/[,;\n]+/)
+        .map((e) => e.trim())
+        .filter((e) => e.length > 0);
+
+      if (emails.length <= 1) {
+        newRows.push(row);
+        continue;
+      }
+
+      splitCount += 1;
+      for (const email of emails) {
+        const newRow = [...row];
+        newRow[col] = email;
+        newRows.push(newRow);
+      }
+    }
+
+    if (splitCount === 0) {
+      setLastAction({ message: 'Нет строк с несколькими почтами для разделения', time: Date.now() });
+      closeEmailSplitModal();
+      return;
+    }
+
+    const totalNewRows = newRows.length - body.length;
+    setUndoSnapshot(`Разделение почт (${splitCount} строк → +${totalNewRows} новых)`);
+    applyRows(header ? [header, ...newRows] : newRows);
+    setLastAction({
+      message: `Разделено ${splitCount} строк, добавлено ${totalNewRows} новых строк`,
+      time: Date.now(),
+    });
+    closeEmailSplitModal();
+  };
+
   // ── Name Cleanup (Очистка названий) ──────────────────────────────
 
   const openNameCleanupModal = () => {
@@ -5138,6 +5208,21 @@ export function DatabaseSpreadsheet() {
 
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-900">Разделение</span>
+                </div>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={openEmailSplitModal}
+                    className="w-full text-left rounded-lg border border-violet-200 bg-violet-50/40 px-3 py-2 text-xs font-medium text-violet-800 transition hover:bg-violet-50 hover:border-violet-300"
+                  >
+                    Разделить почты по строкам
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-gray-900">Очистка</span>
                 </div>
                 <div className="space-y-2">
@@ -6006,6 +6091,99 @@ export function DatabaseSpreadsheet() {
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Email Split Modal ─────────────────────────────── */}
+      {emailSplit.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-600 text-white shadow-sm font-bold text-lg">
+                  ✉
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Разделить почты</h3>
+                  <p className="text-xs text-gray-500 font-medium">Дублирование строк при нескольких email</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeEmailSplitModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с почтами
+                </label>
+                <select
+                  value={emailSplit.sourceCol}
+                  onChange={(e) =>
+                    setEmailSplit((prev) => ({ ...prev, sourceCol: Number(e.target.value) }))
+                  }
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100 focus:outline-none"
+                >
+                  {headerLabels.map((label, i) => (
+                    <option key={i} value={i}>
+                      {label || toColumnLabel(i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg bg-violet-50 border border-violet-100 p-3 text-xs text-violet-900 space-y-1">
+                <p>
+                  Если в ячейке несколько email (через запятую, точку с запятой или перенос строки),
+                  строка будет продублирована для каждого email.
+                </p>
+                <p>
+                  Строк с несколькими почтами:{' '}
+                  <span className="font-semibold text-gray-900">
+                    {activeTab
+                      ? (() => {
+                          const body = hasHeaderRow(activeTab.data)
+                            ? activeTab.data.slice(1)
+                            : activeTab.data;
+                          return body.filter((row) => {
+                            const cell = (row[emailSplit.sourceCol] ?? '').trim();
+                            if (!cell) return false;
+                            const parts = cell
+                              .split(/[,;\n]+/)
+                              .map((e) => e.trim())
+                              .filter((e) => e.length > 0);
+                            return parts.length > 1;
+                          }).length;
+                        })()
+                      : 0}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end border-t border-gray-100 px-6 py-4 bg-gray-50/50 gap-3">
+              <button
+                type="button"
+                onClick={closeEmailSplitModal}
+                className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+              >
+                Закрыть
+              </button>
+              <button
+                type="button"
+                onClick={handleSplitEmails}
+                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-violet-600/20 transition-all hover:bg-violet-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+              >
+                <span>✂</span>
+                Разделить
+              </button>
             </div>
           </div>
         </div>
