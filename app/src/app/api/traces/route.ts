@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
     .order('started_at', { ascending: false })
     .limit(limit);
 
-  if (jobId) rootQuery = rootQuery.eq('job_id', jobId);
+  if (jobId) rootQuery = rootQuery.or(`job_id.eq.${jobId},search_job_id.eq.${jobId}`);
   if (statusFilter) rootQuery = rootQuery.eq('status', statusFilter);
 
   const { data: roots, error: rootsError } = await rootQuery;

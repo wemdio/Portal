@@ -1,5 +1,6 @@
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { buildTraceSpanInsertPayload } from '@/lib/tracing/traceSpanPayload';
 
 /* -------------------------------------------------------------------------- */
 /*  Types                                                                     */
@@ -37,6 +38,7 @@ export interface CreateSpanOptions {
   message?: string;
   userId?: string | null;
   jobId?: string | null;
+  searchJobId?: string | null;
   level?: SpanLevel;
 }
 
@@ -50,21 +52,22 @@ async function insertSpan(opts: CreateSpanOptions): Promise<string | null> {
     return null;
   }
 
+  const row = buildTraceSpanInsertPayload({
+    traceId: opts.traceId,
+    parentSpanId: opts.parentSpanId ?? null,
+    name: opts.name,
+    input: opts.input ?? {},
+    message: opts.message,
+    userId: opts.userId ?? null,
+    jobId: opts.jobId ?? null,
+    searchJobId: opts.searchJobId ?? null,
+    level: opts.level ?? 'info',
+    startedAt: new Date(),
+  });
+
   const { data, error } = await supabaseAdmin
     .from('trace_spans')
-    .insert({
-      trace_id: opts.traceId,
-      parent_span_id: opts.parentSpanId ?? null,
-      name: opts.name,
-      status: 'running' as SpanStatus,
-      input: opts.input ?? {},
-      output: {},
-      started_at: new Date().toISOString(),
-      user_id: opts.userId ?? null,
-      job_id: opts.jobId ?? null,
-      level: opts.level ?? 'info',
-      message: opts.message ?? null,
-    })
+    .insert(row)
     .select('id')
     .single();
 
@@ -114,6 +117,7 @@ export class Span {
   private readonly _startedAt: number;
   private readonly _userId: string | null;
   private readonly _jobId: string | null;
+  private readonly _searchJobId: string | null;
   private _ended = false;
 
   constructor(opts: {
@@ -123,6 +127,7 @@ export class Span {
     startedAt: number;
     userId?: string | null;
     jobId?: string | null;
+    searchJobId?: string | null;
   }) {
     this.id = opts.id;
     this.traceId = opts.traceId;
@@ -130,6 +135,7 @@ export class Span {
     this._startedAt = opts.startedAt;
     this._userId = opts.userId ?? null;
     this._jobId = opts.jobId ?? null;
+    this._searchJobId = opts.searchJobId ?? null;
   }
 
   /** Start a child span nested under this one. */
@@ -148,6 +154,7 @@ export class Span {
       message: opts.message,
       userId: this._userId,
       jobId: this._jobId,
+      searchJobId: this._searchJobId,
       level: opts.level,
     });
     if (!spanId) return null;
@@ -159,6 +166,7 @@ export class Span {
       startedAt,
       userId: this._userId,
       jobId: this._jobId,
+      searchJobId: this._searchJobId,
     });
   }
 
@@ -255,6 +263,7 @@ export async function startTrace(opts: {
   message?: string;
   userId?: string | null;
   jobId?: string | null;
+  searchJobId?: string | null;
   level?: SpanLevel;
 }): Promise<Span | null> {
   const traceId = crypto.randomUUID();
@@ -268,6 +277,7 @@ export async function startTrace(opts: {
     message: opts.message,
     userId: opts.userId,
     jobId: opts.jobId,
+    searchJobId: opts.searchJobId,
     level: opts.level,
   });
 
@@ -280,5 +290,6 @@ export async function startTrace(opts: {
     startedAt,
     userId: opts.userId,
     jobId: opts.jobId,
+    searchJobId: opts.searchJobId,
   });
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { useIsTma } from '@/lib/useIsTma';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -191,6 +192,7 @@ function generateMonthRange(): string[] {
    ═══════════════════════════════════════════ */
 
 export default function FinancePage() {
+  const isTma = useIsTma();
   const [projects, setProjects] = useState<ProjectFinanceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [allExpenses, setAllExpenses] = useState<Record<string, MonthlyExpenses>>({});
@@ -582,15 +584,18 @@ export default function FinancePage() {
     );
   }
 
+  const sectionHeaderClass = `${isTma ? 'px-4 py-3' : 'px-6 py-4'} border-b border-gray-100 bg-gray-50/50`;
+  const sectionBodyClass = isTma ? 'px-4 py-3' : 'px-6 py-4';
+
   return (
-    <div className="space-y-6 max-w-[1600px] mx-auto">
+    <div className={`${isTma ? 'space-y-4' : 'space-y-6'} max-w-[1600px] mx-auto`}>
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-gray-900">Финансы</h1>
+          <h1 className={`${isTma ? 'text-2xl' : 'text-3xl'} font-bold tracking-tight text-gray-900`}>Финансы</h1>
           <p className="mt-1 text-sm text-gray-500">P&L, выручка, расходы, KPI</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className={`${isTma ? 'flex flex-wrap items-center gap-2' : 'flex items-center gap-3'}`}>
           <button
             onClick={() => {
               const idx = monthRange.indexOf(selectedMonth);
@@ -624,14 +629,14 @@ export default function FinancePage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-gray-100 p-1 rounded-xl w-fit">
+      <div className={isTma ? 'flex gap-1 bg-gray-100 p-1 rounded-xl w-full overflow-x-auto no-scrollbar' : 'flex gap-1 bg-gray-100 p-1 rounded-xl w-fit'}>
         {(['overview', 'revenue', 'expenses', 'kpi'] as const).map((tab) => {
           const labels = { overview: 'Обзор', revenue: 'Выручка', expenses: 'Расходы', kpi: 'KPI' };
           return (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+              className={`${isTma ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} font-medium rounded-lg transition-all ${
                 activeTab === tab
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -680,12 +685,12 @@ export default function FinancePage() {
 
           {/* Monthly P&L Mini Table */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">
                 P&L — {formatMonthLabel(selectedMonth)}
               </h2>
             </div>
-            <div className="px-6 py-4 divide-y divide-gray-100">
+            <div className={`${sectionBodyClass} divide-y divide-gray-100`}>
               <PnlRow label="Выручка" value={pnl.revenue} bold />
               <PnlRow label="  Продажи (новые клиенты)" value={revenue.sales.total} indent />
               <PnlRow label="  Продления" value={revenue.renewals.total} indent />
@@ -730,7 +735,7 @@ export default function FinancePage() {
 
           {/* Year Overview Chart */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">
                 Годовая динамика — {selectedMonth.split('-')[0]}
               </h2>
@@ -795,7 +800,7 @@ export default function FinancePage() {
 
           {/* Revenue by Source */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">По каналам</h2>
             </div>
             <div className="overflow-x-auto">
@@ -837,7 +842,7 @@ export default function FinancePage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* By Client */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+              <div className={sectionHeaderClass}>
                 <h2 className="text-lg font-bold text-gray-900">По клиентам</h2>
               </div>
               <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
@@ -869,7 +874,7 @@ export default function FinancePage() {
 
             {/* By Specialist */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+              <div className={sectionHeaderClass}>
                 <h2 className="text-lg font-bold text-gray-900">По специалистам</h2>
               </div>
               <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
@@ -902,7 +907,7 @@ export default function FinancePage() {
 
           {/* Project Details */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">Детализация по проектам</h2>
             </div>
             <div className="overflow-x-auto">
@@ -970,10 +975,10 @@ export default function FinancePage() {
         <>
           {/* Section 1: Общие показатели */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">Общие показатели</h2>
             </div>
-            <div className="px-6 py-4 divide-y divide-gray-100">
+            <div className={`${sectionBodyClass} divide-y divide-gray-100`}>
               <MetricRow label="Оборот" value={formatCurrency(pnl.revenue)} />
               <MetricRow label="Расход компании" value={formatCurrency(pnl.expensesFact)} />
               <MetricRow label="Итого чистая прибыль" value={formatCurrency(pnl.netProfitFact)} highlight={pnl.netProfitFact >= 0 ? 'green' : 'red'} />
@@ -993,10 +998,10 @@ export default function FinancePage() {
 
           {/* Section 2: Аутрич направление */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">Аутрич направление</h2>
             </div>
-            <div className="px-6 py-4 divide-y divide-gray-100">
+            <div className={`${sectionBodyClass} divide-y divide-gray-100`}>
               <MetricRow label="Выручка аутрич" value={formatCurrency(outreachPnl.revenue)} />
               <MetricRow label="Чистая прибыль аутрич" value={formatCurrency(outreachPnl.netProfit)} highlight={outreachPnl.netProfit >= 0 ? 'green' : 'red'} />
               <MetricRow label="Маржинальность аутрич" value={formatPercent(outreachPnl.margin)} />
@@ -1015,10 +1020,10 @@ export default function FinancePage() {
 
           {/* Section 3: Клиенты и продажи */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">Клиенты и продажи</h2>
             </div>
-            <div className="px-6 py-4">
+            <div className={sectionBodyClass}>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-0 divide-y divide-gray-100">
                   <h4 className="text-sm font-semibold text-gray-500 uppercase pb-3">Продажи (новые клиенты)</h4>
@@ -1048,7 +1053,7 @@ export default function FinancePage() {
 
           {/* Section 4: Выручка по каналам */}
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className={sectionHeaderClass}>
               <h2 className="text-lg font-bold text-gray-900">Выручка по каналам</h2>
             </div>
             <div className="overflow-x-auto">
@@ -1122,8 +1127,9 @@ function SummaryCard({
 }: {
   label: string; value: string; sub?: string; color?: 'green' | 'red'; trend?: number;
 }) {
+  const isTma = useIsTma();
   return (
-    <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm">
+    <div className={`bg-white rounded-2xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
       <div className="text-sm font-medium text-gray-500 mb-1">{label}</div>
       <p className={`text-2xl font-bold ${
         color === 'green' ? 'text-emerald-700' : color === 'red' ? 'text-red-700' : 'text-gray-900'
@@ -1189,6 +1195,7 @@ function ExpensesTab({
   summary: MonthlyExpensesSummary;
   onUpdate: (updated: MonthlyExpenses) => void;
 }) {
+  const isTma = useIsTma();
   const categories: { key: keyof MonthlyExpenses; label: string; summaryKey: keyof MonthlyExpensesSummary }[] = [
     { key: 'payroll', label: 'ФОТ (зарплаты)', summaryKey: 'payroll' },
     { key: 'operations', label: 'Операционные расходы (подписки, инструменты)', summaryKey: 'operations' },
@@ -1238,7 +1245,7 @@ function ExpensesTab({
         const catSummary = summary[key as keyof MonthlyExpensesSummary] as { plan: number; fact: number };
         return (
           <div key={key} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+            <div className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} border-b border-gray-100 bg-gray-50/50 flex items-center justify-between`}>
               <div>
                 <h3 className="text-base font-bold text-gray-900">{label}</h3>
                 {catSummary.fact > 0 && (
@@ -1329,7 +1336,7 @@ function ExpensesTab({
         );
       })}
 
-      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5">
+      <div className={`bg-amber-50 border border-amber-200 rounded-2xl ${isTma ? 'p-4' : 'p-5'}`}>
         <h4 className="text-sm font-semibold text-amber-800 mb-1">Данные хранятся локально</h4>
         <p className="text-sm text-amber-700">
           Расходы сохраняются в браузере (localStorage). Для совместного доступа рекомендуется
@@ -1346,12 +1353,13 @@ function ExpensesTab({
 
 function MissingFieldsNotice() {
   const [expanded, setExpanded] = useState(false);
+  const isTma = useIsTma();
 
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-2xl overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full px-6 py-4 flex items-center justify-between text-left hover:bg-gray-100 transition-colors"
+        className={`${isTma ? 'w-full px-4 py-3' : 'w-full px-6 py-4'} flex items-center justify-between text-left hover:bg-gray-100 transition-colors`}
       >
         <span className="text-sm font-semibold text-gray-700">
           Недостающие данные для полной финансовой модели
@@ -1359,7 +1367,7 @@ function MissingFieldsNotice() {
         <span className="text-gray-400 text-xs">{expanded ? 'свернуть' : 'развернуть'}</span>
       </button>
       {expanded && (
-        <div className="px-6 pb-6 space-y-4">
+        <div className={`${isTma ? 'px-4 pb-6' : 'px-6 pb-6'} space-y-4`}>
           {/* Fields to add to projects */}
           <div>
             <h4 className="text-sm font-semibold text-gray-800 mb-2">1. Поля для таблицы projects</h4>

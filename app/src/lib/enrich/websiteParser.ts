@@ -1,6 +1,8 @@
 import * as cheerio from 'cheerio';
 import iconv from 'iconv-lite';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
+import { normalizeUrl } from '@/lib/enrich/urlUtils';
+import { extractEmailsFromHtml } from '@/lib/enrich/emailExtractor';
 
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_TEXT_LENGTH = 3000;
@@ -35,13 +37,34 @@ const ABOUT_PATHS = [
   '/pages/about',
   '/pages/about-us',
 ];
-const URL_TOKEN_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/i;
 const META_DESCRIPTION_SELECTORS = [
   'meta[name="description"]',
   'meta[property="og:description"]',
   'meta[name="twitter:description"]',
 ];
 const TITLE_SELECTORS = ['title', 'meta[property="og:title"]', 'meta[name="twitter:title"]'];
+const CONTACT_PATHS = [
+  '/contact',
+  '/contact/',
+  '/contacts',
+  '/contacts/',
+  '/kontakty',
+  '/kontakty/',
+  '/kontakt',
+  '/kontakt/',
+  '/контакты',
+  '/контакты/',
+  '/obratnaya-svyaz',
+  '/obratnaya-svyaz/',
+  '/feedback',
+  '/feedback/',
+  '/support',
+  '/support/',
+];
+const CONTACT_HREF_PATTERN =
+  /\/(contact|contacts|kontakty|kontakt|kontakti|obratnaya[-_]?svyaz|feedback|support|контакты)(\/|$|\?|#)/i;
+const CONTACT_TEXT_PATTERN =
+  /\b(contact|contacts|контакты|обратн(ая|ой)\s+связ(ь|и)|написать|связаться|телефон|email|почта|support)\b/i;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -57,36 +80,7 @@ function isHtmlLikeContentType(contentType: string | null): boolean {
   );
 }
 
-/**
- * Normalise a raw string into a valid `https://` URL.
- * Throws if the value cannot be turned into a URL.
- */
-export function normalizeUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) throw new Error('Пустой URL');
-  const tokenMatch = trimmed.match(URL_TOKEN_REGEX);
-  const candidate = tokenMatch ? tokenMatch[0] : trimmed;
-  const cleaned = candidate.replace(/[),.;]+$/g, '');
-  const withScheme = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(withScheme);
-  } catch {
-    throw new Error(`Невалидный URL: ${trimmed}`);
-  }
-
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error(`Неподдерживаемый протокол: ${parsed.protocol}`);
-  }
-
-  // Basic hostname check: at least one dot
-  if (!parsed.hostname.includes('.')) {
-    throw new Error(`Невалидный домен: ${parsed.hostname}`);
-  }
-
-  return parsed.href;
-}
+export { normalizeUrl } from '@/lib/enrich/urlUtils';
 
 /**
  * Clean extracted text: remove web artifacts, stray symbols, fix formatting.
@@ -378,6 +372,107 @@ async function fetchHtmlWithRetry(
     }
   }
   return null;
+}
+
+function normalizeForDedupe(url: string): string {
+  return url.replace(/[#?].*$/, '').replace(/\/+$/, '');
+}
+
+export function discoverContactLinks(html: string, baseUrl: string): string[] {
+  const $ = cheerio.load(html);
+  const origin = new URL(baseUrl).origin;
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  $('a[href]').each((_, el) => {
+    const href = ($(el).attr('href') ?? '').trim();
+    if (!href) return;
+    if (/^(#|mailto:|tel:|javascript:)/i.test(href)) return;
+
+    const linkText = ($(el).text() ?? '').trim();
+    const hrefMatches = CONTACT_HREF_PATTERN.test(href);
+    const textMatches = CONTACT_TEXT_PATTERN.test(linkText);
+    if (!hrefMatches && !textMatches) return;
+
+    let absoluteUrl: string;
+    try {
+      absoluteUrl = new URL(href, baseUrl).href;
+    } catch {
+      return;
+    }
+
+    if (!absoluteUrl.startsWith(origin)) return;
+    const normalized = normalizeForDedupe(absoluteUrl);
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    results.push(absoluteUrl);
+  });
+
+  return results;
+}
+
+function buildContactCandidates(baseUrl: string, discovered: string[]): string[] {
+  const origin = new URL(baseUrl).origin;
+  const staticCandidates = CONTACT_PATHS.map((p) => `${origin}${p}`);
+  const seen = new Set<string>();
+  const all = [...discovered, ...staticCandidates];
+  const results: string[] = [];
+  for (const u of all) {
+    const normalized = normalizeForDedupe(u);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    results.push(u);
+  }
+  return results;
+}
+
+export async function fetchWebsiteEmails(
+  rawUrl: string,
+  options?: { timeout?: number; signal?: AbortSignal; maxPages?: number },
+): Promise<{ emails: string[]; checked_urls: string[] }> {
+  const url = normalizeUrl(rawUrl);
+  const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
+  const signal = options?.signal;
+  const maxPages = Math.max(1, Math.min(12, options?.maxPages ?? 6));
+
+  const checked: string[] = [];
+  const found = new Set<string>();
+
+  // 1) Fetch main page HTML to discover contact links + mailto in header/footer.
+  const main = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  if (main?.html) {
+    checked.push(url);
+    for (const e of extractEmailsFromHtml(main.html)) found.add(e);
+    const discovered = discoverContactLinks(main.html, url);
+    const candidates = buildContactCandidates(url, discovered);
+
+    // Prefer discovered links first; cap by maxPages
+    for (const candidate of candidates.slice(0, maxPages)) {
+      if (signal?.aborted) break;
+      const normalized = normalizeForDedupe(candidate);
+      if (checked.some((c) => normalizeForDedupe(c) === normalized)) continue;
+      const html = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+      checked.push(candidate);
+      if (html?.html) {
+        for (const e of extractEmailsFromHtml(html.html)) found.add(e);
+        if (found.size > 0) break;
+      }
+    }
+  } else {
+    // Even if main failed, still try static contact paths.
+    const candidates = buildContactCandidates(url, []);
+    for (const candidate of candidates.slice(0, maxPages)) {
+      if (signal?.aborted) break;
+      const html = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+      checked.push(candidate);
+      if (html?.html) {
+        for (const e of extractEmailsFromHtml(html.html)) found.add(e);
+        if (found.size > 0) break;
+      }
+    }
+  }
+
+  return { emails: Array.from(found), checked_urls: checked };
 }
 
 /**

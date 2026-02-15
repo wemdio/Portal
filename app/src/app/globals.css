@@ -3,6 +3,17 @@
 :root {
   --foreground-rgb: 0, 0, 0;
   --background-rgb: 249, 250, 251; /* gray-50 */
+  --app-bg: rgb(var(--background-rgb));
+  --app-fg: rgb(var(--foreground-rgb));
+  --app-surface: #ffffff;
+  --app-surface-2: #f3f4f6; /* gray-100 */
+  --app-border: #e5e7eb; /* gray-200 */
+  --app-muted: #6b7280; /* gray-500 */
+  --app-primary: #111827; /* gray-900 */
+  --app-primary-contrast: #ffffff;
+  --app-danger: #dc2626; /* red-600 */
+  --app-viewport-height: 100vh;
+  --app-viewport-stable-height: 100vh;
 }
 
 @theme {
@@ -21,11 +32,143 @@
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: rgb(var(--background-rgb));
+  color: var(--app-fg);
+  background: var(--app-bg);
   font-family: Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  min-height: var(--app-viewport-height, 100vh);
+}
+
+html.tma-mobile body {
+  background: var(--tma-bg);
+  color: var(--tma-fg);
+}
+
+html.tma-mobile main {
+  color: var(--tma-fg);
+}
+
+html.tma-mobile:not([data-tma-theme]),
+html.tma-mobile[data-tma-theme='dark'] {
+  --tma-bg: #0b1220;
+  --tma-fg: #e5e7eb;
+  --tma-surface: #111827;
+  --tma-surface-2: #1c2940;
+  --tma-border: rgba(148, 163, 184, 0.28);
+  --tma-muted: #9ca3af;
+  --tma-primary: #f8fafc;
+  --tma-primary-contrast: #0b1220;
+  --tma-accent: #93c5fd;
+  --tma-danger: #fda4af;
+  --tma-shadow: 0 14px 28px rgba(2, 6, 23, 0.35);
+}
+
+html.tma-mobile[data-tma-theme='light'] {
+  --tma-bg: #f3f7fc;
+  --tma-fg: #0f172a;
+  --tma-surface: #ffffff;
+  --tma-surface-2: #eef2f7;
+  --tma-border: #d6deea;
+  --tma-muted: #64748b;
+  --tma-primary: #0f172a;
+  --tma-primary-contrast: #f8fafc;
+  --tma-accent: #1d4ed8;
+  --tma-danger: #dc2626;
+  --tma-shadow: 0 12px 24px rgba(15, 23, 42, 0.10);
+}
+
+html.tma-mobile .bg-white {
+  background-color: var(--tma-surface) !important;
+}
+
+html.tma-mobile .bg-gray-100 {
+  background-color: var(--tma-surface-2) !important;
+}
+
+html.tma-mobile .text-gray-900,
+html.tma-mobile .text-gray-800,
+html.tma-mobile .text-gray-700 {
+  color: var(--tma-fg) !important;
+}
+
+html.tma-mobile .text-gray-600,
+html.tma-mobile .text-gray-500,
+html.tma-mobile .text-gray-400 {
+  color: var(--tma-muted) !important;
+}
+
+html.tma-mobile .border-gray-100,
+html.tma-mobile .border-gray-200,
+html.tma-mobile .border-gray-300 {
+  border-color: var(--tma-border) !important;
+}
+
+html.tma-mobile .tma-surface {
+  background-color: var(--tma-surface);
+  color: var(--tma-fg);
+  border-color: var(--tma-border);
+}
+
+html.tma-mobile .tma-surface-soft {
+  background-color: var(--tma-surface-2);
+}
+
+html.tma-mobile .tma-text {
+  color: var(--tma-fg);
+}
+
+html.tma-mobile .tma-muted {
+  color: var(--tma-muted);
+}
+
+html.tma-mobile .tma-nav-item {
+  color: var(--tma-fg);
+}
+
+html.tma-mobile .tma-nav-item:hover {
+  background-color: var(--tma-surface-2);
+}
+
+html.tma-mobile .tma-chip {
+  background-color: var(--tma-surface-2);
+  color: var(--tma-fg);
+  border: 1px solid var(--tma-border);
+}
+
+html.tma-mobile .tma-chip-active {
+  background-color: var(--tma-primary);
+  color: var(--tma-primary-contrast);
+  border: 1px solid transparent;
+}
+
+html.tma-mobile .tma-danger {
+  color: var(--tma-danger);
+}
+
+html.tma-mobile .tma-card {
+  background-color: var(--tma-surface);
+  border: 1px solid var(--tma-border);
+  box-shadow: var(--tma-shadow);
+}
+
+@layer utilities {
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }
 
 /* Custom scrollbar for better aesthetics */
