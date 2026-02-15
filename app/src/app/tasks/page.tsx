@@ -10,6 +10,7 @@ import {
   parseFlexibleDate,
 } from '@/lib/dateUtils';
 import { logError } from '@/lib/loggerClient';
+import { useIsTma } from '@/lib/useIsTma';
 
 type TaskItem = {
   id: string;
@@ -62,6 +63,7 @@ const getTaskStatus = (
 };
 
 export default function TasksPage() {
+  const isTma = useIsTma();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'specialists' | 'projects'>('specialists');
@@ -129,18 +131,18 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className={isTma ? 'space-y-4' : 'space-y-6'}>
+      <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center justify-between gap-4'}>
         <div>
           <p className="text-sm text-gray-400">Главная / задачи</p>
-          <h1 className="text-2xl font-semibold text-gray-900">Задачи</h1>
+          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold text-gray-900`}>Задачи</h1>
           <p className="mt-1 text-sm text-gray-500">Задачи специалистов и проектов в одном месте.</p>
         </div>
-        <div className="flex items-center rounded-full bg-gray-100 p-1">
+        <div className={isTma ? 'flex w-full items-center rounded-full bg-gray-100 p-1' : 'flex items-center rounded-full bg-gray-100 p-1'}>
           <button
             type="button"
             onClick={() => setView('specialists')}
-            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition ${
+            className={`${isTma ? 'flex flex-1 items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
               view === 'specialists' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
@@ -149,7 +151,7 @@ export default function TasksPage() {
           <button
             type="button"
             onClick={() => setView('projects')}
-            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition ${
+            className={`${isTma ? 'flex flex-1 items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
               view === 'projects' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
@@ -159,9 +161,9 @@ export default function TasksPage() {
       </div>
 
       {view === 'specialists' && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
           {tasksBySpecialist.map(([specialist, list]) => (
-            <div key={specialist} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div key={specialist} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-semibold text-gray-900">{specialist}</h3>
@@ -197,7 +199,7 @@ export default function TasksPage() {
             </div>
           ))}
           {tasksBySpecialist.length === 0 && (
-            <div className="rounded-xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">
+            <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 ${isTma ? 'p-5' : 'p-6'}`}>
               Задачи пока не добавлены.
             </div>
           )}
@@ -205,12 +207,12 @@ export default function TasksPage() {
       )}
 
       {view === 'projects' && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
           {tasksByProject.map(({ project, tasks: list }) => {
             const deadlineDate = parseFlexibleDate(project.deadline);
             const status = getTaskStatus(project.status, deadlineDate, today);
             return (
-              <div key={project.id} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+              <div key={project.id} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <h3 className="text-lg font-semibold text-gray-900">{project.client || 'Без названия'}</h3>
@@ -239,7 +241,7 @@ export default function TasksPage() {
             );
           })}
           {tasksByProject.length === 0 && (
-            <div className="rounded-xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">
+            <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 ${isTma ? 'p-5' : 'p-6'}`}>
               Нет проектов для отображения.
             </div>
           )}

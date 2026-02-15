@@ -1,7 +1,7 @@
 'use client';
 
 import type { ParserJob } from '@/types';
-import { JobStatus } from './JobStatus';
+import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw } from 'lucide-react';
 
 const STAGE_LABELS: Record<string, string> = {
@@ -84,6 +84,7 @@ export function JobsList({
         <div className="divide-y divide-gray-100">
           {jobs.map((job) => {
             const isActive = activeJobId === job.id;
+            const stoppedByUser = isStoppedByUser(job.status, job.error_message);
             const totalFound = typeof job.total_found === 'number' ? job.total_found : null;
             const totalParsed = typeof job.total_parsed === 'number' ? job.total_parsed : null;
             const hasTotal = totalFound != null && totalFound > 0;
@@ -110,7 +111,7 @@ export function JobsList({
                   <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <JobStatus status={job.status} />
+                      <JobStatus status={job.status} errorMessage={job.error_message} />
                       <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
@@ -121,8 +122,10 @@ export function JobsList({
                         {hasProgress ? (
                           <div
                             className={`h-full transition-all duration-300 ${
-                              job.status === 'failed'
-                                ? 'bg-red-500'
+                              stoppedByUser
+                                ? 'bg-amber-500'
+                                : job.status === 'failed'
+                                  ? 'bg-red-500'
                                 : job.status === 'completed'
                                   ? 'bg-emerald-500'
                                   : 'bg-emerald-500'
@@ -146,7 +149,11 @@ export function JobsList({
                             Найдено: {totalFound ?? '—'} · Обработано: {totalParsed ?? '—'}
                           </span>
                         ) : null}
-                        {job.error_message ? <span className="text-red-600 line-clamp-1">{job.error_message}</span> : null}
+                        {job.error_message ? (
+                          <span className={`${stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
+                            {stoppedByUser ? 'Остановлено' : job.error_message}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   </div>

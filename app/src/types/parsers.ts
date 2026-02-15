@@ -32,6 +32,85 @@ export interface HHSearchConfig {
   fetch_employers?: boolean;
 }
 
+export interface SearchParserJob {
+  id: string;
+  user_id: string;
+  status: ParserJobStatus;
+  config: { queries: string[] };
+  total_queries: number;
+  processed_queries: number;
+  total_results: number;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface SearchResult {
+  id: string;
+  job_id: string;
+  query: string;
+  title: string;
+  link: string;
+  snippet: string;
+  position: number;
+  company_name?: string | null;
+  site?: string | null;
+  description?: string | null;
+  email?: string | null;
+  provider?: string | null;
+  created_at: string;
+}
+
+export interface YandexMapsJob {
+  id: string;
+  user_id: string;
+  status: ParserJobStatus;
+  config: { search_urls: string[]; max_results?: number; headless?: boolean };
+  progress_stage?: string | null;
+  total_links: number;
+  processed_links: number;
+  total_organizations: number;
+  processed_organizations: number;
+  proxy_enabled: boolean;
+  proxy_protocol?: string | null;
+  proxy_host?: string | null;
+  proxy_port?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface YandexMapsLinkRow {
+  id: string;
+  job_id: string;
+  link: string;
+  created_at: string;
+}
+
+export interface YandexMapsOrganizationRow {
+  id: string;
+  job_id: string;
+  name?: string | null;
+  country?: string | null;
+  city?: string | null;
+  address?: string | null;
+  rating?: string | null;
+  reviews_count?: string | null;
+  website?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  telegram?: string | null;
+  vk?: string | null;
+  instagram?: string | null;
+  whatsapp?: string | null;
+  card_url?: string | null;
+  working_hours?: string | null;
+  categories?: string | null;
+  created_at: string;
+}
+
 export interface HHVacancyRow {
   id: string;
   job_id: string;
