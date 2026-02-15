@@ -73,9 +73,10 @@ async function fetchHtmlWithPlaywright(url: string): Promise<{ html: string; fin
 
   let browser: Browser;
   try {
-    browser = playwrightReuseBrowser()
+    const maybeBrowser = playwrightReuseBrowser()
       ? await (playwrightBrowserPromise ?? (playwrightBrowserPromise = launch()))
       : await launch();
+    browser = maybeBrowser as Browser;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("Executable doesn't exist") || msg.includes('playwright install')) {
