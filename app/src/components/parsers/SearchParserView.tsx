@@ -6,7 +6,122 @@ import { supabase } from '@/lib/supabaseClient';
 import type { SearchParserJob, SearchResult } from '@/types/parsers';
 import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
-import { RefreshCw, Download, Copy, Check, ExternalLink } from 'lucide-react';
+import { RefreshCw, Download, Copy, Check, ExternalLink, FileSpreadsheet, Loader2 } from 'lucide-react';
+
+type Lead = {
+  id: string;
+  company_name: string | null;
+  site: string | null;
+  email: string | null;
+  description: string | null;
+  queries: string[];
+  sources: number;
+  created_at: string;
+};
+
+const exportHeader = ['Company', 'Site', 'Email', 'Description', 'Queries'];
+
+function safeHostname(url: string | null) {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+const SOURCE_HOST_SUBSTRINGS = [
+  // job boards
+  'hh.ru',
+  'rabota.ru',
+  'gorodrabot.ru',
+  'dreamjob.ru',
+  // tenders / procurement
+  'zakupki.gov.ru',
+  'zakupki.kontur.ru',
+  'rostender.info',
+  'synapsenet.ru',
+  'bicotender.ru',
+  // events / directories
+  '10times.com',
+  'expocentr.ru',
+  // obvious sources (registries/catalogs)
+  'gisp.gov.ru',
+  'energybase.ru',
+];
+
+function isLikelySourceSite(siteUrl: string | null) {
+  const host = safeHostname(siteUrl);
+  if (!host) return false;
+  if (SOURCE_HOST_SUBSTRINGS.some((s) => host === s || host.endsWith(`.${s}`))) return true;
+  // Heuristics: directories/registries/aggregators are rarely "buyers"
+  if (/(zakup|tender|torgi|vacanc|rabota|career|job|work|expo|catalog|directory|reest|reestr|spravochnik)/i.test(host)) {
+    return true;
+  }
+  return false;
+}
+
+function escapeHtml(value: unknown) {
+  const text = String(value ?? '')
+    .replaceAll('\t', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('\r', ' ');
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function exportRow(r: Lead) {
+  return [
+    r.company_name ?? '',
+    r.site ?? '',
+    r.email ?? '',
+    r.description ?? '',
+    (r.queries ?? []).join(' · '),
+  ];
+}
+
+function buildCsv(items: Lead[]) {
+  const lines = [exportHeader.join(',')];
+  for (const item of items) {
+    const row = exportRow(item).map((val) => {
+      const text = String(val).replaceAll('"', '""');
+      return `"${text}"`;
+    });
+    lines.push(row.join(','));
+  }
+  return lines.join('\n');
+}
+
+function buildExcelHtml(items: Lead[]) {
+  const header = exportHeader
+    .map((h) => `<th style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(h)}</th>`)
+    .join('');
+  const body = items
+    .map((item) => {
+      const cells = exportRow(item)
+        .map((cell) => `<td style="border:1px solid #d1d5db;padding:4px 6px;white-space:nowrap;">${escapeHtml(cell)}</td>`)
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table style="border-collapse:collapse;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+}
+
+function downloadBlob(content: string, mime: string, filename: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 function formatDate(dateStr: string) {
   try {
@@ -48,6 +163,16 @@ function useTimedFlag(durationMs: number) {
   return { flag, trigger };
 }
 
+function getExportFilename(extension: string) {
+  const now = new Date();
+  const d = String(now.getDate()).padStart(2, '0');
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const y = now.getFullYear();
+  const h = String(now.getHours()).padStart(2, '0');
+  const min = String(now.getMinutes()).padStart(2, '0');
+  return `leads_${d}${m}${y}_${h}${min}.${extension}`;
+}
+
 export function SearchParserView() {
   const [jobs, setJobs] = useState<SearchParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -62,17 +187,6 @@ export function SearchParserView() {
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
   const leads = useMemo(() => {
-    type Lead = {
-      id: string;
-      company_name: string | null;
-      site: string | null;
-      email: string | null;
-      description: string | null;
-      queries: string[];
-      sources: number;
-      created_at: string;
-    };
-
     const pickBetterText = (a: string | null, b: string | null) => {
       const aa = (a ?? '').trim();
       const bb = (b ?? '').trim();
@@ -130,6 +244,18 @@ export function SearchParserView() {
       return an.localeCompare(bn, 'ru');
     });
   }, [results]);
+
+  const categorizedLeads = useMemo(() => {
+    const companies: Lead[] = [];
+    const sources: Lead[] = [];
+    for (const lead of leads) {
+      if (isLikelySourceSite(lead.site)) sources.push(lead);
+      else companies.push(lead);
+    }
+    return { companies, sources };
+  }, [leads]);
+  const companyLeads = categorizedLeads.companies;
+  const sourceLeads = categorizedLeads.sources;
 
   const getAccessToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -291,27 +417,20 @@ export function SearchParserView() {
   }, []);
 
   const handleExportCsv = () => {
-    if (leads.length === 0) return;
-    const header = ['Company', 'Site', 'Email', 'Description', 'Queries'];
-    const rows = leads.map((r) => [
-      `"${(r.company_name ?? '').replace(/"/g, '""')}"`,
-      `"${(r.site ?? '').replace(/"/g, '""')}"`,
-      `"${(r.email ?? '').replace(/"/g, '""')}"`,
-      `"${(r.description ?? '').replace(/"/g, '""')}"`,
-      `"${(r.queries ?? []).join(' · ').replace(/"/g, '""')}"`,
-    ]);
-    const csv = [header.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `search_results_${activeJobId}.csv`;
-    a.click();
+    if (companyLeads.length === 0) return;
+    const csv = buildCsv(companyLeads);
+    downloadBlob(csv, 'text/csv;charset=utf-8', getExportFilename('csv'));
+  };
+
+  const handleExportExcel = () => {
+    if (companyLeads.length === 0) return;
+    const html = buildExcelHtml(companyLeads);
+    downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', getExportFilename('xls'));
   };
 
   const handleCopy = async () => {
-     if (leads.length === 0) return;
-     const text = leads
+     if (companyLeads.length === 0) return;
+     const text = companyLeads
        .map((r) => `${r.company_name ?? ''}\t${r.site ?? ''}\t${r.email ?? ''}\t${r.description ?? ''}`)
        .join('\n');
      await copyToClipboard(text, triggerCopiedResults);
@@ -337,10 +456,13 @@ export function SearchParserView() {
   const processedQueries = activeJob?.processed_queries ?? 0;
   const totalQueries = activeJob?.total_queries ?? jobQueries.length;
   const totalResults = activeJob?.total_results ?? leads.length;
+  const totalCompanies = companyLeads.length;
+  const totalSources = sourceLeads.length;
   const jobControlsDisabled = !activeJobId || jobActionId === activeJobId || busy;
-  const exportDisabled = leads.length === 0;
+  const exportDisabled = companyLeads.length === 0;
   const showStop = activeJob?.status === 'running' || activeJob?.status === 'pending';
   const activeJobStoppedByUser = activeJob ? isStoppedByUser(activeJob.status, activeJob.error_message) : false;
+  const isJobLoading = Boolean(activeJob && showStop);
 
   return (
     <div className="space-y-6">
@@ -399,10 +521,10 @@ export function SearchParserView() {
                <p className="text-sm text-gray-500">
                  {activeJob ? (
                    <>
-                     Компаний: {totalResults} · Запросов: {processedQueries}/{totalQueries}
+                     Компаний: {totalCompanies} · Источников: {totalSources} · Всего ссылок: {totalResults} · Запросов: {processedQueries}/{totalQueries}
                    </>
                  ) : (
-                   `${leads.length} компаний`
+                   `${totalCompanies} компаний`
                  )}
                </p>
             </div>
@@ -427,11 +549,29 @@ export function SearchParserView() {
                    </button>
                  </>
                ) : null}
-               <button onClick={handleExportCsv} disabled={exportDisabled} className="p-2 text-gray-500 hover:text-gray-700 disabled:opacity-50">
-                  <Download className="h-5 w-5" />
+               <button
+                  onClick={handleExportCsv}
+                  disabled={exportDisabled}
+                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+               >
+                  <Download className="h-4 w-4 mr-2" />
+                  CSV
                </button>
-               <button onClick={handleCopy} disabled={exportDisabled} className="p-2 text-gray-500 hover:text-gray-700 disabled:opacity-50">
-                  {copiedResults ? <Check className="h-5 w-5 text-green-500" /> : <Copy className="h-5 w-5" />}
+               <button
+                  onClick={handleExportExcel}
+                  disabled={exportDisabled}
+                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+               >
+                  <FileSpreadsheet className="h-4 w-4 mr-2" />
+                  Excel
+               </button>
+               <button
+                  onClick={handleCopy}
+                  disabled={exportDisabled}
+                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+               >
+                  {copiedResults ? <Check className="h-4 w-4 mr-2 text-green-500" /> : <Copy className="h-4 w-4 mr-2" />}
+                  Копировать
                </button>
             </div>
           </div>
@@ -517,10 +657,21 @@ export function SearchParserView() {
                    <tbody className={`divide-y divide-gray-100 ${activeJobStoppedByUser ? 'bg-amber-50/20' : 'bg-white'}`}>
                       {loadingResults ? (
                          <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-500">Загрузка...</td></tr>
-                      ) : leads.length === 0 ? (
-                         <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-500">Нет компаний</td></tr>
+                      ) : companyLeads.length === 0 ? (
+                         isJobLoading ? (
+                           <tr>
+                             <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
+                               <div className="inline-flex items-center gap-2">
+                                 <Loader2 className="h-4 w-4 animate-spin" />
+                                 <span>Загрузка...</span>
+                               </div>
+                             </td>
+                           </tr>
+                         ) : (
+                           <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-500">Нет компаний</td></tr>
+                         )
                       ) : (
-                         leads.map((r) => (
+                         companyLeads.map((r) => (
                             <tr key={`${r.site ?? r.id}`} className={activeJobStoppedByUser ? 'hover:bg-amber-50' : 'hover:bg-gray-50'}>
                                <td className="px-4 py-3">
                                   <a

@@ -7,6 +7,7 @@ import { simplifySearchQuery } from '@/lib/parsers/searchQueryUtils';
 import { fetchWebsiteEmails } from '@/lib/enrich/websiteParser';
 import type { SearchResultItem } from './searchScraper';
 import { duckDuckGoSearchDetailed, googleSearchDetailed, isDuckDuckGoBlockedError, isGoogleBlockedError } from './searchScraper';
+import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -14,6 +15,17 @@ const ENRICH_EMAIL_ENABLED = process.env.SEARCH_ENRICH_EMAIL_ENABLED !== '0';
 const ENRICH_EMAIL_MAX_SITES_PER_JOB = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB ?? '40') || 40;
 const ENRICH_EMAIL_MAX_PAGES_PER_SITE = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE ?? '8') || 8;
 const ENRICH_EMAIL_CONCURRENCY = Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY ?? '2') || 2;
+
+const SOURCE_EXPAND_ENABLED = process.env.SEARCH_SOURCE_EXPAND_ENABLED !== '0';
+const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY ?? '2') || 2;
+const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB ?? '10') || 10;
+const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? '25') || 25;
+const SOURCE_EXPAND_CONCURRENCY = Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY ?? '2') || 2;
+
+const QUERY_CONCURRENCY = Math.max(
+  1,
+  Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY ?? '2') || 2),
+);
 
 function randInt(min: number, max: number) {
   return Math.floor(min + Math.random() * (max - min + 1));
@@ -44,6 +56,23 @@ async function throttleBetweenQueries(provider: 'google' | 'duckduckgo') {
   // Google already has internal delay in googleSearchDetailed; DDG does not.
   const base = provider === 'duckduckgo' ? randInt(1200, 2600) : randInt(600, 1400);
   await sleep(base);
+}
+
+function createAsyncLock() {
+  let chain = Promise.resolve();
+  return async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = chain;
+    let release: () => void = () => {};
+    chain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
 }
 
 function normalizeSite(link: string): string | null {
@@ -137,6 +166,38 @@ function isEnrichableCompanySite(site: string): boolean {
   return !blockedForEnrich.some((b) => host === b || host.endsWith(`.${b}`));
 }
 
+function isLikelySourceSite(site: string): boolean {
+  const host = site
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  if (!host) return false;
+  const knownSources = [
+    // directories/registries
+    'gisp.gov.ru',
+    'energybase.ru',
+    // events/directories
+    '10times.com',
+    'expocentr.ru',
+    // procurement
+    'zakupki.gov.ru',
+    'zakupki.kontur.ru',
+    'rostender.info',
+    'synapsenet.ru',
+    'bicotender.ru',
+    // jobs
+    'hh.ru',
+    'rabota.ru',
+    'gorodrabot.ru',
+    'dreamjob.ru',
+  ];
+  if (knownSources.some((b) => host === b || host.endsWith(`.${b}`))) return true;
+  if (/(zakup|tender|torgi|vacanc|rabota|career|job|work|expo|catalog|directory|reest|reestr|spravochnik)/i.test(host)) {
+    return true;
+  }
+  return false;
+}
+
 function toLeadRow(
   r: SearchResultItem,
   jobId: string,
@@ -207,6 +268,7 @@ export async function runSearchParserJob(jobId: string) {
       .eq('id', jobId);
 
     const queries = (job.config as { queries?: string[] })?.queries || [];
+
     let totalResults = 0;
     let processedQueries = 0;
     // NOTE: we prefer completing with a warning over failing the whole job
@@ -214,9 +276,12 @@ export async function runSearchParserJob(jobId: string) {
     let hadFailures = false;
     const seenSites = new Set<string>();
     let enrichedSites = 0;
+    let expandedSources = 0;
     let ddgBlockedStreak = 0;
     let ddgBlockedCount = 0;
     let lastBlockedHint: string | null = null;
+    let cancelled = false;
+    const withLock = createAsyncLock();
 
     void logInfo(
       'parser.search.job.start',
@@ -243,26 +308,31 @@ export async function runSearchParserJob(jobId: string) {
     // Once Google blocks (enablejs/captcha/consent), stop trying it for this job to avoid log spam and wasted latency.
     let googleBlockedForJob = false;
 
-    // 3. Process queries
-    for (const query of queries) {
-      // Check for cancellation
+    // 3. Process queries (parallel workers: 2-3 by default)
+    await mapWithConcurrency(queries, QUERY_CONCURRENCY, async (query, index) => {
+      if (cancelled) return;
+
+      // Check for cancellation (best-effort)
       const { data: currentJob } = await supabaseAdmin
         .from('search_parser_jobs')
         .select('status')
         .eq('id', jobId)
         .single();
-        
-      if (currentJob?.status === 'failed') { // If cancelled/failed externally
-         return; 
+      if (currentJob?.status === 'failed') {
+        cancelled = true;
+        return;
       }
 
       const querySpan = await trace?.startChild({
         name: 'search.query',
-        input: { query, index: processedQueries + 1, total: queries.length },
+        input: { query, index: index + 1, total: queries.length },
         message: `Запрос: ${query}`,
       });
 
-      let queryFinished = false;
+      let providerUsed: 'google' | 'duckduckgo' = 'google';
+      let insertedCount = 0;
+      let hadQueryFailures = false;
+
       try {
         let results: SearchResultItem[] = [];
         let debugPrimary: unknown = null;
@@ -270,6 +340,7 @@ export async function runSearchParserJob(jobId: string) {
         let debugFallback: unknown = null;
         let googleUrlFallback: string | null = null;
         let provider: 'google' | 'duckduckgo' = 'google';
+        const simplifiedQuery = simplifySearchQuery(query);
 
         try {
           if (googleBlockedForJob) {
@@ -284,7 +355,6 @@ export async function runSearchParserJob(jobId: string) {
             provider = 'google';
           }
         } catch (e) {
-          // If Google is blocked (enablejs/captcha/consent), fall back to DDG instead of failing the whole job.
           if (isGoogleBlockedError(e)) {
             usedFallback = true;
             googleBlockedForJob = true;
@@ -298,8 +368,33 @@ export async function runSearchParserJob(jobId: string) {
           }
         }
 
+        // If Google returns 200 but we parse zero results, prefer DDG for stability.
+        if (!googleBlockedForJob && provider === 'google' && results.length === 0) {
+          const dbg =
+            debugPrimary && typeof debugPrimary === 'object'
+              ? (debugPrimary as { container_count?: unknown; title?: unknown })
+              : null;
+          const containerCount = typeof dbg?.container_count === 'number' ? dbg.container_count : null;
+          const title = typeof dbg?.title === 'string' ? dbg.title : null;
+          const looksLikeEmptyShell = containerCount === 0 || (title !== null && title.trim() === '');
+          if (looksLikeEmptyShell) {
+            try {
+              const ddg = await duckDuckGoSearchDetailed(query);
+              if (ddg.results.length > 0) {
+                usedFallback = true;
+                debugFallback = ddg.debug;
+                results = ddg.results;
+                provider = 'duckduckgo';
+                googleBlockedForJob = true;
+              }
+            } catch (e) {
+              debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
+            }
+          }
+        }
+
         if (results.length === 0) {
-          const simplified = simplifySearchQuery(query);
+          const simplified = simplifiedQuery;
           if (simplified && simplified !== query) {
             usedFallback = true;
             if (provider === 'google') {
@@ -317,55 +412,159 @@ export async function runSearchParserJob(jobId: string) {
             }
           }
         }
-        
-        if (results.length > 0) {
-          const rows = results
-            .map((r) => toLeadRow(r, jobId, provider))
-            .filter(Boolean)
-            .map((row) => row!);
 
-          // Drop rows without (company_name + site) and dedupe by site for this job
-          const deduped = rows.filter((row) => {
+        providerUsed = provider;
+
+        // Build rows (local dedupe only)
+        const rows = results
+          .map((r) => toLeadRow(r, jobId, provider))
+          .filter(Boolean)
+          .map((row) => row!);
+        const localSeen = new Set<string>();
+        const localDeduped = rows.filter((row) => {
+          const key = row.site.toLowerCase();
+          if (localSeen.has(key)) return false;
+          localSeen.add(key);
+          return true;
+        });
+
+        // Claim new sites globally (dedupe across all concurrent tasks)
+        const { claimedRows, reservedSourcesToExpand } = await withLock(async () => {
+          const claimed: typeof localDeduped = [];
+          for (const row of localDeduped) {
             const key = row.site.toLowerCase();
-            if (seenSites.has(key)) return false;
+            if (seenSites.has(key)) continue;
             seenSites.add(key);
-            return true;
+            claimed.push(row);
+          }
+
+          let reserved: typeof claimed = [];
+          if (SOURCE_EXPAND_ENABLED && expandedSources < SOURCE_EXPAND_MAX_SOURCES_PER_JOB) {
+            const remainingSources = Math.max(0, SOURCE_EXPAND_MAX_SOURCES_PER_JOB - expandedSources);
+            reserved = claimed
+              .filter((r) => isLikelySourceSite(r.site))
+              .slice(0, Math.min(SOURCE_EXPAND_MAX_SOURCES_PER_QUERY, remainingSources));
+            // Reserve slots globally (even if expansion yields 0)
+            expandedSources += reserved.length;
+          }
+
+          return { claimedRows: claimed, reservedSourcesToExpand: reserved };
+        });
+
+        // Expand sources outside the lock (network-bound)
+        let extractedRows: typeof claimedRows = [];
+        if (reservedSourcesToExpand.length > 0) {
+          const extractedBatches = await mapWithConcurrency(
+            reservedSourcesToExpand,
+            SOURCE_EXPAND_CONCURRENCY,
+            async (source) => {
+              try {
+                const out = await extractCompanySitesFromSource(source.link, {
+                  maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE,
+                });
+                return { source, sites: out.sites };
+              } catch (e) {
+                void logWarn(
+                  'parser.search.source_expand.failed',
+                  e instanceof Error ? e.message : String(e),
+                  { jobId, source: source.site },
+                  logMeta,
+                );
+                return { source, sites: [] };
+              }
+            },
+          );
+
+          const maybeExtracted: typeof claimedRows = [];
+          for (const batch of extractedBatches) {
+            for (const s of batch.sites) {
+              if (!isLeadCandidateSite(s.site)) continue;
+              maybeExtracted.push({
+                job_id: jobId,
+                query,
+                title: s.title ?? s.site,
+                link: s.link,
+                snippet: `Источник: ${batch.source.site} (${batch.source.link})`,
+                position: 0,
+                company_name: deriveCompanyName(s.title, s.site) ?? s.site,
+                site: s.site,
+                description: `Источник: ${batch.source.site}`,
+                email: null,
+                provider: 'source_expand',
+              });
+            }
+          }
+
+          // Claim extracted sites globally
+          extractedRows = await withLock(async () => {
+            const claimed: typeof maybeExtracted = [];
+            for (const row of maybeExtracted) {
+              const key = row.site.toLowerCase();
+              if (seenSites.has(key)) continue;
+              seenSites.add(key);
+              claimed.push(row);
+            }
+            return claimed;
           });
 
-          if (deduped.length > 0) {
-            // Try to enrich emails by crawling contact pages (home + /contact, etc).
-            if (ENRICH_EMAIL_ENABLED && enrichedSites < ENRICH_EMAIL_MAX_SITES_PER_JOB) {
-              const remaining = Math.max(0, ENRICH_EMAIL_MAX_SITES_PER_JOB - enrichedSites);
-              const toEnrich = deduped.filter((r) => !r.email && isEnrichableCompanySite(r.site)).slice(0, remaining);
-              if (toEnrich.length > 0) {
-                const enriched = await mapWithConcurrency(toEnrich, ENRICH_EMAIL_CONCURRENCY, async (lead) => {
-                  try {
-                    const { emails } = await fetchWebsiteEmails(lead.site, { maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE });
-                    const cleaned = emails.map((e) => e.trim()).filter(Boolean);
-                    const unique = Array.from(new Set(cleaned)).slice(0, 3);
-                    return { site: lead.site, email: unique.length ? unique.join('; ') : null };
-                  } catch {
-                    return { site: lead.site, email: null };
-                  }
-                });
+          if (extractedRows.length > 0) {
+            void logInfo(
+              'parser.search.source_expand.completed',
+              'Expanded source pages into company sites',
+              { jobId, query, sources: reservedSourcesToExpand.length, extracted: extractedRows.length },
+              logMeta,
+            );
+          }
+        }
 
-                const emailBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e.email]));
-                for (const row of deduped) {
-                  const e = emailBySite.get(row.site.toLowerCase());
-                  if (e) row.email = e;
-                }
-                enrichedSites += toEnrich.length;
-              }
+        const rowsToInsert = [...claimedRows, ...extractedRows];
+
+        // Email enrichment (reserve slots globally, do network outside lock)
+        let toEnrich: typeof rowsToInsert = [];
+        if (ENRICH_EMAIL_ENABLED) {
+          toEnrich = await withLock(async () => {
+            if (enrichedSites >= ENRICH_EMAIL_MAX_SITES_PER_JOB) return [];
+            const remaining = Math.max(0, ENRICH_EMAIL_MAX_SITES_PER_JOB - enrichedSites);
+            const candidates = rowsToInsert
+              .filter((r) => !r.email && isEnrichableCompanySite(r.site))
+              .slice(0, remaining);
+            enrichedSites += candidates.length;
+            return candidates;
+          });
+        }
+
+        if (toEnrich.length > 0) {
+          const enriched = await mapWithConcurrency(toEnrich, ENRICH_EMAIL_CONCURRENCY, async (lead) => {
+            try {
+              const { emails } = await fetchWebsiteEmails(lead.site, { maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE });
+              const cleaned = emails.map((e) => e.trim()).filter(Boolean);
+              const unique = Array.from(new Set(cleaned)).slice(0, 3);
+              return { site: lead.site, email: unique.length ? unique.join('; ') : null };
+            } catch {
+              return { site: lead.site, email: null };
             }
+          });
+          const emailBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e.email]));
+          for (const row of rowsToInsert) {
+            const e = emailBySite.get(row.site.toLowerCase());
+            if (e) row.email = e;
+          }
+        }
 
-            await supabaseAdmin.from('search_results').insert(deduped);
-            totalResults += deduped.length;
+        if (rowsToInsert.length > 0) {
+          const { error: insertError } = await supabaseAdmin.from('search_results').insert(rowsToInsert);
+          if (insertError) {
+            hadQueryFailures = true;
+            void logError('parser.search.insert.failed', insertError, { jobId, provider, query }, logMeta);
+          } else {
+            insertedCount = rowsToInsert.length;
           }
         }
 
         await querySpan?.end(
           {
             results: results.length,
+            inserted: insertedCount,
             fallback_used: usedFallback,
             provider,
             links: {
@@ -383,64 +582,55 @@ export async function runSearchParserJob(jobId: string) {
                 : {}),
               ...(usedFallback && googleUrlFallback ? { fallback_google_url: googleUrlFallback } : {}),
             },
-            ...(results.length === 0
-              ? { debug: { primary: debugPrimary, fallback: debugFallback } }
-              : {}),
+            ...(results.length === 0 ? { debug: { primary: debugPrimary, fallback: debugFallback } } : {}),
           },
           `Найдено ${results.length} результатов`,
         );
         void logInfo(
           'parser.search.query.completed',
           'Search parser query completed',
-          { jobId, query, results: results.length, fallback_used: usedFallback },
+          { jobId, query, results: results.length, inserted: insertedCount, fallback_used: usedFallback },
           logMeta,
         );
 
-        // Throttle to reduce 202/429 bursts.
         await throttleBetweenQueries(provider);
-        queryFinished = true;
       } catch (err) {
-        // Expected in practice: search engines can return temporary blocks (enablejs/202/429).
-        // Keep logs quieter for known/handled blocks.
+        hadQueryFailures = true;
         if (!isGoogleBlockedError(err) && !isDuckDuckGoBlockedError(err)) {
           console.error(`Error processing query "${query}":`, err);
         } else {
           console.warn(`Search blocked for query "${query}":`, err);
         }
-        hadFailures = true;
         await querySpan?.fail(err);
-        void logError(
-          'parser.search.query.failed',
-          err,
-          { jobId, query },
-          logMeta,
-        );
+        void logError('parser.search.query.failed', err, { jobId, query }, logMeta);
+
+        // Keep the same cooldown behavior, but update shared counters under lock.
         if (isGoogleBlockedError(err)) {
-          // Google blocking is expected; job should continue via DDG provider.
-          ddgBlockedStreak = 0;
-          lastBlockedHint = err.message;
+          await withLock(async () => {
+            ddgBlockedStreak = 0;
+            lastBlockedHint = err.message;
+          });
           await throttleBetweenQueries('duckduckgo');
-          queryFinished = true;
-          continue;
-        }
-        if (isDuckDuckGoBlockedError(err)) {
-          ddgBlockedStreak += 1;
-          ddgBlockedCount += 1;
-          lastBlockedHint = err.message;
-          // Extra cooldown when DDG starts returning 202/blocked.
+        } else if (isDuckDuckGoBlockedError(err)) {
+          await withLock(async () => {
+            ddgBlockedStreak += 1;
+            ddgBlockedCount += 1;
+            lastBlockedHint = err.message;
+          });
           const streak = Math.min(ddgBlockedStreak, 6);
           const cooldown = Math.min(90_000, 4500 * 2 ** (streak - 1) + randInt(0, 2500));
           await sleep(cooldown);
-          queryFinished = true;
-          continue;
+        } else {
+          await withLock(async () => {
+            ddgBlockedStreak = 0;
+          });
         }
-        ddgBlockedStreak = 0;
       } finally {
-        // Always advance progress so the UI doesn't look "stuck" on blocked queries.
-        if (!queryFinished) {
-          // even if we rethrow in future changes, keep progress monotonic
-        }
-        processedQueries += 1;
+        await withLock(async () => {
+          processedQueries += 1;
+          if (insertedCount > 0) totalResults += insertedCount;
+          if (hadQueryFailures) hadFailures = true;
+        });
         await supabaseAdmin
           .from('search_parser_jobs')
           .update({
@@ -449,7 +639,7 @@ export async function runSearchParserJob(jobId: string) {
           })
           .eq('id', jobId);
       }
-    }
+    });
 
     // Prefer completing with a meaningful hint if we saw blocks.
     const hint =
