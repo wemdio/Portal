@@ -1161,7 +1161,7 @@ export function ProjectList() {
                             options={STATUS_OPTIONS}
                             onChange={(value) => {
                               setDraftValue(selectedProject.id, 'status', value);
-                              void commitProjectUpdate(selectedProject, { status: value });
+                              void commitProjectUpdate(selectedProject, { status: value as ProjectStatus });
                             }}
                             disabled={Boolean(savingRows[selectedProject.id])}
                           />
