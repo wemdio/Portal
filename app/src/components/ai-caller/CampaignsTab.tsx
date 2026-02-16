@@ -240,7 +240,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     }
 
     setCurrentContact(data.contact?.phone || null);
-    setCurrentCallId(data.callId);
 
     // Poll for call completion
     pollRef.current = setInterval(async () => {
@@ -261,7 +260,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
           });
 
           setCurrentContact(null);
-          setCurrentCallId(null);
 
           // Check if campaign is still running
           const campRes = await fetch(`/api/ai-caller/campaigns/${campaignId}`, {
