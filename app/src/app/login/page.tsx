@@ -3,8 +3,69 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { useIsTma } from '@/lib/useIsTma';
+
+const TELEGRAM_STORAGE_KEYS = {
+  token: 'tg_link_token',
+  expiresAt: 'tg_link_expires_at',
+  isWebApp: 'tg_is_webapp',
+} as const;
+
+function clearTelegramLink() {
+  sessionStorage.removeItem(TELEGRAM_STORAGE_KEYS.token);
+  sessionStorage.removeItem(TELEGRAM_STORAGE_KEYS.expiresAt);
+}
+
+function getTelegramLinkToken() {
+  if (typeof window === 'undefined') return null;
+  const token = sessionStorage.getItem(TELEGRAM_STORAGE_KEYS.token);
+  const expiresAt = sessionStorage.getItem(TELEGRAM_STORAGE_KEYS.expiresAt);
+  if (!token || !expiresAt) return null;
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresAtMs) || Date.now() >= expiresAtMs) {
+    clearTelegramLink();
+    return null;
+  }
+  return token;
+}
+
+async function linkTelegramAccount(accessToken: string) {
+  if (typeof window === 'undefined') return { ok: true, skipped: true };
+  if (!sessionStorage.getItem(TELEGRAM_STORAGE_KEYS.isWebApp)) {
+    return { ok: true, skipped: true };
+  }
+
+  const linkToken = getTelegramLinkToken();
+  if (!linkToken) return { ok: true, skipped: true };
+
+  try {
+    const response = await fetch('/api/telegram/link', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ link_token: linkToken }),
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      return {
+        ok: false,
+        status: response.status,
+        error: data?.error ?? response.statusText,
+      };
+    }
+
+    clearTelegramLink();
+    return { ok: true, skipped: false };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
 
 export default function LoginPage() {
+  const isTma = useIsTma();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -54,6 +115,15 @@ export default function LoginPage() {
 
         // Check if session was created immediately (meaning email confirmation is off)
         if (data.session) {
+             const linkResult = await linkTelegramAccount(data.session.access_token);
+             if (!linkResult.ok) {
+               void logError('telegram.link.failed', linkResult.error, {
+                 status: linkResult.status,
+                 isSignUp,
+               });
+             } else if (!linkResult.skipped) {
+               void logAudit('telegram.link.success', 'Telegram account linked', { isSignUp });
+             }
              setMessage('Регистрация успешна! Входим...');
              void logAudit('auth.signup.success', 'User signed up', { withSession: true });
              // Hard reload to ensure session is picked up by middleware
@@ -72,6 +142,12 @@ export default function LoginPage() {
         if (error) throw error;
         
         if (data.session) {
+          const linkResult = await linkTelegramAccount(data.session.access_token);
+          if (!linkResult.ok) {
+            void logError('telegram.link.failed', linkResult.error, { status: linkResult.status });
+          } else if (!linkResult.skipped) {
+            void logAudit('telegram.link.success', 'Telegram account linked');
+          }
           void logAudit('auth.login.success', 'User logged in', { withSession: true });
           // Hard reload to ensure session is picked up by middleware
           window.location.href = '/';
@@ -102,10 +178,10 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50">
-      <div className="w-full max-w-md space-y-8 bg-white p-8 rounded-xl border border-gray-100 shadow-sm">
+    <div className={isTma ? 'flex min-h-screen items-center justify-center bg-gray-50 px-4 py-6' : 'flex min-h-screen items-center justify-center bg-gray-50'}>
+      <div className={`w-full max-w-md bg-white rounded-xl border border-gray-100 shadow-sm ${isTma ? 'space-y-6 p-6' : 'space-y-8 p-8'}`}>
         <div className="text-center">
-          <h2 className="mt-6 text-3xl font-bold tracking-tight text-gray-900">
+          <h2 className={`${isTma ? 'mt-4 text-2xl' : 'mt-6 text-3xl'} font-bold tracking-tight text-gray-900`}>
             {isSignUp ? 'Создать аккаунт' : 'Вход в Портал'}
           </h2>
           <p className="mt-2 text-sm text-gray-600">
@@ -113,7 +189,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form className="mt-8 space-y-6" onSubmit={handleAuth}>
+        <form className={`${isTma ? 'mt-6' : 'mt-8'} space-y-6`} onSubmit={handleAuth}>
           <div className="space-y-4 rounded-md shadow-sm">
             <div>
               <input

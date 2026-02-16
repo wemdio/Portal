@@ -5,6 +5,8 @@ const customJestConfig = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
+  modulePathIgnorePatterns: ['<rootDir>/.next/'],
+  watchPathIgnorePatterns: ['<rootDir>/.next/'],
   testMatch: [
     '<rootDir>/tests/**/*.[jt]s?(x)',
     '<rootDir>/tests/**/?(*.)+(spec|test).[jt]s?(x)'

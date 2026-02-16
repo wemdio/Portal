@@ -3,20 +3,7 @@ export type LogSource = 'server' | 'client' | 'audit';
 
 export type LogContext = Record<string, unknown>;
 
-const REDACT_KEYS = [
-  /password/i,
-  /token/i,
-  /authorization/i,
-  /cookie/i,
-  /secret/i,
-  /api[_-]?key/i,
-  /supabase/i,
-];
-
-const MAX_STRING_LENGTH = 500;
-const MAX_ARRAY_LENGTH = 50;
-const MAX_DEPTH = 4;
-const MAX_STACK_LENGTH = 2000;
+import { REDACT_KEYS, MAX_STRING_LENGTH, MAX_ARRAY_LENGTH, MAX_DEPTH, MAX_STACK_LENGTH } from '@/lib/constants';
 
 function truncateString(value: string, maxLength = MAX_STRING_LENGTH) {
   if (value.length <= maxLength) return value;

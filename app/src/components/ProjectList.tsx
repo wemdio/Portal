@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
@@ -120,6 +121,7 @@ function getCommentValue(project: Project) {
 }
 
 export function ProjectList() {
+  const isTma = useIsTma();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -432,10 +434,10 @@ export function ProjectList() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className={isTma ? 'space-y-4' : 'space-y-4'}>
       {/* Deadline Alert */}
       {(overdueCount > 0 || soonCount > 0) && (
-        <div className={`rounded-xl p-4 ${overdueCount > 0 ? 'bg-red-50 border border-red-100' : 'bg-amber-50 border border-amber-100'}`}>
+        <div className={`rounded-xl ${isTma ? 'p-3' : 'p-4'} ${overdueCount > 0 ? 'bg-red-50 border border-red-100' : 'bg-amber-50 border border-amber-100'}`}>
           <div className="flex items-center">
             <div className="ml-1">
               <p className={`text-sm font-medium ${overdueCount > 0 ? 'text-red-800' : 'text-amber-800'}`}>
@@ -449,17 +451,17 @@ export function ProjectList() {
       )}
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 pb-2">
+      <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-gray-900">Проекты</h1>
+          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold tracking-tight text-gray-900`}>Проекты</h1>
           <p className="mt-1 text-sm text-gray-500 font-medium">{projects.length} проектов</p>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className={isTma ? 'flex w-full flex-col gap-3' : 'flex flex-wrap items-center gap-3'}>
           {canEdit && (
             <button
               type="button"
               onClick={() => void handleToggleEditing()}
-              className={`inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 border ${
+              className={`inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 border ${isTma ? 'w-full' : ''} ${
                 isTableEditing
                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
                   : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50 shadow-sm'
@@ -471,7 +473,7 @@ export function ProjectList() {
         {canCreate && (
           <Link 
             href="/projects/new"
-              className="inline-flex items-center justify-center rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-gray-800 transition-all duration-200"
+              className={`inline-flex items-center justify-center rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-gray-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
           >
             Новый проект
           </Link>
@@ -480,7 +482,7 @@ export function ProjectList() {
       </div>
 
       {/* Controls */}
-      <div className="flex flex-col lg:flex-row gap-4 items-center bg-white p-2 rounded-xl shadow-sm border border-gray-200">
+      <div className={isTma ? 'flex flex-col gap-3 bg-white p-3 rounded-xl shadow-sm border border-gray-200' : 'flex flex-col lg:flex-row gap-4 items-center bg-white p-2 rounded-xl shadow-sm border border-gray-200'}>
         {/* Search */}
         <div className="relative flex-1 w-full">
           <input
@@ -494,7 +496,7 @@ export function ProjectList() {
 
       {/* Status Filter Tabs */}
       {viewMode !== 'kanban' && (
-          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar border-l border-gray-100 pl-4 py-1">
+          <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar border-t border-gray-100 pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar border-l border-gray-100 pl-4 py-1'}>
           {[
             { key: 'all', label: 'Все' },
             { key: 'в работе', label: 'В работе' },
@@ -541,8 +543,24 @@ export function ProjectList() {
         </div>
       )}
 
+      {isTma && filteredProjects.length > 0 && (
+        <div className="space-y-3">
+          {sortedProjects.map((project) => (
+            <ProjectCard 
+              key={project.id} 
+              project={project} 
+              onStatusChange={updateProjectStatus}
+              openMenuId={openMenuId}
+              setOpenMenuId={setOpenMenuId}
+              onDeleteRequest={requestDeleteProject}
+              canDelete={canDelete}
+            />
+          ))}
+        </div>
+      )}
+
       {/* Cards View */}
-      {viewMode === 'cards' && filteredProjects.length > 0 && (
+      {!isTma && viewMode === 'cards' && filteredProjects.length > 0 && (
         <div className="space-y-4">
           {sortedProjects.map((project) => (
             <ProjectCard 
@@ -559,7 +577,7 @@ export function ProjectList() {
       )}
 
       {/* Kanban View */}
-      {viewMode === 'kanban' && (
+      {!isTma && viewMode === 'kanban' && (
         <div className="flex gap-4 overflow-x-auto pb-4">
           {kanbanColumns.map((column) => (
             <div 
@@ -594,7 +612,7 @@ export function ProjectList() {
       )}
 
       {/* Table View */}
-      {viewMode === 'table' && filteredProjects.length > 0 && (
+      {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
             <table className="min-w-full divide-y divide-gray-100 text-sm">
@@ -860,16 +878,16 @@ export function ProjectList() {
       )}
 
       {selectedProject && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+        <div className={isTma ? 'fixed inset-0 z-50 flex items-stretch justify-center p-0' : 'fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6'}>
           <div
             className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm transition-opacity"
             onClick={() => setSelectedProjectId(null)}
           />
-          <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl bg-white shadow-2xl ring-1 ring-gray-900/5 flex flex-col">
-            <div className="flex items-start justify-between border-b border-gray-100 px-8 py-6 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all">
-              <div className="flex-1 pr-8">
+          <div className={isTma ? 'relative w-full h-[100dvh] overflow-y-auto rounded-none bg-white shadow-2xl ring-1 ring-gray-900/5 flex flex-col' : 'relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl bg-white shadow-2xl ring-1 ring-gray-900/5 flex flex-col'}>
+            <div className={isTma ? 'flex flex-col gap-4 border-b border-gray-100 px-4 py-4 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all' : 'flex items-start justify-between border-b border-gray-100 px-8 py-6 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all'}>
+              <div className={isTma ? 'flex-1' : 'flex-1 pr-8'}>
                 <div className="flex items-center gap-3 mb-2">
-                  <h2 className="text-2xl font-bold text-gray-900 leading-tight">
+                  <h2 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold text-gray-900 leading-tight`}>
                     {selectedProject.client || 'Без названия'}
                   </h2>
                   {selectedProject.name && (
@@ -919,9 +937,9 @@ export function ProjectList() {
               </div>
             </div>
 
-            <div className="p-8 space-y-10 bg-white min-h-[500px]">
+            <div className={isTma ? 'p-4 space-y-6 bg-white min-h-[500px]' : 'p-8 space-y-10 bg-white min-h-[500px]'}>
               
-              <section className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
                 <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200 transition-colors group hover:bg-gray-100/50">
                   <div className="flex items-center gap-3 mb-3">
                     <label className="text-sm font-bold text-gray-700 tracking-wide uppercase">Специалист</label>
@@ -981,7 +999,7 @@ export function ProjectList() {
                 </div>
               </section>
 
-              <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
                 <div className="flex flex-col h-full rounded-2xl bg-blue-50/30 border border-blue-100 p-6 transition-all hover:shadow-md hover:border-blue-200">
                    <h3 className="text-sm font-bold text-blue-900 uppercase tracking-wide mb-4 flex items-center gap-2">
                      <span className="w-2 h-2 rounded-full bg-blue-600 ring-2 ring-blue-100"></span>
@@ -1019,7 +1037,7 @@ export function ProjectList() {
                 </div>
               </section>
 
-              <section className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
                  <div>
                     <h3 className="text-sm font-bold text-gray-600 mb-3 uppercase tracking-wide flex items-center gap-2">
                       Подзадачи
@@ -1347,7 +1365,7 @@ export function ProjectList() {
               )}
             </div>
             
-             <div className="bg-gray-50 px-8 py-5 rounded-b-3xl border-t border-gray-100 flex justify-between items-center">
+             <div className={isTma ? 'bg-gray-50 px-4 py-4 border-t border-gray-100 flex flex-col gap-3' : 'bg-gray-50 px-8 py-5 rounded-b-3xl border-t border-gray-100 flex justify-between items-center'}>
                <span className="text-xs text-gray-400">
                   {selectedProject.updated_at ? `Последнее обновление: ${new Date(selectedProject.updated_at).toLocaleDateString()}` : ''}
                </span>
@@ -1646,6 +1664,7 @@ function ProjectCard({
   onDeleteRequest?: (id: string) => void;
   canDelete?: boolean;
 }) {
+  const isTma = useIsTma();
   const statusConfig = getStatusConfig(project.status);
   const deadlineStatus = getDeadlineStatus(project.deadline);
   const isMenuOpen = openMenuId === project.id;
@@ -1673,7 +1692,7 @@ function ProjectCard({
           : deadlineStatus === 'soon'
             ? 'border-amber-200'
             : 'border-gray-200'
-      } p-4 md:p-5 hover:shadow-md transition-shadow`}
+      } ${isTma ? 'p-4' : 'p-4 md:p-5'} hover:shadow-md transition-shadow`}
     >
       <div className="flex items-start justify-between gap-3">
         <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
@@ -1746,20 +1765,8 @@ function ProjectCard({
       </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className={`mt-4 grid grid-cols-1 gap-4 ${isTma ? '' : 'md:grid-cols-2 xl:grid-cols-4'}`}>
         <InfoItem label="Сумма договора" value={project.budget} />
-        <InfoItem label="Маржа" value={project.margin} />
-        <InfoItem label="KPI" value={kpiValue} />
-        <InfoItem
-          label="Ссылка на договор"
-          value={contractHref ? formatUrlLabel(contractHref) : ''}
-          href={contractHref}
-        />
-        <InfoItem
-          label="Ссылка на передачу"
-          value={handoffHref ? formatUrlLabel(handoffHref) : ''}
-          href={handoffHref}
-        />
         <InfoItem
           label="Дедлайн"
           value={deadlineLabel}
@@ -1775,21 +1782,37 @@ function ProjectCard({
           value={project.manager}
           valueClassName="inline-flex items-center rounded-full bg-lime-100 px-2.5 py-1 text-xs font-semibold text-lime-800"
         />
-        <InfoItem
-          label="Где ведется проект"
-          value={platformConfig?.label}
-          valueClassName={
-            platformConfig?.className
-              ? `inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${platformConfig.className}`
-              : undefined
-          }
-        />
-        <InfoItem
-          label="Комментарий"
-          value={commentValue}
-          className="md:col-span-2 xl:col-span-4"
-          valueClassName="text-gray-700 break-words"
-        />
+        {!isTma && (
+          <>
+            <InfoItem label="Маржа" value={project.margin} />
+            <InfoItem label="KPI" value={kpiValue} />
+            <InfoItem
+              label="Ссылка на договор"
+              value={contractHref ? formatUrlLabel(contractHref) : ''}
+              href={contractHref}
+            />
+            <InfoItem
+              label="Ссылка на передачу"
+              value={handoffHref ? formatUrlLabel(handoffHref) : ''}
+              href={handoffHref}
+            />
+            <InfoItem
+              label="Где ведется проект"
+              value={platformConfig?.label}
+              valueClassName={
+                platformConfig?.className
+                  ? `inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${platformConfig.className}`
+                  : undefined
+              }
+            />
+            <InfoItem
+              label="Комментарий"
+              value={commentValue}
+              className="md:col-span-2 xl:col-span-4"
+              valueClassName="text-gray-700 break-words"
+            />
+          </>
+        )}
           </div>
     </div>
   );
