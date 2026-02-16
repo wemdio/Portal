@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { Phone, Bot, History, Users, BarChart3 } from 'lucide-react';
 import { TestCallTab } from '@/components/ai-caller/TestCallTab';
@@ -18,6 +18,11 @@ const TABS: { id: AiCallerTab; label: string; icon: typeof Phone }[] = [
   { id: 'history', label: 'История', icon: History },
 ];
 
+async function getToken() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ?? '';
+}
+
 export default function AiCallerPage() {
   const [activeTab, setActiveTab] = useState<AiCallerTab>('test-call');
   const [assistants, setAssistants] = useState<VapiAssistant[]>([]);
@@ -26,10 +31,8 @@ export default function AiCallerPage() {
   const [loading, setLoading] = useState(true);
   const [loadingCalls, setLoadingCalls] = useState(false);
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
+  const coreLoaded = useRef<boolean | null>(null);
+  const callsLoaded = useRef<boolean | null>(null);
 
   const fetchCore = useCallback(async () => {
     setLoading(true);
@@ -48,10 +51,10 @@ export default function AiCallerPage() {
       setAssistants((assistantsData.assistants ?? []) as VapiAssistant[]);
       setPhoneNumbers((phonesData.phoneNumbers ?? []) as VapiPhoneNumber[]);
     } catch {
-      // Errors will be shown in individual components
+      // Errors shown in child components
     }
     setLoading(false);
-  }, [getToken]);
+  }, []);
 
   const fetchCalls = useCallback(async () => {
     setLoadingCalls(true);
@@ -66,18 +69,21 @@ export default function AiCallerPage() {
       // ignore
     }
     setLoadingCalls(false);
-  }, [getToken]);
+  }, []);
 
-  useEffect(() => {
+  // Initial load on first render (React 19 ref-init pattern)
+  if (coreLoaded.current == null) {
+    coreLoaded.current = true;
     fetchCore();
-  }, [fetchCore]);
+  }
 
-  // Lazy-load calls when History or Analytics tab is opened
-  useEffect(() => {
-    if ((activeTab === 'history' || activeTab === 'analytics') && calls.length === 0) {
+  function handleTabChange(tab: AiCallerTab) {
+    setActiveTab(tab);
+    if ((tab === 'history' || tab === 'analytics') && callsLoaded.current == null) {
+      callsLoaded.current = true;
       fetchCalls();
     }
-  }, [activeTab, calls.length, fetchCalls]);
+  }
 
   return (
     <div className="space-y-6">
@@ -98,7 +104,7 @@ export default function AiCallerPage() {
             return (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => handleTabChange(tab.id)}
                 className={`inline-flex items-center gap-2 border-b-2 py-3 px-1 text-sm font-medium whitespace-nowrap transition-colors
                   ${
                     isActive
@@ -143,7 +149,6 @@ export default function AiCallerPage() {
       {activeTab === 'analytics' && (
         <AnalyticsTab
           calls={calls}
-          assistants={assistants}
           loading={loading || loadingCalls}
           onRefreshCalls={fetchCalls}
         />
