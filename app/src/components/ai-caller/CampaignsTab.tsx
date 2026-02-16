@@ -219,12 +219,28 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   }
 
   async function callNext(campaignId: string) {
-    const token = await getToken();
-    const res = await fetch(`/api/ai-caller/campaigns/${campaignId}/call-next`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await res.json();
+    let token: string;
+    try {
+      token = await getToken();
+    } catch {
+      console.error('[Campaign] Failed to get auth token, stopping');
+      setRunningCampaignId(null);
+      setCurrentContact(null);
+      return;
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      const res = await fetch(`/api/ai-caller/campaigns/${campaignId}/call-next`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      data = await res.json();
+    } catch (err) {
+      console.error('[Campaign] call-next request failed:', err);
+      setTimeout(() => callNext(campaignId), 5000);
+      return;
+    }
 
     if (data.done) {
       setRunningCampaignId(null);
@@ -234,34 +250,83 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     }
 
     if (data.error) {
-      // Skip failed, try next
+      console.warn('[Campaign] call-next error, skipping:', data.error);
       setTimeout(() => callNext(campaignId), 2000);
       return;
     }
 
-    setCurrentContact(data.contact?.phone || null);
+    const contact = data.contact as { id: string; phone: string } | undefined;
+    const callId = data.callId as string | undefined;
 
-    // Poll for call completion
+    setCurrentContact(contact?.phone || null);
+
+    if (!callId) {
+      console.error('[Campaign] No callId returned, skipping contact');
+      setTimeout(() => callNext(campaignId), 2000);
+      return;
+    }
+
+    const TERMINAL_STATUSES = new Set(['ended', 'failed']);
+    const MAX_POLL_SECONDS = 300; // 5 min max per call
+    const POLL_INTERVAL_MS = 4000;
+    const pollStarted = Date.now();
+    let pollErrors = 0;
+
     pollRef.current = setInterval(async () => {
+      const elapsed = (Date.now() - pollStarted) / 1000;
+
+      // Timeout — mark as failed and move on
+      if (elapsed > MAX_POLL_SECONDS) {
+        console.warn(`[Campaign] Call ${callId} timed out after ${MAX_POLL_SECONDS}s, moving on`);
+        if (pollRef.current) clearInterval(pollRef.current);
+        setCurrentContact(null);
+        fetchCampaigns();
+        setTimeout(() => callNext(campaignId), 2000);
+        return;
+      }
+
+      let callData: Record<string, unknown>;
       try {
-        const callRes = await fetch(`/api/ai-caller/calls/${data.callId}`, {
+        const callRes = await fetch(`/api/ai-caller/calls/${callId}`, {
           headers: { Authorization: `Bearer ${await getToken()}` },
         });
-        const callData = await callRes.json();
-
-        if (callData.call?.status === 'ended') {
+        if (!callRes.ok) throw new Error(`HTTP ${callRes.status}`);
+        callData = await callRes.json();
+        pollErrors = 0;
+      } catch (err) {
+        pollErrors++;
+        console.warn(`[Campaign] Poll error #${pollErrors}:`, err);
+        if (pollErrors >= 10) {
+          console.error('[Campaign] Too many poll errors, skipping contact');
           if (pollRef.current) clearInterval(pollRef.current);
+          setCurrentContact(null);
+          fetchCampaigns();
+          setTimeout(() => callNext(campaignId), 3000);
+        }
+        return;
+      }
 
-          // Mark contact as completed
+      const call = callData.call as Record<string, unknown> | undefined;
+      const status = (call?.status as string) ?? '';
+
+      if (TERMINAL_STATUSES.has(status)) {
+        if (pollRef.current) clearInterval(pollRef.current);
+
+        // Mark contact as completed
+        try {
           await fetch(`/api/ai-caller/campaigns/${campaignId}/complete-contact`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getToken()}` },
-            body: JSON.stringify({ contactId: data.contact.id, callId: data.callId }),
+            body: JSON.stringify({ contactId: contact?.id, callId }),
           });
+        } catch (err) {
+          console.error('[Campaign] complete-contact failed:', err);
+        }
 
-          setCurrentContact(null);
+        setCurrentContact(null);
 
-          // Check if campaign is still running
+        // Check if campaign is still running
+        try {
           const campRes = await fetch(`/api/ai-caller/campaigns/${campaignId}`, {
             headers: { Authorization: `Bearer ${await getToken()}` },
           });
@@ -271,10 +336,13 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
           } else {
             setRunningCampaignId(null);
           }
-          fetchCampaigns();
+        } catch {
+          // If we can't check, still try next
+          setTimeout(() => callNext(campaignId), 3000);
         }
-      } catch { /* ignore */ }
-    }, 3000);
+        fetchCampaigns();
+      }
+    }, POLL_INTERVAL_MS);
   }
 
   async function deleteCampaign(id: string) {
