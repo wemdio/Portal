@@ -11,6 +11,10 @@ import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/project
 type ViewMode = 'table' | 'cards' | 'kanban';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
+const PROJECT_TYPE_OPTIONS = ['Продажа', 'Продление'];
+const STATUS_OPTIONS = ['В работе', 'Тестирование', 'На паузе', 'Подготовка', 'Завершен', 'Отменен'];
 
 /** Parse comma-separated services string into array */
 const parseServices = (value: string | undefined | null): string[] => {
@@ -133,6 +137,7 @@ export function ProjectList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
 
   useEffect(() => {
     void fetchProjects();
@@ -1102,6 +1107,244 @@ export function ProjectList() {
                   )}
                 </div>
               </section>
+
+              {/* Collapsible Project Settings */}
+              {canEdit && (
+                <section className="border-t border-gray-200 pt-6">
+                  <button
+                    type="button"
+                    onClick={() => setShowProjectSettings(!showProjectSettings)}
+                    className="flex items-center gap-2 text-sm font-semibold text-gray-500 hover:text-gray-700 transition-colors w-full uppercase tracking-wide"
+                  >
+                    <svg className={`w-4 h-4 transition-transform ${showProjectSettings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                    Настройки проекта
+                  </button>
+
+                  {showProjectSettings && (
+                    <div className="mt-6 space-y-5">
+                      {/* Client & Status */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Клиент</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'client')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'client', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { client: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="Название компании"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Статус</label>
+                          <InlineSelect
+                            value={getDraftValue(selectedProject, 'status')}
+                            options={STATUS_OPTIONS}
+                            onChange={(value) => {
+                              setDraftValue(selectedProject.id, 'status', value);
+                              void commitProjectUpdate(selectedProject, { status: value });
+                            }}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Services */}
+                      <div>
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Услуги</label>
+                        <div className="flex flex-wrap gap-2">
+                          {SERVICE_OPTIONS.map((service) => {
+                            const currentServices = parseServices(getDraftValue(selectedProject, 'name'));
+                            const isSelected = currentServices.includes(service);
+                            return (
+                              <button
+                                key={service}
+                                type="button"
+                                disabled={Boolean(savingRows[selectedProject.id])}
+                                onClick={() => {
+                                  const updated = isSelected
+                                    ? currentServices.filter((s) => s !== service)
+                                    : [...currentServices, service];
+                                  const newValue = updated.join(', ');
+                                  setDraftValue(selectedProject.id, 'name', newValue);
+                                  void commitProjectUpdate(selectedProject, { name: newValue });
+                                }}
+                                className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                                  isSelected
+                                    ? 'bg-blue-600 text-white border-blue-600'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                                }`}
+                              >
+                                {service}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Financial */}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Сумма договора</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'budget')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'budget', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { budget: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="150000"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Маржа</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'margin')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'margin', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { margin: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="Маржа %"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Тип проекта</label>
+                          <InlineSelect
+                            value={getDraftValue(selectedProject, 'project_type')}
+                            options={PROJECT_TYPE_OPTIONS}
+                            onChange={(value) => {
+                              setDraftValue(selectedProject.id, 'project_type', value);
+                              void commitProjectUpdate(selectedProject, { project_type: value as Project['project_type'] });
+                            }}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Platform & Source */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Где ведется проект</label>
+                          <InlineSelect
+                            value={getDraftValue(selectedProject, 'work_format')}
+                            options={WORK_FORMAT_OPTIONS}
+                            onChange={(value) => {
+                              setDraftValue(selectedProject.id, 'work_format', value);
+                              void commitProjectUpdate(selectedProject, { work_format: value });
+                            }}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Источник лида</label>
+                          <InlineSelect
+                            value={getDraftValue(selectedProject, 'lead_source')}
+                            options={LEAD_SOURCE_OPTIONS}
+                            onChange={(value) => {
+                              setDraftValue(selectedProject.id, 'lead_source', value);
+                              void commitProjectUpdate(selectedProject, { lead_source: value });
+                            }}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Dates */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата оплаты</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'payment_date')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'payment_date', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { payment_date: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            type="date"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата договора</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'contract_date')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'contract_date', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { contract_date: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            type="date"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата запуска</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'launch_date')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'launch_date', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { launch_date: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            type="date"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дедлайн</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'deadline')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'deadline', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { deadline: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            type="date"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Links */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Ссылка на договор</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'contract_link')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'contract_link', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { contract_link: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="https://..."
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Ссылка на передачу</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'handoff_link')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'handoff_link', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { handoff_link: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="https://..."
+                          />
+                        </div>
+                      </div>
+
+                      {/* KPI */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">KPI План</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'kpi_plan')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'kpi_plan', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { kpi_plan: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="KPI план"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">KPI Факт</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'kpi_fact')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'kpi_fact', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { kpi_fact: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="KPI факт"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
             
              <div className="bg-gray-50 px-8 py-5 rounded-b-3xl border-t border-gray-100 flex justify-between items-center">
@@ -1256,6 +1499,7 @@ function InlineInput({
   disabled,
   placeholder,
   className,
+  type = 'text',
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -1263,10 +1507,11 @@ function InlineInput({
   disabled?: boolean;
   placeholder?: string;
   className?: string;
+  type?: string;
 }) {
   return (
     <input
-      type="text"
+      type={type}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       onBlur={(e) => onCommit?.(e.target.value)}
