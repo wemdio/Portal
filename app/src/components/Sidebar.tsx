@@ -7,12 +7,13 @@ import type { Route } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
-import { ROLE_LABELS, isAdmin } from '@/lib/roles';
+import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 
 type NavItem = {
   name: string;
   href: string;
   adminOnly?: boolean;
+  billingCalendarOnly?: boolean;
 };
 
 const navItems: NavItem[] = [
@@ -23,6 +24,7 @@ const navItems: NavItem[] = [
   { name: 'Финансы', href: '/finance' },
   { name: 'Инструменты', href: '/tools' },
   { name: 'Оплаты', href: '/payments' },
+  { name: 'Календарь почт', href: '/billing-calendar', billingCalendarOnly: true },
   { name: 'Регламент', href: '/reglament' },
   { name: 'Админ', href: '/admin', adminOnly: true },
   { name: 'Настройки', href: '/settings' },
@@ -104,6 +106,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
       <nav className="flex-1 space-y-0.5 px-3 py-4 overflow-y-auto">
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
+          if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'

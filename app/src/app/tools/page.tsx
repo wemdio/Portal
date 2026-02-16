@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { Route } from 'next';
 
 export default function ToolsPage() {
   return (
@@ -11,6 +12,22 @@ export default function ToolsPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <Link
+          href={'/tools/ai-caller' as Route}
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+        >
+          <div className="flex items-start gap-3">
+            <div>
+              <p className="text-base font-semibold text-gray-900">AI Звонилка</p>
+              <p className="text-sm text-gray-500">
+                AI-ассистенты для обзвона: тестовые звонки, управление промптами и история.
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
+            Открыть →
+          </div>
+        </Link>
         <Link
           href="/tools/databases"
           className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"

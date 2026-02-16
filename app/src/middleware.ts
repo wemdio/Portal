@@ -91,6 +91,20 @@ export async function middleware(request: NextRequest) {
     }
   }
 
+  // Protect billing-calendar routes - only technician, lead, admin, director
+  if (user && request.nextUrl.pathname.startsWith('/billing-calendar')) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const allowedRoles = ['technician', 'lead', 'admin', 'director']
+    if (!profile || !allowedRoles.includes(profile.role)) {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
   return response
 }
 
