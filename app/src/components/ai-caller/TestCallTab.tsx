@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { Phone, Loader2, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber, VapiCall } from '@/types/ai-caller';
@@ -39,25 +39,9 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
   const [error, setError] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Auto-select first items
-  useEffect(() => {
-    if (assistants.length && !selectedAssistant) {
-      setSelectedAssistant(assistants[0].id);
-    }
-  }, [assistants, selectedAssistant]);
-
-  useEffect(() => {
-    if (phoneNumbers.length && !selectedPhone) {
-      setSelectedPhone(phoneNumbers[0].id);
-    }
-  }, [phoneNumbers, selectedPhone]);
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
+  // Auto-select first items (derived — no useEffect needed)
+  const effectiveAssistant = selectedAssistant || (assistants.length ? assistants[0].id : '');
+  const effectivePhone = selectedPhone || (phoneNumbers.length ? phoneNumbers[0].id : '');
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -91,7 +75,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
   );
 
   async function makeCall() {
-    if (!selectedAssistant || !selectedPhone || !customerNumber.trim()) return;
+    if (!effectiveAssistant || !effectivePhone || !customerNumber.trim()) return;
 
     setCalling(true);
     setError('');
@@ -106,8 +90,8 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          assistantId: selectedAssistant,
-          phoneNumberId: selectedPhone,
+          assistantId: effectiveAssistant,
+          phoneNumberId: effectivePhone,
           customerNumber: customerNumber.trim(),
         }),
       });
@@ -138,12 +122,12 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
   // ── Helpers ──
 
   function getSelectedAssistantName() {
-    const a = assistants.find((a) => a.id === selectedAssistant);
+    const a = assistants.find((a) => a.id === effectiveAssistant);
     return a?.name || 'Без имени';
   }
 
   function getSelectedPhoneLabel() {
-    const p = phoneNumbers.find((p) => p.id === selectedPhone);
+    const p = phoneNumbers.find((p) => p.id === effectivePhone);
     return p?.number || p?.name || p?.id || '—';
   }
 
@@ -181,7 +165,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
               Ассистент
             </label>
             <select
-              value={selectedAssistant}
+              value={effectiveAssistant}
               onChange={(e) => setSelectedAssistant(e.target.value)}
               disabled={calling}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
@@ -203,7 +187,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
               Звонить с номера
             </label>
             <select
-              value={selectedPhone}
+              value={effectivePhone}
               onChange={(e) => setSelectedPhone(e.target.value)}
               disabled={calling}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
@@ -238,7 +222,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
               />
               <button
                 onClick={makeCall}
-                disabled={calling || !selectedAssistant || !selectedPhone || !customerNumber.trim()}
+                disabled={calling || !effectiveAssistant || !effectivePhone || !customerNumber.trim()}
                 className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-5 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {calling ? (

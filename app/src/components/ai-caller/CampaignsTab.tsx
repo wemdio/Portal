@@ -1,21 +1,18 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Plus,
-  Upload,
   Play,
   Pause,
   Trash2,
   Loader2,
   CheckCircle,
   XCircle,
-  Clock,
   Users,
   ChevronDown,
   ChevronUp,
-  Phone,
   FileSpreadsheet,
   X,
 } from 'lucide-react';
@@ -81,8 +78,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   // Running campaign
   const [runningCampaignId, setRunningCampaignId] = useState<string | null>(null);
   const [currentContact, setCurrentContact] = useState<string | null>(null);
-  const [currentCallId, setCurrentCallId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const campaignsLoaded = useRef<boolean | null>(null);
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -102,15 +99,15 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setLoadingCampaigns(false);
   }, [getToken]);
 
-  useEffect(() => {
+  // Initial load via ref guard
+  if (campaignsLoaded.current == null) {
+    campaignsLoaded.current = true;
     fetchCampaigns();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [fetchCampaigns]);
+  }
 
-  useEffect(() => {
-    if (assistants.length && !formAssistant) setFormAssistant(assistants[0].id);
-    if (phoneNumbers.length && !formPhone) setFormPhone(phoneNumbers[0].id);
-  }, [assistants, phoneNumbers, formAssistant, formPhone]);
+  // Derived defaults
+  const effectiveAssistant = formAssistant || (assistants.length ? assistants[0].id : '');
+  const effectivePhone = formPhone || (phoneNumbers.length ? phoneNumbers[0].id : '');
 
   // ── CSV Upload ──
 
@@ -166,7 +163,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   // ── Create Campaign ──
 
   async function createCampaign() {
-    if (!formName.trim() || !formAssistant || !formPhone || !parsedContacts.length) return;
+    if (!formName.trim() || !effectiveAssistant || !effectivePhone || !parsedContacts.length) return;
 
     setCreating(true);
     setError('');
@@ -177,8 +174,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           name: formName,
-          assistantId: formAssistant,
-          phoneNumberId: formPhone,
+          assistantId: effectiveAssistant,
+          phoneNumberId: effectivePhone,
           contacts: parsedContacts,
         }),
       });
@@ -385,8 +382,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Ассистент</label>
               <select
-                value={formAssistant}
-                onChange={(e) => setFormAssistant(e.target.value)}
+              value={effectiveAssistant}
+              onChange={(e) => setFormAssistant(e.target.value)}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
                 {assistants.map((a) => (
@@ -397,8 +394,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Звонить с номера</label>
               <select
-                value={formPhone}
-                onChange={(e) => setFormPhone(e.target.value)}
+              value={effectivePhone}
+              onChange={(e) => setFormPhone(e.target.value)}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
                 {phoneNumbers.map((p) => (

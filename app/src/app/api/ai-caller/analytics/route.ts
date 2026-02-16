@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { listCalls, getCall } from '@/lib/vapi';
+import { getCall } from '@/lib/vapi';
 
 export const dynamic = 'force-dynamic';
 

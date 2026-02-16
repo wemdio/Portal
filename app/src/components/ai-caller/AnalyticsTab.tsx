@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Loader2,
@@ -15,7 +15,7 @@ import {
   Sparkles,
   ArrowRight,
 } from 'lucide-react';
-import type { VapiCall, VapiAssistant } from '@/types/ai-caller';
+import type { VapiCall } from '@/types/ai-caller';
 
 interface Analysis {
   id: string;
@@ -34,7 +34,6 @@ interface Analysis {
 
 interface Props {
   calls: VapiCall[];
-  assistants: VapiAssistant[];
   loading: boolean;
   onRefreshCalls: () => void;
 }
@@ -56,11 +55,12 @@ const FILTER_OPTIONS = [
   { id: 'no_answer', label: 'Без ответа' },
 ];
 
-export function AnalyticsTab({ calls, assistants, loading, onRefreshCalls }: Props) {
+export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [loadingAnalyses, setLoadingAnalyses] = useState(true);
   const [filter, setFilter] = useState('all');
+  const analysesLoaded = useRef<boolean | null>(null);
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -81,9 +81,11 @@ export function AnalyticsTab({ calls, assistants, loading, onRefreshCalls }: Pro
     setLoadingAnalyses(false);
   }, [getToken]);
 
-  useEffect(() => {
+  // Initial load via ref guard
+  if (analysesLoaded.current == null) {
+    analysesLoaded.current = true;
     fetchAnalyses();
-  }, [fetchAnalyses]);
+  }
 
   // Analyze unanalyzed calls
   async function analyzeNewCalls() {
