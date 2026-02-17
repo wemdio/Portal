@@ -5,8 +5,10 @@ import { uploadCSV } from '@/lib/csvUpload';
 import Link from 'next/link';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { AdminTracesPanel } from '@/components/AdminTracesPanel';
+import { useIsTma } from '@/lib/useIsTma';
 
 export default function AdminPage() {
+  const isTma = useIsTma();
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error' | 'warning' | null; message: string; details?: string[] }>({ type: null, message: '' });
@@ -54,13 +56,13 @@ export default function AdminPage() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto py-10 px-4">
-      <h1 className="text-3xl font-bold mb-8 text-gray-900">Админ панель</h1>
+    <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <h1 className={`${isTma ? 'text-xl' : 'text-3xl'} font-bold mb-6 sm:mb-8 text-gray-900`}>Админ панель</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
         <Link 
           href="/admin/users"
-          className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group"
+          className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >
           <div className="flex items-center mb-4">
             <div className="ml-4">
@@ -71,7 +73,7 @@ export default function AdminPage() {
           <p className="text-sm text-blue-600 font-medium">Перейти →</p>
         </Link>
 
-        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+        <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-6'}`}>
           <div className="flex items-center mb-4">
             <div className="ml-4">
               <h2 className="text-lg font-semibold text-gray-900">Импорт данных</h2>
@@ -81,14 +83,14 @@ export default function AdminPage() {
         </div>
       </div>
       
-      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+      <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-6'}`}>
         <h2 className="text-xl font-semibold mb-4 text-gray-900">Импорт проектов из CSV</h2>
         <p className="text-gray-500 mb-6 text-sm">
           Загрузите ваш Excel файл (сохраненный как CSV), чтобы заполнить базу данных.
           <br/>Убедитесь, что первая строка содержит заголовки: Название, Статус проекта, Контролирует и т.д.
         </p>
 
-        <div className="flex items-center space-x-4">
+        <div className={`flex items-center ${isTma ? 'flex-col gap-3' : 'space-x-4'}`}>
           <input
             type="file"
             accept=".csv"
@@ -103,7 +105,7 @@ export default function AdminPage() {
           <button
             onClick={handleUpload}
             disabled={!file || uploading}
-            className="inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${isTma ? 'w-full' : ''}`}
           >
             {uploading ? 'Импорт...' : 'Загрузить данные'}
           </button>

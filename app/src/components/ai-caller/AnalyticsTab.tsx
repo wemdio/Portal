@@ -275,7 +275,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
                         {a.key_points.map((kp, i) => (
                           <span
                             key={i}
-                            className="inline-block rounded-full bg-white/80 border border-gray-200 px-2.5 py-0.5 text-xs text-gray-600"
+                            className="inline-block rounded-full bg-white/80 border border-gray-200 px-3 py-1 text-xs text-gray-600"
                           >
                             {kp}
                           </span>

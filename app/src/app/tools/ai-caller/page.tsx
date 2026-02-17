@@ -97,7 +97,7 @@ export default function AiCallerPage() {
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
-        <nav className="-mb-px flex gap-4 overflow-x-auto" aria-label="Tabs">
+        <nav className="-mb-px flex gap-4 overflow-x-auto no-scrollbar" aria-label="Tabs">
           {TABS.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
