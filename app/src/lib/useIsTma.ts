@@ -11,24 +11,6 @@ type TelegramWindow = Window & {
 };
 
 const TMA_MOBILE_MEDIA_QUERY = '(max-width: 900px)';
-const COARSE_POINTER_MEDIA_QUERY = '(pointer: coarse)';
-
-function isLikelyMobileDevice() {
-  if (typeof navigator === 'undefined') return false;
-
-  type NavigatorWithUserAgentData = Navigator & {
-    userAgentData?: {
-      mobile?: boolean;
-    };
-  };
-
-  const nav = navigator as NavigatorWithUserAgentData;
-  if (typeof nav.userAgentData?.mobile === 'boolean') {
-    return nav.userAgentData.mobile;
-  }
-
-  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|IEMobile|Opera Mini/i.test(navigator.userAgent);
-}
 
 export function useIsTma() {
   const getIsTma = () => {
@@ -40,9 +22,7 @@ export function useIsTma() {
     const isTelegramUa = /Telegram/i.test(navigator.userAgent);
     const hasTmaContext = hasWebApp || hasInitData || flagged || isTelegramUa;
     const isMobileViewport = window.matchMedia(TMA_MOBILE_MEDIA_QUERY).matches;
-    const hasCoarsePointer = window.matchMedia(COARSE_POINTER_MEDIA_QUERY).matches;
-    const isMobileRuntime = isLikelyMobileDevice() || hasCoarsePointer;
-    return hasTmaContext && isMobileRuntime && isMobileViewport;
+    return hasTmaContext && isMobileViewport;
   };
   const [isTma, setIsTma] = useState(getIsTma);
 

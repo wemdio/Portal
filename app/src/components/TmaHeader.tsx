@@ -2,19 +2,25 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
 import { getCurrentUserRole, isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
+import { supabase } from '@/lib/supabaseClient';
 
-type TmaHeaderProps = {
-  onMenuClick?: () => void;
-};
-
-export function TmaHeader({ onMenuClick }: TmaHeaderProps) {
+export function TmaHeader() {
   const pathname = usePathname();
+  const router = useRouter();
   const [role, setRole] = useState<UserRole | null>(null);
+
+  const handleSignOut = () => {
+    void (async () => {
+      await supabase.auth.signOut();
+      router.push('/login' as Route);
+      router.refresh();
+    })();
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -44,20 +50,7 @@ export function TmaHeader({ onMenuClick }: TmaHeaderProps) {
       className="sticky top-0 z-40 border-b backdrop-blur"
       style={{ borderColor: 'var(--tma-border)', backgroundColor: 'var(--tma-bg)' }}
     >
-      <div className="flex items-start gap-3 px-4 pt-3 pb-2 safe-top">
-        <button
-          type="button"
-          onClick={onMenuClick}
-          className="mt-0.5 inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-colors"
-          style={{
-            borderColor: 'var(--tma-border)',
-            backgroundColor: 'var(--tma-surface-2)',
-            color: 'var(--tma-fg)',
-          }}
-          aria-label="Открыть меню"
-        >
-          <span className="text-lg leading-none">☰</span>
-        </button>
+      <div className="flex items-start gap-3 px-4 pt-4 pb-2 safe-top">
         <div className="min-w-0 flex-1">
           <p className="tma-muted text-[11px] uppercase tracking-wide">
             Portal
@@ -85,6 +78,13 @@ export function TmaHeader({ onMenuClick }: TmaHeaderProps) {
               </Link>
             );
           })}
+          <button
+            type="button"
+            onClick={handleSignOut}
+            className="whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition tma-chip-danger"
+          >
+            Выйти
+          </button>
         </div>
       </div>
     </div>

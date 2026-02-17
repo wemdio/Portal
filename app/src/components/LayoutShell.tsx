@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import { Sidebar } from './Sidebar';
 import { useIsTma } from '@/lib/useIsTma';
@@ -10,7 +10,6 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
   const isTma = useIsTma();
-  const [tmaMenuOpen, setTmaMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!isTma) return;
@@ -41,15 +40,9 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
           <Sidebar collapsed={isSpreadsheetPage} isTma={false} />
           <div className={`flex-shrink-0 hidden md:block ${isSpreadsheetPage ? 'w-3' : 'w-60'}`} />
         </>
-      ) : (
-        <Sidebar
-          isTma
-          mobileOpen={tmaMenuOpen}
-          onMobileClose={() => setTmaMenuOpen(false)}
-        />
-      )}
+      ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
-        {isTma && <TmaHeader onMenuClick={() => setTmaMenuOpen(true)} />}
+        {isTma && <TmaHeader />}
         <main className={`flex-1${isTma ? ' overflow-y-auto' : ''} ${contentPadding}${isTma ? ' safe-bottom' : ''}`}>
           <div className={contentWidth}>{children}</div>
         </main>

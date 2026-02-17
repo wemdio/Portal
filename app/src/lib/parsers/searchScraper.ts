@@ -5,6 +5,8 @@ import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import type { Dispatcher } from 'undici';
 import type { Browser } from 'playwright';
 
+import { SEARCH_CONFIG } from '@/lib/config';
+
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -12,21 +14,21 @@ const USER_AGENTS = [
 ];
 
 function isPlaywrightEnabled() {
-  return process.env.SEARCH_PLAYWRIGHT_ENABLED === '1';
+  return SEARCH_CONFIG.PLAYWRIGHT.ENABLED;
 }
 
 function playwrightTimeoutMs() {
   // Default a bit higher because Playwright is used as a fallback path (blocked/202),
   // and slow proxies / first browser launch can exceed 25s.
-  return Number(process.env.SEARCH_PLAYWRIGHT_TIMEOUT_MS ?? '45000') || 45000;
+  return SEARCH_CONFIG.PLAYWRIGHT.TIMEOUT_MS;
 }
 
 function playwrightHeadless() {
-  return process.env.SEARCH_PLAYWRIGHT_HEADLESS !== '0';
+  return SEARCH_CONFIG.PLAYWRIGHT.HEADLESS;
 }
 
 function playwrightReuseBrowser() {
-  return process.env.SEARCH_PLAYWRIGHT_REUSE_BROWSER !== '0';
+  return SEARCH_CONFIG.PLAYWRIGHT.REUSE_BROWSER;
 }
 
 let SEARCH_PROXY_DISPATCHER: Dispatcher | undefined | null = null;
