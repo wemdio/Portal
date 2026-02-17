@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Loader2,
@@ -21,6 +21,11 @@ import {
   User,
   Mail,
   Filter,
+  Volume2,
+  Square,
+  Download,
+  Send,
+  Check,
 } from 'lucide-react';
 import type { VapiCall } from '@/types/ai-caller';
 
@@ -82,7 +87,18 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [transcriptCache, setTranscriptCache] = useState<Record<string, string>>({});
   const [loadingTranscript, setLoadingTranscript] = useState<string | null>(null);
+  const [playingCallId, setPlayingCallId] = useState<string | null>(null);
+  const [loadingAudio, setLoadingAudio] = useState<string | null>(null);
+  const [recordingUrls, setRecordingUrls] = useState<Record<string, string>>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const analysesLoaded = useRef<boolean | null>(null);
+
+  // Telegram
+  const [tgChats, setTgChats] = useState<{ id: number; title: string; type: string }[]>([]);
+  const [tgChatsLoaded, setTgChatsLoaded] = useState(false);
+  const [tgDropdownId, setTgDropdownId] = useState<string | null>(null);
+  const [tgSending, setTgSending] = useState<string | null>(null);
+  const [tgSent, setTgSent] = useState<Set<string>>(new Set());
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -194,6 +210,174 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     } else {
       setExpandedId(analysisId);
       fetchTranscript(vapiCallId);
+    }
+  }
+
+  async function playRecording(vapiCallId: string) {
+    if (playingCallId === vapiCallId) {
+      stopPlayback();
+      return;
+    }
+    stopPlayback();
+
+    if (recordingUrls[vapiCallId]) {
+      startAudio(vapiCallId, recordingUrls[vapiCallId]);
+      return;
+    }
+
+    setLoadingAudio(vapiCallId);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/ai-caller/calls/${vapiCallId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const call = data.call as Record<string, unknown> | undefined;
+      const url = (call?.recordingUrl as string)
+        || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
+        || '';
+
+      if (!url) { setLoadingAudio(null); return; }
+      setRecordingUrls((prev) => ({ ...prev, [vapiCallId]: url }));
+      startAudio(vapiCallId, url);
+    } catch { /* ignore */ }
+    setLoadingAudio(null);
+  }
+
+  function startAudio(vapiCallId: string, url: string) {
+    const audio = new Audio(url);
+    audio.onended = () => { setPlayingCallId(null); audioRef.current = null; };
+    audio.onerror = () => { setPlayingCallId(null); audioRef.current = null; };
+    audio.play();
+    audioRef.current = audio;
+    setPlayingCallId(vapiCallId);
+  }
+
+  function stopPlayback() {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    setPlayingCallId(null);
+  }
+
+  // Close telegram dropdown on outside click
+  useEffect(() => {
+    if (!tgDropdownId) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-tg-dropdown]')) {
+        setTgDropdownId(null);
+      }
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [tgDropdownId]);
+
+  // Download recording
+  async function downloadRecording(callId: string) {
+    let url = recordingUrls[callId];
+    if (!url) {
+      try {
+        const token = await getToken();
+        const res = await fetch(`/api/ai-caller/calls/${callId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        url = data.recordingUrl || data.artifact?.recordingUrl || '';
+        if (url) {
+          setRecordingUrls((prev) => ({ ...prev, [callId]: url }));
+        }
+      } catch {
+        return;
+      }
+    }
+    if (!url) return;
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `call-${callId}.wav`;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  // Telegram functions
+  async function loadTgChats(force = false) {
+    if (tgChatsLoaded && !force) return;
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/ai-caller/telegram/chats', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const chats = data.chats ?? [];
+      setTgChats(chats);
+      // Only cache if we actually got results
+      if (chats.length > 0) setTgChatsLoaded(true);
+    } catch {
+      // silently ignore
+    }
+  }
+
+  function toggleTgDropdown(analysisId: string) {
+    if (tgDropdownId === analysisId) {
+      setTgDropdownId(null);
+      return;
+    }
+    setTgDropdownId(analysisId);
+    loadTgChats(!tgChatsLoaded);
+  }
+
+  async function sendToTelegram(chatId: number, analysis: Analysis) {
+    const key = `${analysis.id}-${chatId}`;
+    setTgSending(key);
+    try {
+      const token = await getToken();
+
+      // Format date dd/mm/yy
+      const d = new Date(analysis.analyzed_at);
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yy = String(d.getFullYear()).slice(-2);
+      const callDate = `${dd}/${mm}/${yy}`;
+
+      const body = {
+        chatId,
+        vapiCallId: analysis.vapi_call_id,
+        phone: analysis.customer_number ?? undefined,
+        company: analysis.contact_company ?? analysis.company_name ?? undefined,
+        contactName: analysis.contact_name ?? undefined,
+        email: analysis.contact_email ?? undefined,
+        extra: analysis.contact_extra ?? undefined,
+        outcome: analysis.outcome,
+        interestLevel: analysis.interest_level,
+        summary: analysis.summary ?? undefined,
+        nextAction: analysis.next_action ?? undefined,
+        keyPoints: analysis.key_points ?? undefined,
+        callDate,
+        recordingUrl: recordingUrls[analysis.vapi_call_id] || undefined,
+      };
+
+      const res = await fetch('/api/ai-caller/telegram/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        setTgSent((prev) => new Set(prev).add(key));
+      }
+    } catch {
+      // silently ignore
+    } finally {
+      setTgSending(null);
+      setTimeout(() => setTgDropdownId(null), 1200);
     }
   }
 
@@ -464,6 +648,101 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
                         )}
                       </div>
                     )}
+
+                    {/* Action buttons */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {/* Play audio */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); playRecording(a.vapi_call_id); }}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                          playingCallId === a.vapi_call_id
+                            ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {loadingAudio === a.vapi_call_id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : playingCallId === a.vapi_call_id
+                            ? <Square className="h-3.5 w-3.5" />
+                            : <Volume2 className="h-3.5 w-3.5" />}
+                        {playingCallId === a.vapi_call_id ? 'Остановить' : 'Прослушать'}
+                      </button>
+
+                      {/* Download recording */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); downloadRecording(a.vapi_call_id); }}
+                        className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Скачать запись
+                      </button>
+
+                      {/* Telegram */}
+                      <div className="relative" data-tg-dropdown>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleTgDropdown(a.id); }}
+                          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                            tgDropdownId === a.id
+                              ? 'bg-sky-100 text-sky-700'
+                              : 'bg-sky-50 text-sky-600 hover:bg-sky-100'
+                          }`}
+                        >
+                          <Send className="h-3.5 w-3.5" />
+                          В телеграм
+                        </button>
+
+                        {tgDropdownId === a.id && (
+                          <div className="absolute left-0 top-full mt-1 z-50 w-64 rounded-xl border border-gray-200 bg-white shadow-lg py-1 max-h-60 overflow-y-auto">
+                            {!tgChatsLoaded ? (
+                              <div className="flex items-center gap-2 px-3 py-3 text-xs text-gray-400">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                Загрузка чатов...
+                              </div>
+                            ) : tgChats.length === 0 ? (
+                              <div className="px-3 py-3 text-xs text-gray-400">
+                                Нет доступных чатов. Добавьте бота в группу или напишите ему.
+                              </div>
+                            ) : (
+                              tgChats.map((chat) => {
+                                const sentKey = `${a.id}-${chat.id}`;
+                                const isSending = tgSending === sentKey;
+                                const wasSent = tgSent.has(sentKey);
+
+                                return (
+                                  <button
+                                    key={chat.id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (!isSending && !wasSent) sendToTelegram(chat.id, a);
+                                    }}
+                                    disabled={isSending || wasSent}
+                                    className={`w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 transition-colors ${
+                                      wasSent
+                                        ? 'bg-green-50 text-green-700'
+                                        : 'hover:bg-gray-50 text-gray-700'
+                                    }`}
+                                  >
+                                    <span className="flex-1 truncate">
+                                      {chat.title}
+                                      <span className="text-xs text-gray-400 ml-1">
+                                        ({chat.type === 'private' ? 'ЛС' : chat.type === 'group' ? 'группа' : chat.type === 'supergroup' ? 'группа' : 'канал'})
+                                      </span>
+                                    </span>
+                                    {isSending ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin flex-shrink-0 text-gray-400" />
+                                    ) : wasSent ? (
+                                      <Check className="h-3.5 w-3.5 flex-shrink-0 text-green-600" />
+                                    ) : (
+                                      <Send className="h-3 w-3 flex-shrink-0 text-gray-400" />
+                                    )}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
 
                     {/* Transcript */}
                     <div className="rounded-lg bg-white/70 border border-gray-200 p-3.5">

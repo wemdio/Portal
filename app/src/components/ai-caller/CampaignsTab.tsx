@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Plus,
@@ -15,6 +15,8 @@ import {
   ChevronUp,
   FileSpreadsheet,
   X,
+  Volume2,
+  Square,
 } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber } from '@/types/ai-caller';
 
@@ -81,6 +83,12 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const campaignsLoaded = useRef<boolean | null>(null);
 
+  // Audio playback
+  const [playingCallId, setPlayingCallId] = useState<string | null>(null);
+  const [loadingAudio, setLoadingAudio] = useState<string | null>(null);
+  const [recordingUrls, setRecordingUrls] = useState<Record<string, string>>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
     return session?.access_token ?? '';
@@ -104,6 +112,26 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     campaignsLoaded.current = true;
     fetchCampaigns();
   }
+
+  // Auto-refresh campaign stats while a campaign is running
+  useEffect(() => {
+    if (!runningCampaignId) return;
+    const interval = setInterval(() => {
+      fetchCampaigns();
+      // Also refresh expanded contacts if viewing the running campaign
+      if (expandedId === runningCampaignId) {
+        getToken().then((token) =>
+          fetch(`/api/ai-caller/campaigns/${runningCampaignId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+            .then((r) => r.json())
+            .then((data) => setContacts(data.contacts ?? []))
+            .catch(() => {})
+        );
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [runningCampaignId, expandedId, fetchCampaigns, getToken]);
 
   // Derived defaults
   const effectiveAssistant = formAssistant || (assistants.length ? assistants[0].id : '');
@@ -402,6 +430,68 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setLoadingContacts(false);
   }
 
+  // ── Audio playback ──
+
+  async function playRecording(vapiCallId: string) {
+    // If already playing this one — stop
+    if (playingCallId === vapiCallId) {
+      stopPlayback();
+      return;
+    }
+
+    // Stop any current playback
+    stopPlayback();
+
+    // Check cache
+    if (recordingUrls[vapiCallId]) {
+      startAudio(vapiCallId, recordingUrls[vapiCallId]);
+      return;
+    }
+
+    // Fetch recording URL from Vapi
+    setLoadingAudio(vapiCallId);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/ai-caller/calls/${vapiCallId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const call = data.call as Record<string, unknown> | undefined;
+      const url = (call?.recordingUrl as string)
+        || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
+        || '';
+
+      if (!url) {
+        setLoadingAudio(null);
+        return;
+      }
+
+      setRecordingUrls((prev) => ({ ...prev, [vapiCallId]: url }));
+      startAudio(vapiCallId, url);
+    } catch {
+      // ignore
+    }
+    setLoadingAudio(null);
+  }
+
+  function startAudio(vapiCallId: string, url: string) {
+    const audio = new Audio(url);
+    audio.onended = () => { setPlayingCallId(null); audioRef.current = null; };
+    audio.onerror = () => { setPlayingCallId(null); audioRef.current = null; };
+    audio.play();
+    audioRef.current = audio;
+    setPlayingCallId(vapiCallId);
+  }
+
+  function stopPlayback() {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    setPlayingCallId(null);
+  }
+
   // ── Helpers ──
 
   function getAssistantName(id: string) {
@@ -664,17 +754,21 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                             <tr>
                               <th className="text-left py-1 pr-4">Телефон</th>
                               <th className="text-left py-1 pr-4">Компания</th>
-                              <th className="text-left py-1 pr-4">Контакт</th>
                               <th className="text-left py-1 pr-4">Статус</th>
-                              <th className="text-right py-1">Длит.</th>
+                              <th className="text-right py-1 pr-4">Длит.</th>
+                              <th className="text-center py-1 w-10">Запись</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
-                            {contacts.map((c) => (
+                            {contacts.map((c) => {
+                              const isPlaying = playingCallId === c.vapi_call_id;
+                              const isLoadingRec = loadingAudio === c.vapi_call_id;
+                              const canPlay = c.status === 'completed' && c.vapi_call_id;
+
+                              return (
                               <tr key={c.id} className="text-gray-600">
                                 <td className="py-1.5 pr-4 font-mono">{c.phone_number}</td>
                                 <td className="py-1.5 pr-4">{c.company_name || '—'}</td>
-                                <td className="py-1.5 pr-4">{c.contact_name || '—'}</td>
                                 <td className="py-1.5 pr-4">
                                   <span className={`inline-flex items-center gap-1 ${
                                     c.status === 'completed' ? 'text-green-600' :
@@ -691,11 +785,33 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                                      c.status === 'failed' ? 'Ошибка' : c.status}
                                   </span>
                                 </td>
-                                <td className="py-1.5 text-right">
+                                <td className="py-1.5 text-right pr-4">
                                   {c.call_duration ? `${Math.floor(c.call_duration / 60)}:${(c.call_duration % 60).toString().padStart(2, '0')}` : '—'}
                                 </td>
+                                <td className="py-1.5 text-center">
+                                  {canPlay ? (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); playRecording(c.vapi_call_id!); }}
+                                      className={`p-1 rounded-md transition-colors ${
+                                        isPlaying
+                                          ? 'text-blue-600 bg-blue-100 hover:bg-blue-200'
+                                          : 'text-gray-400 hover:text-blue-600 hover:bg-blue-50'
+                                      }`}
+                                      title={isPlaying ? 'Остановить' : 'Прослушать запись'}
+                                    >
+                                      {isLoadingRec
+                                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        : isPlaying
+                                          ? <Square className="h-3.5 w-3.5" />
+                                          : <Volume2 className="h-3.5 w-3.5" />}
+                                    </button>
+                                  ) : (
+                                    <span className="text-gray-300">—</span>
+                                  )}
+                                </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
