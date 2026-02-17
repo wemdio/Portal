@@ -180,7 +180,7 @@ export default function TasksPage() {
                           <p className="text-xs text-gray-500">{task.projectName}</p>
                           <p className="text-sm font-medium text-gray-900">{task.title}</p>
                         </div>
-                        <span className={`rounded-full border px-2 py-1 text-[11px] font-semibold ${status.className}`}>
+                        <span className={`shrink-0 min-w-[112px] whitespace-nowrap text-center rounded-full border px-3 py-1 text-[11px] font-semibold ${status.className}`}>
                           {status.label}
                         </span>
                       </div>

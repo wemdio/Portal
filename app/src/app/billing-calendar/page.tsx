@@ -158,7 +158,6 @@ export default function BillingCalendarPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>('create');
   const [editingItem, setEditingItem] = useState<EmailSubscription | null>(null);
-  const [selectedDate, setSelectedDate] = useState<string>('');
 
   // View mode
   const [viewMode, setViewMode] = useState<'calendar' | 'list'>('calendar');
@@ -556,7 +555,7 @@ export default function BillingCalendarPage() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 lg:grid-cols-4 sm:gap-4">
         <StatCard label="Активные подписки" value={String(stats.activeCount)} />
         <StatCard
           label="Ожидают решения"
@@ -575,50 +574,54 @@ export default function BillingCalendarPage() {
       {viewMode === 'calendar' && (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
           {/* Calendar Header */}
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={prevMonth}
-                className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-              </button>
-              <h2 className="text-lg font-bold text-gray-900 min-w-[180px] text-center">
-                {MONTH_NAMES[currentMonth]} {currentYear}
-              </h2>
-              <button
-                onClick={nextMonth}
-                className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
-              <button
-                onClick={goToToday}
-                className="ml-2 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                Сегодня
-              </button>
-            </div>
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-gray-100 bg-gray-50/50">
+            <div className="grid grid-cols-3 items-center">
+              <div className="justify-self-start">
+                <button
+                  onClick={goToToday}
+                  className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors hidden sm:inline-flex"
+                >
+                  Сегодня
+                </button>
+              </div>
 
-            {/* Legend */}
-            <div className="hidden lg:flex items-center gap-4 text-xs text-gray-500">
-              {Object.entries(STATUS_CONFIG).map(([key, cfg]) => (
-                <span key={key} className="flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full ${cfg.dot}`} />
-                  {cfg.label}
-                </span>
-              ))}
+              <div className="justify-self-center flex items-center gap-3">
+                <button
+                  onClick={prevMonth}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <h2 className="text-base sm:text-lg font-bold text-gray-900 min-w-[140px] sm:min-w-[180px] text-center">
+                  {MONTH_NAMES[currentMonth]} {currentYear}
+                </h2>
+                <button
+                  onClick={nextMonth}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="justify-self-end hidden lg:flex items-center gap-4 text-xs text-gray-500">
+                {Object.entries(STATUS_CONFIG).map(([key, cfg]) => (
+                  <span key={key} className="flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${cfg.dot}`} />
+                    {cfg.label}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
 
           {/* Day Names */}
           <div className="grid grid-cols-7 border-b border-gray-100">
             {DAY_NAMES.map((name) => (
-              <div key={name} className="px-2 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase">
+              <div key={name} className="px-1.5 py-2 sm:px-2 sm:py-2.5 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">
                 {name}
               </div>
             ))}
@@ -628,7 +631,7 @@ export default function BillingCalendarPage() {
           <div className="grid grid-cols-7">
             {/* Empty cells before first day */}
             {Array.from({ length: firstDay }).map((_, i) => (
-              <div key={`empty-${i}`} className="min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
+              <div key={`empty-${i}`} className="min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
             ))}
 
             {/* Day cells */}
@@ -642,7 +645,7 @@ export default function BillingCalendarPage() {
               return (
                 <div
                   key={day}
-                  className={`min-h-[120px] border-b border-r border-gray-50 p-1.5 transition-colors
+                  className={`min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 p-1 sm:p-1.5 transition-colors
                     ${isToday ? 'bg-blue-50/40' : isWeekend ? 'bg-gray-50/40' : 'hover:bg-gray-50/50'}
                     ${isTechnician(userRole) ? 'cursor-pointer' : ''}
                   `}
@@ -652,7 +655,7 @@ export default function BillingCalendarPage() {
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span
-                      className={`text-xs font-medium w-6 h-6 flex items-center justify-center rounded-full
+                      className={`text-[11px] sm:text-xs font-medium w-5 h-5 sm:w-6 sm:h-6 flex items-center justify-center rounded-full
                         ${isToday ? 'bg-blue-600 text-white' : 'text-gray-700'}
                       `}
                     >
@@ -679,7 +682,7 @@ export default function BillingCalendarPage() {
                               openEditModal(sub);
                             }
                           }}
-                          className={`w-full text-left px-1.5 py-0.5 rounded text-[10px] leading-tight truncate block transition-all hover:opacity-80
+                          className={`w-full text-left px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] leading-tight truncate block transition-all hover:opacity-80
                             ${cfg.bg} ${cfg.text}
                           `}
                           title={`${sub.project_name} — ${formatCurrency(sub.billing_amount, sub.currency)}`}
@@ -690,7 +693,7 @@ export default function BillingCalendarPage() {
                       );
                     })}
                     {daySubs.length > 3 && (
-                      <div className="text-[10px] text-gray-400 px-1.5">+{daySubs.length - 3} ещё</div>
+                      <div className="text-[9px] sm:text-[10px] text-gray-400 px-1.5">+{daySubs.length - 3} ещё</div>
                     )}
                   </div>
                 </div>
@@ -699,7 +702,7 @@ export default function BillingCalendarPage() {
 
             {/* Empty cells after last day */}
             {Array.from({ length: (7 - ((firstDay + daysInMonth) % 7)) % 7 }).map((_, i) => (
-              <div key={`trail-${i}`} className="min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
+              <div key={`trail-${i}`} className="min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
             ))}
           </div>
         </div>
@@ -712,19 +715,19 @@ export default function BillingCalendarPage() {
             <h2 className="text-lg font-bold text-gray-900">Все подписки</h2>
           </div>
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-100">
+            <table className="w-full divide-y divide-gray-100 text-xs sm:text-sm">
               <thead className="bg-gray-50/50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Проект</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Провайдер</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase">Почт</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Дата списания</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase">Сумма</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase">Цикл</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase">Статус</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase">Решение</th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase">Дней до</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase">Действия</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-left text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Проект</th>
+                  <th className="hidden sm:table-cell px-3 py-2 sm:px-4 sm:py-3 text-left text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Провайдер</th>
+                  <th className="hidden sm:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Почт</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-left text-[10px] sm:text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">Дата</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-right text-[10px] sm:text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">Сумма</th>
+                  <th className="hidden md:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Цикл</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Статус</th>
+                  <th className="hidden lg:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Решение</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-center text-[10px] sm:text-xs font-semibold text-gray-500 uppercase whitespace-nowrap">Дней</th>
+                  <th className="px-3 py-2 sm:px-4 sm:py-3 text-right text-[10px] sm:text-xs font-semibold text-gray-500 uppercase">Действия</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -735,29 +738,32 @@ export default function BillingCalendarPage() {
 
                   return (
                     <tr key={sub.id} className={`hover:bg-gray-50/50 ${isUrgent ? 'bg-amber-50/30' : ''}`}>
-                      <td className="px-4 py-3 text-sm font-medium text-gray-900 max-w-[200px] truncate">
-                        {sub.project_name}
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 font-medium text-gray-900 max-w-[220px] sm:max-w-[200px]">
+                        <div className="truncate">{sub.project_name}</div>
+                        <div className="sm:hidden mt-0.5 text-[11px] text-gray-400 truncate">
+                          {(sub.email_provider || '—')}{' · '}{sub.email_count} почт{' · '}{CYCLE_LABELS[sub.billing_cycle]}
+                        </div>
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-500">{sub.email_provider || '—'}</td>
-                      <td className="px-4 py-3 text-sm text-center text-gray-500">{sub.email_count}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">
+                      <td className="hidden sm:table-cell px-3 py-2 sm:px-4 sm:py-3 text-gray-500">{sub.email_provider || '—'}</td>
+                      <td className="hidden sm:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center text-gray-500">{sub.email_count}</td>
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 text-gray-700 whitespace-nowrap">
                         {new Date(sub.next_billing_date).toLocaleDateString('ru-RU', {
                           day: 'numeric', month: 'short', year: 'numeric',
                         })}
                       </td>
-                      <td className="px-4 py-3 text-sm text-right font-medium text-gray-900">
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 text-right font-medium text-gray-900 whitespace-nowrap">
                         {formatCurrency(sub.billing_amount, sub.currency)}
                       </td>
-                      <td className="px-4 py-3 text-sm text-center text-gray-500">
+                      <td className="hidden md:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center text-gray-500">
                         {CYCLE_LABELS[sub.billing_cycle]}
                       </td>
-                      <td className="px-4 py-3 text-center">
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 text-center">
                         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.bg} ${cfg.text}`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
                           {cfg.label}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-center">
+                      <td className="hidden lg:table-cell px-3 py-2 sm:px-4 sm:py-3 text-center">
                         {sub.lead_decision ? (
                           <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${
                             sub.lead_decision === 'keep'
@@ -770,19 +776,19 @@ export default function BillingCalendarPage() {
                           <span className="text-xs text-gray-400">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-center">
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 text-center whitespace-nowrap">
                         <span className={`text-sm font-medium ${
                           daysUntil < 0 ? 'text-red-500' : daysUntil <= 2 ? 'text-amber-600' : 'text-gray-500'
                         }`}>
                           {daysUntil < 0 ? `${Math.abs(daysUntil)}д назад` : daysUntil === 0 ? 'Сегодня' : `${daysUntil}д`}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-3 py-2 sm:px-4 sm:py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
                           {isLead(userRole) && (sub.status === 'pending_review' || sub.status === 'active') && (
                             <button
                               onClick={() => openDecisionModal(sub)}
-                              className="px-2.5 py-1 text-xs font-medium text-amber-700 bg-amber-50 rounded-md hover:bg-amber-100 transition-colors"
+                              className="px-2.5 py-1 text-[11px] sm:text-xs font-medium text-amber-700 bg-amber-50 rounded-md hover:bg-amber-100 transition-colors"
                             >
                               Решение
                             </button>
@@ -791,13 +797,13 @@ export default function BillingCalendarPage() {
                             <>
                               <button
                                 onClick={() => openEditModal(sub)}
-                                className="px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
+                                className="px-2.5 py-1 text-[11px] sm:text-xs font-medium text-blue-700 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
                               >
                                 Ред.
                               </button>
                               <button
                                 onClick={() => handleDelete(sub.id)}
-                                className="px-2.5 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 transition-colors"
+                                className="px-2.5 py-1 text-[11px] sm:text-xs font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 transition-colors"
                               >
                                 Уд.
                               </button>
@@ -1110,9 +1116,9 @@ function StatCard({ label, value, color }: { label: string; value: string; color
   };
 
   return (
-    <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm">
-      <div className="text-sm font-medium text-gray-500 mb-1">{label}</div>
-      <p className={`text-2xl font-bold ${color ? colorClasses[color] : 'text-gray-900'}`}>{value}</p>
+    <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-sm">
+      <div className="text-xs sm:text-sm font-medium text-gray-500 mb-1">{label}</div>
+      <p className={`text-xl sm:text-2xl font-bold ${color ? colorClasses[color] : 'text-gray-900'}`}>{value}</p>
     </div>
   );
 }

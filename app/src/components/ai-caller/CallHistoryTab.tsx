@@ -196,10 +196,27 @@ export function CallHistoryTab({ calls, assistants, loading, onRefresh }: Props)
                   <div className="text-xs text-gray-400 mt-0.5">
                     {getAssistantName(call.assistantId)}
                   </div>
+                  <div className="sm:hidden mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+                    <span className="inline-flex items-center gap-1 text-gray-500">
+                      <Clock className="h-3.5 w-3.5" />
+                      {formatDuration(call.startedAt, call.endedAt)}
+                    </span>
+                    {(() => {
+                      const outcome = getCallOutcomeLabel(call);
+                      return (
+                        <span className={`font-medium ${outcome.color}`}>
+                          {outcome.label}
+                        </span>
+                      );
+                    })()}
+                    <span className="text-gray-400">
+                      {formatDate(call.createdAt)}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Duration */}
-                <div className="flex items-center gap-1 text-sm text-gray-500">
+                <div className="hidden sm:flex items-center gap-1 text-sm text-gray-500">
                   <Clock className="h-3.5 w-3.5" />
                   {formatDuration(call.startedAt, call.endedAt)}
                 </div>
@@ -208,14 +225,14 @@ export function CallHistoryTab({ calls, assistants, loading, onRefresh }: Props)
                 {(() => {
                   const outcome = getCallOutcomeLabel(call);
                   return (
-                    <div className={`text-xs font-medium w-32 text-right truncate ${outcome.color}`}>
+                    <div className={`hidden sm:block text-xs font-medium w-32 text-right truncate ${outcome.color}`}>
                       {outcome.label}
                     </div>
                   );
                 })()}
 
                 {/* Date */}
-                <div className="text-xs text-gray-400 w-32 text-right">
+                <div className="hidden sm:block text-xs text-gray-400 w-32 text-right">
                   {formatDate(call.createdAt)}
                 </div>
 
@@ -245,7 +262,7 @@ export function CallHistoryTab({ calls, assistants, loading, onRefresh }: Props)
                           <span className="text-xs font-medium text-gray-500 uppercase">
                             Транскрипт
                           </span>
-                          <div className="max-h-64 overflow-y-auto rounded-lg bg-white border border-gray-200 p-4 mt-1 space-y-2">
+                          <div className="max-h-80 sm:max-h-64 overflow-y-auto rounded-lg bg-white border border-gray-200 p-4 mt-1 space-y-2">
                             {detailCall.messages
                               ?.filter(
                                 (m) =>

@@ -49,6 +49,10 @@ html.tma-mobile main {
   color: var(--tma-fg);
 }
 
+html.tma-mobile {
+  font-size: 14px;
+}
+
 html.tma-mobile:not([data-tma-theme]),
 html.tma-mobile[data-tma-theme='dark'] {
   --tma-bg: #0b1220;
@@ -179,6 +183,14 @@ html.tma-mobile .tma-card {
   .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom);
   }
+
+  .tma-safe-top {
+    padding-top: calc(env(safe-area-inset-top) + 20px);
+  }
+
+  .tma-safe-bottom {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+  }
 }
 
 /* Custom scrollbar for better aesthetics */
@@ -205,4 +217,38 @@ input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button { 
   -webkit-appearance: none; 
   margin: 0; 
+}
+
+@media (max-width: 640px) {
+  .reglament-content section {
+    padding: 20px !important;
+  }
+
+  .reglament-content h2 {
+    font-size: 15px !important;
+    line-height: 21px !important;
+  }
+
+  .reglament-content h3 {
+    font-size: 13px !important;
+    line-height: 18px !important;
+  }
+
+  .reglament-content p,
+  .reglament-content li {
+    font-size: 12px !important;
+    line-height: 17px !important;
+  }
+}
+
+.reglament-content {
+  overflow-x: hidden;
+}
+
+.reglament-content p,
+.reglament-content li,
+.reglament-content a,
+.reglament-content code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }

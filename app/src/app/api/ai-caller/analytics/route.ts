@@ -273,10 +273,18 @@ export async function GET(req: NextRequest) {
 
   // Enrich with campaign contact info (company, name, email)
   const customerNumbers = analyses
-    .map((a) => a.customer_number)
-    .filter(Boolean) as string[];
+    .map((a) => (typeof a.customer_number === 'string' ? a.customer_number : null))
+    .filter((v): v is string => typeof v === 'string' && v.length > 0);
 
-  let contactMap: Record<string, { company_name: string | null; contact_name: string | null; email: string | null; extra_data: Record<string, string> | null }> = {};
+  const contactMap: Record<
+    string,
+    {
+      company_name: string | null;
+      contact_name: string | null;
+      email: string | null;
+      extra_data: Record<string, string> | null;
+    }
+  > = {};
 
   if (customerNumbers.length > 0) {
     const { data: contacts } = await supabase
@@ -297,10 +305,12 @@ export async function GET(req: NextRequest) {
   }
 
   const enriched = analyses.map((a) => {
-    const contact = a.customer_number ? contactMap[a.customer_number] : null;
+    const customerNumber = typeof a.customer_number === 'string' ? a.customer_number : null;
+    const analysisCompanyName = typeof a.company_name === 'string' ? a.company_name : null;
+    const contact = customerNumber ? contactMap[customerNumber] : null;
     return {
       ...a,
-      contact_company: contact?.company_name ?? a.company_name ?? null,
+      contact_company: contact?.company_name ?? analysisCompanyName ?? null,
       contact_name: contact?.contact_name ?? null,
       contact_email: contact?.email ?? null,
       contact_extra: contact?.extra_data ?? null,

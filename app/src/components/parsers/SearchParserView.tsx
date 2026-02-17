@@ -339,7 +339,7 @@ export function SearchParserView() {
     }
   }, [activeJob, activeJobId, refreshJobs, loadResults]);
 
-  const handleStart = async (queries: string[]) => {
+  const handleStart = useCallback(async (queries: string[]) => {
     setBusy(true);
     setError(null);
     try {
@@ -355,7 +355,7 @@ export function SearchParserView() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [apiFetch, refreshJobs]);
 
   const stopJob = useCallback(async (jobId: string) => {
     setJobActionId(jobId);

@@ -143,30 +143,6 @@ function parseHhSearchLink(value: string): LinkParseResult {
   };
 }
 
-function EmployersHint() {
-  return (
-    <span className="relative inline-flex items-center group">
-      <span
-        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-300 text-[10px] font-semibold text-gray-500"
-        aria-hidden="true"
-      >
-        ?
-      </span>
-      <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 w-64 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-        Дополнительно подгружаем информацию о компании: сайт, описание, отрасли. Это увеличивает время парсинга.
-      </span>
-    </span>
-  );
-}
-
-function EmployersExample() {
-  return (
-    <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-      Пример: включайте опцию, если нужен сайт/описание/отрасли компании. Это увеличит время выполнения.
-    </div>
-  );
-}
-
 export function HHParserForm({ onStart, busy }: Props) {
   const [mode, setMode] = useState<'link' | 'manual'>('link');
   const [searchLink, setSearchLink] = useState('');
@@ -177,7 +153,6 @@ export function HHParserForm({ onStart, busy }: Props) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [perPage, setPerPage] = useState('50');
-  const [fetchEmployers, setFetchEmployers] = useState(false);
 
   const manualConfig: HHSearchConfig = useMemo(() => {
     const salary_from = salaryFrom.trim() ? Number(salaryFrom) : undefined;
@@ -191,9 +166,9 @@ export function HHParserForm({ onStart, busy }: Props) {
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
       per_page: Number.isFinite(per_page) ? per_page : undefined,
-      fetch_employers: fetchEmployers,
+      fetch_employers: true,
     };
-  }, [area, currency, dateFrom, dateTo, perPage, salaryFrom, text, fetchEmployers]);
+  }, [area, currency, dateFrom, dateTo, perPage, salaryFrom, text]);
 
   const linkParse = useMemo(() => parseHhSearchLink(searchLink), [searchLink]);
   const linkConfig = linkParse.config;
@@ -203,10 +178,10 @@ export function HHParserForm({ onStart, busy }: Props) {
   const canStart = mode === 'link' ? linkReady : Boolean(text.trim());
   const activeConfig = useMemo(() => {
     if (mode === 'link') {
-      return linkConfig ? { ...linkConfig, fetch_employers: fetchEmployers } : undefined;
+      return linkConfig ? { ...linkConfig, fetch_employers: true } : undefined;
     }
-    return { ...manualConfig, fetch_employers: fetchEmployers };
-  }, [fetchEmployers, linkConfig, manualConfig, mode]);
+    return { ...manualConfig, fetch_employers: true };
+  }, [linkConfig, manualConfig, mode]);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -283,22 +258,6 @@ export function HHParserForm({ onStart, busy }: Props) {
             </div>
             {linkError ? <div className="mt-2 text-xs text-red-600">{linkError}</div> : null}
           </div>
-          <label className="inline-flex items-center gap-3 text-sm text-gray-700 ml-1">
-            <span className="relative inline-flex h-5 w-9 items-center">
-              <input
-                type="checkbox"
-                checked={fetchEmployers}
-                onChange={(e) => setFetchEmployers(e.target.checked)}
-                className="peer sr-only"
-              />
-              <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
-              <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
-            </span>
-            <span className="inline-flex items-center gap-1">
-              Подтягивать данные работодателей (дольше)
-              <EmployersHint />
-            </span>
-          </label>
 
           {linkConfig && !linkError ? (
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
@@ -417,23 +376,6 @@ export function HHParserForm({ onStart, busy }: Props) {
               />
             </div>
           </div>
-          <label className="mt-3 inline-flex items-center gap-3 text-sm text-gray-700 ml-1">
-            <span className="relative inline-flex h-5 w-9 items-center">
-              <input
-                type="checkbox"
-                checked={fetchEmployers}
-                onChange={(e) => setFetchEmployers(e.target.checked)}
-                className="peer sr-only"
-              />
-              <span className="absolute inset-0 rounded-full bg-gray-200 transition peer-checked:bg-blue-600" />
-              <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
-            </span>
-            <span className="inline-flex items-center gap-1">
-              Подтягивать данные работодателей (дольше)
-              <EmployersHint />
-            </span>
-          </label>
-          <EmployersExample />
         </>
       )}
     </div>
