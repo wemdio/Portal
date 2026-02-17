@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
+import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
 
@@ -13,10 +14,13 @@ type QueueItem = {
   attempt_count: number;
 };
 
+type ExtractionType = 'text' | 'email';
+
 type JobRow = {
   id: string;
   user_id: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  extraction_type: ExtractionType;
   total: number;
   processed: number;
   success_count: number;
@@ -197,6 +201,117 @@ async function setCache(urlNormalized: string, payload: { text?: string; error?:
   }
 }
 
+// ── Email scraper cache (separate table) ──────────────────────
+
+async function getEmailCache(urlNormalized: string) {
+  if (!supabaseAdmin) return null;
+  try {
+    const { data, error } = await withSupabaseTimeout(
+      supabaseAdmin
+        .from('email_scraper_cache')
+        .select('emails, last_error, expires_at')
+        .eq('url_normalized', urlNormalized)
+        .maybeSingle(),
+      'Таймаут чтения email-кэша',
+    );
+    if (error) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function setEmailCache(
+  urlNormalized: string,
+  payload: { emails?: string; error?: string; sourceUrl?: string; pagesScanned?: number },
+) {
+  if (!supabaseAdmin) return;
+  const now = new Date();
+  const hasEmails = payload.emails && payload.emails.length > 0;
+  const expiresAt = hasEmails
+    ? new Date(now.getTime() + cacheSuccessTtlMs)
+    : new Date(now.getTime() + cacheErrorTtlMs);
+
+  try {
+    await withSupabaseTimeout(
+      supabaseAdmin
+        .from('email_scraper_cache')
+        .upsert(
+          {
+            url_normalized: urlNormalized,
+            emails: payload.emails ?? null,
+            last_error: payload.error ?? null,
+            fetched_at: now.toISOString(),
+            expires_at: expiresAt.toISOString(),
+            source_url: payload.sourceUrl ?? null,
+            pages_scanned: payload.pagesScanned ?? 0,
+          },
+          { onConflict: 'url_normalized' },
+        ),
+      'Таймаут записи email-кэша',
+    );
+  } catch {
+    // Cache write should not break item processing.
+  }
+}
+
+async function fetchEmailsWithCache(
+  item: QueueItem,
+  inflight: Map<string, Promise<FetchResult>>,
+): Promise<FetchResult> {
+  const key = `email:${item.url_normalized}`;
+  if (inflight.has(key)) return inflight.get(key)!;
+
+  const promise = (async () => {
+    if (item.url_normalized) {
+      const cached = await getEmailCache(item.url_normalized);
+      if (cached && cached.expires_at && new Date(cached.expires_at).getTime() > Date.now()) {
+        if (cached.last_error && !cached.emails && shouldUseCachedError(cached.last_error)) {
+          return { error: cached.last_error };
+        }
+        return { text: cached.emails ?? '' };
+      }
+    }
+
+    try {
+      const abortController = new AbortController();
+      const result = await runWithTimeout(
+        scrapeEmails(item.url_raw, {
+          timeout: FETCH_TIMEOUT_MS,
+          signal: abortController.signal,
+        }),
+        {
+          timeoutMs: FETCH_HARD_TIMEOUT_MS,
+          timeoutMessage: `Превышено время ожидания сайта (${Math.round(FETCH_HARD_TIMEOUT_MS / 1000)}с)`,
+          onTimeout: () => abortController.abort(),
+        },
+      );
+      const emailsText = result.emails.slice(0, 10).join('; ');
+      if (item.url_normalized) {
+        await setEmailCache(item.url_normalized, {
+          emails: emailsText,
+          sourceUrl: item.url_raw,
+          pagesScanned: result.pagesScanned,
+        });
+      }
+      return { text: emailsText };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Ошибка извлечения email';
+      if (item.url_normalized && shouldUseCachedError(message)) {
+        await setEmailCache(item.url_normalized, { error: message, sourceUrl: item.url_raw });
+      }
+      return { error: message };
+    }
+  })();
+
+  inflight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inflight.delete(key);
+  }
+}
+
 async function updateQueueItem(
   item: QueueItem,
   result: FetchResult,
@@ -297,7 +412,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, user_id, status, total, processed, success_count, error_count')
+      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count')
       .eq('id', jobId)
       .single<JobRow>();
 
@@ -409,7 +524,10 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
               }
               return;
             }
-            const result = await fetchWithCache(item, inflight);
+            const extractionType: ExtractionType = job.extraction_type ?? 'text';
+            const result = extractionType === 'email'
+              ? await fetchEmailsWithCache(item, inflight)
+              : await fetchWithCache(item, inflight);
             if (result.error && !result.text) {
               if (shouldRetryEnrichmentItem(result.error, item.attempt_count, MAX_ATTEMPTS)) {
                 const requeued = await updateQueueItem(item, { error: result.error }, 'pending');
