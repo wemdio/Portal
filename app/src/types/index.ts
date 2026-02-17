@@ -8,7 +8,7 @@ export type ProjectStatus =
 
 export * from './parsers';
 
-export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer';
+export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead';
 
 export interface UserProfile {
   id: string;

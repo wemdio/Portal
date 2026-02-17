@@ -7,7 +7,7 @@ import type { Route } from 'next';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
-import { ROLE_LABELS, isAdmin } from '@/lib/roles';
+import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems } from '@/lib/navigation';
 
 type SidebarProps = {
@@ -129,6 +129,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       <nav className="flex-1 space-y-0.5 px-3 py-4 overflow-y-auto">
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
+          if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'

@@ -22,6 +22,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
+      - VAPI_API_KEY=${VAPI_API_KEY}
+      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
     restart: unless-stopped
     networks:
       - portal-network
