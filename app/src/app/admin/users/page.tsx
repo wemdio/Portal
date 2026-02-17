@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
+import { useIsTma } from '@/lib/useIsTma';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -16,6 +17,7 @@ function getErrorMessage(err: unknown): string {
 }
 
 export default function UsersPage() {
+  const isTma = useIsTma();
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -204,7 +206,7 @@ export default function UsersPage() {
 
   if (!isAdmin(currentUserRole)) {
     return (
-      <div className="max-w-4xl mx-auto py-10">
+      <div className={`max-w-4xl mx-auto ${isTma ? 'py-6 px-4 text-sm leading-relaxed' : 'py-10'}`}>
         <div className="bg-red-50 border border-red-200 rounded-lg p-6 flex items-center">
           <div>
             <h2 className="text-lg font-semibold text-red-800">Доступ запрещен</h2>
@@ -216,10 +218,10 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto py-10 px-4">
-      <div className="flex items-center justify-between mb-8">
+    <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Управление пользователями</h1>
+          <h1 className={`${isTma ? 'text-xl' : 'text-3xl'} font-bold text-gray-900`}>Управление пользователями</h1>
           <p className="mt-1 text-sm text-gray-500">Создание и управление ролями пользователей</p>
         </div>
         <button
@@ -227,7 +229,7 @@ export default function UsersPage() {
             setSearchQuery(''); // Clear search when opening modal
             setShowCreateModal(true);
           }}
-          className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          className={`inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors ${isTma ? 'w-full sm:w-auto' : ''}`}
         >
           Добавить пользователя
         </button>

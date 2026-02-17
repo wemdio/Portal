@@ -50,7 +50,7 @@ export function TmaHeader() {
       className="sticky top-0 z-40 border-b backdrop-blur"
       style={{ borderColor: 'var(--tma-border)', backgroundColor: 'var(--tma-bg)' }}
     >
-      <div className="flex items-start gap-3 px-4 pt-4 pb-2 safe-top">
+      <div className="flex items-start gap-3 px-4 pb-2 tma-safe-top">
         <div className="min-w-0 flex-1">
           <p className="tma-muted text-[11px] uppercase tracking-wide">
             Portal

@@ -259,10 +259,10 @@ export default function ReglamentPage() {
   }, []);
 
   return (
-    <div className="max-w-5xl mx-auto py-8 px-4">
-      <div className="mb-8">
-        <h1 className="text-4xl font-bold mb-2 text-gray-900">Регламент работы</h1>
-        <p className="text-gray-600">Руководство по работе для специалистов Polza Agency</p>
+    <div className="max-w-5xl mx-auto px-4 py-6 sm:py-8 text-sm sm:text-base leading-relaxed">
+      <div className="mb-6 sm:mb-8">
+        <h1 className="text-2xl sm:text-4xl font-bold mb-2 text-gray-900">Регламент работы</h1>
+        <p className="text-sm text-gray-600">Руководство по работе для специалистов Polza Agency</p>
         
         {/* Поиск */}
         <div className="mt-6 relative" ref={searchInputRef}>
@@ -274,7 +274,7 @@ export default function ReglamentPage() {
               onChange={(e) => updateSearch(e.target.value)}
               onFocus={() => searchQuery && setShowResults(true)}
               placeholder="Поиск по тексту..."
-              className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full pl-10 pr-4 py-2.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
           
@@ -288,7 +288,7 @@ export default function ReglamentPage() {
                   className="w-full text-left px-4 py-3 hover:bg-blue-50 border-b border-gray-100 last:border-b-0 transition-colors"
                 >
                   <div className="font-medium text-gray-900 mb-1">{result.title}</div>
-                  <div className="text-sm text-gray-600 line-clamp-2">
+                  <div className="text-xs sm:text-sm text-gray-600 line-clamp-2">
                     {result.context.split(new RegExp(`(${searchQuery})`, 'gi')).map((part, i) => 
                       part.toLowerCase() === searchQuery.toLowerCase() ? (
                         <mark key={i} className="bg-yellow-200 font-semibold">{part}</mark>
@@ -315,7 +315,7 @@ export default function ReglamentPage() {
         </div>
       </div>
       
-      <div ref={contentRef} className="space-y-6">
+      <div ref={contentRef} className="reglament-content space-y-5 sm:space-y-6">
         {/* Этапы работы */}
         <section id="etapy-raboty" className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow-md border border-blue-200 p-8">
           <div className="flex items-center gap-3 mb-6">

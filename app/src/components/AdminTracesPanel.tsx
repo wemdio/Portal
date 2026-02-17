@@ -264,7 +264,9 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
         {/* Content */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-lg font-semibold text-gray-900">{node.name}</span>
+            <span className="font-mono text-sm sm:text-lg font-semibold text-gray-900 break-all sm:break-normal">
+              {node.name}
+            </span>
 
             {/* Status badge */}
             <span
@@ -281,7 +283,7 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
 
             {/* Duration */}
             {node.duration_ms != null && (
-              <span className="text-base text-gray-400 font-mono">
+              <span className="text-xs sm:text-base text-gray-400 font-mono">
                 {formatDuration(node.duration_ms)}
               </span>
             )}
@@ -294,7 +296,7 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
 
           {/* Message */}
           {node.message && (
-            <p className="mt-0.5 text-lg text-gray-600 truncate">{node.message}</p>
+            <p className="mt-0.5 text-xs sm:text-lg text-gray-600 truncate">{node.message}</p>
           )}
 
           {expanded && (
@@ -304,22 +306,22 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
               onKeyDown={(e) => e.stopPropagation()}
             >
               {!isEmptyObj(node.input) && (
-                <details className="text-base">
+                <details className="text-xs sm:text-base">
                   <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none font-medium">
                     Параметры запроса
                   </summary>
-                  <pre className="mt-1 p-2 rounded-md bg-gray-50 border border-gray-100 text-gray-700 whitespace-pre-wrap break-words overflow-auto max-h-52 text-base">
+                  <pre className="mt-1 p-2 rounded-md bg-gray-50 border border-gray-100 text-gray-700 whitespace-pre-wrap break-words overflow-auto max-h-52 text-xs sm:text-base">
                     {safeJson(node.input)}
                   </pre>
                 </details>
               )}
               {!isEmptyObj(node.output) && (
-                <details className="text-base" open={node.status === 'failed'}>
+                <details className="text-xs sm:text-base" open={node.status === 'failed'}>
                   <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none font-medium">
                     Результат
                   </summary>
                   <pre
-                    className={`mt-1 p-2 rounded-md border whitespace-pre-wrap break-words overflow-auto max-h-52 text-base ${
+                    className={`mt-1 p-2 rounded-md border whitespace-pre-wrap break-words overflow-auto max-h-52 text-xs sm:text-base ${
                       node.status === 'failed'
                         ? 'bg-red-50 border-red-100 text-red-700'
                         : 'bg-gray-50 border-gray-100 text-gray-700'
@@ -335,7 +337,7 @@ function SpanTreeItem({ node, isLast }: { node: SpanNode; isLast: boolean }) {
 
         {/* Timestamp - right side */}
         <div className="flex-shrink-0 text-right">
-          <span className="text-sm text-gray-400">{formatTimestamp(node.started_at)}</span>
+          <span className="text-[10px] sm:text-sm text-gray-400">{formatTimestamp(node.started_at)}</span>
         </div>
       </div>
 
@@ -410,7 +412,9 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
         {/* Content */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5 flex-wrap">
-            <span className="font-mono text-xl font-bold text-gray-900">{root.name}</span>
+            <span className="font-mono text-sm sm:text-xl font-bold text-gray-900 break-all sm:break-normal">
+              {root.name}
+            </span>
 
             {/* Status badge */}
             <span
@@ -427,14 +431,14 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
 
             {/* Duration */}
             {root.duration_ms != null && (
-              <span className="text-lg text-gray-400 font-mono">
+              <span className="text-xs sm:text-lg text-gray-400 font-mono">
                 {formatDuration(root.duration_ms)}
               </span>
             )}
 
             {/* Child count */}
             {childCount > 0 && (
-              <span className="text-base text-gray-400 bg-gray-100 px-2.5 py-1 rounded-md">
+              <span className="text-xs sm:text-base text-gray-400 bg-gray-100 px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-md">
                 {childCount} {childCount === 1 ? 'подзадача' : childCount < 5 ? 'подзадачи' : 'подзадач'}
               </span>
             )}
@@ -442,11 +446,11 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
 
           {/* Message */}
           {root.message && (
-            <p className="mt-1 text-lg text-gray-600">{root.message}</p>
+            <p className="mt-1 text-xs sm:text-lg text-gray-600">{root.message}</p>
           )}
 
           {/* Meta row */}
-          <div className="mt-1.5 flex items-center gap-3 text-base text-gray-400">
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] sm:text-base text-gray-400">
             <span>{formatTimestamp(root.started_at)}</span>
             {root.job_id && (
               <span className="font-mono truncate max-w-[180px]" title={root.job_id}>
@@ -486,22 +490,22 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
       {expanded && (
         <div className="border-t border-gray-100 px-4 py-3">
           {!isEmptyObj(root.input) && (
-            <details className="mb-3 text-base" open>
+            <details className="mb-3 text-xs sm:text-base" open>
               <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none font-medium">
                 Параметры запроса
               </summary>
-              <pre className="mt-1 p-2 rounded-md bg-gray-50 border border-gray-100 text-gray-700 whitespace-pre-wrap break-words overflow-auto max-h-60 text-base">
+              <pre className="mt-1 p-2 rounded-md bg-gray-50 border border-gray-100 text-gray-700 whitespace-pre-wrap break-words overflow-auto max-h-60 text-xs sm:text-base">
                 {safeJson(root.input)}
               </pre>
             </details>
           )}
           {!isEmptyObj(root.output) && (
-            <details className="mb-3 text-base" open={root.status === 'failed'}>
+            <details className="mb-3 text-xs sm:text-base" open={root.status === 'failed'}>
               <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none font-medium">
                 Результат
               </summary>
               <pre
-                className={`mt-1 p-2 rounded-md border whitespace-pre-wrap break-words overflow-auto max-h-60 text-base ${
+                className={`mt-1 p-2 rounded-md border whitespace-pre-wrap break-words overflow-auto max-h-60 text-xs sm:text-base ${
                   root.status === 'failed'
                     ? 'bg-red-50 border-red-100 text-red-700'
                     : 'bg-gray-50 border-gray-100 text-gray-700'
@@ -664,12 +668,12 @@ export function AdminTracesPanel({
   }, [traces, search]);
 
   return (
-    <div className="bg-white p-7 rounded-xl border border-gray-200 shadow-sm">
+    <div className="bg-white p-4 sm:p-7 rounded-xl border border-gray-200 shadow-sm">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">{title}</h2>
-          <p className="text-base text-gray-500">{description}</p>
+          <h2 className="text-lg sm:text-2xl font-semibold text-gray-900">{title}</h2>
+          <p className="text-xs sm:text-base text-gray-500">{description}</p>
         </div>
       </div>
 
@@ -678,7 +682,7 @@ export function AdminTracesPanel({
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as 'all' | SpanRow['status'])}
-          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-lg text-gray-700"
+          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm sm:text-lg text-gray-700"
         >
           <option value="all">Все статусы</option>
           <option value="running">Выполняется</option>
@@ -690,22 +694,22 @@ export function AdminTracesPanel({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Поиск по имени, событию, сообщению, job_id..."
-          className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-lg text-gray-700"
+          className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-sm sm:text-lg text-gray-700"
         />
       </div>
 
       {/* Error */}
       {error && (
-        <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-lg text-red-700">
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm sm:text-lg text-red-700">
           {error}
         </div>
       )}
 
       {/* Content */}
       {loading && traces.length === 0 ? (
-        <div className="mt-6 text-base text-gray-500">Загрузка трассировок...</div>
+        <div className="mt-6 text-sm sm:text-base text-gray-500">Загрузка трассировок...</div>
       ) : filtered.length === 0 ? (
-        <div className="mt-6 text-base text-gray-500">
+        <div className="mt-6 text-sm sm:text-base text-gray-500">
           {traces.length === 0 ? 'Трассировки не найдены' : 'Нет совпадений по фильтру'}
         </div>
       ) : (

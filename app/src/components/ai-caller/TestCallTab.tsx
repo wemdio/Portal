@@ -208,7 +208,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Номер клиента
             </label>
-            <div className="flex gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <input
                 type="tel"
                 value={customerNumber}
@@ -223,7 +223,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
               <button
                 onClick={makeCall}
                 disabled={calling || !effectiveAssistant || !effectivePhone || !customerNumber.trim()}
-                className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-5 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="inline-flex w-full sm:w-auto sm:self-auto self-center items-center justify-center gap-2 rounded-lg bg-green-600 px-5 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {calling ? (
                   <Loader2 className="h-4 w-4 animate-spin" />

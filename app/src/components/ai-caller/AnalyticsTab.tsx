@@ -388,18 +388,19 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
                         <p className="text-sm text-gray-700 mt-1.5">{a.summary}</p>
                       )}
 
-                      {a.key_points && a.key_points.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mt-2">
-                          {a.key_points.map((kp, i) => (
-                            <span
-                              key={i}
-                              className="inline-block rounded-full bg-white/80 border border-gray-200 px-2.5 py-0.5 text-xs text-gray-600"
-                            >
-                              {kp}
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                    {/* Key points */}
+                    {a.key_points && a.key_points.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {a.key_points.map((kp, i) => (
+                          <span
+                            key={i}
+                            className="inline-block rounded-full bg-white/80 border border-gray-200 px-3 py-1 text-xs text-gray-600"
+                          >
+                            {kp}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                       {a.next_action && (
                         <div className="flex items-center gap-1.5 mt-2.5 text-xs font-medium text-gray-600">
