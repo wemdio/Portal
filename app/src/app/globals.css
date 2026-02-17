@@ -142,6 +142,16 @@ html.tma-mobile .tma-chip-active {
   border: 1px solid transparent;
 }
 
+html.tma-mobile .tma-chip-danger {
+  background-color: var(--tma-surface-2);
+  color: #ef4444;
+  border: 1px solid #ef4444;
+}
+
+html.tma-mobile .tma-chip-danger:hover {
+  background-color: var(--tma-surface);
+}
+
 html.tma-mobile .tma-danger {
   color: var(--tma-danger);
 }
