@@ -158,7 +158,6 @@ export default function BillingCalendarPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<ModalMode>('create');
   const [editingItem, setEditingItem] = useState<EmailSubscription | null>(null);
-  const [selectedDate, setSelectedDate] = useState<string>('');
 
   // View mode
   const [viewMode, setViewMode] = useState<'calendar' | 'list'>('calendar');

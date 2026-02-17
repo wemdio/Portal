@@ -276,7 +276,15 @@ export async function GET(req: NextRequest) {
     .map((a) => a.customer_number)
     .filter(Boolean) as string[];
 
-  let contactMap: Record<string, { company_name: string | null; contact_name: string | null; email: string | null; extra_data: Record<string, string> | null }> = {};
+  const contactMap: Record<
+    string,
+    {
+      company_name: string | null;
+      contact_name: string | null;
+      email: string | null;
+      extra_data: Record<string, string> | null;
+    }
+  > = {};
 
   if (customerNumbers.length > 0) {
     const { data: contacts } = await supabase

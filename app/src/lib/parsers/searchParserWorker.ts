@@ -330,7 +330,6 @@ export async function runSearchParserJob(jobId: string) {
         message: `Запрос: ${query}`,
       });
 
-      let providerUsed: 'google' | 'duckduckgo' = 'google';
       let insertedCount = 0;
       let hadQueryFailures = false;
 
@@ -413,8 +412,6 @@ export async function runSearchParserJob(jobId: string) {
             }
           }
         }
-
-        providerUsed = provider;
 
         // Build rows (local dedupe only)
         const rows = results
