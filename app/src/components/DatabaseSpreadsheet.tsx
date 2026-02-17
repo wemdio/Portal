@@ -167,6 +167,18 @@ type EmailSplitState = {
   sourceCol: number;
 };
 
+type EmailScrapingState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isGenerating: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  retryCount: number;
+  error: string | null;
+  jobId: string | null;
+};
+
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -717,6 +729,18 @@ export function DatabaseSpreadsheet() {
     isOpen: false,
     sourceCol: 0,
   });
+  const [emailScraping, setEmailScraping] = useState<EmailScrapingState>({
+    isOpen: false,
+    sourceCol: 0,
+    isGenerating: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    retryCount: 0,
+    error: null,
+    jobId: null,
+  });
+  const emailScrapingAbortRef = useRef<AbortController | null>(null);
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -3925,6 +3949,252 @@ export function DatabaseSpreadsheet() {
     closeEmailSplitModal();
   };
 
+  // ── Email Scraping (Найти почты) ──────────────────────────────
+
+  const openEmailScrapingModal = () => {
+    setEmailScraping((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null }));
+  };
+
+  const closeEmailScrapingModal = () => {
+    setEmailScraping((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleStopEmailScraping = async () => {
+    if (!emailScraping.isGenerating || !emailScraping.jobId) return;
+    if (!window.confirm('Остановить поиск почт? Прогресс не сохранится.')) return;
+    const jobId = emailScraping.jobId;
+    if (emailScrapingAbortRef.current) emailScrapingAbortRef.current.abort();
+
+    const token = await getFreshToken();
+    if (token) {
+      try {
+        await fetch(`/api/enrich/website/jobs/${jobId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+      } catch { /* ignore */ }
+    }
+    setEmailScraping((prev) => ({ ...prev, isGenerating: false, isOpen: false, jobId: null }));
+    setLastAction({ message: 'Поиск почт остановлен', time: Date.now() });
+  };
+
+  const handleStartEmailScraping = async () => {
+    if (!activeTab || emailScraping.isGenerating) return;
+
+    const rowsToProcess: { rowIndex: number; sourceValue: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      const sourceValue = String(row?.[emailScraping.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      rowsToProcess.push({ rowIndex: i, sourceValue });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setEmailScraping((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setEmailScraping((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    emailScrapingAbortRef.current = new AbortController();
+
+    setEmailScraping((prev) => ({
+      ...prev,
+      isGenerating: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Поиск почт с сайтов');
+
+    // Create the "Email" column
+    const sourceLabel = headerLabels[emailScraping.sourceCol] || toColumnLabel(emailScraping.sourceCol);
+    const newHeaderName = `Email (${sourceLabel})`;
+    const startCol = emailScraping.sourceCol + 1;
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
+
+    let newColIndex = startCol;
+    while (!isColumnEmpty(newColIndex)) newColIndex += 1;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= newColIndex) nextRow.push('');
+      if (rowIndex === 0) nextRow[newColIndex] = newHeaderName;
+      return nextRow;
+    });
+
+    setTabs((prev) => prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)));
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(newColIndex);
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), ENRICHMENT_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+    }
+
+    try {
+      const startRes = await fetch('/api/enrich/website/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+        body: JSON.stringify({
+          rows: rowsToProcess.map((row) => ({ rowIndex: row.rowIndex, url: row.sourceValue })),
+          extraction_type: 'email',
+        }),
+        signal: emailScrapingAbortRef.current?.signal,
+      });
+
+      const startData = await parseJsonResponse<{
+        job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
+      }>(startRes, 'email_scraping.start');
+
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
+      }
+
+      const jobId = startData.job_id;
+      const total = startData.total ?? rowsToProcess.length;
+      const processedCount = startData.processed ?? 0;
+
+      setEmailScraping((prev) => ({
+        ...prev,
+        isOpen: false,
+        isGenerating: true,
+        totalRows: total,
+        currentRow: Math.min(processedCount, total),
+        progress: total > 0 ? Math.round((Math.min(processedCount, total) / total) * 100) : 0,
+        jobId,
+        error: null,
+      }));
+
+      // Poll for results — reuse the same enrichment polling pattern
+      let cursor: string | null = null;
+      let consecutiveErrors = 0;
+      let lastProgressTime = Date.now();
+      let token = currentToken;
+      const signal = emailScrapingAbortRef.current?.signal;
+      const pendingUpdates: Map<number, string> = new Map();
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const flushUpdates = () => {
+        if (pendingUpdates.size === 0) return;
+        const batch = new Map(pendingUpdates);
+        pendingUpdates.clear();
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTabId) return tab;
+          const data = tab.data.map((row, ri) => {
+            const value = batch.get(ri);
+            if (value === undefined) return row;
+            const nextRow = [...row];
+            while (nextRow.length <= newColIndex) nextRow.push('');
+            nextRow[newColIndex] = value;
+            return nextRow;
+          });
+          return { ...tab, data };
+        }));
+      };
+
+      const scheduleFlush = () => {
+        if (flushTimer) return;
+        flushTimer = setTimeout(() => { flushTimer = null; flushUpdates(); }, ENRICHMENT_UPDATE_FLUSH_MS);
+      };
+
+      try {
+        while (!signal?.aborted) {
+          const fetchResults = async (tkn: string) =>
+            fetch(
+              `/api/enrich/website/jobs/${jobId}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+              { headers: { Authorization: `Bearer ${tkn}` }, signal },
+            );
+
+          let res = await fetchResults(token);
+          if (res.status === 401) {
+            const refreshed = await getFreshToken();
+            if (refreshed) { token = refreshed; res = await fetchResults(token); }
+            else throw new Error('Сессия истекла. Войдите заново.');
+          }
+
+          if (!res.ok) {
+            consecutiveErrors += 1;
+            if (consecutiveErrors >= ENRICHMENT_MAX_CONSECUTIVE_FAILURES) {
+              throw new Error(`Слишком много ошибок API (${consecutiveErrors})`);
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          consecutiveErrors = 0;
+
+          const data = await parseJsonResponse<{
+            job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+            results: Array<{ row_index: number; result_text: string | null; status: string }>;
+            next_cursor?: string | null;
+          }>(res, 'email_scraping.results');
+
+          if (data.results?.length) {
+            for (const result of data.results) {
+              if (result.status === 'completed' && result.result_text) {
+                pendingUpdates.set(result.row_index, result.result_text);
+              }
+            }
+            scheduleFlush();
+            if (pendingUpdates.size >= ENRICHMENT_UPDATE_BATCH) flushUpdates();
+            lastProgressTime = Date.now();
+          }
+
+          if (data.next_cursor) cursor = data.next_cursor;
+
+          const processed = data.job?.processed ?? 0;
+          const jobTotal = data.job?.total ?? total;
+          setEmailScraping((prev) => ({
+            ...prev,
+            currentRow: Math.min(processed, jobTotal),
+            progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+          }));
+
+          if (['completed', 'failed', 'cancelled'].includes(data.job?.status)) {
+            flushUpdates();
+            break;
+          }
+
+          if (Date.now() - lastProgressTime > ENRICHMENT_STALL_TIMEOUT_MS) {
+            throw new Error('Процесс завис — нет новых результатов');
+          }
+
+          await new Promise((r) => setTimeout(r, ENRICHMENT_PROGRESS_INTERVAL_MS));
+        }
+      } finally {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushUpdates();
+      }
+
+      setEmailScraping((prev) => ({ ...prev, isGenerating: false, jobId: null }));
+      setLastAction({ message: `Поиск почт завершён`, time: Date.now() });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({ message: 'Поиск почт отменён', time: Date.now() });
+        setEmailScraping((prev) => ({ ...prev, isGenerating: false, isOpen: false, jobId: null }));
+      } else {
+        setEmailScraping((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isGenerating: false,
+          jobId: null,
+        }));
+      }
+    } finally {
+      emailScrapingAbortRef.current = null;
+    }
+  };
+
   // ── Name Cleanup (Очистка названий) ──────────────────────────────
 
   const openNameCleanupModal = () => {
@@ -4524,6 +4794,15 @@ export function DatabaseSpreadsheet() {
           className="inline-flex items-center rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-blue-700 disabled:bg-gray-300"
         >
           Обогатить
+        </button>
+
+        <button
+          type="button"
+          onClick={openEmailScrapingModal}
+          disabled={colCount === 0 || emailScraping.isGenerating}
+          className="inline-flex items-center rounded bg-rose-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-rose-700 disabled:bg-gray-300"
+        >
+          {emailScraping.isGenerating ? `Почты... ${emailScraping.progress}%` : 'Найти почты'}
         </button>
 
         <button
@@ -5768,6 +6047,145 @@ export function DatabaseSpreadsheet() {
                       Запустить обогащение
                     </button>
                   </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Email Scraping Modal ─────────────────────────────── */}
+      {emailScraping.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-600 text-white shadow-sm font-bold text-lg">
+                  @
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Найти почты</h3>
+                  <p className="text-xs text-gray-500 font-medium">Извлечение email-адресов с сайтов компаний</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeEmailScrapingModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-6 px-6 py-6">
+              {emailScraping.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {emailScraping.error}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Столбец с сайтами
+                </label>
+                <div className="relative">
+                  <select
+                    value={emailScraping.sourceCol}
+                    onChange={(e) =>
+                      setEmailScraping((prev) => ({ ...prev, sourceCol: Number(e.target.value), error: null }))
+                    }
+                    disabled={emailScraping.isGenerating}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={`email-scrape-col-${index}`} value={index}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                    ▼
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 px-1">
+                  В ячейках должны быть URL компаний (example.com или https://...)
+                </p>
+              </div>
+
+              {emailScraping.isGenerating ? (
+                <div className="rounded-lg border border-rose-100 bg-rose-50 px-4 py-3">
+                  <p className="text-xs text-rose-700 leading-relaxed">
+                    Поиск почт выполняется в фоне. Можно закрыть окно и продолжать работу.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 space-y-1.5">
+                  <p className="text-xs text-rose-700 leading-relaxed font-semibold">
+                    Глубокий поиск email-адресов:
+                  </p>
+                  <ul className="text-xs text-rose-700 leading-relaxed list-disc pl-4 space-y-0.5">
+                    <li>Главная страница + страницы контактов, о нас, команда</li>
+                    <li>mailto-ссылки, JSON-LD (Schema.org), data-атрибуты</li>
+                    <li>Деобфускация: [at], (at), &#64; и другие паттерны</li>
+                    <li>Фильтрация мусорных email (noreply, system и т.д.)</li>
+                  </ul>
+                </div>
+              )}
+
+              {emailScraping.isGenerating && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Поиск почт...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {emailScraping.currentRow} / {emailScraping.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-rose-600 transition-all duration-300 ease-out"
+                      style={{ width: `${emailScraping.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {emailScraping.isGenerating ? (
+                  <>Обработано: {emailScraping.currentRow} / {emailScraping.totalRows}</>
+                ) : (
+                  <>Будет обработано: <span className="text-gray-900">{visibleRowIndices.length} строк</span></>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeEmailScrapingModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  Закрыть
+                </button>
+                {emailScraping.isGenerating ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopEmailScraping()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartEmailScraping()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-rose-600/20 transition-all hover:bg-rose-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <span>@</span>
+                    Найти почты
+                  </button>
                 )}
               </div>
             </div>
