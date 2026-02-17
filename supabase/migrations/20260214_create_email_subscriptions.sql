@@ -39,30 +39,31 @@ CREATE TABLE IF NOT EXISTS email_subscriptions (
 );
 
 -- Index for calendar queries (by date range)
-CREATE INDEX idx_email_subscriptions_billing_date ON email_subscriptions(next_billing_date);
-CREATE INDEX idx_email_subscriptions_status ON email_subscriptions(status);
-CREATE INDEX idx_email_subscriptions_project ON email_subscriptions(project_id);
+CREATE INDEX IF NOT EXISTS idx_email_subscriptions_billing_date ON email_subscriptions(next_billing_date);
+CREATE INDEX IF NOT EXISTS idx_email_subscriptions_status ON email_subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_email_subscriptions_project ON email_subscriptions(project_id);
 
 -- Enable RLS
 ALTER TABLE email_subscriptions ENABLE ROW LEVEL SECURITY;
 
--- Policy: all authenticated users can read
+-- Policies (drop + create to be idempotent)
+DROP POLICY IF EXISTS "email_subscriptions_select" ON email_subscriptions;
 CREATE POLICY "email_subscriptions_select" ON email_subscriptions
   FOR SELECT TO authenticated
   USING (true);
 
--- Policy: technicians, leads, admins, directors can insert
+DROP POLICY IF EXISTS "email_subscriptions_insert" ON email_subscriptions;
 CREATE POLICY "email_subscriptions_insert" ON email_subscriptions
   FOR INSERT TO authenticated
   WITH CHECK (true);
 
--- Policy: technicians, leads, admins, directors can update
+DROP POLICY IF EXISTS "email_subscriptions_update" ON email_subscriptions;
 CREATE POLICY "email_subscriptions_update" ON email_subscriptions
   FOR UPDATE TO authenticated
   USING (true)
   WITH CHECK (true);
 
--- Policy: admins and directors can delete
+DROP POLICY IF EXISTS "email_subscriptions_delete" ON email_subscriptions;
 CREATE POLICY "email_subscriptions_delete" ON email_subscriptions
   FOR DELETE TO authenticated
   USING (true);
@@ -76,6 +77,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS email_subscriptions_updated_at ON email_subscriptions;
 CREATE TRIGGER email_subscriptions_updated_at
   BEFORE UPDATE ON email_subscriptions
   FOR EACH ROW

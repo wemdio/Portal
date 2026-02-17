@@ -34,7 +34,7 @@ const ANALYSIS_PROMPT = `Ты — аналитик звонков. Проана�
   "key_points": ["ключевой момент 1", "ключевой момент 2"]
 }`;
 
-/** POST — анализировать звонки (массово или по одному) */
+/** POST — анализировать звонки (массово или по одному, с привязкой к кампании) */
 export async function POST(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -47,31 +47,56 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'OPENROUTER_BRIEF_API_KEY не настроен' }, { status: 500 });
   }
 
-  let body: { callIds?: string[] };
+  let body: { callIds?: string[]; campaignId?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  if (!body.callIds?.length) {
-    return NextResponse.json({ error: 'callIds required' }, { status: 400 });
+  const campaignId = body.campaignId ?? null;
+  let callIds = body.callIds ?? [];
+
+  // If campaignId provided but no callIds — auto-collect from campaign contacts
+  if (campaignId && callIds.length === 0) {
+    const { data: contacts } = await supabase
+      .from('ai_campaign_contacts')
+      .select('vapi_call_id')
+      .eq('campaign_id', campaignId)
+      .not('vapi_call_id', 'is', null);
+
+    callIds = (contacts ?? []).map((c) => c.vapi_call_id).filter(Boolean) as string[];
+  }
+
+  if (!callIds.length) {
+    return NextResponse.json({ error: 'callIds required or campaignId with calls' }, { status: 400 });
   }
 
   // Check which calls are already analyzed
   const { data: existing } = await supabase
     .from('ai_call_analyses')
     .select('vapi_call_id')
-    .in('vapi_call_id', body.callIds);
+    .in('vapi_call_id', callIds);
 
   const existingIds = new Set(existing?.map((e) => e.vapi_call_id) ?? []);
-  const newCallIds = body.callIds.filter((id) => !existingIds.has(id));
+
+  // If campaignId provided, update existing analyses that are missing campaign_id
+  if (campaignId && existing && existing.length > 0) {
+    const callIdsToUpdate = existing.map((e) => e.vapi_call_id);
+    await supabase
+      .from('ai_call_analyses')
+      .update({ campaign_id: campaignId })
+      .in('vapi_call_id', callIdsToUpdate)
+      .is('campaign_id', null);
+  }
+
+  const newCallIds = callIds.filter((id) => !existingIds.has(id));
 
   if (newCallIds.length === 0) {
     const { data: analyses } = await supabase
       .from('ai_call_analyses')
       .select('*')
-      .in('vapi_call_id', body.callIds)
+      .in('vapi_call_id', callIds)
       .order('analyzed_at', { ascending: false });
 
     return NextResponse.json({ analyses: analyses ?? [] });
@@ -80,7 +105,7 @@ export async function POST(req: NextRequest) {
   // Fetch call details and analyze
   const results = [];
 
-  for (const callId of newCallIds.slice(0, 10)) {
+  for (const callId of newCallIds.slice(0, 50)) {
     try {
       const callData = (await getCall(callId)) as Record<string, unknown>;
       const transcript = (callData.transcript as string) || '';
@@ -88,11 +113,11 @@ export async function POST(req: NextRequest) {
       const assistantName = (callData.assistant as Record<string, string>)?.name || '';
 
       if (!transcript || transcript.trim().length < 20) {
-        // No meaningful transcript — skip analysis, mark as no_answer
         const analysis = {
           vapi_call_id: callId,
           assistant_name: assistantName,
           customer_number: customerNumber,
+          campaign_id: campaignId,
           outcome: 'no_answer',
           interest_level: 0,
           summary: 'Разговор не состоялся или транскрипт отсутствует',
@@ -146,12 +171,13 @@ export async function POST(req: NextRequest) {
         vapi_call_id: callId,
         assistant_name: assistantName,
         customer_number: customerNumber,
+        campaign_id: campaignId,
         outcome: parsed.outcome as string || 'other',
         interest_level: Math.max(0, Math.min(10, Number(parsed.interest_level) || 0)),
         summary: (parsed.summary as string) || '',
         next_action: (parsed.next_action as string) || '',
         key_points: Array.isArray(parsed.key_points) ? parsed.key_points as string[] : [],
-        transcript_snippet: transcript.slice(0, 300),
+        transcript_snippet: transcript.slice(0, 2000),
       };
 
       await supabase.from('ai_call_analyses').upsert(analysis, { onConflict: 'vapi_call_id' });
@@ -165,13 +191,13 @@ export async function POST(req: NextRequest) {
   const { data: allAnalyses } = await supabase
     .from('ai_call_analyses')
     .select('*')
-    .in('vapi_call_id', body.callIds)
+    .in('vapi_call_id', callIds)
     .order('analyzed_at', { ascending: false });
 
   return NextResponse.json({ analyses: allAnalyses ?? [], newlyAnalyzed: results.length });
 }
 
-/** GET — получить все анализы (с фильтрацией) */
+/** GET — получить все анализы (с фильтрацией) + данные контактов из кампаний */
 export async function GET(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -184,17 +210,102 @@ export async function GET(req: NextRequest) {
   const outcome = searchParams.get('outcome');
   const campaignId = searchParams.get('campaignId');
 
-  let query = supabase
-    .from('ai_call_analyses')
-    .select('*')
-    .order('analyzed_at', { ascending: false })
-    .limit(100);
+  let analyses: Record<string, unknown>[] = [];
 
-  if (outcome) query = query.eq('outcome', outcome);
-  if (campaignId) query = query.eq('campaign_id', campaignId);
+  if (campaignId) {
+    // Try direct campaign_id match first
+    const { data: directMatch } = await supabase
+      .from('ai_call_analyses')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .order('analyzed_at', { ascending: false })
+      .limit(100);
 
-  const { data, error } = await query;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (directMatch && directMatch.length > 0) {
+      analyses = directMatch;
+    } else {
+      // Fallback: find analyses by vapi_call_id from campaign contacts
+      const { data: contacts } = await supabase
+        .from('ai_campaign_contacts')
+        .select('vapi_call_id')
+        .eq('campaign_id', campaignId)
+        .not('vapi_call_id', 'is', null);
 
-  return NextResponse.json({ analyses: data ?? [] });
+      const vapiCallIds = (contacts ?? []).map((c) => c.vapi_call_id).filter(Boolean) as string[];
+
+      if (vapiCallIds.length > 0) {
+        const { data: matchedAnalyses } = await supabase
+          .from('ai_call_analyses')
+          .select('*')
+          .in('vapi_call_id', vapiCallIds)
+          .order('analyzed_at', { ascending: false })
+          .limit(100);
+
+        analyses = matchedAnalyses ?? [];
+
+        // Backfill campaign_id for these analyses
+        if (analyses.length > 0) {
+          await supabase
+            .from('ai_call_analyses')
+            .update({ campaign_id: campaignId })
+            .in('vapi_call_id', vapiCallIds)
+            .is('campaign_id', null);
+        }
+      }
+    }
+  } else {
+    let query = supabase
+      .from('ai_call_analyses')
+      .select('*')
+      .order('analyzed_at', { ascending: false })
+      .limit(100);
+
+    if (outcome) query = query.eq('outcome', outcome);
+
+    const { data, error } = await query;
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    analyses = data ?? [];
+  }
+
+  if (outcome && campaignId) {
+    analyses = analyses.filter((a) => a.outcome === outcome);
+  }
+
+  // Enrich with campaign contact info (company, name, email)
+  const customerNumbers = analyses
+    .map((a) => a.customer_number)
+    .filter(Boolean) as string[];
+
+  let contactMap: Record<string, { company_name: string | null; contact_name: string | null; email: string | null; extra_data: Record<string, string> | null }> = {};
+
+  if (customerNumbers.length > 0) {
+    const { data: contacts } = await supabase
+      .from('ai_campaign_contacts')
+      .select('phone_number, company_name, contact_name, email, extra_data')
+      .in('phone_number', customerNumbers);
+
+    if (contacts) {
+      for (const c of contacts) {
+        contactMap[c.phone_number] = {
+          company_name: c.company_name,
+          contact_name: c.contact_name,
+          email: c.email,
+          extra_data: c.extra_data,
+        };
+      }
+    }
+  }
+
+  const enriched = analyses.map((a) => {
+    const contact = a.customer_number ? contactMap[a.customer_number] : null;
+    return {
+      ...a,
+      contact_company: contact?.company_name ?? a.company_name ?? null,
+      contact_name: contact?.contact_name ?? null,
+      contact_email: contact?.email ?? null,
+      contact_extra: contact?.extra_data ?? null,
+    };
+  });
+
+  return NextResponse.json({ analyses: enriched });
 }
