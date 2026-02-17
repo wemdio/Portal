@@ -56,7 +56,16 @@ interface MonthlyExpensesSummary {
   operations: { plan: number; fact: number };
   taxes: { plan: number; fact: number };
   marketing: { plan: number; fact: number };
+  additional: { plan: number; fact: number };
   total: { plan: number; fact: number };
+}
+
+interface ApprovedPayment {
+  id: string;
+  department: string;
+  description: string;
+  amount: number;
+  created_at: string;
 }
 
 /* ═══════════════════════════════════════════
@@ -198,6 +207,7 @@ export default function FinancePage() {
   const [allExpenses, setAllExpenses] = useState<Record<string, MonthlyExpenses>>({});
   const [selectedMonth, setSelectedMonth] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'overview' | 'revenue' | 'expenses' | 'kpi'>('overview');
+  const [approvedPayments, setApprovedPayments] = useState<ApprovedPayment[]>([]);
 
   // Generate month list
   const monthRange = useMemo(() => generateMonthRange(), []);
@@ -212,6 +222,23 @@ export default function FinancePage() {
   // Load expenses from localStorage
   useEffect(() => {
     setAllExpenses(loadExpenses());
+  }, []);
+
+  // Fetch approved payments from payment_requests
+  useEffect(() => {
+    async function fetchApprovedPayments() {
+      try {
+        const { data, error } = await supabase
+          .from('payment_requests')
+          .select('id, department, description, amount, created_at')
+          .eq('status', 'approved')
+          .order('created_at', { ascending: false });
+        if (!error && data) setApprovedPayments(data);
+      } catch {
+        // table may not exist yet
+      }
+    }
+    fetchApprovedPayments();
   }, []);
 
   // Fetch projects
@@ -334,6 +361,16 @@ export default function FinancePage() {
     return allExpenses[selectedMonth] || EMPTY_EXPENSES;
   }, [allExpenses, selectedMonth]);
 
+  const additionalExpenses = useMemo(() => {
+    const monthPayments = approvedPayments.filter((p) => {
+      const d = new Date(p.created_at);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      return key === selectedMonth;
+    });
+    const total = monthPayments.reduce((s, p) => s + Number(p.amount), 0);
+    return { total, count: monthPayments.length, items: monthPayments };
+  }, [approvedPayments, selectedMonth]);
+
   const expenseSummary = useMemo((): MonthlyExpensesSummary => {
     const sum = (rows: ExpenseRow[]) => ({
       plan: rows.reduce((s, r) => s + r.plan, 0),
@@ -343,17 +380,19 @@ export default function FinancePage() {
     const operations = sum(currentExpenses.operations);
     const taxes = sum(currentExpenses.taxes);
     const marketing = sum(currentExpenses.marketing);
+    const additional = { plan: additionalExpenses.total, fact: additionalExpenses.total };
     return {
       payroll,
       operations,
       taxes,
       marketing,
+      additional,
       total: {
-        plan: payroll.plan + operations.plan + taxes.plan + marketing.plan,
-        fact: payroll.fact + operations.fact + taxes.fact + marketing.fact,
+        plan: payroll.plan + operations.plan + taxes.plan + marketing.plan + additional.plan,
+        fact: payroll.fact + operations.fact + taxes.fact + marketing.fact + additional.fact,
       },
     };
-  }, [currentExpenses]);
+  }, [currentExpenses, additionalExpenses]);
 
   // P&L
   const pnl = useMemo(() => {
@@ -709,6 +748,9 @@ export default function FinancePage() {
               <PnlRow label="  Операционные" value={-expenseSummary.operations.fact} indent negative />
               <PnlRow label="  Налоги" value={-expenseSummary.taxes.fact} indent negative />
               <PnlRow label="  Маркетинг" value={-expenseSummary.marketing.fact} indent negative />
+              {expenseSummary.additional.fact > 0 && (
+                <PnlRow label="  Доп. расходы (оплаты)" value={-expenseSummary.additional.fact} indent negative />
+              )}
               <div className="py-2" />
               <PnlRow
                 label="Чистая прибыль"
@@ -967,6 +1009,7 @@ export default function FinancePage() {
           expenses={currentExpenses}
           summary={expenseSummary}
           onUpdate={(updated) => updateExpenses(selectedMonth, updated)}
+          additionalExpenses={additionalExpenses}
         />
       )}
 
@@ -1189,11 +1232,12 @@ function MetricRow({ label, value, highlight }: { label: string; value: string; 
    ═══════════════════════════════════════════ */
 
 function ExpensesTab({
-  expenses, summary, onUpdate,
+  expenses, summary, onUpdate, additionalExpenses,
 }: {
   expenses: MonthlyExpenses;
   summary: MonthlyExpensesSummary;
   onUpdate: (updated: MonthlyExpenses) => void;
+  additionalExpenses: { total: number; count: number; items: ApprovedPayment[] };
 }) {
   const isTma = useIsTma();
   const categories: { key: keyof MonthlyExpenses; label: string; summaryKey: keyof MonthlyExpensesSummary }[] = [
@@ -1226,11 +1270,12 @@ function ExpensesTab({
   return (
     <div className="space-y-6">
       {/* Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <SummaryCard label="ФОТ (факт)" value={summary.payroll.fact > 0 ? formatCurrency(summary.payroll.fact) : '—'} sub={summary.payroll.plan > 0 ? `план: ${formatCurrency(summary.payroll.plan)}` : undefined} />
         <SummaryCard label="Операционные (факт)" value={summary.operations.fact > 0 ? formatCurrency(summary.operations.fact) : '—'} sub={summary.operations.plan > 0 ? `план: ${formatCurrency(summary.operations.plan)}` : undefined} />
         <SummaryCard label="Налоги (факт)" value={summary.taxes.fact > 0 ? formatCurrency(summary.taxes.fact) : '—'} sub={summary.taxes.plan > 0 ? `план: ${formatCurrency(summary.taxes.plan)}` : undefined} />
         <SummaryCard label="Маркетинг (факт)" value={summary.marketing.fact > 0 ? formatCurrency(summary.marketing.fact) : '—'} sub={summary.marketing.plan > 0 ? `план: ${formatCurrency(summary.marketing.plan)}` : undefined} />
+        <SummaryCard label="Доп. расходы (оплаты)" value={summary.additional.fact > 0 ? formatCurrency(summary.additional.fact) : '—'} sub={`${additionalExpenses.count} согласованных`} />
         <SummaryCard
           label="Итого расходы (факт)"
           value={summary.total.fact > 0 ? formatCurrency(summary.total.fact) : '—'}
@@ -1335,6 +1380,44 @@ function ExpensesTab({
           </div>
         );
       })}
+
+      {/* Additional expenses from approved payment requests */}
+      {additionalExpenses.items.length > 0 && (
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} border-b border-gray-100 bg-gray-50/50`}>
+            <h3 className="text-base font-bold text-gray-900">Доп. расходы (согласованные оплаты)</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {additionalExpenses.count} запросов на {formatCurrency(additionalExpenses.total)}
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-100">
+              <thead className="bg-gray-50/30">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Описание</th>
+                  <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">Отдел</th>
+                  <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">Сумма</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {additionalExpenses.items.map((p) => (
+                  <tr key={p.id}>
+                    <td className="px-4 py-2 text-sm text-gray-900">{p.description}</td>
+                    <td className="px-4 py-2 text-sm text-gray-500">
+                      {({ outreach: 'Аутрич', paid_traffic: 'Платный трафик', accounting: 'Аккаунтинг', sales: 'Продажи' } as Record<string, string>)[p.department] || p.department}
+                    </td>
+                    <td className="px-4 py-2 text-right text-sm font-medium text-gray-900">{formatCurrency(Number(p.amount))}</td>
+                  </tr>
+                ))}
+                <tr className="bg-gray-50/50">
+                  <td className="px-4 py-2 text-sm font-semibold text-gray-700" colSpan={2}>Итого</td>
+                  <td className="px-4 py-2 text-right text-sm font-semibold text-gray-900">{formatCurrency(additionalExpenses.total)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className={`bg-amber-50 border border-amber-200 rounded-2xl ${isTma ? 'p-4' : 'p-5'}`}>
         <h4 className="text-sm font-semibold text-amber-800 mb-1">Данные хранятся локально</h4>
