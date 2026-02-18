@@ -1,5 +1,7 @@
 version: v1.0
 name: Auto (push main)
+execution_time_limit:
+  hours: 3
 agent:
   machine:
     type: e1-standard-2
