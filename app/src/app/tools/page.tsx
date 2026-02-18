@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Bot } from 'lucide-react';
+import { Database, Mail, Search, PhoneCall } from 'lucide-react';
 
 export default function ToolsPage() {
   return (
@@ -17,13 +17,14 @@ export default function ToolsPage() {
           href={'/tools/ai-caller' as Route}
           className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
         >
-          <div className="flex items-start gap-3">
+          <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-base font-semibold text-gray-900">AI Звонилка</p>
               <p className="text-sm text-gray-500">
                 AI-ассистенты для обзвона: тестовые звонки, управление промптами и история.
               </p>
             </div>
+            <PhoneCall className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
           </div>
           <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
             Открыть →
@@ -57,7 +58,25 @@ export default function ToolsPage() {
                 Набор парсеров для сбора данных, запусков и выгрузки результатов.
               </p>
             </div>
-            <Bot className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
+            <Search className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
+          </div>
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
+            Открыть →
+          </div>
+        </Link>
+
+        <Link
+          href={'/tools/email-sequence' as Route}
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-base font-semibold text-gray-900">Цепочки писем</p>
+              <p className="text-sm text-gray-500">
+                Генерация ресёрча по сегменту и цепочки холодных писем.
+              </p>
+            </div>
+            <Mail className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
           </div>
           <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
             Открыть →

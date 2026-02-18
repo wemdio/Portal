@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
-import { Download, ExternalLink, Copy, Check } from 'lucide-react';
+import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight } from 'lucide-react';
 
 type Props = {
   items: HHVacancyRow[];
@@ -198,6 +198,7 @@ export function VacancyResults({
 }: Props) {
   const [copied, setCopied] = useState(false);
   const copiedTimeoutRef = useRef<number | null>(null);
+  const [pageDraft, setPageDraft] = useState<string>(() => String(currentPage));
   const hasItems = items.length > 0;
   const hasJob = Boolean(jobId);
   const statsReady = hasJob && (!loading || count > 0);
@@ -208,6 +209,10 @@ export function VacancyResults({
       }
     };
   }, []);
+
+  useEffect(() => {
+    setPageDraft(String(currentPage));
+  }, [currentPage]);
 
   const shownFrom = hasItems ? offset + 1 : 0;
   const shownTo = hasItems ? Math.min(count, offset + items.length) : 0;
@@ -236,60 +241,81 @@ export function VacancyResults({
     pageButtons.push(totalPages);
   }
 
+  const commitPageDraft = (value: string) => {
+    const next = Number.parseInt(value, 10);
+    if (!Number.isFinite(next)) {
+      setPageDraft(String(currentPage));
+      return;
+    }
+    const clamped = Math.min(Math.max(next, 1), totalPages);
+    setPageDraft(String(clamped));
+    if (!loading && clamped !== currentPage) onPageChange(clamped);
+  };
+
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-      <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
-          <p className="text-sm text-gray-500">
-            {shownLabel}{limitLabel}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {jobId ? (
-            <>
-              {jobStatus === 'running' ? (
-                <button
-                  onClick={() => onStopJob?.()}
-                  disabled={jobControlsDisabled}
-                  className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
-                >
-                  Остановить
-                </button>
+      <div className="px-4 sm:px-6 py-4 border-b border-gray-200">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
+              {jobId ? (
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {jobStatus === 'running' ? (
+                    <button
+                      type="button"
+                      onClick={() => onStopJob?.()}
+                      disabled={jobControlsDisabled}
+                      className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      Остановить
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onDeleteJob?.()}
+                    disabled={jobControlsDisabled}
+                    className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                  >
+                    Удалить
+                  </button>
+                </div>
               ) : null}
-              <button
-                onClick={() => onDeleteJob?.()}
-                disabled={jobControlsDisabled}
-                className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
-              >
-                Удалить
-              </button>
-            </>
-          ) : null}
-          <button
-            onClick={onExportCsv}
-            disabled={actionsDisabled}
-            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-          >
-            <Download className="h-4 w-4 mr-2" />
-            CSV
-          </button>
-          <button
-            onClick={onExportExcel}
-            disabled={actionsDisabled}
-            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-          >
-            <Download className="h-4 w-4 mr-2" />
-            Excel
-          </button>
-          <button
-            onClick={onCopy}
-            disabled={actionsDisabled}
-            className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-          >
-            <Copy className="h-4 w-4 mr-2" />
-            Копировать
-          </button>
+            </div>
+            <p className="text-sm text-gray-500">
+              {shownLabel}{limitLabel}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+            <button
+              type="button"
+              onClick={onExportCsv}
+              disabled={actionsDisabled}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+            >
+              <Download className="h-4 w-4" />
+              CSV
+            </button>
+            <button
+              type="button"
+              onClick={onExportExcel}
+              disabled={actionsDisabled}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+            >
+              <Download className="h-4 w-4" />
+              Excel
+            </button>
+            <button
+              type="button"
+              onClick={onCopy}
+              disabled={actionsDisabled}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+            >
+              <Copy className="h-4 w-4" />
+              Копировать
+            </button>
+          </div>
         </div>
       </div>
 
@@ -425,12 +451,56 @@ export function VacancyResults({
         </div>
       )}
 
-      <div className="px-6 py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-4">
-        <div className="text-sm text-gray-500">
+      <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+        <div className="hidden sm:block text-sm text-gray-500 whitespace-nowrap">
           Страница {Math.min(currentPage, totalPages)} из {totalPages}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Mobile pagination */}
+        <div className="flex w-full items-center gap-2 sm:hidden">
           <button
+            type="button"
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={!canPrev || loading}
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Назад
+          </button>
+
+          <div className="flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+            <span className="text-xs text-gray-500">стр.</span>
+            <input
+              inputMode="numeric"
+              pattern="[0-9]*"
+              aria-label="Номер страницы"
+              value={pageDraft}
+              onChange={(e) => setPageDraft(e.target.value.replace(/[^\d]/g, ''))}
+              onBlur={() => commitPageDraft(pageDraft)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitPageDraft(pageDraft);
+                if (e.key === 'Escape') setPageDraft(String(currentPage));
+              }}
+              disabled={loading || totalPages <= 1}
+              className="w-12 bg-transparent text-center text-sm font-medium text-gray-900 outline-none disabled:opacity-50"
+            />
+            <span className="text-xs text-gray-500">/ {totalPages}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={!canNext || loading}
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Вперёд
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Desktop/tablet pagination */}
+        <div className="hidden sm:flex flex-wrap items-center gap-2">
+          <button
+            type="button"
             onClick={() => onPageChange(currentPage - 1)}
             disabled={!canPrev || loading}
             className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
@@ -442,9 +512,11 @@ export function VacancyResults({
               <span key={`ellipsis-${index}`} className="px-1 text-gray-400">…</span>
             ) : (
               <button
+                type="button"
                 key={page}
                 onClick={() => onPageChange(page)}
                 disabled={loading}
+                aria-current={page === currentPage ? 'page' : undefined}
                 className={`inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium ${
                   page === currentPage
                     ? 'bg-gray-900 text-white'
@@ -456,6 +528,7 @@ export function VacancyResults({
             )
           ))}
           <button
+            type="button"
             onClick={() => onPageChange(currentPage + 1)}
             disabled={!canNext || loading}
             className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
