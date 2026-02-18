@@ -45,6 +45,7 @@ blocks:
             - docker buildx create --use
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --platform linux/amd64 -f Dockerfile .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
   - name: Deploy to production
     dependencies:
       - Push Docker image
@@ -62,5 +63,5 @@ blocks:
             - sudo apt-get update && sudo apt-get install -y sshpass
             - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${USER}@${HOST}:/home/Portal/prod/'
             - >-
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin; sudo docker compose version; sudo docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps; sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f; sudo docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo docker rm -f; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps; sudo docker image prune -f; sudo docker volume prune -f"
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin; sudo docker compose version; sudo docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker; sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f; sudo docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo docker rm -f; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker; sudo docker image prune -f; sudo docker volume prune -f"
 

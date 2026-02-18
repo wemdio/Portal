@@ -3,7 +3,6 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { normalizeUrl } from '@/lib/enrich/websiteParser';
-import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 
 export const dynamic = 'force-dynamic';
 
@@ -154,9 +153,6 @@ export async function POST(req: NextRequest) {
         return jsonError(error.message, 500);
       }
     }
-
-    // Start background worker (non-blocking)
-    void runWebsiteEnrichmentJob(jobId);
 
     return NextResponse.json({
       job_id: jobId,
