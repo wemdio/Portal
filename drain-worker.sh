@@ -16,7 +16,9 @@ POLL_INTERVAL=15  # секунд между проверками
 # Загружаем env если не пришли снаружи
 if [ -f .env ]; then
   set -o allexport
-  source .env
+  # На сервере .env может быть с CRLF (Windows), тогда `source` падает на $'\r'.
+  # Нормализуем окончания строк на лету.
+  source <(tr -d '\r' < .env)
   set +o allexport
 fi
 
