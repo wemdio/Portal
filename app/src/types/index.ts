@@ -7,6 +7,7 @@ export type ProjectStatus =
   | 'Отменен';
 
 export * from './parsers';
+export * from './email-sequence';
 
 export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead';
 
