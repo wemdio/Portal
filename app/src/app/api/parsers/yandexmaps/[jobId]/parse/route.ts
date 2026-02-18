@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,17 +24,20 @@ export async function POST(req: NextRequest) {
   const jobId = getJobIdFromUrl(req);
   const { data: job, error } = await supabase
     .from('yandex_maps_jobs')
-    .select('id')
+    .select('id, status')
     .eq('id', jobId)
     .single();
 
   if (error) return jsonError(error.message, 500);
   if (!job) return jsonError('Not found', 404);
+  if (job.status === 'running') return jsonError('Job is already running', 409);
 
-  runYandexMapsParseOrganizations(jobId).catch((e) => {
-    console.error('Failed to run yandexmaps parse-orgs job:', e);
-  });
+  // Signal to the worker that this job is ready for the parse-orgs step.
+  // Worker picks up jobs in 'pending' status with 'ready_to_parse' stage.
+  await supabase
+    .from('yandex_maps_jobs')
+    .update({ status: 'pending', progress_stage: 'ready_to_parse', error_message: null })
+    .eq('id', jobId);
 
   return NextResponse.json({ ok: true }, { status: 202 });
 }
-
