@@ -6,11 +6,11 @@
 #
 # Переменные (берутся из .env):
 #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-#   WORKER_DRAIN_TIMEOUT_MINUTES (default: 60)
+#   WORKER_DRAIN_TIMEOUT_MINUTES (default: 15)
 
 set -euo pipefail
 
-TIMEOUT_MIN="${WORKER_DRAIN_TIMEOUT_MINUTES:-60}"
+TIMEOUT_MIN="${WORKER_DRAIN_TIMEOUT_MINUTES:-15}"
 POLL_INTERVAL=15  # секунд между проверками
 
 # Загружаем env если не пришли снаружи
@@ -31,9 +31,17 @@ if [ -z "$SUPABASE_URL" ] || [ -z "$KEY" ]; then
 fi
 
 count_running() {
-  local tables=("parser_jobs" "search_parser_jobs" "website_enrichment_jobs" "yandex_maps_jobs")
+  local tables=(
+    "parser_jobs:parser"
+    "search_parser_jobs:search_parser"
+    "website_enrichment_jobs:website_enrichment"
+    "yandex_maps_jobs:yandex_maps"
+  )
   local total=0
-  for table in "${tables[@]}"; do
+  local parts=()
+  for item in "${tables[@]}"; do
+    local table="${item%%:*}"
+    local label="${item#*:}"
     local n
     n=$(curl -s \
       "${SUPABASE_URL}/rest/v1/${table}?status=eq.running&select=id" \
@@ -42,8 +50,16 @@ count_running() {
       -H "Prefer: count=exact" \
       --write-out '%{header_json}' -o /dev/null 2>/dev/null \
       | python3 -c "import sys,json; h=json.load(sys.stdin); print(h.get('content-range',['0'])[0].split('/')[-1])" 2>/dev/null || echo 0)
-    total=$((total + ${n:-0}))
+    n="${n:-0}"
+    case "$n" in
+      ''|*[!0-9]*) n=0 ;;
+    esac
+    total=$((total + n))
+    if [ "$n" -gt 0 ]; then
+      parts+=("${label}=${n}")
+    fi
   done
+  RUNNING_DETAIL="${parts[*]:-}"
   echo "$total"
 }
 
@@ -65,7 +81,11 @@ while true; do
     break
   fi
 
-  echo "[drain] ${running} job(s) still running... (${elapsed}s elapsed, timeout ${max_seconds}s)"
+  if [ -n "${RUNNING_DETAIL:-}" ]; then
+    echo "[drain] ${running} job(s) still running (${RUNNING_DETAIL})... (${elapsed}s elapsed, timeout ${max_seconds}s)"
+  else
+    echo "[drain] ${running} job(s) still running... (${elapsed}s elapsed, timeout ${max_seconds}s)"
+  fi
   sleep "$POLL_INTERVAL"
   elapsed=$((elapsed + POLL_INTERVAL))
 done
