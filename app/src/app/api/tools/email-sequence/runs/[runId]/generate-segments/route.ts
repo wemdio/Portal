@@ -10,6 +10,8 @@ import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -125,7 +127,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     const segmentsJson = blocks.slice(0, 5).map((segment) => ({ segment }));
     const { error: runUpdErr } = await supabase
       .from('email_sequence_runs')
-      .update({ segments: segmentsJson })
+      .update({ segments: segmentsJson, status: 'completed', updated_at: new Date().toISOString() })
       .eq('id', runId);
     if (runUpdErr) throw new Error(runUpdErr.message);
 
