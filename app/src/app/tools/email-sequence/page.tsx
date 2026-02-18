@@ -27,7 +27,7 @@ async function getToken() {
   return session?.access_token ?? '';
 }
 
-async function authedFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
+async function authedFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const token = await getToken();
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token}`);
@@ -327,13 +327,17 @@ export default function EmailSequencePage() {
   const [brief, setBrief] = useState<EmailSequenceBrief>({ ...EMPTY_BRIEF });
 
   const refresh = useCallback(async (runId?: string) => {
-    const data = await authedFetch('/api/tools/email-sequence/runs', { method: 'GET' });
-    setRuns((data.runs ?? []) as EmailSequenceRunRow[]);
+    const data = await authedFetch<{ runs: EmailSequenceRunRow[] }>('/api/tools/email-sequence/runs', { method: 'GET' });
+    setRuns(data.runs ?? []);
     if (runId) {
-      const runData = await authedFetch(`/api/tools/email-sequence/runs/${runId}`, { method: 'GET' });
-      setRun(runData.run as EmailSequenceRunRow);
-      setSegments((runData.segments ?? []) as EmailSequenceSegmentRow[]);
-      setLetters((runData.letters ?? []) as EmailSequenceLetterRow[]);
+      const runData = await authedFetch<{
+        run: EmailSequenceRunRow;
+        segments: EmailSequenceSegmentRow[];
+        letters: EmailSequenceLetterRow[];
+      }>(`/api/tools/email-sequence/runs/${runId}`, { method: 'GET' });
+      setRun(runData.run ?? null);
+      setSegments(runData.segments ?? []);
+      setLetters(runData.letters ?? []);
       setBrief((runData.run?.brief ?? {}) as EmailSequenceBrief);
     }
   }, []);
@@ -409,7 +413,7 @@ export default function EmailSequencePage() {
     setError(null);
     setBusy('create');
     try {
-      const data = await authedFetch('/api/tools/email-sequence/runs', {
+      const data = await authedFetch<{ run: EmailSequenceRunRow }>('/api/tools/email-sequence/runs', {
         method: 'POST',
         body: JSON.stringify({ brief }),
       });
