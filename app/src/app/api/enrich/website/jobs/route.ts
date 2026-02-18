@@ -4,7 +4,6 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { normalizeUrl } from '@/lib/enrich/websiteParser';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
-import { extractActiveJobIds } from '@/lib/enrich/jobLifecycle';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,13 +26,14 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return jsonError('Unauthorized', 401);
 
-    let body: { rows?: EnqueueRow[] };
+    let body: { rows?: EnqueueRow[]; extraction_type?: string };
     try {
-      body = (await req.json()) as { rows?: EnqueueRow[] };
+      body = (await req.json()) as { rows?: EnqueueRow[]; extraction_type?: string };
     } catch {
       return jsonError('Invalid JSON body', 400);
     }
 
+    const extractionType = body.extraction_type === 'email' ? 'email' : 'text';
     const rows = body.rows ?? [];
     if (!Array.isArray(rows) || rows.length === 0) {
       return jsonError('No rows provided', 400);
@@ -44,50 +44,46 @@ export async function POST(req: NextRequest) {
 
     const now = new Date().toISOString();
 
-    // Ensure only one active enrichment per user to avoid stale parallel jobs.
+    // Block if user already has an active enrichment job (don't silently cancel).
     const { data: existingJobs, error: existingJobsError } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, status')
+      .select('id, status, extraction_type, total, processed, created_at')
       .eq('user_id', user.id)
-      .in('status', ['pending', 'running']);
+      .in('status', ['pending', 'running'])
+      .order('created_at', { ascending: false })
+      .limit(1);
 
     if (existingJobsError) {
       return jsonError(existingJobsError.message, 500);
     }
 
-    const activeJobIds = extractActiveJobIds((existingJobs ?? []) as Array<{ id: string; status: string | null }>);
-    if (activeJobIds.length > 0) {
-      const cancelledAt = new Date().toISOString();
-      const stopReason = 'Операция остановлена: запущено новое обогащение';
+    const activeJob = (existingJobs ?? [])[0] as {
+      id: string;
+      status: string;
+      extraction_type: string;
+      total: number;
+      processed: number;
+      created_at: string;
+    } | undefined;
 
-      const { error: cancelJobsError } = await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .update({
-          status: 'cancelled',
-          completed_at: cancelledAt,
-          error_message: stopReason,
-        })
-        .in('id', activeJobIds);
-
-      if (cancelJobsError) {
-        return jsonError(cancelJobsError.message, 500);
-      }
-
-      const { error: cancelQueueError } = await supabaseAdmin
-        .from('website_enrichment_queue')
-        .update({
-          status: 'failed',
-          result_text: null,
-          last_error: stopReason,
-          updated_at: cancelledAt,
-          completed_at: cancelledAt,
-        })
-        .in('job_id', activeJobIds)
-        .in('status', ['pending', 'processing']);
-
-      if (cancelQueueError) {
-        return jsonError(cancelQueueError.message, 500);
-      }
+    if (activeJob) {
+      const typeLabel = activeJob.extraction_type === 'email' ? 'Поиск почт' : 'Обогащение с сайта';
+      const progress = activeJob.total > 0
+        ? Math.round((activeJob.processed / activeJob.total) * 100)
+        : 0;
+      return NextResponse.json(
+        {
+          error: `У вас уже выполняется задача: «${typeLabel}» (${progress}% — ${activeJob.processed}/${activeJob.total}). Дождитесь её завершения или остановите вручную.`,
+          active_job: {
+            id: activeJob.id,
+            extraction_type: activeJob.extraction_type,
+            total: activeJob.total,
+            processed: activeJob.processed,
+            progress,
+          },
+        },
+        { status: 409 },
+      );
     }
 
     let invalidCount = 0;
@@ -133,6 +129,7 @@ export async function POST(req: NextRequest) {
       .insert({
         user_id: user.id,
         status: 'pending',
+        extraction_type: extractionType,
         total: rows.length,
         processed: invalidCount,
         success_count: 0,

@@ -9,6 +9,19 @@ import type {
   EmailSequenceSegmentRow,
 } from '@/types';
 
+const EMPTY_BRIEF: EmailSequenceBrief = {
+  site: '',
+  Company: '',
+  Product: '',
+  Service: '',
+  Segments: '',
+  ca: '',
+  FIGURES: '',
+  sender_name: '',
+  language: 'ru',
+  notes: '',
+};
+
 async function getToken() {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token ?? '';
@@ -194,7 +207,7 @@ function SegmentModal({
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="absolute inset-0 flex items-end justify-center p-4 sm:items-center">
+      <div className="absolute inset-0 flex items-end justify-center p-4 pb-24 sm:items-center sm:pb-4">
         <div className="w-full max-w-3xl rounded-2xl border border-gray-200 bg-white shadow-xl">
           <div className="flex items-start justify-between gap-4 border-b border-gray-100 p-5">
             <div className="min-w-0">
@@ -234,7 +247,7 @@ function SegmentModal({
               <pre className="whitespace-pre-wrap text-sm text-gray-800">{text || '—'}</pre>
             </div>
 
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mt-4 flex items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -296,21 +309,11 @@ export default function EmailSequencePage() {
   const [analyzeQueueByRun, setAnalyzeQueueByRun] = useState<Record<string, number[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [newBriefNotice, setNewBriefNotice] = useState<string | null>(null);
 
   const coreLoaded = useRef<boolean | null>(null);
 
-  const [brief, setBrief] = useState<EmailSequenceBrief>({
-    site: '',
-    Company: '',
-    Product: '',
-    Service: '',
-    Segments: '',
-    ca: '',
-    FIGURES: '',
-    sender_name: '',
-    language: 'ru',
-    notes: '',
-  });
+  const [brief, setBrief] = useState<EmailSequenceBrief>({ ...EMPTY_BRIEF });
 
   const refresh = useCallback(async (runId?: string) => {
     const data = await authedFetch('/api/tools/email-sequence/runs', { method: 'GET' });
@@ -484,6 +487,21 @@ export default function EmailSequencePage() {
     [run?.id, refresh],
   );
 
+  const resetToNewBrief = useCallback(() => {
+    setRun(null);
+    setSegments([]);
+    setLetters([]);
+    setSelectedSegment(null);
+    setActiveLetterIndex(1);
+    setSegmentModalId(null);
+    setSegmentModalNotice(null);
+    setAnalyzeQueueByRun({});
+    setError(null);
+    setBrief({ ...EMPTY_BRIEF });
+    setNewBriefNotice('Новый бриф создан');
+    window.setTimeout(() => setNewBriefNotice(null), 3000);
+  }, []);
+
   const modalSegment = useMemo(() => {
     if (!segmentModalId) return null;
     return segments.find((s) => s.id === segmentModalId) ?? null;
@@ -527,7 +545,7 @@ export default function EmailSequencePage() {
                 disabled={busy != null}
                 className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                {run ? 'Сохранить бриф' : 'Создать запуск'}
+                {run ? 'Сохранить' : 'Создать'}
               </button>
             </div>
 
@@ -580,7 +598,26 @@ export default function EmailSequencePage() {
 
         <div className="xl:col-span-1 h-full">
           <div className="rounded-2xl border border-gray-200 bg-white p-6 flex flex-col h-full">
-            <h2 className="text-lg font-semibold text-gray-900">Запуски</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-gray-900">Запуски</h2>
+              <button
+                type="button"
+                onClick={resetToNewBrief}
+                disabled={busy != null}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 active:scale-95 active:bg-gray-100 transition disabled:opacity-50"
+                title="Новый бриф"
+                aria-label="Новый бриф"
+              >
+                <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+            {newBriefNotice ? (
+              <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+                {newBriefNotice}
+              </div>
+            ) : null}
             <p className="text-sm text-gray-500 mt-1">Последние 20 запусков.</p>
             <div className="mt-4 space-y-2 flex-1 overflow-y-auto pr-1">
               {runs.length ? (

@@ -512,67 +512,77 @@ export function SearchParserView() {
 
         {/* Results */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <div>
-               <div className="flex items-center gap-2">
-                 <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
-                 {activeJob ? <JobStatus status={activeJob.status} errorMessage={activeJob.error_message} /> : null}
-               </div>
-               <p className="text-sm text-gray-500">
-                 {activeJob ? (
-                   <>
-                     Компаний: {totalCompanies} · Источников: {totalSources} · Всего ссылок: {totalResults} · Запросов: {processedQueries}/{totalQueries}
-                   </>
-                 ) : (
-                   `${totalCompanies} компаний`
-                 )}
-               </p>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-               {activeJob ? (
-                 <>
-                   {showStop ? (
-                     <button
-                       onClick={() => activeJob?.id ? stopJob(activeJob.id) : undefined}
-                       disabled={jobControlsDisabled}
-                       className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
-                     >
-                       Остановить
-                     </button>
-                   ) : null}
-                   <button
-                     onClick={() => activeJob?.id ? deleteJob(activeJob.id) : undefined}
-                     disabled={jobControlsDisabled}
-                     className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
-                   >
-                     Удалить
-                   </button>
-                 </>
-               ) : null}
-               <button
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-200">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
+                    {activeJob ? <JobStatus status={activeJob.status} errorMessage={activeJob.error_message} /> : null}
+                  </div>
+                  {activeJob ? (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {showStop ? (
+                        <button
+                          type="button"
+                          onClick={() => activeJob?.id ? stopJob(activeJob.id) : undefined}
+                          disabled={jobControlsDisabled}
+                          className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                        >
+                          Остановить
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => activeJob?.id ? deleteJob(activeJob.id) : undefined}
+                        disabled={jobControlsDisabled}
+                        className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                      >
+                        Удалить
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+                <p className="text-sm text-gray-500">
+                  {activeJob ? (
+                    <>
+                      Компаний: {totalCompanies} · Источников: {totalSources} · Всего ссылок: {totalResults} · Запросов: {processedQueries}/{totalQueries}
+                    </>
+                  ) : (
+                    `${totalCompanies} компаний`
+                  )}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+                <button
+                  type="button"
                   onClick={handleExportCsv}
                   disabled={exportDisabled}
-                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-               >
-                  <Download className="h-4 w-4 mr-2" />
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                >
+                  <Download className="h-4 w-4" />
                   CSV
-               </button>
-               <button
+                </button>
+                <button
+                  type="button"
                   onClick={handleExportExcel}
                   disabled={exportDisabled}
-                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-               >
-                  <FileSpreadsheet className="h-4 w-4 mr-2" />
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                >
+                  <FileSpreadsheet className="h-4 w-4" />
                   Excel
-               </button>
-               <button
+                </button>
+                <button
+                  type="button"
                   onClick={handleCopy}
                   disabled={exportDisabled}
-                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-               >
-                  {copiedResults ? <Check className="h-4 w-4 mr-2 text-green-500" /> : <Copy className="h-4 w-4 mr-2" />}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                >
+                  {copiedResults ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
                   Копировать
-               </button>
+                </button>
+              </div>
             </div>
           </div>
 

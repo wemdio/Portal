@@ -81,7 +81,7 @@ export function JobsList({
       {jobs.length === 0 ? (
         <div className="px-6 py-10 text-center text-gray-500">Запусков пока нет</div>
       ) : (
-        <div className="divide-y divide-gray-100">
+        <div className="divide-y divide-gray-100 max-h-[560px] overflow-y-auto md:max-h-none md:overflow-visible">
           {jobs.map((job) => {
             const isActive = activeJobId === job.id;
             const stoppedByUser = isStoppedByUser(job.status, job.error_message);
