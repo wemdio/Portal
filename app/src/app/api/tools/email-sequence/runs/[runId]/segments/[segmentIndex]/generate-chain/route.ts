@@ -4,12 +4,71 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import type { EmailSequenceBrief } from '@/types';
 import { callOpenAI } from '@/lib/emailSequence/llm';
 import { safeStr } from '@/lib/emailSequence/templating';
-import { WRITER_PROMPTS } from '@/lib/emailSequence/prompts';
 import { PROMPT_LETTER_EXAMPLES } from '@/lib/emailSequence/promptLetterExamples.server';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
+
+function normalizeNewlines(text: string) {
+  return String(text ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function splitLettersFromModelOutput(raw: string): Array<{ letter_index: 1 | 2 | 3 | 4; content: string }> {
+  const text = normalizeNewlines(raw).trim();
+  if (!text) return [];
+
+  // Preferred format: ---LETTER 1--- ... ---LETTER 2--- ...
+  const markerRe = /---\s*LETTER\s*([1-4])\s*---/gi;
+  const markers: Array<{ idx: number; n: 1 | 2 | 3 | 4 }> = [];
+  for (;;) {
+    const m = markerRe.exec(text);
+    if (!m) break;
+    const n = Number(m[1]);
+    if (n >= 1 && n <= 4) markers.push({ idx: m.index, n: n as 1 | 2 | 3 | 4 });
+  }
+
+  if (markers.length >= 2) {
+    const byIdx = [...markers].sort((a, b) => a.idx - b.idx);
+    const out: Array<{ letter_index: 1 | 2 | 3 | 4; content: string }> = [];
+    for (let i = 0; i < byIdx.length; i += 1) {
+      const cur = byIdx[i];
+      const start = cur.idx;
+      const end = i + 1 < byIdx.length ? byIdx[i + 1].idx : text.length;
+      const block = text.slice(start, end);
+      const content = block.replace(/---\s*LETTER\s*[1-4]\s*---/i, '').trim();
+      if (content) out.push({ letter_index: cur.n, content });
+    }
+    const dedup = new Map<number, string>();
+    for (const item of out) {
+      if (!dedup.has(item.letter_index)) dedup.set(item.letter_index, item.content);
+    }
+    const result: Array<{ letter_index: 1 | 2 | 3 | 4; content: string }> = [];
+    for (const n of [1, 2, 3, 4] as const) {
+      const content = dedup.get(n);
+      if (!content) continue;
+      result.push({ letter_index: n, content });
+    }
+    return result;
+  }
+
+  // Fallback: split by "Тема:" occurrences.
+  const blocks = text
+    .split(/\n(?=Тема:)/g)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  if (blocks.length >= 4) {
+    return (blocks.slice(0, 4) as string[]).map((content, i) => ({
+      letter_index: (i + 1) as 1 | 2 | 3 | 4,
+      content,
+    }));
+  }
+
+  return [];
+}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -151,76 +210,85 @@ export async function POST(
       .eq('run_id', runId)
       .eq('segment_index', idx);
 
-    const letters: string[] = [];
+    const language = safeStr(brief.language).trim() || 'ru';
 
-    const runLetter = async (letterIndex: 1 | 2 | 3 | 4) => {
-      const stepSpan = await trace?.startChild({
-        name: `email_sequence.letter_${letterIndex}`,
-        input: { runId, segmentIndex: idx, letterIndex, model: modelWriter },
-        message: `Генерация письма ${letterIndex}`,
+    const sys = [
+      'Ты — AI Email Outreach Assistant.',
+      'Нужно сгенерировать цепочку из 4 писем (письмо 1–4) для одного сегмента.',
+      '',
+      'Жёсткие правила:',
+      '- Каждое письмо начинается с первой строки: "Тема: ...".',
+      '- Язык письма: ' + language + '.',
+      '- Подпись: только имя отправителя: ' + (sender || 'sender_name') + '. Без телефонов/сайтов/должностей.',
+      '- Письмо 1: очень короткое, нейтральное, без продажи и описания продукта/оффера. Цель — попасть к ЛПР / попросить контакт.',
+      '- Письмо 2: кратко представить кто мы/что делаем + 1–2 конкретных факта/доказательства + мягкий CTA (короткий созвон/ответ).',
+      '- Письмо 3: снять ключевые возражения, подчеркнуть УТП, без агрессии.',
+      '- Письмо 4: финальное, корректно закрыть, оставить дверь открытой, лёгкий FOMO без давления.',
+      '',
+      'Формат вывода ОБЯЗАТЕЛЕН (без лишнего текста):',
+      '---LETTER 1---',
+      '<текст письма 1>',
+      '---LETTER 2---',
+      '<текст письма 2>',
+      '---LETTER 3---',
+      '<текст письма 3>',
+      '---LETTER 4---',
+      '<текст письма 4>',
+    ].join('\n');
+
+    const examples = [
+      '## Examples (do not copy verbatim)',
+      '',
+      '### Letter 1 examples',
+      PROMPT_LETTER_EXAMPLES.letter1,
+      '',
+      '### Letter 2 examples',
+      PROMPT_LETTER_EXAMPLES.letter2,
+      '',
+      '### Letter 3 examples',
+      PROMPT_LETTER_EXAMPLES.letter3,
+      '',
+      '### Letter 4 examples',
+      PROMPT_LETTER_EXAMPLES.letter4,
+    ].join('\n');
+
+    const userContext = buildContext(brief, segment, [])
+      .replace('(Use as style/examples. Do not copy verbatim.)', examples);
+
+    const chainSpan = await trace?.startChild({
+      name: 'email_sequence.chain_single_call',
+      input: { runId, segmentIndex: idx, model: modelWriter, sysChars: sys.length, contextChars: userContext.length },
+      message: 'OpenAI: генерация 4 писем одним запросом',
+    });
+
+    let raw = '';
+    try {
+      raw = await callOpenAI({
+        model: modelWriter,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: userContext },
+        ],
+        temperature: 0.6,
+        maxTokens: 2600,
+        timeoutMs: 180_000,
       });
+      await chainSpan?.end({ textChars: raw.length }, `Ок (${raw.length} chars)`);
+    } catch (err) {
+      await chainSpan?.fail(err, { sysChars: sys.length, contextChars: userContext.length });
+      throw err;
+    }
 
-      const examples =
-        letterIndex === 1
-          ? PROMPT_LETTER_EXAMPLES.letter1
-          : letterIndex === 2
-            ? PROMPT_LETTER_EXAMPLES.letter2
-            : letterIndex === 3
-              ? PROMPT_LETTER_EXAMPLES.letter3
-              : PROMPT_LETTER_EXAMPLES.letter4;
+    const letters = splitLettersFromModelOutput(raw);
+    if (letters.length !== 4) {
+      throw new Error(`Не удалось разобрать 4 письма из ответа модели (получено: ${letters.length})`);
+    }
 
-      const sys =
-        letterIndex === 1
-          ? WRITER_PROMPTS.letter1
-          : letterIndex === 2
-            ? WRITER_PROMPTS.letter2.replace('{{previous_letter_1}}', letters[0] ?? '')
-            : letterIndex === 3
-              ? WRITER_PROMPTS.letter3
-                  .replace('{{previous_letter_1}}', letters[0] ?? '')
-                  .replace('{{previous_letter_2}}', letters[1] ?? '')
-              : WRITER_PROMPTS.letter4
-                  .replace('{{previous_letter_1}}', letters[0] ?? '')
-                  .replace('{{previous_letter_2}}', letters[1] ?? '')
-                  .replace('{{previous_letter_3}}', letters[2] ?? '');
-
-      const context = buildContext(brief, segment, letters)
-        .replace('(Use as style/examples. Do not copy verbatim.)', examples);
-
-      await stepSpan?.setOutput({ sysChars: sys.length, contextChars: context.length });
-
-      try {
-        const text = await callOpenAI({
-          model: modelWriter,
-          messages: [
-            { role: 'system', content: sys },
-            { role: 'user', content: context },
-          ],
-          temperature: 0.6,
-          maxTokens: 1200,
-          timeoutMs: 160_000,
-        });
-
-        letters.push(text);
-        await stepSpan?.end(
-          { textChars: text.length },
-          `Сгенерировано (${text.length} chars)`,
-        );
-      } catch (err) {
-        await stepSpan?.fail(err, { sysChars: sys.length, contextChars: context.length });
-        throw err;
-      }
-    };
-
-    await runLetter(1);
-    await runLetter(2);
-    await runLetter(3);
-    await runLetter(4);
-
-    const payload = letters.map((content, i) => ({
+    const payload = letters.map((l) => ({
       run_id: runId,
       segment_index: idx,
-      letter_index: i + 1,
-      content,
+      letter_index: l.letter_index,
+      content: l.content,
     }));
 
     const { error: insErr } = await supabase.from('email_sequence_letters').insert(payload);
@@ -233,7 +301,7 @@ export async function POST(
 
     await trace?.end(
       {
-        letters: letters.map((t, i) => ({ letterIndex: i + 1, chars: t.length })),
+        letters: letters.map((t) => ({ letterIndex: t.letter_index, chars: t.content.length })),
       },
       'Цепочка писем сгенерирована',
     );
@@ -245,7 +313,7 @@ export async function POST(
       logMeta,
     );
 
-    return NextResponse.json({ letters });
+    return NextResponse.json({ letters: letters.map((l) => l.content) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await trace?.fail(err, { runId, segmentIndex: idx });

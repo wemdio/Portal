@@ -27,18 +27,29 @@ async function getToken() {
   return session?.access_token ?? '';
 }
 
-async function authedFetch(path: string, init?: RequestInit) {
+async function authedFetch<T = any>(path: string, init?: RequestInit): Promise<T> {
   const token = await getToken();
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${token}`);
   headers.set('Content-Type', 'application/json');
   const res = await fetch(path, { ...init, headers });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data?.error ?? `Request failed: ${res.status}`;
-    throw new Error(String(msg));
+  const raw = await res.text().catch(() => '');
+  let parsed: unknown = {};
+  try {
+    parsed = raw ? (JSON.parse(raw) as unknown) : {};
+  } catch {
+    parsed = {};
   }
-  return data;
+
+  if (!res.ok) {
+    const maybe = parsed as { error?: unknown } | null;
+    const fromJson = maybe?.error != null ? String(maybe.error) : '';
+    const fromText = raw && !fromJson ? raw.slice(0, 300) : '';
+    const msg = fromJson || fromText || `Request failed: ${res.status}`;
+    throw new Error(`${msg} (${res.status} ${res.statusText || 'HTTP'} · ${path})`);
+  }
+
+  return parsed as T;
 }
 
 async function authedFetchWithTimeout(path: string, init?: RequestInit, timeoutMs = 180_000) {
