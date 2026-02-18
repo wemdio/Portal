@@ -2,7 +2,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,13 +57,6 @@ export async function POST(req: NextRequest) {
     if (error || !job) {
       throw new Error(error?.message || 'Failed to create job');
     }
-
-    // Trigger worker in background (without waiting)
-    // In Node/Vercel edge functions, we should use waitUntil if available, or just not await.
-    // Since this is likely a standard Node.js runtime, logging errors is important.
-    runSearchParserJob(job.id).catch(err => {
-      console.error('Failed to run search parser job in background:', err);
-    });
 
     return NextResponse.json({ job });
   } catch (err) {

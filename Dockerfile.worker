@@ -1,0 +1,56 @@
+# Stage 1: Dependencies
+# Use Debian-based image — Playwright needs system libs unavailable on Alpine
+FROM node:20-slim AS deps
+WORKDIR /app
+
+COPY app/package.json app/package-lock.json ./
+
+# Skip postinstall (playwright install) — we run it manually below
+RUN npm ci --ignore-scripts
+
+# Install Chromium + system dependencies
+RUN npx playwright install chromium --with-deps
+
+# Stage 2: Build worker bundle with esbuild
+FROM node:20-slim AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY app/ ./
+
+# Bundle worker into a single JS file.
+# --conditions=react-server: makes server-only resolve to empty module,
+# so loggerServer, tracer, supabaseAdmin etc. work fine outside Next.js.
+# --external:playwright: keep playwright as a runtime require (native binaries).
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN node_modules/.bin/esbuild worker/index.ts \
+  --bundle \
+  --platform=node \
+  --target=node20 \
+  --outfile=dist/worker.js \
+  --tsconfig=tsconfig.json \
+  --conditions=react-server \
+  --external:playwright \
+  --log-level=info
+
+# Stage 3: Runtime
+FROM node:20-slim AS runner
+WORKDIR /app
+
+RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 worker
+
+# Copy Playwright browser cache from deps stage
+COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
+
+# Install only Playwright system libraries (no browser download)
+RUN npx playwright install-deps chromium
+
+# Runtime node_modules (for Playwright native modules)
+COPY --from=deps /app/node_modules ./node_modules
+
+# Compiled worker bundle
+COPY --from=builder /app/dist/worker.js ./worker.js
+
+USER worker
+
+CMD ["node", "worker.js"]
