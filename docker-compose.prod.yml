@@ -42,7 +42,13 @@ services:
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
+      - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
       - WORKER_POLL_INTERVAL_MS=3000
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-60}
+    depends_on:
+      - yandexmaps
+    stop_grace_period: 4h
     restart: unless-stopped
     networks:
       - portal-network

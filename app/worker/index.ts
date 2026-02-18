@@ -12,6 +12,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
+import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
@@ -70,6 +71,15 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (enrichErr) log('warn', 'Startup recovery: website_enrichment_jobs update failed', enrichErr);
   else if (enrichJobs?.length) log('info', `Startup recovery: reset ${enrichJobs.length} website_enrichment_jobs to pending`);
+
+  // YandexMaps — сбрасываем в 'failed' (нельзя безопасно продолжить посередине HTTP-цикла к Python-сервису)
+  const { data: ymJobs, error: ymErr } = await db
+    .from('yandex_maps_jobs')
+    .update({ status: 'failed', error_message: 'Прервано перезапуском worker-сервиса' })
+    .eq('status', 'running')
+    .select('id');
+  if (ymErr) log('warn', 'Startup recovery: yandex_maps_jobs update failed', ymErr);
+  else if (ymJobs?.length) log('info', `Startup recovery: marked ${ymJobs.length} yandex_maps_jobs as failed`);
 }
 
 // --------------------------------------------------------------------------
@@ -142,6 +152,27 @@ async function claimEnrichJob(): Promise<string | null> {
   return pending.id;
 }
 
+async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
+  const db = supabaseAdmin!;
+
+  // Collect-links step: jobs in 'pending' status with initial stage ('pending')
+  // Parse step: jobs in 'pending' status explicitly marked 'ready_to_parse' by the user
+  // 'links_collected' stage is intentionally skipped — user must confirm parse step
+  const { data: pending } = await db
+    .from('yandex_maps_jobs')
+    .select('id, progress_stage')
+    .eq('status', 'pending')
+    .in('progress_stage', ['pending', 'ready_to_parse'])
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const stage = (pending.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
+  return { id: pending.id as string, stage };
+}
+
 // --------------------------------------------------------------------------
 // Single poll tick — tries to pick up one job of any type
 // --------------------------------------------------------------------------
@@ -168,6 +199,18 @@ async function pollOnce(): Promise<boolean> {
   if (enrichJobId) {
     log('info', `Running website enrichment job ${enrichJobId}`);
     await runWebsiteEnrichmentJob(enrichJobId);
+    return true;
+  }
+
+  const ymJob = await claimYandexMapsJob();
+  if (ymJob) {
+    if (ymJob.stage === 'collect') {
+      log('info', `Running YandexMaps collect-links job ${ymJob.id}`);
+      await runYandexMapsCollectLinks(ymJob.id);
+    } else {
+      log('info', `Running YandexMaps parse-orgs job ${ymJob.id}`);
+      await runYandexMapsParseOrganizations(ymJob.id);
+    }
     return true;
   }
 

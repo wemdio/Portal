@@ -59,9 +59,24 @@ blocks:
           - checkout
       jobs:
         - name: SSH Deploy
+          execution_time_limit:
+            minutes: 120
           commands:
             - sudo apt-get update && sudo apt-get install -y sshpass
-            - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${USER}@${HOST}:/home/Portal/prod/'
+            - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml drain-worker.sh ${USER}@${HOST}:/home/Portal/prod/'
             - >-
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin; sudo docker compose version; sudo docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker; sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f; sudo docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo docker rm -f; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps; sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps worker; sudo docker image prune -f; sudo docker volume prune -f"
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; chmod +x drain-worker.sh;
+              echo '--- Step 1: drain worker (wait for current job to finish) ---';
+              sudo bash drain-worker.sh;
+              echo '--- Step 2: pull new images ---';
+              echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin;
+              sudo docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker;
+              echo '--- Step 3: restart portal + yandexmaps ---';
+              sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f;
+              sudo docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo docker rm -f;
+              sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps;
+              echo '--- Step 4: restart worker with new code ---';
+              sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker;
+              sudo docker image prune -f; sudo docker volume prune -f;
+              echo '--- Deploy complete ---'"
 
