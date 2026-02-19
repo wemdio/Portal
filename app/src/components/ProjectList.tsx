@@ -400,6 +400,7 @@ export function ProjectList() {
 
   const statusCounts = {
     all: projects.length,
+    'подготовка': projects.filter(p => p.status?.toLowerCase().includes('подготовк')).length,
     'в работе': projects.filter(p => p.status?.toLowerCase().includes('работ')).length,
     'тестирование': projects.filter(p => p.status?.toLowerCase().includes('тест')).length,
     'на паузе': projects.filter(p => p.status?.toLowerCase().includes('пауз')).length,
@@ -501,6 +502,7 @@ export function ProjectList() {
           <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar border-t border-gray-100 pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar border-l border-gray-100 pl-4 py-1'}>
           {[
             { key: 'all', label: 'Все' },
+            { key: 'подготовка', label: 'Подготовка' },
             { key: 'в работе', label: 'В работе' },
             { key: 'тестирование', label: 'Тест' },
             { key: 'на паузе', label: 'Пауза' },
@@ -621,6 +623,7 @@ export function ProjectList() {
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Проект</th>
+                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Статус</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Сумма</th>
                   <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Договор</th>
                   <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Передача</th>
@@ -705,6 +708,29 @@ export function ProjectList() {
                           </button>
                       )}
                     </td>
+                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                        {(() => {
+                          const cfg = getStatusConfig(project.status);
+                          return canEdit ? (
+                            <select
+                              value={project.status || ''}
+                              onChange={(e) => {
+                                void commitProjectUpdate(project, { status: e.target.value as ProjectStatus });
+                              }}
+                              disabled={isSaving}
+                              className={`appearance-none cursor-pointer text-xs font-medium px-2.5 py-1 rounded-full border-0 ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color} focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+                            >
+                              {STATUS_OPTIONS.map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color}`}>
+                              {cfg.label}
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
@@ -761,11 +787,19 @@ export function ProjectList() {
                             disabled={isDisabled}
                             placeholder="DD.MM.YY"
                           />
-                        ) : (
-                          <div className="flex items-center text-gray-600">
-                             <span>{readOnlyDeadline}</span>
-                          </div>
-                        )}
+                        ) : (() => {
+                          const dlStatus = getDeadlineStatus(project.deadline);
+                          return (
+                            <span className={
+                              dlStatus === 'overdue' ? 'text-red-600 font-semibold' :
+                              dlStatus === 'soon' ? 'text-amber-600 font-medium' :
+                              'text-gray-600'
+                            }>
+                              {readOnlyDeadline}
+                              {dlStatus === 'overdue' && <span className="ml-1 text-[10px]">●</span>}
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
