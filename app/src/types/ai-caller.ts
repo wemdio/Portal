@@ -100,15 +100,29 @@ export interface VapiCall {
 
 export type AiCallerTab = 'test-call' | 'assistants' | 'campaigns' | 'analytics' | 'history';
 
+export type VoiceProvider = '11labs' | 'playht' | 'cartesia';
+
 export interface VoicePreset {
   id: string;
   label: string;
+  provider: VoiceProvider;
   voiceId: string;
-  model: string;
-  stability: number;
-  similarityBoost: number;
-  style: number;
-  speed: number;
+  group: string;
+  // ElevenLabs
+  model?: string;
+  stability?: number;
+  similarityBoost?: number;
+  style?: number;
+  speed?: number;
+  // PlayHT
+  playhtModel?: string;
+  temperature?: number;
+  emotion?: string;
+  language?: string;
+  // Cartesia
+  cartesiaModel?: string;
+  cartesiaLanguage?: string;
+  experimentalEmotion?: string;
 }
 
 export interface LlmPreset {
@@ -122,9 +136,12 @@ export interface LlmPreset {
 // ── Presets (constant data) ──
 
 export const VOICE_PRESETS: VoicePreset[] = [
+  // ── ElevenLabs ──
   {
     id: 'kate',
     label: 'Kate — Спокойная и дружелюбная',
+    provider: '11labs',
+    group: 'ElevenLabs',
     voiceId: 'tOo2BJ74frmnPadsDNIi',
     model: 'eleven_multilingual_v2',
     stability: 0.55,
@@ -135,6 +152,8 @@ export const VOICE_PRESETS: VoicePreset[] = [
   {
     id: 'mariia',
     label: 'Mariia_R — Тёплая и мягкая',
+    provider: '11labs',
+    group: 'ElevenLabs',
     voiceId: 'RxZqkSWQzJ6HCRFMiyqe',
     model: 'eleven_multilingual_v2',
     stability: 0.5,
@@ -145,6 +164,8 @@ export const VOICE_PRESETS: VoicePreset[] = [
   {
     id: 'nadia',
     label: 'Nadia — Молодая и энергичная',
+    provider: '11labs',
+    group: 'ElevenLabs',
     voiceId: 'GBv7mTt0atIp3Br8iCZE',
     model: 'eleven_multilingual_v2',
     stability: 0.5,
@@ -155,12 +176,83 @@ export const VOICE_PRESETS: VoicePreset[] = [
   {
     id: 'ekaterina',
     label: 'Ekaterina — Деловая и уверенная',
+    provider: '11labs',
+    group: 'ElevenLabs',
     voiceId: 'UhKFMrGGBHcGHwwt3X1R',
     model: 'eleven_multilingual_v2',
     stability: 0.55,
     similarityBoost: 0.8,
     style: 0.25,
     speed: 0.88,
+  },
+  // ── PlayHT ──
+  {
+    id: 'playht-jennifer',
+    label: 'Jennifer — Мягкая, женская',
+    provider: 'playht',
+    group: 'PlayHT',
+    voiceId: 'jennifer',
+    playhtModel: 'Play3.0-mini',
+    language: 'russian',
+    speed: 1.0,
+    temperature: 0.5,
+    emotion: 'female_happy',
+  },
+  {
+    id: 'playht-melissa',
+    label: 'Melissa — Спокойная, женская',
+    provider: 'playht',
+    group: 'PlayHT',
+    voiceId: 'melissa',
+    playhtModel: 'Play3.0-mini',
+    language: 'russian',
+    speed: 1.0,
+    temperature: 0.5,
+  },
+  {
+    id: 'playht-ruby',
+    label: 'Ruby — Энергичная, женская',
+    provider: 'playht',
+    group: 'PlayHT',
+    voiceId: 'ruby',
+    playhtModel: 'Play3.0-mini',
+    language: 'russian',
+    speed: 1.0,
+    temperature: 0.6,
+    emotion: 'female_happy',
+  },
+  {
+    id: 'playht-jack',
+    label: 'Jack — Уверенный, мужской',
+    provider: 'playht',
+    group: 'PlayHT',
+    voiceId: 'jack',
+    playhtModel: 'Play3.0-mini',
+    language: 'russian',
+    speed: 1.0,
+    temperature: 0.5,
+  },
+  // ── Cartesia ──
+  {
+    id: 'cartesia-default-f',
+    label: 'Sonic — Женский, мультиязычный',
+    provider: 'cartesia',
+    group: 'Cartesia',
+    voiceId: 'a0e99841-438c-4a64-b679-ae501e7d6091',
+    cartesiaModel: 'sonic-2',
+    cartesiaLanguage: 'ru',
+    speed: 1.0,
+    experimentalEmotion: 'positivity:high',
+  },
+  {
+    id: 'cartesia-default-m',
+    label: 'Sonic — Мужской, мультиязычный',
+    provider: 'cartesia',
+    group: 'Cartesia',
+    voiceId: '41534e16-2966-4c6b-9670-111411def906',
+    cartesiaModel: 'sonic-2',
+    cartesiaLanguage: 'ru',
+    speed: 1.0,
   },
 ];
 
