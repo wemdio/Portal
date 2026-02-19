@@ -66,6 +66,7 @@ export interface Task {
   title: string;
   result?: string;
   status: TaskStatus;
+  specialist?: string;
   created_by?: string;
   created_at?: string;
   updated_at?: string;

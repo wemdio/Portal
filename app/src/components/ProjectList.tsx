@@ -212,11 +212,11 @@ export function ProjectList() {
     }
   }
 
-  async function addTask(projectId: string, title: string) {
+  async function addTask(projectId: string, title: string, specialist?: string) {
     if (!title.trim()) return;
     const { data, error } = await supabase
       .from('tasks')
-      .insert({ project_id: projectId, title: title.trim() })
+      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null })
       .select()
       .single();
     if (error) return;
@@ -665,7 +665,7 @@ export function ProjectList() {
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Специалист</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Лид (PM)</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Формат</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Задача</th>
+                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Комментарии/Задачи</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-50 bg-white">
@@ -1057,14 +1057,14 @@ export function ProjectList() {
                                         value={newTaskTitle}
                                         onChange={(e) => setNewTaskTitle(e.target.value)}
                                         onKeyDown={(e) => {
-                                          if (e.key === 'Enter') void addTask(project.id, newTaskTitle);
+                                          if (e.key === 'Enter') void addTask(project.id, newTaskTitle, project.specialist);
                                         }}
                                         placeholder="Новая задача..."
                                         className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
                                       />
                                       <button
                                         type="button"
-                                        onClick={() => void addTask(project.id, newTaskTitle)}
+                                        onClick={() => void addTask(project.id, newTaskTitle, project.specialist)}
                                         className="text-xs bg-blue-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-blue-700 transition-colors font-medium"
                                       >
                                         +
