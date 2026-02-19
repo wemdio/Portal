@@ -12,6 +12,13 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+class RunCancelledError extends Error {
+  constructor() {
+    super('Запуск остановлен');
+    this.name = 'RunCancelledError';
+  }
+}
+
 function normalizeNewlines(text: string) {
   return String(text ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
@@ -157,6 +164,16 @@ export async function POST(
   if (!runId) return jsonError('Missing runId', 400);
   if (!Number.isFinite(idx) || idx < 0 || idx > 4) return jsonError('Invalid segmentIndex (0-4)', 400);
 
+  const ensureNotCancelled = async () => {
+    const { data, error } = await supabase
+      .from('email_sequence_runs')
+      .select('status')
+      .eq('id', runId)
+      .single();
+    if (error) throw new Error(error.message);
+    if (String(data?.status ?? '').toLowerCase() === 'cancelled') throw new RunCancelledError();
+  };
+
   const { data: run, error: runErr } = await supabase
     .from('email_sequence_runs')
     .select('id,brief')
@@ -181,6 +198,7 @@ export async function POST(
   let trace: Awaited<ReturnType<typeof startTrace>> | null = null;
 
   try {
+    await ensureNotCancelled();
     trace = await startTrace({
       name: 'email_sequence.generate_chain',
       input: {
@@ -202,6 +220,8 @@ export async function POST(
       { runId, segmentIndex: idx, model: modelWriter },
       logMeta,
     );
+
+    await ensureNotCancelled();
 
     // Reset letters for this segment.
     await supabase
@@ -263,6 +283,7 @@ export async function POST(
 
     let raw = '';
     try {
+      await ensureNotCancelled();
       raw = await callOpenAI({
         model: modelWriter,
         messages: [
@@ -279,6 +300,8 @@ export async function POST(
       throw err;
     }
 
+    await ensureNotCancelled();
+
     const letters = splitLettersFromModelOutput(raw);
     if (letters.length !== 4) {
       throw new Error(`Не удалось разобрать 4 письма из ответа модели (получено: ${letters.length})`);
@@ -293,6 +316,8 @@ export async function POST(
 
     const { error: insErr } = await supabase.from('email_sequence_letters').insert(payload);
     if (insErr) throw new Error(insErr.message);
+
+    await ensureNotCancelled();
 
     await supabase
       .from('email_sequence_runs')
@@ -315,6 +340,14 @@ export async function POST(
 
     return NextResponse.json({ letters: letters.map((l) => l.content) });
   } catch (err) {
+    if (err instanceof RunCancelledError) {
+      await trace?.end({ cancelled: true }, 'Остановлено пользователем');
+      await supabase
+        .from('email_sequence_runs')
+        .update({ status: 'cancelled', error_message: null, updated_at: new Date().toISOString() })
+        .eq('id', runId);
+      return jsonError(err.message, 409);
+    }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await trace?.fail(err, { runId, segmentIndex: idx });
     await logError(

@@ -7,6 +7,7 @@ import type { HHSearchConfig, HHVacancyRow, ParserJob } from '@/types';
 import { HHParserForm } from '@/components/parsers/HHParserForm';
 import { JobsList } from '@/components/parsers/JobsList';
 import { VacancyResults } from '@/components/parsers/VacancyResults';
+import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 type JobsResponse = { jobs: ParserJob[] };
 type CreateJobResponse = { job: ParserJob };
@@ -162,6 +163,60 @@ function buildExcelHtml(items: HHVacancyRow[]) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body><table style="border-collapse:collapse;"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></body></html>`;
 }
 
+async function writeTextToClipboard(text: string) {
+  const tryClipboardApi = async () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    return false;
+  };
+
+  const tryLegacyCopy = async () => {
+    if (typeof document === 'undefined') return false;
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'fixed';
+    el.style.left = '-9999px';
+    el.style.top = '0';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    el.setSelectionRange(0, el.value.length);
+
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } finally {
+      el.remove();
+    }
+    return ok;
+  };
+
+  // On Windows/Chromium `navigator.clipboard.writeText` can silently truncate huge payloads.
+  // Prefer legacy copy path for large exports.
+  const LARGE_TEXT_THRESHOLD = 1_000_000;
+  const preferLegacy = text.length >= LARGE_TEXT_THRESHOLD;
+
+  if (preferLegacy) {
+    const ok = await tryLegacyCopy();
+    if (ok) return;
+    const apiOk = await tryClipboardApi();
+    if (apiOk) return;
+    throw new Error('Clipboard API недоступен');
+  }
+
+  const apiOk = await tryClipboardApi();
+  if (apiOk) return;
+  const ok = await tryLegacyCopy();
+  if (ok) return;
+  throw new Error('Clipboard API недоступен');
+}
+
 function downloadBlob(content: string, mime: string, filename: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -186,12 +241,23 @@ function toUiError(error: unknown, fallback: string): UiError {
   return { message: fallback };
 }
 
+function safeHostname(url: string | null | undefined) {
+  const s = String(url ?? '').trim();
+  if (!s) return null;
+  try {
+    return new URL(s).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export function HHParserView() {
   const [jobs, setJobs] = useState<ParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
+  const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
 
   const [results, setResults] = useState<HHVacancyRow[]>([]);
   const [resultsCount, setResultsCount] = useState(0);
@@ -201,6 +267,7 @@ export function HHParserView() {
   const [resultsLoading, setResultsLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
+  const [addingToDb, setAddingToDb] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
@@ -504,10 +571,8 @@ export function HHParserView() {
     try {
       const items = await resolveExportItems();
       if (items.length === 0) return;
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard API недоступен');
-      }
-      await navigator.clipboard.writeText(buildTsv(items));
+      await writeTextToClipboard(buildTsv(items));
+      setToast({ tone: 'success', message: `Скопировано строк: ${items.length}` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка копирования результатов'));
     } finally {
@@ -515,7 +580,93 @@ export function HHParserView() {
     }
   }, [resolveExportItems]);
 
-  const actionsBusy = exporting || copying;
+  const actionsBusy = exporting || copying || addingToDb;
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const addCompaniesToDatabase = useCallback(async () => {
+    if (!activeJobId) {
+      setToast({ tone: 'error', message: 'Сначала выберите запуск' });
+      return;
+    }
+    setAddingToDb(true);
+    try {
+      const items = await resolveExportItems();
+      if (items.length === 0) {
+        setToast({ tone: 'error', message: 'Нет результатов для добавления' });
+        return;
+      }
+
+      const map = new Map<
+        string,
+        { company_name: string; site: string; company_url: string; description: string; vacancyCount: number }
+      >();
+      for (const v of items) {
+        const host = safeHostname(v.company_site_url) ?? safeHostname(v.company_url);
+        const key = (host ?? v.company_name ?? '').trim().toLowerCase();
+        if (!key) continue;
+        const existing = map.get(key);
+        if (!existing) {
+          map.set(key, {
+            company_name: v.company_name ?? '',
+            site: v.company_site_url ?? '',
+            company_url: v.company_url ?? '',
+            description: v.company_description ?? '',
+            vacancyCount: 1,
+          });
+          continue;
+        }
+        existing.vacancyCount += 1;
+        if (!existing.site && v.company_site_url) existing.site = v.company_site_url;
+        if (!existing.company_url && v.company_url) existing.company_url = v.company_url;
+        if ((!existing.description || existing.description.length < 40) && v.company_description) {
+          existing.description = v.company_description;
+        }
+      }
+
+      const companies = Array.from(map.values()).sort((a, b) =>
+        (a.company_name || a.site).localeCompare(b.company_name || b.site, 'ru'),
+      );
+      if (companies.length === 0) {
+        setToast({ tone: 'error', message: 'Не удалось собрать компании из результатов' });
+        return;
+      }
+
+      const MAX_ROWS = 5000;
+      const rows: string[][] = [
+        ['Company', 'Site', 'CompanyUrl', 'Description', 'Vacancies', 'JobId', 'Parser'],
+        ...companies.slice(0, MAX_ROWS).map((c) => [
+          c.company_name,
+          c.site,
+          c.company_url,
+          c.description,
+          String(c.vacancyCount),
+          activeJobId,
+          'hh',
+        ]),
+      ];
+
+      const title = `HH.ru #${activeJobId.slice(0, 8)}`;
+      const { id } = writePendingDbImport({ title, rows });
+      const url = buildDatabasesImportUrl(id);
+      const trimmed = companies.length > MAX_ROWS;
+      setToast({
+        tone: 'success',
+        message: trimmed
+          ? `Добавлено в “Базы” (${MAX_ROWS} из ${companies.length} компаний). Можете перейти и проверить импорт.`
+          : `Добавлено в “Базы” (${companies.length} компаний). Можете перейти и проверить импорт.`,
+        href: url,
+      });
+    } catch (e) {
+      setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
+    } finally {
+      setAddingToDb(false);
+    }
+  }, [activeJobId, resolveExportItems]);
 
   return (
     <div className="space-y-6">
@@ -535,6 +686,29 @@ export function HHParserView() {
               {error.requestId ? <span className="ml-2 break-all">request_id: {error.requestId}</span> : null}
             </div>
           ) : null}
+        </div>
+      ) : null}
+      {toast ? (
+        <div
+          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
+            toast.tone === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-red-200 bg-red-50 text-red-900'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-3">
+            <div className="min-w-0">{toast.message}</div>
+            {toast.href ? (
+              <a
+                href={toast.href}
+                className="shrink-0 inline-flex items-center rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+              >
+                Перейти
+              </a>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -557,6 +731,7 @@ export function HHParserView() {
           offset={resultsOffset}
           loading={resultsLoading}
           actionsBusy={actionsBusy}
+          addToDatabaseDisabled={addingToDb}
           jobId={activeJob?.id ?? null}
           jobStatus={activeJob?.status ?? null}
           jobActionBusy={jobActionId === activeJob?.id}
@@ -567,6 +742,7 @@ export function HHParserView() {
           onExportCsv={exportCsv}
           onExportExcel={exportExcel}
           onCopy={copyResults}
+          onAddToDatabase={() => void addCompaniesToDatabase()}
           onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
           onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
         />

@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
+import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
 
 type Sheet = {
   id: string;
@@ -598,6 +600,10 @@ const getRowEmail = (row: string[], emailColumns: number[]) => {
 };
 
 export function DatabaseSpreadsheet() {
+  const searchParams = useSearchParams();
+  const importId = searchParams.get('import');
+  const importHandledRef = useRef<string | null>(null);
+
   const [tabs, setTabs] = useState<Sheet[]>(() => [createSheet('Вкладка 1')]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0].id);
   const [tabCounter, setTabCounter] = useState(1);
@@ -1489,6 +1495,61 @@ export function DatabaseSpreadsheet() {
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (!importId) return;
+    if (importHandledRef.current === importId) return;
+    importHandledRef.current = importId;
+
+    const cleanUrl = () => {
+      try {
+        window.history.replaceState(null, '', window.location.pathname);
+      } catch {
+        // ignore
+      }
+    };
+
+    try {
+      const payload = readPendingDbImport(importId);
+      if (!payload) {
+        showCopyNotice('Импорт не найден (возможно, устарел или был очищен браузером)', 'error');
+        cleanUrl();
+        return;
+      }
+
+      const MAX_ROWS = 10_000;
+      const MAX_COLS = 80;
+
+      const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+      const limitedRows = rawRows.slice(0, MAX_ROWS).map((row) => {
+        const cells = Array.isArray(row) ? row : [];
+        return cells.slice(0, MAX_COLS).map((cell) => String(cell ?? ''));
+      });
+
+      if (limitedRows.length === 0) {
+        showCopyNotice('Импорт пустой (0 строк)', 'error');
+        deletePendingDbImport(importId);
+        cleanUrl();
+        return;
+      }
+
+      applyRowsToNewTab(limitedRows, `${payload.title || 'import'}.csv`);
+      const trimmed = limitedRows.length < rawRows.length;
+      showCopyNotice(
+        trimmed
+          ? `Импортировано: ${limitedRows.length} строк (обрезано до лимита)`
+          : `Импортировано: ${limitedRows.length} строк`,
+        'success',
+      );
+
+      deletePendingDbImport(importId);
+      cleanUrl();
+    } catch (e) {
+      showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
+      cleanUrl();
+    }
+  }, [importId, isHydrated]);
 
   const finalizeImport = (status: ImportStatus['status'], filename?: string, message?: string) => {
     const progress = status === 'done' ? 100 : 0;

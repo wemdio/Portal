@@ -18,6 +18,13 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+class RunCancelledError extends Error {
+  constructor() {
+    super('Запуск остановлен');
+    this.name = 'RunCancelledError';
+  }
+}
+
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
@@ -67,6 +74,16 @@ export async function POST(
   if (!runId) return jsonError('Missing runId', 400);
   if (!Number.isFinite(idx) || idx < 0 || idx > 4) return jsonError('Invalid segmentIndex (0-4)', 400);
 
+  const ensureNotCancelled = async () => {
+    const { data, error } = await supabase
+      .from('email_sequence_runs')
+      .select('status')
+      .eq('id', runId)
+      .single();
+    if (error) throw new Error(error.message);
+    if (String(data?.status ?? '').toLowerCase() === 'cancelled') throw new RunCancelledError();
+  };
+
   const { data: run, error: runErr } = await supabase
     .from('email_sequence_runs')
     .select('id,brief')
@@ -91,6 +108,7 @@ export async function POST(
   let trace: Awaited<ReturnType<typeof startTrace>> | null = null;
 
   try {
+    await ensureNotCancelled();
     trace = await startTrace({
       name: 'email_sequence.analyze_segment',
       input: {
@@ -114,6 +132,8 @@ export async function POST(
       logMeta,
     );
 
+    await ensureNotCancelled();
+
     const researchPrompt = fillTemplate(SEGMENT_RESEARCH_PROMPT, {
       ...briefVars(brief),
       segment: segmentName,
@@ -125,6 +145,7 @@ export async function POST(
     });
     let segmentResearch = '';
     try {
+      await ensureNotCancelled();
       segmentResearch = await callPerplexity({
         model: 'sonar-pro',
         messages: [{ role: 'user', content: researchPrompt }],
@@ -134,6 +155,8 @@ export async function POST(
       await researchSpan?.fail(err, { promptChars: researchPrompt.length });
       throw err;
     }
+
+    await ensureNotCancelled();
 
     const painsPrompt = fillTemplate(PAINS_AND_SOLUTIONS_PROMPT, {
       ...briefVars(brief),
@@ -146,6 +169,7 @@ export async function POST(
     });
     let painsAndSolutions = '';
     try {
+      await ensureNotCancelled();
       painsAndSolutions = await callOpenAI({
         model: modelAnalysis,
         messages: [{ role: 'user', content: painsPrompt }],
@@ -157,6 +181,8 @@ export async function POST(
       await painsSpan?.fail(err, { promptChars: painsPrompt.length });
       throw err;
     }
+
+    await ensureNotCancelled();
 
     // After pains are ready, the remaining steps are independent -> run in parallel to reduce latency.
     const tasksPrompt = fillTemplate(TASKS_AND_SOLUTIONS_PROMPT, {
@@ -191,6 +217,7 @@ export async function POST(
     const [tasksAndSolutions, socialProof, casesLpr] = await Promise.all([
       (async () => {
         try {
+          await ensureNotCancelled();
           const txt = await callOpenAI({
             model: modelAnalysis,
             messages: [{ role: 'user', content: tasksPrompt }],
@@ -206,6 +233,7 @@ export async function POST(
       })(),
       (async () => {
         try {
+          await ensureNotCancelled();
           const txt = await callPerplexity({
             model: 'sonar-pro',
             messages: [{ role: 'user', content: socialPrompt }],
@@ -219,6 +247,7 @@ export async function POST(
       })(),
       (async () => {
         try {
+          await ensureNotCancelled();
           const txt = await callPerplexity({
             model: 'sonar-pro',
             messages: [{ role: 'user', content: casesPrompt }],
@@ -231,6 +260,8 @@ export async function POST(
         }
       })(),
     ]);
+
+    await ensureNotCancelled();
 
     const { error: updErr } = await supabase
       .from('email_sequence_segments')
@@ -274,6 +305,14 @@ export async function POST(
       cases_lpr: casesLpr,
     });
   } catch (err) {
+    if (err instanceof RunCancelledError) {
+      await trace?.end({ cancelled: true }, 'Остановлено пользователем');
+      await supabase
+        .from('email_sequence_runs')
+        .update({ status: 'cancelled', error_message: null, updated_at: new Date().toISOString() })
+        .eq('id', runId);
+      return jsonError(err.message, 409);
+    }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await trace?.fail(err, { runId, segmentIndex: idx, segmentName });
     await logError(
