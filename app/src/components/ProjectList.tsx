@@ -650,22 +650,22 @@ export function ProjectList() {
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="min-w-full divide-y divide-gray-100 text-sm">
+            <table className="w-full divide-y divide-gray-100 text-xs table-fixed">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Проект</th>
-                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Статус</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Сумма</th>
-                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Договор</th>
-                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Передача</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Дедлайн</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI План</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI Факт</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Контакты</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Специалист</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Лид (PM)</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Формат</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Комментарии/Задачи</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[11%]">Проект</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Статус</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Сумма</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Дог.</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Пер.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Дедлайн</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">KPI План</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[5%]">KPI Факт</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">Контакты</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Специалист</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Лид (PM)</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Формат</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-50 bg-white">
@@ -700,7 +700,7 @@ export function ProjectList() {
                   
                 return (
                     <tr key={project.id} className="hover:bg-gray-50 transition-colors group">
-                      <td className="px-4 py-3 align-top min-w-[140px]">
+                      <td className="px-2 py-2 align-top overflow-hidden">
                         {isTableEditing ? (
                           <div className="flex items-center gap-2">
                             <InlineInput
@@ -740,7 +740,7 @@ export function ProjectList() {
                           </button>
                       )}
                     </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                      <td className="px-2 py-2 align-top whitespace-nowrap text-center">
                         {(() => {
                           const cfg = getStatusConfig(project.status);
                           return canEdit ? (
@@ -763,7 +763,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={budgetValue}
@@ -776,7 +776,7 @@ export function ProjectList() {
                           <span className="text-gray-900 font-medium">{readOnlyBudget}</span>
                       )}
                     </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={contractValue}
@@ -786,14 +786,14 @@ export function ProjectList() {
                             placeholder="https://..."
                           />
                         ) : contractHref ? (
-                          <a href={contractHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors text-xs font-medium" title="Открыть договор">
+                          <a href={contractHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors text-[10px] font-medium" title="Открыть договор">
                             Дог.
                           </a>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={handoffValue}
@@ -803,14 +803,14 @@ export function ProjectList() {
                             placeholder="https://..."
                           />
                         ) : handoffHref ? (
-                          <a href={handoffHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors text-xs font-medium" title="Открыть передачу">
+                          <a href={handoffHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors text-[10px] font-medium" title="Открыть передачу">
                             Пер.
                           </a>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={deadlineValue}
@@ -833,7 +833,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top">
                         {isTableEditing ? (
                           <InlineInput
                             value={kpiValue}
@@ -846,7 +846,7 @@ export function ProjectList() {
                           <span className="text-gray-900">{readOnlyKpi}</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap w-[90px]">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineStepper
                             value={kpiFactValue}
@@ -893,7 +893,7 @@ export function ProjectList() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap w-[140px]">
+                      <td className="px-2 py-2 align-top">
                         {(() => {
                           const obligation = parseInt(project.contacts_obligation ?? '0', 10) || 0;
                           const done = parseInt(project.contacts_done ?? '0', 10) || 0;
@@ -932,11 +932,11 @@ export function ProjectList() {
                             >
                               {obligation > 0 ? (
                                 <>
-                                  <div className="flex items-baseline gap-1 mb-1">
-                                    <span className="text-sm font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
-                                    <span className="text-xs text-gray-400">/ {obligation.toLocaleString('ru-RU')}</span>
+                                  <div className="flex items-baseline gap-0.5 mb-0.5">
+                                    <span className="text-xs font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
+                                    <span className="text-[10px] text-gray-400">/{obligation.toLocaleString('ru-RU')}</span>
                                   </div>
-                                  <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                  <div className="w-full h-1 bg-gray-200 rounded-full overflow-hidden">
                                     <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                                   </div>
                                 </>
@@ -947,7 +947,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={specialistValue}
@@ -960,16 +960,16 @@ export function ProjectList() {
                           />
                         ) : (
                           readOnlySpecialist !== '—' ? (
-                             <div className="flex items-center">
-                                <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xs font-medium mr-2">
+                             <div className="flex items-center gap-1">
+                                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
                                   {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </div>
-                                <span className="text-gray-700">{readOnlySpecialist}</span>
+                                </span>
+                                <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={managerValue}
@@ -982,16 +982,16 @@ export function ProjectList() {
                           />
                         ) : (
                            readOnlyManager !== '—' ? (
-                             <div className="flex items-center">
-                                <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-medium mr-2">
+                             <div className="flex items-center gap-1">
+                                <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
                                   {readOnlyManager.charAt(0).toUpperCase()}
-                                </div>
-                                <span className="text-gray-700">{readOnlyManager}</span>
+                                </span>
+                                <span className="text-gray-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineSelect
                             value={workFormatValue}
@@ -1010,7 +1010,7 @@ export function ProjectList() {
                           <span className="text-gray-300">—</span>
                         )}
                     </td>
-                      <td className="px-4 py-3 align-top min-w-[180px] relative">
+                      <td className="px-2 py-2 align-top relative">
                         {(() => {
                           const tasks = projectTasks[project.id] ?? [];
                           const latestTask = tasks[0];
