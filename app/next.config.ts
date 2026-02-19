@@ -2,23 +2,15 @@ import type { NextConfig } from "next";
 import { config } from 'dotenv';
 import { resolve } from 'path';
 
-// Support env at repository root (preferred for Docker/CI) and local overrides.
-// Note: dotenv is loaded from next.config, Next itself loads env from app root too.
-const envCandidates = [
-  resolve(__dirname, '..', '.env.local'),
-  resolve(__dirname, '..', '.env'),
-];
-
-const parsedEnv: Record<string, string> = {};
+// Single source of truth for local/dev: repo root `.env` (and optional `.env.local`).
+// We intentionally override any values already set (e.g. from app/.env.local) to avoid confusion.
+const envCandidates = [resolve(__dirname, '..', '.env.local'), resolve(__dirname, '..', '.env')];
 for (const envPath of envCandidates) {
-  const result = config({ path: envPath, override: false });
-  if (result.parsed) {
-    Object.assign(parsedEnv, result.parsed);
-  }
+  config({ path: envPath, override: true });
 }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? parsedEnv.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? parsedEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 const nextConfig: NextConfig = {
   /* config options here */
