@@ -54,4 +54,6 @@ export interface Project {
   project_type?: 'Продажа' | 'Продление' | null;
 
   payment_date?: string;
+  contacts_obligation?: string;
+  contacts_done?: string;
 }

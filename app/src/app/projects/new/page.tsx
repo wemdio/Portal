@@ -10,7 +10,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions } from '@/lib/projectAssignees';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
-const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 const PROJECT_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'Продажа', label: 'Продажа (новый клиент)' },
@@ -93,6 +93,7 @@ export default function NewProjectPage() {
     handoff_link: '',
     deadline: '',
     kpi_plan: '',
+    contacts_obligation: '',
     work_format: '',
     comments: '',
     lead_source: '',
@@ -172,6 +173,7 @@ export default function NewProjectPage() {
           handoff_link: formData.handoff_link || null,
           deadline: formData.deadline || null,
           kpi_plan: formData.kpi_plan || null,
+          contacts_obligation: formData.contacts_obligation || null,
           work_format: formData.work_format || null,
           comments: formData.comments || null,
           lead_source: formData.lead_source || null,
@@ -482,6 +484,23 @@ export default function NewProjectPage() {
           </div>
         </div>
 
+        {/* Contacts obligation */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Обязательство по контактам
+            </label>
+            <input
+              type="text"
+              name="contacts_obligation"
+              value={formData.contacts_obligation}
+              onChange={handleChange}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Например 4000"
+            />
+          </div>
+        </div>
+
         {/* Margin (auto-calculated) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="relative">
@@ -642,7 +661,7 @@ export default function NewProjectPage() {
         {/* Comments */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Комментарий
+            Комментарий передачи
           </label>
           <textarea
             name="comments"
