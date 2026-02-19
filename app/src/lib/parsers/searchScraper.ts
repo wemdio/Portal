@@ -38,8 +38,6 @@ function playwrightObserveMs() {
 
 const SEARCH_PROXY_DEBUG = Boolean(SEARCH_CONFIG.PROXY_DEBUG);
 
-let SEARCH_PROXY_DISPATCHER: Dispatcher | undefined | null = null;
-
 function normalizeProxyUrl(raw: string): string {
   const s = raw.trim();
   if (!s) return '';
