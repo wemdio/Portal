@@ -8,7 +8,7 @@
     "predev": "node scripts/db/ensureDatabase.js",
     "dev": "concurrently \"next dev\" \"cd ../services/yandexmaps && uvicorn server:app --reload --port 8010\" \"npm run dev:worker\"",
     "dev:next": "next dev",
-    "dev:worker": "concurrently \"npm run build:worker:watch\" \"node --env-file ../.env dist/worker.js\"",
+    "dev:worker": "concurrently \"npm run build:worker:watch\" \"node --watch --env-file ../.env dist/worker.js\"",
     "build": "next build",
     "build:worker": "esbuild worker/index.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --tsconfig=tsconfig.json --conditions=react-server --external:playwright --log-level=info",
     "build:worker:watch": "esbuild worker/index.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --tsconfig=tsconfig.json --conditions=react-server --external:playwright --log-level=info --watch",

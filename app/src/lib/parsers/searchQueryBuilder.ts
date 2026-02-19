@@ -1,4 +1,4 @@
-const TARGET_QUERY_COUNT = 8;
+const TARGET_QUERY_COUNT = 10;
 
 const CATEGORY_PATTERNS = {
   list: /(каталог|список|реестр|участник|тендер|закупк|импортер|дистриб|оптов|сеть|производител)/i,

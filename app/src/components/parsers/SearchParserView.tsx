@@ -38,36 +38,7 @@ function safeHostname(url: string | null) {
   }
 }
 
-const SOURCE_HOST_SUBSTRINGS = [
-  // job boards
-  'hh.ru',
-  'rabota.ru',
-  'gorodrabot.ru',
-  'dreamjob.ru',
-  // tenders / procurement
-  'zakupki.gov.ru',
-  'zakupki.kontur.ru',
-  'rostender.info',
-  'synapsenet.ru',
-  'bicotender.ru',
-  // events / directories
-  '10times.com',
-  'expocentr.ru',
-  // obvious sources (registries/catalogs)
-  'gisp.gov.ru',
-  'energybase.ru',
-];
-
-function isLikelySourceSite(siteUrl: string | null) {
-  const host = safeHostname(siteUrl);
-  if (!host) return false;
-  if (SOURCE_HOST_SUBSTRINGS.some((s) => host === s || host.endsWith(`.${s}`))) return true;
-  // Heuristics: directories/registries/aggregators are rarely "buyers"
-  if (/(zakup|tender|torgi|vacanc|rabota|career|job|work|expo|catalog|directory|reest|reestr|spravochnik)/i.test(host)) {
-    return true;
-  }
-  return false;
-}
+// Note: the search parser stores/displays only company leads (source pages are used internally but not shown as results).
 
 function escapeHtml(value: unknown) {
   const text = String(value ?? '')
@@ -255,6 +226,7 @@ export function SearchParserView() {
   const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
+  const latestCreatedAtRef = useRef<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
   const leads = useMemo(() => {
@@ -264,6 +236,33 @@ export function SearchParserView() {
       if (!aa) return bb || null;
       if (!bb) return aa || null;
       return bb.length > aa.length ? bb : aa;
+    };
+
+    const scoreCompanyName = (value: string | null) => {
+      const s = (value ?? '').trim();
+      if (!s) return -100;
+      let score = 0;
+      if (s.length >= 2 && s.length <= 80) score += 5;
+      else if (s.length <= 140) score += 2;
+      else score -= 2;
+      if (/\b(ООО|ЗАО|ОАО|ПАО|АО|ИП)\b/i.test(s)) score += 4;
+      if (/^\d/.test(s)) score -= 6;
+      if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(s)) score -= 6;
+      if (/https?:\/\//i.test(s)) score -= 4;
+      if (/\w+\.\w+/.test(s)) score -= 2;
+      if (/[|]/.test(s)) score -= 1;
+      return score;
+    };
+
+    const pickBetterCompanyName = (a: string | null, b: string | null) => {
+      const aa = (a ?? '').trim();
+      const bb = (b ?? '').trim();
+      if (!aa) return bb || null;
+      if (!bb) return aa || null;
+      const sa = scoreCompanyName(aa);
+      const sb = scoreCompanyName(bb);
+      if (sb !== sa) return sb > sa ? bb : aa;
+      return bb.length < aa.length ? bb : aa;
     };
 
     const mergeEmails = (prev: string | null, next: string | null) => {
@@ -301,7 +300,7 @@ export function SearchParserView() {
         continue;
       }
 
-      existing.company_name = pickBetterText(existing.company_name, r.company_name ?? null);
+      existing.company_name = pickBetterCompanyName(existing.company_name, r.company_name ?? null);
       existing.site = existing.site ?? (r.site ?? null);
       existing.email = mergeEmails(existing.email, r.email ?? null);
       existing.description = pickBetterText(existing.description, (r.description ?? r.snippet ?? null) as string | null);
@@ -316,17 +315,7 @@ export function SearchParserView() {
     });
   }, [results]);
 
-  const categorizedLeads = useMemo(() => {
-    const companies: Lead[] = [];
-    const sources: Lead[] = [];
-    for (const lead of leads) {
-      if (isLikelySourceSite(lead.site)) sources.push(lead);
-      else companies.push(lead);
-    }
-    return { companies, sources };
-  }, [leads]);
-  const companyLeads = categorizedLeads.companies;
-  const sourceLeads = categorizedLeads.sources;
+  const companyLeads = leads;
 
   const getAccessToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -354,6 +343,10 @@ export function SearchParserView() {
     return (await res.json()) as T;
   }, [getAccessToken]);
 
+  useEffect(() => {
+    latestCreatedAtRef.current = results.length ? results[results.length - 1]?.created_at ?? null : null;
+  }, [results]);
+
   const refreshJobs = useCallback(async () => {
     try {
       const { data } = await supabase.from('search_parser_jobs').select('*').order('created_at', { ascending: false });
@@ -363,15 +356,35 @@ export function SearchParserView() {
     }
   }, []);
 
-  const loadResults = useCallback(async (jobId: string) => {
-    setLoadingResults(true);
-    try {
-      const data = await apiFetch<{ results: SearchResult[] }>(`/api/parsers/search/${jobId}/results`);
-      if (data.results) setResults(data.results);
-    } finally {
-      setLoadingResults(false);
-    }
-  }, [apiFetch]);
+  const loadResults = useCallback(
+    async (jobId: string, mode: 'initial' | 'incremental' = 'initial') => {
+      const isInitial = mode === 'initial';
+      if (isInitial) setLoadingResults(true);
+      try {
+        const after = !isInitial ? latestCreatedAtRef.current : null;
+        const url = after
+          ? `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}`
+          : `/api/parsers/search/${jobId}/results`;
+        const data = await apiFetch<{ results: SearchResult[] }>(url);
+        const incoming = data.results ?? [];
+        if (incoming.length === 0) return;
+        setResults((prev) => {
+          if (isInitial || prev.length === 0) return incoming;
+          const seen = new Set(prev.map((r) => r.id));
+          const merged = [...prev];
+          for (const r of incoming) {
+            if (seen.has(r.id)) continue;
+            seen.add(r.id);
+            merged.push(r);
+          }
+          return merged;
+        });
+      } finally {
+        if (isInitial) setLoadingResults(false);
+      }
+    },
+    [apiFetch],
+  );
 
   useEffect(() => {
     refreshJobs();
@@ -379,9 +392,12 @@ export function SearchParserView() {
 
   useEffect(() => {
     if (activeJobId) {
-      loadResults(activeJobId);
+      setResults([]);
+      latestCreatedAtRef.current = null;
+      loadResults(activeJobId, 'initial');
     } else {
       setResults([]);
+      latestCreatedAtRef.current = null;
     }
   }, [activeJobId, loadResults]);
 
@@ -391,7 +407,8 @@ export function SearchParserView() {
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = setInterval(() => {
         refreshJobs();
-        loadResults(activeJobId);
+        // Only append new rows; don't flicker the table.
+        loadResults(activeJobId, 'incremental');
       }, 5000);
       return () => clearInterval(interval);
     }
@@ -512,9 +529,7 @@ export function SearchParserView() {
   const hasQueries = jobQueries.length > 0;
   const processedQueries = activeJob?.processed_queries ?? 0;
   const totalQueries = activeJob?.total_queries ?? jobQueries.length;
-  const totalResults = activeJob?.total_results ?? leads.length;
   const totalCompanies = companyLeads.length;
-  const totalSources = sourceLeads.length;
   const jobControlsDisabled = !activeJobId || jobActionId === activeJobId || busy;
   const exportDisabled = companyLeads.length === 0;
   const copyDisabled = exportDisabled || copying;
@@ -537,16 +552,12 @@ export function SearchParserView() {
 
       const MAX_ROWS = 5000;
       const rows = [
-        ['Company', 'Site', 'Email', 'Description', 'Queries', 'Sources', 'JobId', 'Parser'],
+        ['Company', 'Site', 'Email', 'Description'],
         ...companyLeads.slice(0, MAX_ROWS).map((r) => [
           r.company_name ?? '',
           r.site ?? '',
           r.email ?? '',
           r.description ?? '',
-          (r.queries ?? []).join(' · '),
-          String(r.sources ?? 1),
-          activeJobId ?? '',
-          'search',
         ]),
       ];
 
@@ -616,9 +627,9 @@ export function SearchParserView() {
                   {job.config.queries?.[0] || 'Без запросов'}
                   {job.config.queries?.length > 1 && ` (+${job.config.queries.length - 1})`}
                 </div>
-                <div className="mt-2 text-xs text-gray-500 flex justify-between">
-                  <span>Запросов обработано: {job.processed_queries}/{job.total_queries}</span>
-                  <span>Найдено: {job.total_results}</span>
+                <div className="mt-2 text-xs text-gray-500 flex justify-between gap-3">
+                  <span>Запросов: {job.processed_queries}/{job.total_queries}</span>
+                  <span>Компаний: {job.total_results}</span>
                 </div>
               </button>
             ))}
@@ -642,7 +653,7 @@ export function SearchParserView() {
                 <p className="text-sm text-gray-500">
                   {activeJob ? (
                     <>
-                      Компаний: {totalCompanies} · Источников: {totalSources} · Всего ссылок: {totalResults} · Запросов: {processedQueries}/{totalQueries}
+                      Компаний: {totalCompanies} · Запросов обработано: {processedQueries}/{totalQueries}
                     </>
                   ) : (
                     `${totalCompanies} компаний`

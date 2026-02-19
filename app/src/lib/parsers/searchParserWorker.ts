@@ -2,7 +2,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { startTrace } from '@/lib/tracer';
-import { SEARCH_CONFIG } from '@/lib/config';
 import { buildSearchDiagnostics } from '@/lib/parsers/searchParserDiagnostics';
 import { simplifySearchQuery } from '@/lib/parsers/searchQueryUtils';
 import { fetchWebsiteEmails } from '@/lib/enrich/websiteParser';
@@ -21,18 +20,27 @@ import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const ENRICH_EMAIL_ENABLED = process.env.SEARCH_ENRICH_EMAIL_ENABLED !== '0';
-const ENRICH_EMAIL_MAX_SITES_PER_JOB = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB ?? '40') || 40;
-const ENRICH_EMAIL_MAX_PAGES_PER_SITE = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE ?? '8') || 8;
-const ENRICH_EMAIL_CONCURRENCY = Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY ?? '2') || 2;
+// Max-yield defaults: prioritize collecting *more unique sites* with fewer blocks.
+// Email enrichment can become the bottleneck; keep it lightweight so lead collection keeps moving.
+const ENRICH_EMAIL_ENABLED = true;
+const ENRICH_EMAIL_MAX_SITES_PER_JOB = 500;
+const ENRICH_EMAIL_MAX_PAGES_PER_SITE = 3;
+const ENRICH_EMAIL_CONCURRENCY = 2;
 
-const SOURCE_EXPAND_ENABLED = process.env.SEARCH_SOURCE_EXPAND_ENABLED !== '0';
-const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY ?? '2') || 2;
-const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB ?? '10') || 10;
-const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? '25') || 25;
-const SOURCE_EXPAND_CONCURRENCY = Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY ?? '2') || 2;
+const SOURCE_EXPAND_ENABLED = true;
+const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 10;
+const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 250;
+const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 250;
+const SOURCE_EXPAND_CONCURRENCY = 3;
 
-const QUERY_CONCURRENCY = SEARCH_CONFIG.QUERY_CONCURRENCY;
+// Lower concurrency -> fewer blocks -> more total sites, given enough time.
+const QUERY_CONCURRENCY = 1;
+
+const GOOGLE_RESULTS_PER_QUERY = 100;
+const BING_MAX_PAGES = 8;
+const BING_MAX_RESULTS = 200;
+const MULTI_PROVIDER_ENABLED = true;
+const MAX_UNIQUE_SITES_PER_QUERY = 500;
 
 function randInt(min: number, max: number) {
   return Math.floor(min + Math.random() * (max - min + 1));
@@ -56,6 +64,32 @@ async function mapWithConcurrency<T, R>(
 
   await Promise.all(workers);
   return results;
+}
+
+async function insertInBatches<T extends Record<string, unknown>>(
+  admin: NonNullable<typeof supabaseAdmin>,
+  rows: T[],
+  opts?: { batchSize?: number },
+): Promise<{ inserted: number; hadFailures: boolean; firstErrorMessage: string | null }> {
+  const batchSize = Math.max(1, Math.min(250, Math.floor(opts?.batchSize ?? 60)));
+  let inserted = 0;
+  let hadFailures = false;
+  let firstErrorMessage: string | null = null;
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const { error } = await admin.from('search_results').insert(batch);
+    if (error) {
+      hadFailures = true;
+      firstErrorMessage ??= error.message;
+      // Also log to stdout to make local debugging obvious.
+      console.error('search_results insert batch failed:', error.message);
+      continue;
+    }
+    inserted += batch.length;
+  }
+
+  return { inserted, hadFailures, firstErrorMessage };
 }
 
 async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
@@ -113,6 +147,54 @@ function normalizeSite(link: string): string | null {
   }
 }
 
+function deriveCompanyNameFromSite(site: string): string | null {
+  try {
+    const host = site
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/+$/, '')
+      .split('/')[0]
+      .replace(/^www\./i, '');
+    if (!host) return null;
+    const base = host.split('.')[0] || host;
+    const pretty = base
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!pretty) return null;
+    return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+  } catch {
+    return null;
+  }
+}
+
+function scoreCompanyName(value: string | null | undefined): number {
+  const s = (value ?? '').trim();
+  if (!s) return -100;
+  let score = 0;
+  if (s.length >= 2 && s.length <= 80) score += 5;
+  else if (s.length <= 140) score += 2;
+  else score -= 2;
+  if (/\b(ООО|ЗАО|ОАО|ПАО|АО|ИП)\b/i.test(s)) score += 4;
+  if (/^\d/.test(s)) score -= 6;
+  if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(s)) score -= 6;
+  if (/https?:\/\//i.test(s)) score -= 4;
+  if (/\w+\.\w+/.test(s)) score -= 2;
+  if (/[|]/.test(s)) score -= 1;
+  return score;
+}
+
+function pickBetterCompanyName(prev: string | null, next: string | null): string | null {
+  const a = (prev ?? '').trim() || null;
+  const b = (next ?? '').trim() || null;
+  if (!a) return b;
+  if (!b) return a;
+  const sa = scoreCompanyName(a);
+  const sb = scoreCompanyName(b);
+  if (sb !== sa) return sb > sa ? b : a;
+  // Tie-breaker: prefer shorter (company names shouldn't be essays)
+  return b.length < a.length ? b : a;
+}
+
 function deriveCompanyName(title: string | undefined | null, site: string): string | null {
   const raw = (title ?? '').trim();
   const fallback = site
@@ -149,7 +231,13 @@ function deriveCompanyName(title: string | undefined | null, site: string): stri
     return cleaned.trim();
   })();
 
-  const candidate = (base || fallback).trim();
+  const candidateFromTitle = base.trim();
+  const isSuspiciousTitle =
+    raw.length > 80 ||
+    /^\d+\b/.test(raw) ||
+    /(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(raw);
+
+  const candidate = ((candidateFromTitle && !isSuspiciousTitle ? candidateFromTitle : '') || fallback).trim();
   if (candidate.length < 2) return null;
   // avoid returning just a TLD-like token
   if (/^\w+\.\w+$/.test(candidate) && candidate.toLowerCase() === fallback.toLowerCase()) {
@@ -265,7 +353,7 @@ function toLeadRow(
   const site = normalizeSite(r.link);
   if (!site) return null;
   if (!isLeadCandidateSite(site)) return null;
-  const companyName = deriveCompanyName(r.title, site) ?? site;
+  const companyName = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
 
   return {
     job_id: jobId,
@@ -389,7 +477,7 @@ export async function runSearchParserJob(jobId: string) {
           // Google has internal delays, but we still gate globally to avoid bursts
           // when query concurrency > 1.
           await scheduleGoogle(() => randInt(1400, 3200));
-          return await googleSearchDetailed(q, 20);
+          return await googleSearchDetailed(q, GOOGLE_RESULTS_PER_QUERY);
         };
 
         const runDdg = async (q: string) => {
@@ -403,7 +491,7 @@ export async function runSearchParserJob(jobId: string) {
 
         const runBing = async (q: string) => {
           await scheduleBing(() => randInt(2800, 6200));
-          return await bingSearchDetailed(q, { maxPages: 4, pageSize: 10, maxResults: 50 });
+          return await bingSearchDetailed(q, { maxPages: BING_MAX_PAGES, pageSize: 10, maxResults: BING_MAX_RESULTS });
         };
 
         const runMojeek = async (q: string) => {
@@ -411,7 +499,7 @@ export async function runSearchParserJob(jobId: string) {
           return await mojeekSearchDetailed(q);
         };
 
-        let results: SearchResultItem[] = [];
+        let results: Array<(SearchResultItem & { _provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' })> = [];
         let debugPrimary: unknown = null;
         let usedFallback = false;
         let debugFallback: unknown = null;
@@ -459,11 +547,67 @@ export async function runSearchParserJob(jobId: string) {
           throw lastErr ?? new Error('All search providers failed');
         };
 
+        const collectProviders = async (q: string) => {
+          const order: Array<'google' | 'duckduckgo' | 'bing' | 'mojeek'> = googleBlockedForJob
+            ? ['duckduckgo', 'bing', 'mojeek']
+            : ['google', 'duckduckgo', 'bing', 'mojeek'];
+
+          const combined: Array<(SearchResultItem & { _provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' })> = [];
+          const seen = new Set<string>();
+          const debug: Record<string, unknown> = {};
+
+          for (const p of order) {
+            try {
+              const out =
+                p === 'google'
+                  ? await runGoogle(q)
+                  : p === 'duckduckgo'
+                    ? await runDdg(q)
+                    : p === 'bing'
+                      ? await runBing(q)
+                      : await runMojeek(q);
+              debug[p] = out.debug;
+              for (const item of out.results) {
+                const site = normalizeSite(item.link);
+                if (!site) continue;
+                if (!isLeadCandidateSite(site)) continue;
+                const key = site.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                combined.push({ ...item, _provider: p });
+                if (seen.size >= MAX_UNIQUE_SITES_PER_QUERY) break;
+              }
+              if (seen.size >= MAX_UNIQUE_SITES_PER_QUERY) break;
+            } catch (e) {
+              debug[p] = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
+              if (isGoogleBlockedError(e)) {
+                googleBlockedForJob = true;
+                lastBlockedHint = e.message;
+                continue;
+              }
+              if (isDuckDuckGoBlockedError(e) || isBingBlockedError(e) || isMojeekBlockedError(e)) {
+                lastBlockedHint = e instanceof Error ? e.message : String(e);
+                continue;
+              }
+              // Non-blocking unexpected errors: keep going to other providers
+              continue;
+            }
+          }
+          return { results: combined, debug };
+        };
+
         try {
-          const primary = await tryProviders(query);
-          provider = primary.provider;
-          results = primary.out.results;
-          debugPrimary = primary.out.debug;
+          if (MULTI_PROVIDER_ENABLED) {
+            const out = await collectProviders(query);
+            results = out.results;
+            debugPrimary = out.debug;
+            provider = 'google'; // kept for legacy trace fields; per-row provider is stored separately
+          } else {
+            const primary = await tryProviders(query);
+            provider = primary.provider;
+            results = primary.out.results.map((r) => ({ ...r, _provider: primary.provider }));
+            debugPrimary = primary.out.debug;
+          }
         } catch (e) {
           // If everything failed, bubble up. The catch below will handle cooldowns/hints.
           throw e;
@@ -474,10 +618,16 @@ export async function runSearchParserJob(jobId: string) {
           try {
             usedFallback = true;
             debugFallback = debugPrimary;
-            const fallback = await tryProviders(query);
-            provider = fallback.provider;
-            results = fallback.out.results;
-            debugPrimary = fallback.out.debug;
+            if (MULTI_PROVIDER_ENABLED) {
+              const out = await collectProviders(query);
+              results = out.results;
+              debugPrimary = out.debug;
+            } else {
+              const fallback = await tryProviders(query);
+              provider = fallback.provider;
+              results = fallback.out.results.map((r) => ({ ...r, _provider: fallback.provider }));
+              debugPrimary = fallback.out.debug;
+            }
           } catch (e) {
             debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
           }
@@ -488,25 +638,31 @@ export async function runSearchParserJob(jobId: string) {
           if (simplified && simplified !== query) {
             usedFallback = true;
             try {
-              const fallback = await tryProviders(simplified);
-              provider = fallback.provider;
-              results = fallback.out.results;
-              debugFallback = fallback.out.debug;
-              if (fallback.provider === 'google' && fallback.out?.debug && typeof fallback.out.debug === 'object') {
-                googleUrlFallback = (fallback.out.debug as { request_url?: string }).request_url ?? null;
+              if (MULTI_PROVIDER_ENABLED) {
+                const out = await collectProviders(simplified);
+                results = out.results.map((r) => ({ ...r, query }));
+                debugFallback = out.debug;
+              } else {
+                const fallback = await tryProviders(simplified);
+                provider = fallback.provider;
+                results = fallback.out.results.map((r) => ({ ...r, _provider: fallback.provider }));
+                debugFallback = fallback.out.debug;
+                if (fallback.provider === 'google' && fallback.out?.debug && typeof fallback.out.debug === 'object') {
+                  googleUrlFallback = (fallback.out.debug as { request_url?: string }).request_url ?? null;
+                }
+                if (results.length > 0) {
+                  results = results.map((item) => ({ ...item, query }));
+                }
               }
             } catch (e) {
               debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
-            }
-            if (results.length > 0) {
-              results = results.map((item) => ({ ...item, query }));
             }
           }
         }
 
         // Build rows (local dedupe only)
         const rows = results
-          .map((r) => toLeadRow(r, jobId, provider))
+          .map((r) => toLeadRow(r, jobId, r._provider))
           .filter(Boolean)
           .map((row) => row!);
         const localSeen = new Set<string>();
@@ -607,14 +763,16 @@ export async function runSearchParserJob(jobId: string) {
         }
 
         const rowsToInsert = [...claimedRows, ...extractedRows];
+        // UI/export expects only companies (leads). Keep source pages for expansion but do not store them as results.
+        const companyRowsToInsert = rowsToInsert.filter((r) => !isLikelySourceSite(r.site));
 
         // Email enrichment (reserve slots globally, do network outside lock)
-        let toEnrich: typeof rowsToInsert = [];
+        let toEnrich: typeof companyRowsToInsert = [];
         if (ENRICH_EMAIL_ENABLED) {
           toEnrich = await withLock(async () => {
             if (enrichedSites >= ENRICH_EMAIL_MAX_SITES_PER_JOB) return [];
             const remaining = Math.max(0, ENRICH_EMAIL_MAX_SITES_PER_JOB - enrichedSites);
-            const candidates = rowsToInsert
+            const candidates = companyRowsToInsert
               .filter((r) => !r.email && isEnrichableCompanySite(r.site))
               .slice(0, remaining);
             enrichedSites += candidates.length;
@@ -625,29 +783,41 @@ export async function runSearchParserJob(jobId: string) {
         if (toEnrich.length > 0) {
           const enriched = await mapWithConcurrency(toEnrich, ENRICH_EMAIL_CONCURRENCY, async (lead) => {
             try {
-              const { emails } = await fetchWebsiteEmails(lead.site, { maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE });
+              const { emails, brand_name } = await fetchWebsiteEmails(lead.site, {
+                maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE,
+              });
               const cleaned = emails.map((e) => e.trim()).filter(Boolean);
               const unique = Array.from(new Set(cleaned)).slice(0, 3);
-              return { site: lead.site, email: unique.length ? unique.join('; ') : null };
+              return {
+                site: lead.site,
+                email: unique.length ? unique.join('; ') : null,
+                brand_name: brand_name?.trim() ? brand_name.trim().slice(0, 160) : null,
+              };
             } catch {
-              return { site: lead.site, email: null };
+              return { site: lead.site, email: null, brand_name: null };
             }
           });
-          const emailBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e.email]));
-          for (const row of rowsToInsert) {
-            const e = emailBySite.get(row.site.toLowerCase());
-            if (e) row.email = e;
+          const enrichedBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e]));
+          for (const row of companyRowsToInsert) {
+            const e = enrichedBySite.get(row.site.toLowerCase());
+            if (!e) continue;
+            if (e.email) row.email = e.email;
+            if (e.brand_name) row.company_name = pickBetterCompanyName(row.company_name, e.brand_name) ?? row.company_name;
           }
         }
 
-        if (rowsToInsert.length > 0) {
-          const { error: insertError } = await admin.from('search_results').insert(rowsToInsert);
-          if (insertError) {
+        if (companyRowsToInsert.length > 0) {
+          const inserted = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
+          if (inserted.hadFailures) {
             hadQueryFailures = true;
-            void logError('parser.search.insert.failed', insertError, { jobId, provider, query }, logMeta);
-          } else {
-            insertedCount = rowsToInsert.length;
+            void logError(
+              'parser.search.insert.failed',
+              new Error(inserted.firstErrorMessage ?? 'insert failed'),
+              { jobId, provider, query, attempted: companyRowsToInsert.length, inserted: inserted.inserted },
+              logMeta,
+            );
           }
+          insertedCount = inserted.inserted;
         }
 
         await querySpan?.end(
