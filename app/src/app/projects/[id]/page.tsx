@@ -11,7 +11,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
-const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 
 /** Parse a comma-separated services string into an array */
@@ -707,6 +707,30 @@ export default function ProjectPage() {
                     onChange={(e) => setProject({ ...project, kpi_fact: e.target.value })}
                     disabled={!canEdit}
                     className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border font-bold text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    />
+                </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                 <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Обязательство по контактам</label>
+                    <input
+                    type="text"
+                    value={project.contacts_obligation ?? ''}
+                    onChange={(e) => setProject({ ...project, contacts_obligation: e.target.value })}
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    placeholder="Например 4000"
+                    />
+                </div>
+                 <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Контактов пройдено</label>
+                    <input
+                    type="text"
+                    value={project.contacts_done ?? ''}
+                    onChange={(e) => setProject({ ...project, contacts_done: e.target.value })}
+                    disabled={!canEdit}
+                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border font-bold text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                    placeholder="0"
                     />
                 </div>
             </div>

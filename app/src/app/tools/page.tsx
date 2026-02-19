@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Mail, Search, PhoneCall } from 'lucide-react';
+import { Database, Sparkles, Mail, Search, PhoneCall } from 'lucide-react';
 
 export default function ToolsPage() {
   return (
@@ -13,6 +13,28 @@ export default function ToolsPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <Link
+          href={'/tools/done-for-you' as Route}
+          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-base font-semibold text-gray-900">Done For You База</p>
+                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
+                  В разработке
+                </span>
+              </div>
+              <p className="text-sm text-gray-500">
+                AI соберет, очистит и персонализирует базу автоматически по брифу.
+              </p>
+            </div>
+            <Sparkles className="h-8 w-8 text-blue-500 group-hover:text-blue-600 transition-colors" />
+          </div>
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
+            Открыть →
+          </div>
+        </Link>
         <Link
           href={'/tools/ai-caller' as Route}
           className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"

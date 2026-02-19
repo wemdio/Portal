@@ -12,7 +12,7 @@ import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/project
 type ViewMode = 'table' | 'cards' | 'kanban';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
-const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 const PROJECT_TYPE_OPTIONS = ['Продажа', 'Продление'];
 const STATUS_OPTIONS = ['В работе', 'Тестирование', 'На паузе', 'Подготовка', 'Завершен', 'Отменен'];
@@ -140,6 +140,8 @@ export function ProjectList() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
+  const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
+  const [editingContactsValue, setEditingContactsValue] = useState('');
 
   useEffect(() => {
     void fetchProjects();
@@ -625,9 +627,9 @@ export function ProjectList() {
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Дедлайн</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI План</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI Факт</th>
+                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Контакты</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Специалист</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Лид (PM)</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Комментарий</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Формат</th>
               </tr>
             </thead>
@@ -778,7 +780,7 @@ export function ProjectList() {
                           <span className="text-gray-900">{readOnlyKpi}</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap w-[120px]">
+                      <td className="px-4 py-3 align-top whitespace-nowrap w-[90px]">
                         {isTableEditing ? (
                           <InlineStepper
                             value={kpiFactValue}
@@ -788,8 +790,96 @@ export function ProjectList() {
                             placeholder="Факт"
                           />
                         ) : (
-                          <span className="text-gray-900">{readOnlyKpiFact}</span>
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-900 tabular-nums">{readOnlyKpiFact}</span>
+                            {canEdit && (
+                              <div className="flex flex-col gap-px ml-0.5">
+                                <button
+                                  type="button"
+                                  disabled={isSaving}
+                                  onClick={() => {
+                                    const cur = parseInt(project.kpi_fact ?? '0', 10);
+                                    const next = (isNaN(cur) ? 0 : cur) + 1;
+                                    void commitProjectUpdate(project, { kpi_fact: next.toString() });
+                                  }}
+                                  className="flex items-center justify-center w-4 h-3 text-gray-300 hover:text-gray-600 transition-colors disabled:opacity-30 leading-none"
+                                  style={{ fontSize: '8px' }}
+                                  title="Увеличить"
+                                >
+                                  ▲
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isSaving}
+                                  onClick={() => {
+                                    const cur = parseInt(project.kpi_fact ?? '0', 10);
+                                    const next = (isNaN(cur) ? 0 : cur) - 1;
+                                    void commitProjectUpdate(project, { kpi_fact: next.toString() });
+                                  }}
+                                  className="flex items-center justify-center w-4 h-3 text-gray-300 hover:text-gray-600 transition-colors disabled:opacity-30 leading-none"
+                                  style={{ fontSize: '8px' }}
+                                  title="Уменьшить"
+                                >
+                                  ▼
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         )}
+                      </td>
+                      <td className="px-4 py-3 align-top whitespace-nowrap w-[140px]">
+                        {(() => {
+                          const obligation = parseInt(project.contacts_obligation ?? '0', 10) || 0;
+                          const done = parseInt(project.contacts_done ?? '0', 10) || 0;
+                          const pct = obligation > 0 ? Math.min(Math.round((done / obligation) * 100), 100) : 0;
+                          const barColor = pct >= 100 ? 'bg-emerald-500' : pct >= 50 ? 'bg-blue-500' : 'bg-amber-500';
+                          const isEditingThis = editingContactsId === project.id;
+
+                          if (isEditingThis) {
+                            return (
+                              <input
+                                type="text"
+                                autoFocus
+                                value={editingContactsValue}
+                                onChange={(e) => setEditingContactsValue(e.target.value)}
+                                onBlur={() => {
+                                  void commitProjectUpdate(project, { contacts_done: editingContactsValue });
+                                  setEditingContactsId(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') e.currentTarget.blur();
+                                  if (e.key === 'Escape') setEditingContactsId(null);
+                                }}
+                                className="w-full rounded-md border border-blue-400 bg-white px-2 py-1 text-sm text-gray-900 outline-none ring-2 ring-blue-500/20"
+                              />
+                            );
+                          }
+
+                          return (
+                            <div
+                              className={canEdit ? 'cursor-pointer hover:bg-gray-100 rounded-md px-1 py-0.5 -mx-1 transition-colors' : ''}
+                              onClick={() => {
+                                if (!canEdit || isSaving) return;
+                                setEditingContactsValue(project.contacts_done || '0');
+                                setEditingContactsId(project.id);
+                              }}
+                            >
+                              {obligation > 0 ? (
+                                <>
+                                  <div className="flex items-baseline gap-1 mb-1">
+                                    <span className="text-sm font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
+                                    <span className="text-xs text-gray-400">/ {obligation.toLocaleString('ru-RU')}</span>
+                                  </div>
+                                  <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                    <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                                  </div>
+                                </>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
@@ -833,20 +923,6 @@ export function ProjectList() {
                                 <span className="text-gray-700">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 align-top min-w-[160px]">
-                        {isTableEditing ? (
-                          <InlineTextarea
-                            value={commentsValue}
-                            onChange={(value) => setDraftValue(project.id, 'comments', value)}
-                            onCommit={(value) => void commitProjectUpdate(project, { comments: value })}
-                            disabled={isDisabled}
-                            placeholder="Комментарий"
-                            rows={2}
-                          />
-                        ) : (
-                          <span className="text-gray-500 text-xs leading-relaxed line-clamp-3 break-words">{readOnlyComment}</span>
                         )}
                       </td>
                       <td className="px-4 py-3 align-top whitespace-nowrap">
@@ -1038,37 +1114,29 @@ export function ProjectList() {
               </section>
 
               <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
-                 <div>
-                    <h3 className="text-sm font-bold text-gray-600 mb-3 uppercase tracking-wide flex items-center gap-2">
-                      Подзадачи
-                    </h3>
-                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-200 shadow-inner">
-                      <InlineTextarea
-                        value={getDraftValue(selectedProject, 'subtasks')}
-                        onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
-                        onCommit={(value) => void commitProjectUpdate(selectedProject, { subtasks: value })}
-                        disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                        placeholder="Список подзадач..."
-                        rows={4}
-                        className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
-                      />
-                    </div>
+                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Подзадачи</h3>
+                    <InlineTextarea
+                      value={getDraftValue(selectedProject, 'subtasks')}
+                      onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
+                      onCommit={(value) => void commitProjectUpdate(selectedProject, { subtasks: value })}
+                      disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                      placeholder="Список подзадач..."
+                      rows={4}
+                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                    />
                  </div>
-                 <div>
-                    <h3 className="text-sm font-bold text-gray-600 mb-3 uppercase tracking-wide flex items-center gap-2">
-                      Комментарий
-                    </h3>
-                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-200 shadow-inner">
-                      <InlineTextarea
-                        value={getDraftValue(selectedProject, 'comments')}
-                        onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
-                        onCommit={(value) => void commitProjectUpdate(selectedProject, { comments: value })}
-                        disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                        placeholder="Внутренний комментарий..."
-                        rows={4}
-                        className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
-                      />
-                    </div>
+                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Комментарий передачи</h3>
+                    <InlineTextarea
+                      value={getDraftValue(selectedProject, 'comments')}
+                      onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
+                      onCommit={(value) => void commitProjectUpdate(selectedProject, { comments: value })}
+                      disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                      placeholder="Внутренний комментарий..."
+                      rows={4}
+                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                    />
                  </div>
               </section>
 
@@ -1132,12 +1200,13 @@ export function ProjectList() {
                   <button
                     type="button"
                     onClick={() => setShowProjectSettings(!showProjectSettings)}
-                    className="flex items-center gap-2 text-sm font-semibold text-gray-500 hover:text-gray-700 transition-colors w-full uppercase tracking-wide"
+                    className="flex items-center gap-3 w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
                   >
-                    <svg className={`w-4 h-4 transition-transform ${showProjectSettings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className={`w-5 h-5 text-gray-600 transition-transform ${showProjectSettings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
-                    Настройки проекта
+                    <span className="text-sm font-bold text-gray-700 uppercase tracking-wide">Настройки проекта</span>
+                    <span className="text-xs text-gray-400 ml-auto">{showProjectSettings ? 'Свернуть' : 'Развернуть'}</span>
                   </button>
 
                   {showProjectSettings && (
@@ -1356,6 +1425,30 @@ export function ProjectList() {
                             onCommit={(value) => void commitProjectUpdate(selectedProject, { kpi_fact: value })}
                             disabled={Boolean(savingRows[selectedProject.id])}
                             placeholder="KPI факт"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Contacts */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Обязательство по контактам</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'contacts_obligation')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'contacts_obligation', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { contacts_obligation: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="Например 4000"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Контактов пройдено</label>
+                          <InlineInput
+                            value={getDraftValue(selectedProject, 'contacts_done')}
+                            onChange={(value) => setDraftValue(selectedProject.id, 'contacts_done', value)}
+                            onCommit={(value) => void commitProjectUpdate(selectedProject, { contacts_done: value })}
+                            disabled={Boolean(savingRows[selectedProject.id])}
+                            placeholder="0"
                           />
                         </div>
                       </div>
