@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Project, ProjectStatus, UserProfile } from '@/types';
+import { Project, ProjectStatus, Task, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
@@ -142,11 +142,15 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
+  const [projectTasks, setProjectTasks] = useState<Record<string, Task[]>>({});
+  const [taskPopoverId, setTaskPopoverId] = useState<string | null>(null);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
 
   useEffect(() => {
     void fetchProjects();
     void checkPermissions();
     void fetchAssigneeOptions();
+    void fetchAllTasks();
   }, []);
 
   async function checkPermissions() {
@@ -188,6 +192,48 @@ export function ProjectList() {
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
     }
+  }
+
+  async function fetchAllTasks() {
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const grouped: Record<string, Task[]> = {};
+      for (const t of (data ?? []) as Task[]) {
+        if (!grouped[t.project_id]) grouped[t.project_id] = [];
+        grouped[t.project_id].push(t);
+      }
+      setProjectTasks(grouped);
+    } catch {
+      // tasks table may not exist yet
+    }
+  }
+
+  async function addTask(projectId: string, title: string, specialist?: string) {
+    if (!title.trim()) return;
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null })
+      .select()
+      .single();
+    if (error) return;
+    const task = data as Task;
+    setProjectTasks((prev) => ({
+      ...prev,
+      [projectId]: [task, ...(prev[projectId] ?? [])],
+    }));
+    setNewTaskTitle('');
+  }
+
+  async function deleteTask(taskId: string, projectId: string) {
+    await supabase.from('tasks').delete().eq('id', taskId);
+    setProjectTasks((prev) => ({
+      ...prev,
+      [projectId]: (prev[projectId] ?? []).filter((t) => t.id !== taskId),
+    }));
   }
 
   async function updateProjectStatus(id: string, newStatus: string) {
@@ -400,6 +446,7 @@ export function ProjectList() {
 
   const statusCounts = {
     all: projects.length,
+    'подготовка': projects.filter(p => p.status?.toLowerCase().includes('подготовк')).length,
     'в работе': projects.filter(p => p.status?.toLowerCase().includes('работ')).length,
     'тестирование': projects.filter(p => p.status?.toLowerCase().includes('тест')).length,
     'на паузе': projects.filter(p => p.status?.toLowerCase().includes('пауз')).length,
@@ -437,21 +484,6 @@ export function ProjectList() {
 
   return (
     <div className={isTma ? 'space-y-4' : 'space-y-4'}>
-      {/* Deadline Alert */}
-      {(overdueCount > 0 || soonCount > 0) && (
-        <div className={`rounded-xl ${isTma ? 'p-3' : 'p-4'} ${overdueCount > 0 ? 'bg-red-50 border border-red-100' : 'bg-amber-50 border border-amber-100'}`}>
-          <div className="flex items-center">
-            <div className="ml-1">
-              <p className={`text-sm font-medium ${overdueCount > 0 ? 'text-red-800' : 'text-amber-800'}`}>
-                {overdueCount > 0 && <span>🔴 {overdueCount} просрочено</span>}
-                {overdueCount > 0 && soonCount > 0 && ' · '}
-                {soonCount > 0 && <span>🟠 {soonCount} скоро дедлайн</span>}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
         <div>
@@ -501,6 +533,7 @@ export function ProjectList() {
           <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar border-t border-gray-100 pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar border-l border-gray-100 pl-4 py-1'}>
           {[
             { key: 'all', label: 'Все' },
+            { key: 'подготовка', label: 'Подготовка' },
             { key: 'в работе', label: 'В работе' },
             { key: 'тестирование', label: 'Тест' },
             { key: 'на паузе', label: 'Пауза' },
@@ -617,20 +650,22 @@ export function ProjectList() {
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="min-w-full divide-y divide-gray-100 text-sm">
+            <table className="w-full divide-y divide-gray-100 text-xs table-fixed">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Проект</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Сумма</th>
-                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Договор</th>
-                  <th className="px-4 py-3.5 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Передача</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Дедлайн</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI План</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">KPI Факт</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Контакты</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Специалист</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Лид (PM)</th>
-                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Формат</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[11%]">Проект</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Статус</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Сумма</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Дог.</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Пер.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Дедлайн</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">KPI План</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[5%]">KPI Факт</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">Контакты</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Специалист</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Лид (PM)</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Формат</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-50 bg-white">
@@ -665,7 +700,7 @@ export function ProjectList() {
                   
                 return (
                     <tr key={project.id} className="hover:bg-gray-50 transition-colors group">
-                      <td className="px-4 py-3 align-top min-w-[140px]">
+                      <td className="px-2 py-2 align-top overflow-hidden">
                         {isTableEditing ? (
                           <div className="flex items-center gap-2">
                             <InlineInput
@@ -705,7 +740,30 @@ export function ProjectList() {
                           </button>
                       )}
                     </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap text-center">
+                        {(() => {
+                          const cfg = getStatusConfig(project.status);
+                          return canEdit ? (
+                            <select
+                              value={project.status || ''}
+                              onChange={(e) => {
+                                void commitProjectUpdate(project, { status: e.target.value as ProjectStatus });
+                              }}
+                              disabled={isSaving}
+                              className={`appearance-none cursor-pointer text-xs font-medium px-2.5 py-1 rounded-full border-0 ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color} focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
+                            >
+                              {STATUS_OPTIONS.map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color}`}>
+                              {cfg.label}
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={budgetValue}
@@ -718,7 +776,7 @@ export function ProjectList() {
                           <span className="text-gray-900 font-medium">{readOnlyBudget}</span>
                       )}
                     </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={contractValue}
@@ -728,14 +786,14 @@ export function ProjectList() {
                             placeholder="https://..."
                           />
                         ) : contractHref ? (
-                          <a href={contractHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors text-xs font-medium" title="Открыть договор">
+                          <a href={contractHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors text-[10px] font-medium" title="Открыть договор">
                             Дог.
                           </a>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap text-center">
+                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={handoffValue}
@@ -745,14 +803,14 @@ export function ProjectList() {
                             placeholder="https://..."
                           />
                         ) : handoffHref ? (
-                          <a href={handoffHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors text-xs font-medium" title="Открыть передачу">
+                          <a href={handoffHref} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors text-[10px] font-medium" title="Открыть передачу">
                             Пер.
                           </a>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={deadlineValue}
@@ -761,13 +819,21 @@ export function ProjectList() {
                             disabled={isDisabled}
                             placeholder="DD.MM.YY"
                           />
-                        ) : (
-                          <div className="flex items-center text-gray-600">
-                             <span>{readOnlyDeadline}</span>
-                          </div>
-                        )}
+                        ) : (() => {
+                          const dlStatus = getDeadlineStatus(project.deadline);
+                          return (
+                            <span className={
+                              dlStatus === 'overdue' ? 'text-red-600 font-semibold' :
+                              dlStatus === 'soon' ? 'text-amber-600 font-medium' :
+                              'text-gray-600'
+                            }>
+                              {readOnlyDeadline}
+                              {dlStatus === 'overdue' && <span className="ml-1 text-[10px]">●</span>}
+                            </span>
+                          );
+                        })()}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top">
                         {isTableEditing ? (
                           <InlineInput
                             value={kpiValue}
@@ -780,7 +846,7 @@ export function ProjectList() {
                           <span className="text-gray-900">{readOnlyKpi}</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap w-[90px]">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineStepper
                             value={kpiFactValue}
@@ -827,7 +893,7 @@ export function ProjectList() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap w-[140px]">
+                      <td className="px-2 py-2 align-top">
                         {(() => {
                           const obligation = parseInt(project.contacts_obligation ?? '0', 10) || 0;
                           const done = parseInt(project.contacts_done ?? '0', 10) || 0;
@@ -866,11 +932,11 @@ export function ProjectList() {
                             >
                               {obligation > 0 ? (
                                 <>
-                                  <div className="flex items-baseline gap-1 mb-1">
-                                    <span className="text-sm font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
-                                    <span className="text-xs text-gray-400">/ {obligation.toLocaleString('ru-RU')}</span>
+                                  <div className="flex items-baseline gap-0.5 mb-0.5">
+                                    <span className="text-xs font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
+                                    <span className="text-[10px] text-gray-400">/{obligation.toLocaleString('ru-RU')}</span>
                                   </div>
-                                  <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                  <div className="w-full h-1 bg-gray-200 rounded-full overflow-hidden">
                                     <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                                   </div>
                                 </>
@@ -881,7 +947,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={specialistValue}
@@ -894,16 +960,16 @@ export function ProjectList() {
                           />
                         ) : (
                           readOnlySpecialist !== '—' ? (
-                             <div className="flex items-center">
-                                <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xs font-medium mr-2">
+                             <div className="flex items-center gap-1">
+                                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
                                   {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </div>
-                                <span className="text-gray-700">{readOnlySpecialist}</span>
+                                </span>
+                                <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={managerValue}
@@ -916,16 +982,16 @@ export function ProjectList() {
                           />
                         ) : (
                            readOnlyManager !== '—' ? (
-                             <div className="flex items-center">
-                                <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-medium mr-2">
+                             <div className="flex items-center gap-1">
+                                <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
                                   {readOnlyManager.charAt(0).toUpperCase()}
-                                </div>
-                                <span className="text-gray-700">{readOnlyManager}</span>
+                                </span>
+                                <span className="text-gray-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 align-top whitespace-nowrap">
+                      <td className="px-2 py-2 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineSelect
                             value={workFormatValue}
@@ -944,6 +1010,73 @@ export function ProjectList() {
                           <span className="text-gray-300">—</span>
                         )}
                     </td>
+                      <td className="px-2 py-2 align-top relative">
+                        {(() => {
+                          const tasks = projectTasks[project.id] ?? [];
+                          const latestTask = tasks[0];
+                          const isOpen = taskPopoverId === project.id;
+                          return (
+                            <>
+                              <div
+                                className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-gray-100'}`}
+                                onClick={() => setTaskPopoverId(isOpen ? null : project.id)}
+                              >
+                                {latestTask ? (
+                                  <div>
+                                    <p className="text-xs text-gray-900 line-clamp-2">{latestTask.title}</p>
+                                    {tasks.length > 1 && (
+                                      <p className="text-[10px] text-gray-400 mt-0.5">+{tasks.length - 1} ещё</p>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
+                                )}
+                              </div>
+                              {isOpen && (
+                                <div className="absolute right-0 top-full mt-1 z-30 w-72 bg-white rounded-xl border border-gray-200 shadow-xl p-3 space-y-2">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-gray-700">Задачи</span>
+                                    <button type="button" onClick={() => setTaskPopoverId(null)} className="text-gray-400 hover:text-gray-600 text-sm">✕</button>
+                                  </div>
+                                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                                    {tasks.map((t) => (
+                                      <div key={t.id} className="flex items-start gap-2 rounded-lg bg-gray-50 p-2 text-xs group">
+                                        <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                                        <span className={`flex-1 ${t.status === 'done' ? 'line-through text-gray-400' : 'text-gray-800'}`}>{t.title}</span>
+                                        {canEdit && (
+                                          <button type="button" onClick={() => void deleteTask(t.id, project.id)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 text-[10px] transition-opacity">✕</button>
+                                        )}
+                                      </div>
+                                    ))}
+                                    {tasks.length === 0 && <p className="text-xs text-gray-400 text-center py-2">Нет задач</p>}
+                                  </div>
+                                  {canEdit && (
+                                    <div className="flex gap-1.5 pt-1 border-t border-gray-100">
+                                      <input
+                                        type="text"
+                                        value={newTaskTitle}
+                                        onChange={(e) => setNewTaskTitle(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') void addTask(project.id, newTaskTitle, project.specialist);
+                                        }}
+                                        placeholder="Новая задача..."
+                                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => void addTask(project.id, newTaskTitle, project.specialist)}
+                                        className="text-xs bg-blue-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </td>
                   </tr>
                 );
               })}
@@ -1115,7 +1248,10 @@ export function ProjectList() {
 
               <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
                  <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Подзадачи</h3>
+                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                      <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Подзадачи</span>
+                    </div>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'subtasks')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
@@ -1127,7 +1263,10 @@ export function ProjectList() {
                     />
                  </div>
                  <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Комментарий передачи</h3>
+                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                      <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Комментарий передачи</span>
+                    </div>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'comments')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
