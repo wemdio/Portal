@@ -99,6 +99,23 @@ export default function TasksPage() {
     return m;
   }, [projects]);
 
+  const promoteLegacyTask = useCallback(async (legacyTask: EnrichedTask, newStatus: TaskStatus) => {
+    const p = projectMap.get(legacyTask.project_id);
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        project_id: legacyTask.project_id,
+        title: legacyTask.title,
+        status: newStatus,
+        specialist: p?.specialist || null,
+      })
+      .select()
+      .single();
+    if (!error && data) {
+      setDbTasks((prev) => [data as Task, ...prev]);
+    }
+  }, [projectMap]);
+
   const shouldFilterByUser = !userIsLead && currentUserName;
 
   const regularTasks = useMemo<EnrichedTask[]>(() => {
@@ -120,6 +137,12 @@ export default function TasksPage() {
     });
   }, [dbTasks, projectMap, shouldFilterByUser, currentUserName]);
 
+  const existingTaskTitles = useMemo(() => {
+    const set = new Set<string>();
+    dbTasks.forEach((t) => set.add(`${t.project_id}::${t.title}`));
+    return set;
+  }, [dbTasks]);
+
   const hypothesisTasks = useMemo<EnrichedTask[]>(() => {
     const enriched: EnrichedTask[] = [];
     const relevantProjects = shouldFilterByUser
@@ -129,6 +152,7 @@ export default function TasksPage() {
     relevantProjects.forEach((project) => {
       const legacy = splitLegacyTasks(project.hypotheses || project.weekly_tasks);
       legacy.forEach((title, idx) => {
+        if (existingTaskTitles.has(`${project.id}::${title}`)) return;
         enriched.push({
           id: `legacy-${project.id}-${idx}`,
           project_id: project.id,
@@ -141,7 +165,7 @@ export default function TasksPage() {
       });
     });
     return enriched;
-  }, [projects, shouldFilterByUser, currentUserName]);
+  }, [projects, shouldFilterByUser, currentUserName, existingTaskTitles]);
 
   const currentTasks = activeTab === 'tasks' ? regularTasks : hypothesisTasks;
 
@@ -224,29 +248,24 @@ export default function TasksPage() {
             </p>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            {task.isLegacy ? (
-              <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${statusCfg.className}`}>
-                {statusCfg.label}
-              </span>
-            ) : (
-              <select
-                value={task.status}
-                onChange={(e) => void updateTaskStatus(task.id, e.target.value as TaskStatus)}
-                className={`appearance-none cursor-pointer rounded-full border px-2.5 py-0.5 text-[10px] font-semibold outline-none ${statusCfg.className}`}
-              >
-                {statusOptions.map((s) => (
-                  <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>
-                ))}
-              </select>
-            )}
+            <select
+              value={task.status}
+              onChange={(e) => {
+                const newStatus = e.target.value as TaskStatus;
+                if (task.isLegacy) {
+                  void promoteLegacyTask(task, newStatus);
+                } else {
+                  void updateTaskStatus(task.id, newStatus);
+                }
+              }}
+              className={`appearance-none cursor-pointer rounded-full border px-2.5 py-0.5 text-[10px] font-semibold outline-none ${statusCfg.className}`}
+            >
+              {statusOptions.map((s) => (
+                <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>
+              ))}
+            </select>
           </div>
         </div>
-
-        {task.isLegacy && (
-          <div className="mt-1">
-            <span className="text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">гипотеза</span>
-          </div>
-        )}
 
         {!task.isLegacy && (
           <div className="mt-2 pt-2 border-t border-gray-100">
