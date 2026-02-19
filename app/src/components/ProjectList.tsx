@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Project, ProjectStatus, UserProfile } from '@/types';
+import { Project, ProjectStatus, Task, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
@@ -142,11 +142,15 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
+  const [projectTasks, setProjectTasks] = useState<Record<string, Task[]>>({});
+  const [taskPopoverId, setTaskPopoverId] = useState<string | null>(null);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
 
   useEffect(() => {
     void fetchProjects();
     void checkPermissions();
     void fetchAssigneeOptions();
+    void fetchAllTasks();
   }, []);
 
   async function checkPermissions() {
@@ -188,6 +192,48 @@ export function ProjectList() {
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
     }
+  }
+
+  async function fetchAllTasks() {
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const grouped: Record<string, Task[]> = {};
+      for (const t of (data ?? []) as Task[]) {
+        if (!grouped[t.project_id]) grouped[t.project_id] = [];
+        grouped[t.project_id].push(t);
+      }
+      setProjectTasks(grouped);
+    } catch {
+      // tasks table may not exist yet
+    }
+  }
+
+  async function addTask(projectId: string, title: string) {
+    if (!title.trim()) return;
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({ project_id: projectId, title: title.trim() })
+      .select()
+      .single();
+    if (error) return;
+    const task = data as Task;
+    setProjectTasks((prev) => ({
+      ...prev,
+      [projectId]: [task, ...(prev[projectId] ?? [])],
+    }));
+    setNewTaskTitle('');
+  }
+
+  async function deleteTask(taskId: string, projectId: string) {
+    await supabase.from('tasks').delete().eq('id', taskId);
+    setProjectTasks((prev) => ({
+      ...prev,
+      [projectId]: (prev[projectId] ?? []).filter((t) => t.id !== taskId),
+    }));
   }
 
   async function updateProjectStatus(id: string, newStatus: string) {
@@ -438,21 +484,6 @@ export function ProjectList() {
 
   return (
     <div className={isTma ? 'space-y-4' : 'space-y-4'}>
-      {/* Deadline Alert */}
-      {(overdueCount > 0 || soonCount > 0) && (
-        <div className={`rounded-xl ${isTma ? 'p-3' : 'p-4'} ${overdueCount > 0 ? 'bg-red-50 border border-red-100' : 'bg-amber-50 border border-amber-100'}`}>
-          <div className="flex items-center">
-            <div className="ml-1">
-              <p className={`text-sm font-medium ${overdueCount > 0 ? 'text-red-800' : 'text-amber-800'}`}>
-                {overdueCount > 0 && <span>🔴 {overdueCount} просрочено</span>}
-                {overdueCount > 0 && soonCount > 0 && ' · '}
-                {soonCount > 0 && <span>🟠 {soonCount} скоро дедлайн</span>}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
         <div>
@@ -634,6 +665,7 @@ export function ProjectList() {
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Специалист</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Лид (PM)</th>
                   <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Формат</th>
+                  <th className="px-4 py-3.5 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Задача</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-50 bg-white">
@@ -978,6 +1010,73 @@ export function ProjectList() {
                           <span className="text-gray-300">—</span>
                         )}
                     </td>
+                      <td className="px-4 py-3 align-top min-w-[180px] relative">
+                        {(() => {
+                          const tasks = projectTasks[project.id] ?? [];
+                          const latestTask = tasks[0];
+                          const isOpen = taskPopoverId === project.id;
+                          return (
+                            <>
+                              <div
+                                className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-gray-100'}`}
+                                onClick={() => setTaskPopoverId(isOpen ? null : project.id)}
+                              >
+                                {latestTask ? (
+                                  <div>
+                                    <p className="text-xs text-gray-900 line-clamp-2">{latestTask.title}</p>
+                                    {tasks.length > 1 && (
+                                      <p className="text-[10px] text-gray-400 mt-0.5">+{tasks.length - 1} ещё</p>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
+                                )}
+                              </div>
+                              {isOpen && (
+                                <div className="absolute right-0 top-full mt-1 z-30 w-72 bg-white rounded-xl border border-gray-200 shadow-xl p-3 space-y-2">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-xs font-bold text-gray-700">Задачи</span>
+                                    <button type="button" onClick={() => setTaskPopoverId(null)} className="text-gray-400 hover:text-gray-600 text-sm">✕</button>
+                                  </div>
+                                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                                    {tasks.map((t) => (
+                                      <div key={t.id} className="flex items-start gap-2 rounded-lg bg-gray-50 p-2 text-xs group">
+                                        <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                                        <span className={`flex-1 ${t.status === 'done' ? 'line-through text-gray-400' : 'text-gray-800'}`}>{t.title}</span>
+                                        {canEdit && (
+                                          <button type="button" onClick={() => void deleteTask(t.id, project.id)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 text-[10px] transition-opacity">✕</button>
+                                        )}
+                                      </div>
+                                    ))}
+                                    {tasks.length === 0 && <p className="text-xs text-gray-400 text-center py-2">Нет задач</p>}
+                                  </div>
+                                  {canEdit && (
+                                    <div className="flex gap-1.5 pt-1 border-t border-gray-100">
+                                      <input
+                                        type="text"
+                                        value={newTaskTitle}
+                                        onChange={(e) => setNewTaskTitle(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') void addTask(project.id, newTaskTitle);
+                                        }}
+                                        placeholder="Новая задача..."
+                                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => void addTask(project.id, newTaskTitle)}
+                                        className="text-xs bg-blue-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </td>
                   </tr>
                 );
               })}

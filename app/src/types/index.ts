@@ -57,3 +57,17 @@ export interface Project {
   contacts_obligation?: string;
   contacts_done?: string;
 }
+
+export type TaskStatus = 'pending' | 'in_progress' | 'done';
+
+export interface Task {
+  id: string;
+  project_id: string;
+  title: string;
+  result?: string;
+  status: TaskStatus;
+  created_by?: string;
+  created_at?: string;
+  updated_at?: string;
+  project?: Project;
+}

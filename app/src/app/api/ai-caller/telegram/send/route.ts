@@ -6,7 +6,6 @@ export const dynamic = 'force-dynamic';
 
 const TG_TOKEN = process.env.AI_CALLER_TG_BOT_TOKEN ?? '';
 const VAPI_KEY = process.env.VAPI_API_KEY ?? '';
-const TG_CAPTION_LIMIT = 1024;
 
 /** POST — отправить информацию о лиде в Telegram чат */
 export async function POST(req: NextRequest) {
@@ -113,73 +112,22 @@ export async function POST(req: NextRequest) {
   const fullText = lines.join('\n');
 
   try {
-    let messageId: number | undefined;
-    let audioError: string | undefined;
-
-    // If we have a recording — send as single audio post with caption
-    if (recordingUrl) {
-      try {
-        const audioRes = await fetch(recordingUrl, { signal: AbortSignal.timeout(30_000) });
-
-        if (audioRes.ok) {
-          const arrayBuf = await audioRes.arrayBuffer();
-          const audioBytes = new Uint8Array(arrayBuf);
-          const ct = audioRes.headers.get('content-type') ?? 'audio/wav';
-
-          let ext = 'wav';
-          if (ct.includes('mp3') || ct.includes('mpeg')) ext = 'mp3';
-          else if (ct.includes('ogg')) ext = 'ogg';
-
-          // Fit text into caption limit (1024 chars)
-          const caption = fullText.length <= TG_CAPTION_LIMIT
-            ? fullText
-            : fullText.slice(0, TG_CAPTION_LIMIT - 3) + '...';
-
-          const form = new FormData();
-          form.append('chat_id', String(body.chatId));
-          form.append('audio', new Blob([audioBytes], { type: ct }), `recording.${ext}`);
-          form.append('caption', caption);
-          form.append('parse_mode', 'HTML');
-
-          const tgRes = await fetch(
-            `https://api.telegram.org/bot${TG_TOKEN}/sendAudio`,
-            { method: 'POST', body: form },
-          );
-          const tgData = await tgRes.json();
-
-          if (tgData.ok) {
-            messageId = tgData.result?.message_id;
-          } else {
-            audioError = tgData.description ?? 'sendAudio failed';
-          }
-        } else {
-          audioError = `Audio download: ${audioRes.status}`;
-        }
-      } catch (e) {
-        audioError = e instanceof Error ? e.message : 'Audio failed';
-      }
+    const tgRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: body.chatId,
+        text: fullText,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+    const tgData = await tgRes.json();
+    if (!tgData.ok) {
+      return NextResponse.json({ error: tgData.description || 'Telegram send failed' }, { status: 502 });
     }
 
-    // Fallback: if no audio or audio failed — send as text message
-    if (!messageId) {
-      const tgRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: body.chatId,
-          text: fullText,
-          parse_mode: 'HTML',
-          disable_web_page_preview: true,
-        }),
-      });
-      const tgData = await tgRes.json();
-      if (!tgData.ok) {
-        return NextResponse.json({ error: tgData.description || 'Telegram send failed' }, { status: 502 });
-      }
-      messageId = tgData.result?.message_id;
-    }
-
-    return NextResponse.json({ ok: true, messageId, audioError });
+    return NextResponse.json({ ok: true, messageId: tgData.result?.message_id });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 502 });
