@@ -82,23 +82,6 @@ export default function TasksPage() {
     }
   }
 
-  const promoteLegacyTask = useCallback(async (legacyTask: EnrichedTask, newStatus: TaskStatus) => {
-    const p = projectMap.get(legacyTask.project_id);
-    const { data, error } = await supabase
-      .from('tasks')
-      .insert({
-        project_id: legacyTask.project_id,
-        title: legacyTask.title,
-        status: newStatus,
-        specialist: p?.specialist || null,
-      })
-      .select()
-      .single();
-    if (!error && data) {
-      setDbTasks((prev) => [data as Task, ...prev]);
-    }
-  }, [projectMap]);
-
   const updateTaskStatus = useCallback(async (taskId: string, newStatus: TaskStatus) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
     await supabase.from('tasks').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', taskId);
@@ -115,6 +98,23 @@ export default function TasksPage() {
     projects.forEach((p) => m.set(p.id, p));
     return m;
   }, [projects]);
+
+  const promoteLegacyTask = useCallback(async (legacyTask: EnrichedTask, newStatus: TaskStatus) => {
+    const p = projectMap.get(legacyTask.project_id);
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        project_id: legacyTask.project_id,
+        title: legacyTask.title,
+        status: newStatus,
+        specialist: p?.specialist || null,
+      })
+      .select()
+      .single();
+    if (!error && data) {
+      setDbTasks((prev) => [data as Task, ...prev]);
+    }
+  }, [projectMap]);
 
   const shouldFilterByUser = !userIsLead && currentUserName;
 
