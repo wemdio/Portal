@@ -9,6 +9,7 @@
     "dev": "concurrently \"next dev\" \"cd ../services/yandexmaps && uvicorn server:app --reload --port 8010\"",
     "dev:next": "next dev",
     "build": "next build",
+    "build:worker": "esbuild worker/index.ts --bundle --platform=node --target=node20 --outfile=dist/worker.js --tsconfig=tsconfig.json --conditions=react-server --external:playwright --log-level=info",
     "prestart": "node scripts/db/ensureDatabase.js",
     "start": "next start",
     "lint": "eslint",
@@ -36,6 +37,7 @@
     "playwright": "^1.58.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^3.4.0",
     "undici": "^7.20.0",
     "xlsx": "^0.18.5"
@@ -51,6 +53,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "concurrently": "^9.2.1",
+    "esbuild": "^0.25.0",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "jest": "^29.7.0",

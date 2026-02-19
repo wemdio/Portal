@@ -93,19 +93,38 @@ function deriveCompanyName(title: string | undefined | null, site: string): stri
     .split('/')[0]
     .replace(/^www\./i, '');
 
-  const base = raw
-    ? raw
-        .replace(/[“”«»]/g, '"')
-        .split(/\s+[\-|—|•|:|·|::|\|]\s+/)[0]
-        .split(' | ')[0]
-        .trim()
-    : '';
+  const base = (() => {
+    if (!raw) return '';
+    const cleaned = raw.replace(/[“”«»]/g, '"');
+
+    // Most common Russian SEO title pattern: "Описание | НазваниеКомпании"
+    // Company brand is typically the LAST segment after ' | '
+    const pipeParts = cleaned.split(' | ').map((s) => s.trim()).filter((s) => s.length >= 2);
+    if (pipeParts.length >= 2) {
+      const last = pipeParts[pipeParts.length - 1];
+      // Company names are typically short; use last segment if it fits
+      if (last.length <= 80) return last;
+      // If last is long, prefer any segment with a legal entity marker
+      const withEntity = pipeParts.find((p) => /\b(ООО|ЗАО|ОАО|ПАО|ИП|АО)\b/i.test(p));
+      if (withEntity) return withEntity;
+      // Fall back to first segment
+      return pipeParts[0];
+    }
+
+    // No '|' — try em/en-dash: "НазваниеКомпании — описание"
+    // Company name is typically BEFORE the dash
+    const dashParts = cleaned.split(/\s+[—–]\s+/).map((s) => s.trim()).filter((s) => s.length >= 2);
+    if (dashParts.length >= 2) {
+      return dashParts[0];
+    }
+
+    return cleaned.trim();
+  })();
 
   const candidate = (base || fallback).trim();
   if (candidate.length < 2) return null;
   // avoid returning just a TLD-like token
   if (/^\w+\.\w+$/.test(candidate) && candidate.toLowerCase() === fallback.toLowerCase()) {
-    // Convert domain to a slightly nicer display name
     const parts = fallback.split('.');
     const name = parts[0] || fallback;
     return name.charAt(0).toUpperCase() + name.slice(1);
@@ -349,7 +368,7 @@ export async function runSearchParserJob(jobId: string) {
             debugPrimary = ddg.debug;
             provider = 'duckduckgo';
           } else {
-            const primary = await googleSearchDetailed(query);
+            const primary = await googleSearchDetailed(query, 30);
             results = primary.results;
             debugPrimary = primary.debug;
             provider = 'google';
@@ -398,7 +417,7 @@ export async function runSearchParserJob(jobId: string) {
           if (simplified && simplified !== query) {
             usedFallback = true;
             if (provider === 'google') {
-              const fallback = await googleSearchDetailed(simplified);
+              const fallback = await googleSearchDetailed(simplified, 30);
               results = fallback.results;
               debugFallback = fallback.debug;
               googleUrlFallback = fallback.debug.request_url;
