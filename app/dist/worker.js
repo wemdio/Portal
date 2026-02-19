@@ -63665,6 +63665,7 @@ async function googleSearchDetailed(query, numResults = 10) {
               status: 200,
               title: title2,
               block_reason: null,
+              proxy: { kind: proxyUrl ? "playwright" : "none", server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
               container_count: stats2.container_count,
               h3_count: stats2.h3_count,
               anchor_with_h3_count: stats2.anchor_with_h3_count,
