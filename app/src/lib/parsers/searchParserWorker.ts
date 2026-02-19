@@ -462,9 +462,7 @@ export async function runSearchParserJob(jobId: string) {
         try {
           const primary = await tryProviders(query);
           provider = primary.provider;
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           results = primary.out.results;
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           debugPrimary = primary.out.debug;
         } catch (e) {
           // If everything failed, bubble up. The catch below will handle cooldowns/hints.
@@ -478,9 +476,7 @@ export async function runSearchParserJob(jobId: string) {
             debugFallback = debugPrimary;
             const fallback = await tryProviders(query);
             provider = fallback.provider;
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
             results = fallback.out.results;
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
             debugPrimary = fallback.out.debug;
           } catch (e) {
             debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
@@ -494,9 +490,7 @@ export async function runSearchParserJob(jobId: string) {
             try {
               const fallback = await tryProviders(simplified);
               provider = fallback.provider;
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
               results = fallback.out.results;
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
               debugFallback = fallback.out.debug;
               if (fallback.provider === 'google' && fallback.out?.debug && typeof fallback.out.debug === 'object') {
                 googleUrlFallback = (fallback.out.debug as { request_url?: string }).request_url ?? null;
