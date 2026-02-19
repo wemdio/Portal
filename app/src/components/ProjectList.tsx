@@ -1246,12 +1246,11 @@ export function ProjectList() {
                 </div>
               </section>
 
-              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
-                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
-                      <span className="w-2 h-2 rounded-full bg-blue-600"></span>
-                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Подзадачи</span>
-                    </div>
+              <section>
+                <h3 className="text-lg font-bold text-gray-900 mb-4">Подзадачи и комментарии</h3>
+                <div className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">Подзадачи</label>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'subtasks')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
@@ -1261,12 +1260,9 @@ export function ProjectList() {
                       rows={4}
                       className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
                     />
-                 </div>
-                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
-                      <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Комментарий передачи</span>
-                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">Комментарий передачи</label>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'comments')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
@@ -1276,7 +1272,8 @@ export function ProjectList() {
                       rows={4}
                       className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
                     />
-                 </div>
+                  </div>
+                </div>
               </section>
 
               <section>
@@ -1597,18 +1594,13 @@ export function ProjectList() {
               )}
             </div>
             
-             <div className={isTma ? 'bg-gray-50 px-4 py-4 border-t border-gray-100 flex flex-col gap-3' : 'bg-gray-50 px-8 py-5 rounded-b-3xl border-t border-gray-100 flex justify-between items-center'}>
-               <span className="text-xs text-gray-400">
-                  {selectedProject.updated_at ? `Последнее обновление: ${new Date(selectedProject.updated_at).toLocaleDateString()}` : ''}
-               </span>
-               <button
-                  type="button"
-                  onClick={() => setSelectedProjectId(null)}
-                  className="px-6 py-2.5 bg-gray-900 text-white rounded-xl text-sm font-medium hover:bg-gray-800 hover:shadow-lg hover:shadow-gray-900/20 transition-all duration-200"
-                >
-                  Готово
-                </button>
-             </div>
+             {selectedProject.updated_at && (
+               <div className={isTma ? 'px-4 py-3 border-t border-gray-100' : 'px-8 py-3 rounded-b-3xl border-t border-gray-100'}>
+                 <span className="text-xs text-gray-400">
+                    Последнее обновление: {new Date(selectedProject.updated_at).toLocaleDateString()}
+                 </span>
+               </div>
+             )}
           </div>
         </div>
       )}
