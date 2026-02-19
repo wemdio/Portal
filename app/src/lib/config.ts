@@ -2,10 +2,30 @@
 // Значения можно переопределять через переменные окружения, но здесь заданы дефолты.
 
 export const SEARCH_CONFIG = {
+  // Логи и диагностика
+  PROXY_DEBUG: process.env.SEARCH_PROXY_DEBUG === '1',
+
   // Настройки Playwright для парсинга поиска
   PLAYWRIGHT: {
-    ENABLED: process.env.SEARCH_PLAYWRIGHT_ENABLED !== '0', // Включено по умолчанию (кроме явного '0')
-    HEADLESS: process.env.SEARCH_PLAYWRIGHT_HEADLESS !== '0',
+    // Enabled by default in dev/prod; disabled by default in tests to avoid launching browsers in Jest.
+    ENABLED:
+      process.env.SEARCH_PLAYWRIGHT_ENABLED != null
+        ? process.env.SEARCH_PLAYWRIGHT_ENABLED !== '0'
+        : process.env.NODE_ENV !== 'test',
+    // In development, default to headful so the operator can observe browser behavior.
+    // In production (incl. Docker), default to headless to avoid GUI requirements.
+    HEADLESS:
+      process.env.SEARCH_PLAYWRIGHT_HEADLESS != null
+        ? process.env.SEARCH_PLAYWRIGHT_HEADLESS !== '0'
+        : process.env.NODE_ENV === 'production',
+    // Keep the browser window open briefly in development so it’s visible while debugging.
+    // Can be overridden via env if needed, but does not require env to work.
+    OBSERVE_MS:
+      process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS != null
+        ? Math.max(0, Math.floor(Number(process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS) || 0))
+        : process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'test'
+          ? 0
+          : 15000,
     TIMEOUT_MS: Number(process.env.SEARCH_PLAYWRIGHT_TIMEOUT_MS) || 25000,
     REUSE_BROWSER: process.env.SEARCH_PLAYWRIGHT_REUSE_BROWSER !== '0',
   },
@@ -27,7 +47,8 @@ export const SEARCH_CONFIG = {
     CONCURRENCY: Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY) || 2,
   },
 
-  QUERY_CONCURRENCY: Math.max(1, Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY) || 2)),
+  // Стабильность важнее скорости — bursty traffic быстро ловит блоки.
+  QUERY_CONCURRENCY: Math.max(1, Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY) || 1)),
 };
 
 export const HH_CONFIG = {

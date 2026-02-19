@@ -6,7 +6,8 @@ import { supabase } from '@/lib/supabaseClient';
 import type { SearchParserJob, SearchResult } from '@/types/parsers';
 import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
-import { RefreshCw, Download, Copy, Check, ExternalLink, FileSpreadsheet, Loader2 } from 'lucide-react';
+import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy } from 'lucide-react';
+import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 type Lead = {
   id: string;
@@ -20,6 +21,13 @@ type Lead = {
 };
 
 const exportHeader = ['Company', 'Site', 'Email', 'Description', 'Queries'];
+
+function tsvCell(value: unknown) {
+  return String(value ?? '')
+    .replaceAll('\t', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('\r', ' ');
+}
 
 function safeHostname(url: string | null) {
   if (!url) return null;
@@ -94,6 +102,69 @@ function buildCsv(items: Lead[]) {
     lines.push(row.join(','));
   }
   return lines.join('\n');
+}
+
+function buildTsv(items: Lead[]) {
+  const lines = [exportHeader.map(tsvCell).join('\t')];
+  for (const item of items) {
+    const row = exportRow(item).map(tsvCell);
+    lines.push(row.join('\t'));
+  }
+  return lines.join('\n');
+}
+
+async function writeTextToClipboard(text: string) {
+  const tryClipboardApi = async () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    return false;
+  };
+
+  const tryLegacyCopy = async () => {
+    if (typeof document === 'undefined') return false;
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'fixed';
+    el.style.left = '-9999px';
+    el.style.top = '0';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    el.setSelectionRange(0, el.value.length);
+
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } finally {
+      el.remove();
+    }
+    return ok;
+  };
+
+  // On Windows/Chromium `navigator.clipboard.writeText` can silently truncate huge payloads.
+  // Prefer legacy copy path for large exports.
+  const LARGE_TEXT_THRESHOLD = 1_000_000;
+  const preferLegacy = text.length >= LARGE_TEXT_THRESHOLD;
+
+  if (preferLegacy) {
+    const ok = await tryLegacyCopy();
+    if (ok) return;
+    const apiOk = await tryClipboardApi();
+    if (apiOk) return;
+    throw new Error('Clipboard API недоступен');
+  }
+
+  const apiOk = await tryClipboardApi();
+  if (apiOk) return;
+  const ok = await tryLegacyCopy();
+  if (ok) return;
+  throw new Error('Clipboard API недоступен');
 }
 
 function buildExcelHtml(items: Lead[]) {
@@ -180,10 +251,10 @@ export function SearchParserView() {
   const [busy, setBusy] = useState(false);
   const [loadingResults, setLoadingResults] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
+  const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
-  const { flag: copiedResults, trigger: triggerCopiedResults } = useTimedFlag(2000);
-  const { flag: copiedQueries, trigger: triggerCopiedQueries } = useTimedFlag(2000);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
   const leads = useMemo(() => {
@@ -282,19 +353,6 @@ export function SearchParserView() {
 
     return (await res.json()) as T;
   }, [getAccessToken]);
-
-  const copyToClipboard = useCallback(async (text: string, onCopied: () => void) => {
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard API недоступен');
-      }
-      await navigator.clipboard.writeText(text);
-      onCopied();
-    } catch (err) {
-      console.error('Failed to copy', err);
-      setError('Не удалось скопировать в буфер обмена');
-    }
-  }, [setError]);
 
   const refreshJobs = useCallback(async () => {
     try {
@@ -428,20 +486,19 @@ export function SearchParserView() {
     downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', getExportFilename('xls'));
   };
 
-  const handleCopy = async () => {
-     if (companyLeads.length === 0) return;
-     const text = companyLeads
-       .map((r) => `${r.company_name ?? ''}\t${r.site ?? ''}\t${r.email ?? ''}\t${r.description ?? ''}`)
-       .join('\n');
-     await copyToClipboard(text, triggerCopiedResults);
-  };
-
-  const handleCopyQueries = useCallback(async () => {
-    if (!activeJob) return;
-    const queries = (activeJob.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
-    if (queries.length === 0) return;
-    await copyToClipboard(queries.join('\n'), triggerCopiedQueries);
-  }, [activeJob, copyToClipboard, triggerCopiedQueries]);
+  const handleCopy = useCallback(async () => {
+    if (companyLeads.length === 0) return;
+    setCopying(true);
+    try {
+      const text = buildTsv(companyLeads);
+      await writeTextToClipboard(text);
+      setToast({ tone: 'success', message: `Скопировано строк: ${companyLeads.length}` });
+    } catch (e) {
+      setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Не удалось скопировать в буфер обмена' });
+    } finally {
+      setCopying(false);
+    }
+  }, [companyLeads]);
 
   const handleRepeat = useCallback(async () => {
     const queries = (activeJob?.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
@@ -460,15 +517,76 @@ export function SearchParserView() {
   const totalSources = sourceLeads.length;
   const jobControlsDisabled = !activeJobId || jobActionId === activeJobId || busy;
   const exportDisabled = companyLeads.length === 0;
+  const copyDisabled = exportDisabled || copying;
   const showStop = activeJob?.status === 'running' || activeJob?.status === 'pending';
   const activeJobStoppedByUser = activeJob ? isStoppedByUser(activeJob.status, activeJob.error_message) : false;
   const isJobLoading = Boolean(activeJob && showStop);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), toast.href ? 9000 : 3500);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const addToDatabase = useCallback(() => {
+    try {
+      if (companyLeads.length === 0) {
+        setToast({ tone: 'error', message: 'Нет компаний для добавления' });
+        return;
+      }
+
+      const MAX_ROWS = 5000;
+      const rows = [
+        ['Company', 'Site', 'Email', 'Description', 'Queries', 'Sources', 'JobId', 'Parser'],
+        ...companyLeads.slice(0, MAX_ROWS).map((r) => [
+          r.company_name ?? '',
+          r.site ?? '',
+          r.email ?? '',
+          r.description ?? '',
+          (r.queries ?? []).join(' · '),
+          String(r.sources ?? 1),
+          activeJobId ?? '',
+          'search',
+        ]),
+      ];
+
+      const title = `Поиск ${activeJobId ? `#${activeJobId.slice(0, 8)}` : ''}`.trim() || 'Поиск';
+      const { id } = writePendingDbImport({ title, rows });
+      const url = buildDatabasesImportUrl(id);
+      setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
+    } catch (e) {
+      setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
+    }
+  }, [activeJobId, companyLeads]);
 
   return (
     <div className="space-y-6">
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
+        </div>
+      ) : null}
+      {toast ? (
+        <div
+          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
+            toast.tone === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-red-200 bg-red-50 text-red-900'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-3">
+            <div className="min-w-0">{toast.message}</div>
+            {toast.href ? (
+              <a
+                href={toast.href}
+                className="shrink-0 inline-flex items-center rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+              >
+                Перейти
+              </a>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -520,28 +638,6 @@ export function SearchParserView() {
                     <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
                     {activeJob ? <JobStatus status={activeJob.status} errorMessage={activeJob.error_message} /> : null}
                   </div>
-                  {activeJob ? (
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      {showStop ? (
-                        <button
-                          type="button"
-                          onClick={() => activeJob?.id ? stopJob(activeJob.id) : undefined}
-                          disabled={jobControlsDisabled}
-                          className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-                        >
-                          Остановить
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => activeJob?.id ? deleteJob(activeJob.id) : undefined}
-                        disabled={jobControlsDisabled}
-                        className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
-                      >
-                        Удалить
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
                 <p className="text-sm text-gray-500">
                   {activeJob ? (
@@ -554,12 +650,22 @@ export function SearchParserView() {
                 </p>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+              <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-nowrap">
+                <button
+                  type="button"
+                  onClick={addToDatabase}
+                  disabled={companyLeads.length === 0}
+                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  title="Добавит результаты в “Базы” (без открытия новой вкладки)"
+                >
+                  <Database className="h-4 w-4" />
+                  В базу
+                </button>
                 <button
                   type="button"
                   onClick={handleExportCsv}
                   disabled={exportDisabled}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
                 >
                   <Download className="h-4 w-4" />
                   CSV
@@ -568,20 +674,49 @@ export function SearchParserView() {
                   type="button"
                   onClick={handleExportExcel}
                   disabled={exportDisabled}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
                 >
                   <FileSpreadsheet className="h-4 w-4" />
                   Excel
                 </button>
                 <button
                   type="button"
-                  onClick={handleCopy}
-                  disabled={exportDisabled}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  onClick={() => void handleCopy()}
+                  disabled={copyDisabled}
+                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  title="Копировать компании в буфер (TSV для вставки в таблицы)"
                 >
-                  {copiedResults ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-                  Копировать
+                  {copying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                  {copying ? 'Копирование…' : 'Копировать'}
                 </button>
+
+                {activeJob ? (
+                  <>
+                    <div className="hidden sm:block h-6 w-px bg-gray-200 mx-1" aria-hidden="true" />
+                    {showStop ? (
+                      <button
+                        type="button"
+                        onClick={() => (activeJob?.id ? stopJob(activeJob.id) : undefined)}
+                        disabled={jobControlsDisabled}
+                        title="Остановить"
+                        aria-label="Остановить"
+                        className="inline-flex h-9 w-full items-center justify-center rounded-lg border border-amber-200 bg-amber-50 px-2 text-amber-900 hover:bg-amber-100 hover:shadow-sm disabled:opacity-50 sm:w-9"
+                      >
+                        {jobActionId === activeJobId ? <Loader2 className="h-4 w-4 animate-spin" /> : <CirclePause className="h-4 w-4" />}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => (activeJob?.id ? deleteJob(activeJob.id) : undefined)}
+                      disabled={jobControlsDisabled}
+                      title="Удалить"
+                      aria-label="Удалить"
+                      className="inline-flex h-9 w-full items-center justify-center rounded-lg border border-red-200 bg-red-50 px-2 text-red-800 hover:bg-red-100 disabled:opacity-50 sm:w-9"
+                    >
+                      {jobActionId === activeJobId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    </button>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
@@ -597,23 +732,6 @@ export function SearchParserView() {
                     className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
                   >
                     Повторить
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCopyQueries}
-                    disabled={!hasQueries}
-                    className={`inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-300 ${
-                      copiedQueries
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                    {copiedQueries ? (
-                      <Check className="h-3.5 w-3.5 mr-1 text-emerald-600" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5 mr-1" />
-                    )}
-                    {copiedQueries ? 'Скопировано' : 'Скопировать'}
                   </button>
                 </div>
               </div>
@@ -648,7 +766,7 @@ export function SearchParserView() {
               {activeJobStoppedByUser ? <span>Остановлено</span> : null}
               {!activeJobStoppedByUser && activeJob.status === 'failed' ? <span>{activeJob.error_message}</span> : null}
               {!activeJobStoppedByUser && activeJob.status !== 'failed' ? (
-                <span>Подсказка: {activeJob.error_message}</span>
+                <span>{activeJob.error_message}</span>
               ) : null}
             </div>
           ) : null}
