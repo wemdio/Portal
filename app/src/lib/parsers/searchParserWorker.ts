@@ -2,11 +2,21 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { startTrace } from '@/lib/tracer';
+import { SEARCH_CONFIG } from '@/lib/config';
 import { buildSearchDiagnostics } from '@/lib/parsers/searchParserDiagnostics';
 import { simplifySearchQuery } from '@/lib/parsers/searchQueryUtils';
 import { fetchWebsiteEmails } from '@/lib/enrich/websiteParser';
 import type { SearchResultItem } from './searchScraper';
-import { duckDuckGoSearchDetailed, googleSearchDetailed, isDuckDuckGoBlockedError, isGoogleBlockedError } from './searchScraper';
+import {
+  bingSearchDetailed,
+  duckDuckGoSearchDetailed,
+  googleSearchDetailed,
+  isBingBlockedError,
+  isDuckDuckGoBlockedError,
+  isGoogleBlockedError,
+  isMojeekBlockedError,
+  mojeekSearchDetailed,
+} from './searchScraper';
 import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -22,10 +32,7 @@ const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = Number(process.env.SEARCH_SOURCE_EXPAN
 const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? '25') || 25;
 const SOURCE_EXPAND_CONCURRENCY = Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY ?? '2') || 2;
 
-const QUERY_CONCURRENCY = Math.max(
-  1,
-  Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY ?? '2') || 2),
-);
+const QUERY_CONCURRENCY = SEARCH_CONFIG.QUERY_CONCURRENCY;
 
 function randInt(min: number, max: number) {
   return Math.floor(min + Math.random() * (max - min + 1));
@@ -51,10 +58,17 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function throttleBetweenQueries(provider: 'google' | 'duckduckgo') {
+async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
   // Aim for stability over speed; jitter helps avoid anti-bot thresholds.
   // Google already has internal delay in googleSearchDetailed; DDG does not.
-  const base = provider === 'duckduckgo' ? randInt(1200, 2600) : randInt(600, 1400);
+  const base =
+    provider === 'duckduckgo'
+      ? randInt(1800, 4200)
+      : provider === 'bing'
+        ? randInt(1200, 2800)
+        : provider === 'mojeek'
+          ? randInt(900, 2200)
+          : randInt(900, 2200);
   await sleep(base);
 }
 
@@ -72,6 +86,20 @@ function createAsyncLock() {
     } finally {
       release();
     }
+  };
+}
+
+function createRateLimiter() {
+  const withLock = createAsyncLock();
+  let nextAllowedAt = 0;
+  return async function scheduleDelay(getDelayMs: () => number) {
+    await withLock(async () => {
+      const now = Date.now();
+      const waitMs = Math.max(0, nextAllowedAt - now);
+      // Reserve the next slot first, so concurrent waiters don't bunch up.
+      nextAllowedAt = Math.max(nextAllowedAt, now) + Math.max(0, getDelayMs());
+      if (waitMs > 0) await sleep(waitMs);
+    });
   };
 }
 
@@ -220,7 +248,7 @@ function isLikelySourceSite(site: string): boolean {
 function toLeadRow(
   r: SearchResultItem,
   jobId: string,
-  provider: 'google' | 'duckduckgo',
+  provider: string,
 ): {
   job_id: string;
   query: string;
@@ -302,6 +330,10 @@ export async function runSearchParserJob(jobId: string) {
     let lastBlockedHint: string | null = null;
     let cancelled = false;
     const withLock = createAsyncLock();
+    const scheduleGoogle = createRateLimiter();
+    const scheduleDdg = createRateLimiter();
+    const scheduleBing = createRateLimiter();
+    const scheduleMojeek = createRateLimiter();
 
     void logInfo(
       'parser.search.job.start',
@@ -353,62 +385,101 @@ export async function runSearchParserJob(jobId: string) {
       let hadQueryFailures = false;
 
       try {
+        const runGoogle = async (q: string) => {
+          // Google has internal delays, but we still gate globally to avoid bursts
+          // when query concurrency > 1.
+          await scheduleGoogle(() => randInt(1400, 3200));
+          return await googleSearchDetailed(q, 20);
+        };
+
+        const runDdg = async (q: string) => {
+          // DDG blocks aggressively on bursty traffic; gate and scale delays
+          // based on recent blocking streak to improve stability.
+          const streak = Math.min(ddgBlockedStreak, 4);
+          const mult = streak <= 0 ? 1 : 2 ** streak;
+          await scheduleDdg(() => randInt(5200, 9800) * mult + randInt(0, 1600));
+          return await duckDuckGoSearchDetailed(q);
+        };
+
+        const runBing = async (q: string) => {
+          await scheduleBing(() => randInt(2800, 6200));
+          return await bingSearchDetailed(q, { maxPages: 4, pageSize: 10, maxResults: 50 });
+        };
+
+        const runMojeek = async (q: string) => {
+          await scheduleMojeek(() => randInt(1800, 4500));
+          return await mojeekSearchDetailed(q);
+        };
+
         let results: SearchResultItem[] = [];
         let debugPrimary: unknown = null;
         let usedFallback = false;
         let debugFallback: unknown = null;
         let googleUrlFallback: string | null = null;
-        let provider: 'google' | 'duckduckgo' = 'google';
+        let provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' = 'google';
         const simplifiedQuery = simplifySearchQuery(query);
 
+        const tryProviders = async (q: string) => {
+          const order: Array<'google' | 'duckduckgo' | 'bing' | 'mojeek'> = googleBlockedForJob
+            ? ['duckduckgo', 'bing', 'mojeek']
+            : ['google', 'duckduckgo', 'bing', 'mojeek'];
+
+          let lastErr: unknown = null;
+          for (const p of order) {
+            try {
+              if (p === 'google') {
+                const out = await runGoogle(q);
+                return { provider: p, out };
+              }
+              if (p === 'duckduckgo') {
+                const out = await runDdg(q);
+                return { provider: p, out };
+              }
+              if (p === 'bing') {
+                const out = await runBing(q);
+                return { provider: p, out };
+              }
+              const out = await runMojeek(q);
+              return { provider: p, out };
+            } catch (e) {
+              lastErr = e;
+              if (isGoogleBlockedError(e)) {
+                googleBlockedForJob = true;
+                lastBlockedHint = e.message;
+                // keep trying other providers
+                continue;
+              }
+              if (isDuckDuckGoBlockedError(e) || isBingBlockedError(e) || isMojeekBlockedError(e)) {
+                lastBlockedHint = e instanceof Error ? e.message : String(e);
+                continue;
+              }
+              throw e;
+            }
+          }
+          throw lastErr ?? new Error('All search providers failed');
+        };
+
         try {
-          if (googleBlockedForJob) {
-            const ddg = await duckDuckGoSearchDetailed(query);
-            results = ddg.results;
-            debugPrimary = ddg.debug;
-            provider = 'duckduckgo';
-          } else {
-            const primary = await googleSearchDetailed(query, 30);
-            results = primary.results;
-            debugPrimary = primary.debug;
-            provider = 'google';
-          }
+          const primary = await tryProviders(query);
+          provider = primary.provider;
+          results = primary.out.results;
+          debugPrimary = primary.out.debug;
         } catch (e) {
-          if (isGoogleBlockedError(e)) {
-            usedFallback = true;
-            googleBlockedForJob = true;
-            debugPrimary = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
-            const ddg = await duckDuckGoSearchDetailed(query);
-            results = ddg.results;
-            debugFallback = ddg.debug;
-            provider = 'duckduckgo';
-          } else {
-            throw e;
-          }
+          // If everything failed, bubble up. The catch below will handle cooldowns/hints.
+          throw e;
         }
 
-        // If Google returns 200 but we parse zero results, prefer DDG for stability.
-        if (!googleBlockedForJob && provider === 'google' && results.length === 0) {
-          const dbg =
-            debugPrimary && typeof debugPrimary === 'object'
-              ? (debugPrimary as { container_count?: unknown; title?: unknown })
-              : null;
-          const containerCount = typeof dbg?.container_count === 'number' ? dbg.container_count : null;
-          const title = typeof dbg?.title === 'string' ? dbg.title : null;
-          const looksLikeEmptyShell = containerCount === 0 || (title !== null && title.trim() === '');
-          if (looksLikeEmptyShell) {
-            try {
-              const ddg = await duckDuckGoSearchDetailed(query);
-              if (ddg.results.length > 0) {
-                usedFallback = true;
-                debugFallback = ddg.debug;
-                results = ddg.results;
-                provider = 'duckduckgo';
-                googleBlockedForJob = true;
-              }
-            } catch (e) {
-              debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
-            }
+        // If provider returns 0, try the next providers (stability > speed).
+        if (results.length === 0) {
+          try {
+            usedFallback = true;
+            debugFallback = debugPrimary;
+            const fallback = await tryProviders(query);
+            provider = fallback.provider;
+            results = fallback.out.results;
+            debugPrimary = fallback.out.debug;
+          } catch (e) {
+            debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
           }
         }
 
@@ -416,15 +487,16 @@ export async function runSearchParserJob(jobId: string) {
           const simplified = simplifiedQuery;
           if (simplified && simplified !== query) {
             usedFallback = true;
-            if (provider === 'google') {
-              const fallback = await googleSearchDetailed(simplified, 30);
-              results = fallback.results;
-              debugFallback = fallback.debug;
-              googleUrlFallback = fallback.debug.request_url;
-            } else {
-              const fallback = await duckDuckGoSearchDetailed(simplified);
-              results = fallback.results;
-              debugFallback = fallback.debug;
+            try {
+              const fallback = await tryProviders(simplified);
+              provider = fallback.provider;
+              results = fallback.out.results;
+              debugFallback = fallback.out.debug;
+              if (fallback.provider === 'google' && fallback.out?.debug && typeof fallback.out.debug === 'object') {
+                googleUrlFallback = (fallback.out.debug as { request_url?: string }).request_url ?? null;
+              }
+            } catch (e) {
+              debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
             }
             if (results.length > 0) {
               results = results.map((item) => ({ ...item, query }));
@@ -597,6 +669,18 @@ export async function runSearchParserJob(jobId: string) {
                     final_url: (debugPrimary as { final_url?: string }).final_url,
                   }
                 : {}),
+              ...(provider === 'bing' && debugPrimary && typeof debugPrimary === 'object'
+                ? {
+                    bing_url: (debugPrimary as { request_url?: string }).request_url,
+                    final_url: (debugPrimary as { final_url?: string }).final_url,
+                  }
+                : {}),
+              ...(provider === 'mojeek' && debugPrimary && typeof debugPrimary === 'object'
+                ? {
+                    mojeek_url: (debugPrimary as { request_url?: string }).request_url,
+                    final_url: (debugPrimary as { final_url?: string }).final_url,
+                  }
+                : {}),
               ...(usedFallback && googleUrlFallback ? { fallback_google_url: googleUrlFallback } : {}),
             },
             ...(results.length === 0 ? { debug: { primary: debugPrimary, fallback: debugFallback } } : {}),
@@ -609,11 +693,9 @@ export async function runSearchParserJob(jobId: string) {
           { jobId, query, results: results.length, inserted: insertedCount, fallback_used: usedFallback },
           logMeta,
         );
-
-        await throttleBetweenQueries(provider);
       } catch (err) {
         hadQueryFailures = true;
-        if (!isGoogleBlockedError(err) && !isDuckDuckGoBlockedError(err)) {
+        if (!isGoogleBlockedError(err) && !isDuckDuckGoBlockedError(err) && !isBingBlockedError(err) && !isMojeekBlockedError(err)) {
           console.error(`Error processing query "${query}":`, err);
         } else {
           console.warn(`Search blocked for query "${query}":`, err);
@@ -637,6 +719,18 @@ export async function runSearchParserJob(jobId: string) {
           const streak = Math.min(ddgBlockedStreak, 6);
           const cooldown = Math.min(90_000, 4500 * 2 ** (streak - 1) + randInt(0, 2500));
           await sleep(cooldown);
+        } else if (isBingBlockedError(err)) {
+          await withLock(async () => {
+            ddgBlockedStreak = 0;
+            lastBlockedHint = err instanceof Error ? err.message : String(err);
+          });
+          await sleep(randInt(6000, 16000));
+        } else if (isMojeekBlockedError(err)) {
+          await withLock(async () => {
+            ddgBlockedStreak = 0;
+            lastBlockedHint = err instanceof Error ? err.message : String(err);
+          });
+          await sleep(randInt(3500, 9000));
         } else {
           await withLock(async () => {
             ddgBlockedStreak = 0;
@@ -661,7 +755,7 @@ export async function runSearchParserJob(jobId: string) {
     // Prefer completing with a meaningful hint if we saw blocks.
     const hint =
       totalResults <= 0 && lastBlockedHint
-        ? `Поисковик ограничил запросы: ${lastBlockedHint}. Попробуйте VPN/прокси или увеличьте паузы.`
+        ? `Поисковик ограничил запросы: ${lastBlockedHint}.`
         : lastBlockedHint && (ddgBlockedCount > 0 || hadFailures)
           ? `Частично ограничено поисковиком: ${lastBlockedHint}`
           : null;

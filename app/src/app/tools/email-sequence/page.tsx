@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
 import type {
   EmailSequenceBrief,
@@ -73,26 +74,26 @@ function cleanSegmentText(value: unknown): string {
   return s.replace(/^\s*►\s*/u, '');
 }
 
-function formatRunStatus(value: string | null | undefined): string {
-  const raw = String(value ?? '');
-  const v = raw.toLowerCase();
-  if (!v) return '—';
-  if (v === 'running') return 'в процессе';
-  if (v === 'completed' || v === 'done' || v === 'success') return 'готово';
-  if (v === 'failed' || v === 'error') return 'ошибка';
-  if (v === 'cancelled' || v === 'canceled') return 'отменено';
-  if (v === 'pending' || v === 'queued') return 'в очереди';
-  return raw;
+function sanitizeFilename(value: string): string {
+  return value
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 140);
 }
 
-function getRunStatusBadgeClasses(value: string | null | undefined): string {
-  const v = String(value ?? '').toLowerCase();
-  if (v === 'running') return 'bg-blue-50 text-blue-700 border-blue-200';
-  if (v === 'completed' || v === 'done' || v === 'success') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-  if (v === 'failed' || v === 'error') return 'bg-red-50 text-red-700 border-red-200';
-  if (v === 'cancelled' || v === 'canceled') return 'bg-amber-50 text-amber-700 border-amber-200';
-  if (v === 'pending' || v === 'queued') return 'bg-gray-50 text-gray-600 border-gray-200';
-  return 'bg-gray-50 text-gray-600 border-gray-200';
+function formatCreatedAt(value: string | null | undefined): string {
+  const s = String(value ?? '').trim();
+  if (!s) return '—';
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('ru-RU', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function TextField({
@@ -229,7 +230,7 @@ function SegmentModal({
                 </span>
               </div>
               <p className="mt-1 text-xs sm:text-sm text-gray-500">
-                Анализ и письма отображаются в основном окне после выбора сегмента.
+                Анализ и письма отображаются в основном окне (сегмент выбирается автоматически при открытии/анализе).
               </p>
             </div>
             <button
@@ -371,6 +372,72 @@ export default function EmailSequencePage() {
     if (!selectedLetters.length) return null;
     return selectedLetters.find((l) => l.letter_index === activeLetterIndex) ?? selectedLetters[0] ?? null;
   }, [selectedLetters, activeLetterIndex]);
+
+  const downloadDocx = useCallback(async () => {
+    if (!selected) return;
+    if (!selectedLetters.length) return;
+
+    setError(null);
+    try {
+      const { Document, HeadingLevel, Packer, Paragraph, TextRun } = await import('docx');
+
+      const company = String(run?.brief?.Company ?? '').trim();
+      const segmentLabel = `Сегмент ${selected.segment_index + 1}`;
+      const generatedAt = new Date().toLocaleString('ru-RU', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      const children: InstanceType<typeof Paragraph>[] = [];
+      children.push(
+        new Paragraph({
+          text: company ? `Цепочка писем — ${company}` : 'Цепочка писем',
+          heading: HeadingLevel.HEADING_1,
+        }),
+      );
+      children.push(new Paragraph({ text: segmentLabel, heading: HeadingLevel.HEADING_2 }));
+      children.push(new Paragraph({ text: `Сгенерировано: ${generatedAt}` }));
+      children.push(new Paragraph({ text: '' }));
+
+      for (const letter of selectedLetters) {
+        children.push(new Paragraph({ text: `Письмо ${letter.letter_index}`, heading: HeadingLevel.HEADING_2 }));
+
+        const content = String(letter.content ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+        if (!content) {
+          children.push(new Paragraph({ text: '—' }));
+          children.push(new Paragraph({ text: '' }));
+          continue;
+        }
+
+        const lines = content.split('\n');
+        for (const line of lines) {
+          if (!line.trim()) {
+            children.push(new Paragraph({ text: '' }));
+            continue;
+          }
+          children.push(
+            new Paragraph({
+              children: [new TextRun({ text: line })],
+            }),
+          );
+        }
+        children.push(new Paragraph({ text: '' }));
+      }
+
+      const doc = new Document({
+        sections: [{ properties: {}, children }],
+      });
+
+      const blob = await Packer.toBlob(doc);
+      const filename = sanitizeFilename(`${company || 'email-sequence'} — ${segmentLabel}.docx`);
+      saveAs(blob, filename);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    }
+  }, [run?.brief?.Company, selected, selectedLetters]);
 
   useEffect(() => {
     setActiveLetterIndex(1);
@@ -517,6 +584,63 @@ export default function EmailSequencePage() {
     window.setTimeout(() => setNewBriefNotice(null), 3000);
   }, []);
 
+  const canDeleteSelectedRun = useMemo(() => {
+    if (!run?.id) return false;
+    if (busy != null) return false;
+    if (analyzeQueue.length) return false;
+    const st = String(run.status ?? '').toLowerCase();
+    if (st === 'running') return false;
+    return true;
+  }, [analyzeQueue.length, busy, run?.id, run?.status]);
+
+  const canStopSelectedRun = useMemo(() => {
+    if (!run?.id) return false;
+    const st = String(run.status ?? '').toLowerCase();
+    return busy != null || analyzeQueue.length > 0 || st === 'running';
+  }, [analyzeQueue.length, busy, run?.id, run?.status]);
+
+  const stopSelectedRun = useCallback(async () => {
+    if (!run?.id) return;
+    setError(null);
+    try {
+      await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}/cancel`, { method: 'POST' }, 30_000);
+      setAnalyzeQueueByRun((prev) => {
+        const cur = prev[run.id] ?? [];
+        if (!cur.length) return prev;
+        return { ...prev, [run.id]: [] };
+      });
+      setBusy(null);
+      await refresh(run.id);
+      setNewBriefNotice('Запуск остановлен');
+      window.setTimeout(() => setNewBriefNotice(null), 3000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    }
+  }, [refresh, run?.id]);
+
+  const deleteSelectedRun = useCallback(async () => {
+    if (!run?.id) return;
+    if (!canDeleteSelectedRun) return;
+    if (!window.confirm('Удалить этот запуск (включая сегменты/анализ и письма)? Отменить действие будет нельзя.')) return;
+    setError(null);
+    try {
+      await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}`, { method: 'DELETE' }, 30_000);
+      setRun(null);
+      setSegments([]);
+      setLetters([]);
+      setSelectedSegment(null);
+      setActiveLetterIndex(1);
+      setSegmentModalId(null);
+      setSegmentModalNotice(null);
+      setAnalyzeQueueByRun({});
+      await refresh();
+      setNewBriefNotice('Запуск удалён');
+      window.setTimeout(() => setNewBriefNotice(null), 3000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    }
+  }, [canDeleteSelectedRun, refresh, run?.id]);
+
   const modalSegment = useMemo(() => {
     if (!segmentModalId) return null;
     return segments.find((s) => s.id === segmentModalId) ?? null;
@@ -615,18 +739,38 @@ export default function EmailSequencePage() {
           <div className="rounded-2xl border border-gray-200 bg-white p-6 flex flex-col h-full">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold text-gray-900">Запуски</h2>
-              <button
-                type="button"
-                onClick={resetToNewBrief}
-                disabled={busy != null}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 active:scale-95 active:bg-gray-100 transition disabled:opacity-50"
-                title="Новый бриф"
-                aria-label="Новый бриф"
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                </svg>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={stopSelectedRun}
+                  disabled={!canStopSelectedRun}
+                  className="inline-flex h-8 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 active:scale-95 active:bg-gray-100 transition disabled:opacity-50"
+                  title="Остановить запуск (и очередь), если он выполняется"
+                >
+                  Остановить
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedRun}
+                  disabled={!canDeleteSelectedRun}
+                  className="inline-flex h-8 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 active:scale-95 active:bg-gray-100 transition disabled:opacity-50"
+                  title="Удалить можно только если нет сегментов и писем (иначе дождитесь окончания или остановите)"
+                >
+                  Удалить
+                </button>
+                <button
+                  type="button"
+                  onClick={resetToNewBrief}
+                  disabled={busy != null}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 active:scale-95 active:bg-gray-100 transition disabled:opacity-50"
+                  title="Новый бриф"
+                  aria-label="Новый бриф"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
             </div>
             {newBriefNotice ? (
               <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
@@ -646,14 +790,12 @@ export default function EmailSequencePage() {
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium text-gray-900 truncate">{r.brief?.Company ?? r.id}</div>
-                      <span
-                        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${getRunStatusBadgeClasses(r.status)}`}
-                      >
-                        {formatRunStatus(r.status)}
-                      </span>
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Компания</div>
+                        <div className="mt-0.5 font-medium text-gray-900 truncate">{r.brief?.Company ?? r.id}</div>
+                      </div>
                     </div>
-                    <div className="mt-1 text-xs text-gray-500 truncate">{r.id}</div>
+                    <div className="mt-1 text-xs text-gray-500 truncate">Создано: {formatCreatedAt(r.created_at)}</div>
                   </button>
                 ))
               ) : (
@@ -718,6 +860,7 @@ export default function EmailSequencePage() {
                   key={s.id}
                   type="button"
                   onClick={() => {
+                    setSelectedSegment(s.segment_index);
                     setSegmentModalNotice(null);
                     setSegmentModalId(s.id);
                   }}
@@ -800,31 +943,31 @@ export default function EmailSequencePage() {
             <div className="xl:col-span-3">
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">Segment_Analysis</div>
+                  <div className="text-sm font-semibold text-gray-900">Исследование сегмента</div>
                   <pre className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs text-gray-700">
                     {selected.segment_research ?? '—'}
                   </pre>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">Pains_And_Solutions</div>
+                  <div className="text-sm font-semibold text-gray-900">Боли и решения</div>
                   <pre className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs text-gray-700">
                     {selected.pains_and_solutions ?? '—'}
                   </pre>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">Tasks_And_Solutions</div>
+                  <div className="text-sm font-semibold text-gray-900">Задачи и решения</div>
                   <pre className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs text-gray-700">
                     {selected.tasks_and_solutions ?? '—'}
                   </pre>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">Social_Proof</div>
+                  <div className="text-sm font-semibold text-gray-900">Социальные доказательства</div>
                   <pre className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs text-gray-700">
                     {selected.social_proof ?? '—'}
                   </pre>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 lg:col-span-2">
-                  <div className="text-sm font-semibold text-gray-900">Cases_LPR</div>
+                  <div className="text-sm font-semibold text-gray-900">Кейсы и ЛПР</div>
                   <pre className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs text-gray-700">
                     {selected.cases_lpr ?? '—'}
                   </pre>
@@ -839,7 +982,19 @@ export default function EmailSequencePage() {
                     <div className="text-base font-semibold text-gray-900">Письма</div>
                     <div className="mt-0.5 text-xs text-gray-500">Сегмент {selected.segment_index + 1}</div>
                   </div>
-                  {activeLetter?.content ? <CopyButton text={activeLetter.content} /> : null}
+                  <div className="flex items-center gap-2">
+                    {selectedLetters.length ? (
+                      <button
+                        type="button"
+                        onClick={downloadDocx}
+                        className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                        title="Скачать 4 письма в DOCX"
+                      >
+                        Скачать DOCX
+                      </button>
+                    ) : null}
+                    {activeLetter?.content ? <CopyButton text={activeLetter.content} /> : null}
+                  </div>
                 </div>
 
                 <div className="mt-3 grid grid-cols-4 gap-1 rounded-xl bg-white p-1 border border-gray-200">
@@ -910,10 +1065,12 @@ export default function EmailSequencePage() {
         }}
         onAnalyze={() => {
           if (!modalSegment) return;
+          setSelectedSegment(modalSegment.segment_index);
           requestAnalyze(modalSegment.segment_index);
         }}
         onQueueInfo={() => {
           if (!modalSegment) return;
+          setSelectedSegment(modalSegment.segment_index);
           // Queue when another analysis is in-flight for this run.
           if (activeAnalyzeIndex != null && activeAnalyzeIndex !== modalSegment.segment_index) {
             setAnalyzeQueueByRun((prev) => {

@@ -13,6 +13,13 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+class RunCancelledError extends Error {
+  constructor() {
+    super('Запуск остановлен');
+    this.name = 'RunCancelledError';
+  }
+}
+
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
@@ -52,6 +59,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const { runId } = await params;
   if (!runId) return jsonError('Missing runId', 400);
 
+  const ensureNotCancelled = async () => {
+    const { data, error } = await supabase
+      .from('email_sequence_runs')
+      .select('status')
+      .eq('id', runId)
+      .single();
+    if (error) throw new Error(error.message);
+    if (String(data?.status ?? '').toLowerCase() === 'cancelled') throw new RunCancelledError();
+  };
+
   const { data: run, error: runErr } = await supabase
     .from('email_sequence_runs')
     .select('id,brief,status')
@@ -62,6 +79,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const brief = (run.brief ?? {}) as EmailSequenceBrief;
   const companyName = safeStr(brief.Company).trim();
   if (!companyName) return jsonError('Brief is missing Company', 400);
+
+  try {
+    await ensureNotCancelled();
+  } catch (err) {
+    if (err instanceof RunCancelledError) return jsonError(err.message, 409);
+    return jsonError(err instanceof Error ? err.message : 'Ошибка', 500);
+  }
 
   await supabase
     .from('email_sequence_runs')
@@ -85,6 +109,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       logMeta,
     );
 
+    await ensureNotCancelled();
+
     // Reset derived data to avoid mixing results.
     await Promise.all([
       supabase.from('email_sequence_letters').delete().eq('run_id', runId),
@@ -100,6 +126,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
 
     let content = '';
     try {
+      await ensureNotCancelled();
       content = await callPerplexity({
         model: 'sonar-pro',
         messages: [{ role: 'user', content: prompt }],
@@ -109,6 +136,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       await perplexitySpan?.fail(err, { promptChars: prompt.length });
       throw err;
     }
+
+    await ensureNotCancelled();
 
     const blocks = extractSegmentBlocks(content, '►');
     if (blocks.length === 0) {
@@ -141,6 +170,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
 
     return NextResponse.json({ segments: segmentsJson, raw: content });
   } catch (err) {
+    if (err instanceof RunCancelledError) {
+      await trace?.end({ cancelled: true }, 'Остановлено пользователем');
+      await supabase
+        .from('email_sequence_runs')
+        .update({ status: 'cancelled', error_message: null, updated_at: new Date().toISOString() })
+        .eq('id', runId);
+      return jsonError(err.message, 409);
+    }
     await trace?.fail(err, { runId });
     await logError('email.sequence.generate_segments.failed', err, { runId }, logMeta);
     await supabase

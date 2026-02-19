@@ -59,8 +59,9 @@ count_running() {
       parts+=("${label}=${n}")
     fi
   done
-  RUNNING_DETAIL="${parts[*]:-}"
-  echo "$total"
+  # Важно: эту функцию вызываем через process substitution (см. ниже),
+  # потому что $(count_running) выполнит её в subshell и "потеряет" детали.
+  printf '%s\t%s\n' "$total" "${parts[*]:-}"
 }
 
 elapsed=0
@@ -69,7 +70,8 @@ max_seconds=$((TIMEOUT_MIN * 60))
 echo "[drain] Waiting for worker to finish current jobs (timeout: ${TIMEOUT_MIN}m)..."
 
 while true; do
-  running=$(count_running)
+  running_detail=""
+  IFS=$'\t' read -r running running_detail < <(count_running)
 
   if [ "$running" -eq 0 ]; then
     echo "[drain] No running jobs — proceeding with worker restart"
@@ -81,8 +83,8 @@ while true; do
     break
   fi
 
-  if [ -n "${RUNNING_DETAIL:-}" ]; then
-    echo "[drain] ${running} job(s) still running (${RUNNING_DETAIL})... (${elapsed}s elapsed, timeout ${max_seconds}s)"
+  if [ -n "${running_detail:-}" ]; then
+    echo "[drain] ${running} job(s) still running (${running_detail})... (${elapsed}s elapsed, timeout ${max_seconds}s)"
   else
     echo "[drain] ${running} job(s) still running... (${elapsed}s elapsed, timeout ${max_seconds}s)"
   fi
