@@ -1248,7 +1248,10 @@ export function ProjectList() {
 
               <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
                  <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Подзадачи</h3>
+                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                      <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Подзадачи</span>
+                    </div>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'subtasks')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
@@ -1260,7 +1263,10 @@ export function ProjectList() {
                     />
                  </div>
                  <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <h3 className="text-sm font-bold text-gray-900 mb-2 pb-2 border-b border-gray-200">Комментарий передачи</h3>
+                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                      <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Комментарий передачи</span>
+                    </div>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'comments')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
