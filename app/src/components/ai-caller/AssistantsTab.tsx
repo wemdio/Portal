@@ -105,6 +105,41 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
     const voice = VOICE_PRESETS.find((v) => v.id === form.voicePreset) ?? VOICE_PRESETS[0];
     const llm = LLM_PRESETS.find((l) => l.id === form.llmPreset) ?? LLM_PRESETS[0];
 
+    let voiceConfig: Record<string, unknown>;
+
+    if (voice.provider === 'playht') {
+      voiceConfig = {
+        provider: 'playht',
+        voiceId: voice.voiceId,
+        model: voice.playhtModel ?? 'Play3.0-mini',
+        language: voice.language ?? 'russian',
+        speed: voice.speed ?? 1.0,
+        temperature: voice.temperature ?? 0.5,
+        ...(voice.emotion ? { emotion: voice.emotion } : {}),
+      };
+    } else if (voice.provider === 'cartesia') {
+      voiceConfig = {
+        provider: 'cartesia',
+        voiceId: voice.voiceId,
+        model: voice.cartesiaModel ?? 'sonic-2',
+        language: voice.cartesiaLanguage ?? 'ru',
+        ...(voice.experimentalEmotion
+          ? { experimentalControls: { emotion: voice.experimentalEmotion } }
+          : {}),
+      };
+    } else {
+      voiceConfig = {
+        provider: '11labs',
+        voiceId: voice.voiceId,
+        model: voice.model ?? 'eleven_multilingual_v2',
+        stability: voice.stability ?? 0.5,
+        similarityBoost: voice.similarityBoost ?? 0.75,
+        style: voice.style ?? 0.3,
+        useSpeakerBoost: true,
+        speed: voice.speed ?? 0.88,
+      };
+    }
+
     const payload: Record<string, unknown> = {
       name: form.name,
       firstMessage: form.firstMessage,
@@ -114,16 +149,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
         messages: [{ role: 'system', content: form.systemPrompt }],
         temperature: 0.7,
       },
-      voice: {
-        provider: '11labs',
-        voiceId: voice.voiceId,
-        model: voice.model,
-        stability: voice.stability,
-        similarityBoost: voice.similarityBoost,
-        style: voice.style,
-        useSpeakerBoost: true,
-        speed: voice.speed,
-      },
+      voice: voiceConfig,
       ...DEFAULT_PIPELINE_SETTINGS,
     };
 
@@ -183,7 +209,10 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
 
   function startEdit(a: VapiAssistant) {
     const voiceId = a.voice?.voiceId;
-    const voicePreset = VOICE_PRESETS.find((v) => v.voiceId === voiceId)?.id ?? 'kate';
+    const voiceProvider = a.voice?.provider;
+    const voicePreset = VOICE_PRESETS.find(
+      (v) => v.voiceId === voiceId && (!voiceProvider || v.provider === voiceProvider),
+    )?.id ?? 'kate';
     const modelName = a.model?.model;
     const llmPreset = LLM_PRESETS.find((l) => l.model === modelName)?.id ?? 'gpt41';
     const systemPrompt =
@@ -338,10 +367,14 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
                 }
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
-                {VOICE_PRESETS.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.label}
-                  </option>
+                {Array.from(new Set(VOICE_PRESETS.map((v) => v.group))).map((group) => (
+                  <optgroup key={group} label={group}>
+                    {VOICE_PRESETS.filter((v) => v.group === group).map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>
@@ -403,7 +436,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
           {assistants.map((a) => {
             const isExpanded = expandedId === a.id;
             const voicePreset = VOICE_PRESETS.find(
-              (v) => v.voiceId === a.voice?.voiceId,
+              (v) => v.voiceId === a.voice?.voiceId && (!a.voice?.provider || v.provider === a.voice.provider),
             );
             const llmPreset = LLM_PRESETS.find(
               (l) => l.model === a.model?.model,
