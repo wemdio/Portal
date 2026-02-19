@@ -6,9 +6,10 @@ import type { YandexMapsJob, YandexMapsLinkRow, YandexMapsOrganizationRow } from
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { Download, RefreshCw, FileSpreadsheet } from 'lucide-react';
+import { Download, RefreshCw, FileSpreadsheet, Database } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
+import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 function formatDate(dateStr: string) {
   try {
@@ -50,6 +51,7 @@ export function YandexMapsParserView() {
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [loadingResults, setLoadingResults] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
   const { flag: refreshed, trigger: triggerRefreshed } = useTimedFlag(1200);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
@@ -312,6 +314,72 @@ export function YandexMapsParserView() {
     saveAs(blob, getExportFilename('xlsx'));
   }, [activeJobId, results]);
 
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const addToDatabase = useCallback(() => {
+    try {
+      if (!activeJobId) {
+        setToast({ tone: 'error', message: 'Сначала выберите запуск' });
+        return;
+      }
+      if (results.length === 0) {
+        setToast({ tone: 'error', message: 'Нет результатов для добавления' });
+        return;
+      }
+
+      const MAX_ROWS = 5000;
+      const rows: string[][] = [
+        [
+          'Name',
+          'Website',
+          'Email',
+          'Phone',
+          'Address',
+          'City',
+          'Categories',
+          'CardUrl',
+          'Telegram',
+          'VK',
+          'Instagram',
+          'WhatsApp',
+          'Rating',
+          'Reviews',
+          'JobId',
+          'Parser',
+        ],
+        ...results.slice(0, MAX_ROWS).map((r) => [
+          r.name ?? '',
+          r.website ?? '',
+          r.email ?? '',
+          r.phone ?? '',
+          r.address ?? '',
+          r.city ?? '',
+          r.categories ?? '',
+          r.card_url ?? '',
+          r.telegram ?? '',
+          r.vk ?? '',
+          r.instagram ?? '',
+          r.whatsapp ?? '',
+          r.rating ?? '',
+          r.reviews_count ?? '',
+          activeJobId,
+          'yandexmaps',
+        ]),
+      ];
+
+      const title = `Яндекс.Карты #${activeJobId.slice(0, 8)}`;
+      const { id } = writePendingDbImport({ title, rows });
+      const url = buildDatabasesImportUrl(id);
+      setToast({ tone: 'success', message: 'Добавлено в “Базы”. Можете перейти и проверить импорт.', href: url });
+    } catch (e) {
+      setToast({ tone: 'error', message: e instanceof Error ? e.message : 'Ошибка добавления в базу' });
+    }
+  }, [activeJobId, results]);
+
   const totalLinks = activeJob?.total_links ?? 0;
   const totalOrgs = activeJob?.total_organizations ?? results.length;
   const processedOrgs = activeJob?.processed_organizations ?? 0;
@@ -330,6 +398,29 @@ export function YandexMapsParserView() {
 
   return (
     <div className="space-y-8">
+      {toast ? (
+        <div
+          className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
+            toast.tone === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-red-200 bg-red-50 text-red-900'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-3">
+            <div className="min-w-0">{toast.message}</div>
+            {toast.href ? (
+              <a
+                href={toast.href}
+                className="shrink-0 inline-flex items-center rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 shadow-sm hover:bg-emerald-50"
+              >
+                Перейти
+              </a>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {/* Top Section: New Run */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-gray-100 bg-gray-50/50">
@@ -528,6 +619,16 @@ export function YandexMapsParserView() {
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
                   <h3 className="text-base font-semibold text-gray-900">Результаты</h3>
                   <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={addToDatabase}
+                      disabled={!activeJobId || results.length === 0}
+                      className="inline-flex items-center gap-2 rounded-lg bg-white border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                      title="Откроет “Базы” и добавит результаты новой вкладкой"
+                    >
+                      <Database className="h-3.5 w-3.5" />
+                      В базу
+                    </button>
                     <button
                       type="button"
                       onClick={handleExportExcel}

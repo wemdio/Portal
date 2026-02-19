@@ -57,7 +57,26 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ r
   const { runId } = await params;
   if (!runId) return jsonError('Missing runId', 400);
 
-  const { error } = await supabase.from('email_sequence_runs').delete().eq('id', runId);
+  const { data: run, error: runErr } = await supabase
+    .from('email_sequence_runs')
+    .select('id,user_id,status')
+    .eq('id', runId)
+    .single();
+  if (runErr) return jsonError(runErr.message, runErr.code === 'PGRST116' ? 404 : 500);
+  if (run.user_id !== user.id) return jsonError('Forbidden', 403);
+
+  const status = String(run.status ?? '').toLowerCase();
+  if (status === 'running') return jsonError('Нельзя удалить: запуск выполняется. Дождитесь окончания или нажмите «Остановить».', 409);
+
+  // Delete derived data first, then the run itself.
+  const [{ error: delLettersErr }, { error: delSegmentsErr }] = await Promise.all([
+    supabase.from('email_sequence_letters').delete().eq('run_id', runId),
+    supabase.from('email_sequence_segments').delete().eq('run_id', runId),
+  ]);
+  if (delLettersErr) return jsonError(delLettersErr.message, 500);
+  if (delSegmentsErr) return jsonError(delSegmentsErr.message, 500);
+
+  const { error } = await supabase.from('email_sequence_runs').delete().eq('id', runId).eq('user_id', user.id);
   if (error) return jsonError(error.message, 500);
   return NextResponse.json({ ok: true });
 }

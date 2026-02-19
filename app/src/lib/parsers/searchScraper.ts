@@ -31,46 +31,140 @@ function playwrightReuseBrowser() {
   return SEARCH_CONFIG.PLAYWRIGHT.REUSE_BROWSER;
 }
 
-let SEARCH_PROXY_DISPATCHER: Dispatcher | undefined | null = null;
+function playwrightObserveMs() {
+  const raw = Number(SEARCH_CONFIG.PLAYWRIGHT.OBSERVE_MS ?? 0);
+  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+}
 
-async function getSearchProxyDispatcher(): Promise<Dispatcher | undefined> {
-  if (SEARCH_PROXY_DISPATCHER !== null) return SEARCH_PROXY_DISPATCHER ?? undefined;
+const SEARCH_PROXY_DEBUG = Boolean(SEARCH_CONFIG.PROXY_DEBUG);
 
-  const proxyUrl = (process.env.SEARCH_PROXY_URL?.trim() || process.env.HH_PROXY_URL?.trim()) ?? '';
-  if (!proxyUrl) {
-    SEARCH_PROXY_DISPATCHER = undefined;
-    return undefined;
+function normalizeProxyUrl(raw: string): string {
+  const s = raw.trim();
+  if (!s) return '';
+  // People often set HOST:PORT without scheme; both undici ProxyAgent and Playwright expect a URL.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) return s;
+  return `http://${s}`;
+}
+
+function redactProxyUrl(raw: string): string {
+  const normalized = normalizeProxyUrl(raw);
+  if (!normalized) return '';
+  try {
+    const u = new URL(normalized);
+    u.username = '';
+    u.password = '';
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    // Best-effort fallback: strip credentials like user:pass@ if present
+    return normalized.replace(/\/\/[^@/]+@/g, '//').replace(/\/$/, '');
   }
+}
+
+function toPlaywrightProxy(raw: string): { server: string; username?: string; password?: string } | undefined {
+  const normalized = normalizeProxyUrl(raw);
+  if (!normalized) return undefined;
+  try {
+    const u = new URL(normalized);
+    const username = u.username || undefined;
+    const password = u.password || undefined;
+    // Playwright expects creds as separate fields; keep server without credentials.
+    u.username = '';
+    u.password = '';
+    const server = u.toString().replace(/\/$/, '');
+    return { server, ...(username ? { username } : {}), ...(password ? { password } : {}) };
+  } catch {
+    // If URL parsing fails, fall back to plain server; creds won't be applied.
+    return { server: normalized.replace(/\/$/, '') };
+  }
+}
+
+function parseProxyList(raw: string): string[] {
+  const s = raw.trim();
+  if (!s) return [];
+  // Preferred format: JSON array: ["http://user:pass@ip:port", "..."]
+  if (s.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(s) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => normalizeProxyUrl(String(v ?? ''))).filter(Boolean);
+      }
+    } catch {
+      // fall through to split parsing
+    }
+  }
+  // Fallback: comma/semicolon/whitespace separated
+  return s
+    .split(/[,\n;\t ]+/g)
+    .map((v) => normalizeProxyUrl(String(v ?? '')))
+    .filter(Boolean);
+}
+
+function getSearchProxyUrls(): string[] {
+  const listRaw = (process.env.SEARCH_PROXY_URLS ?? '').trim();
+  const list = parseProxyList(listRaw);
+  if (list.length) return list;
+  const singleRaw = (process.env.SEARCH_PROXY_URL?.trim() || process.env.HH_PROXY_URL?.trim()) ?? '';
+  const single = normalizeProxyUrl(singleRaw);
+  return single ? [single] : [];
+}
+
+let proxyRoundRobin = 0;
+
+function pickSearchProxyUrl(seed: number): string {
+  const proxies = getSearchProxyUrls();
+  if (!proxies.length) return '';
+  // Deterministic-enough rotation per attempt + some round-robin between calls.
+  proxyRoundRobin = (proxyRoundRobin + 1) % Number.MAX_SAFE_INTEGER;
+  const idx = Math.abs(seed + proxyRoundRobin) % proxies.length;
+  return proxies[idx] ?? '';
+}
+
+const SEARCH_PROXY_DISPATCHERS = new Map<string, Dispatcher>();
+
+async function getSearchProxyDispatcher(proxyUrl: string): Promise<Dispatcher | undefined> {
+  const key = proxyUrl.trim();
+  if (!key) return undefined;
+  const existing = SEARCH_PROXY_DISPATCHERS.get(key);
+  if (existing) return existing;
 
   try {
     // Lazy import to avoid loading undici internals in Jest environment
     const mod = await import('undici');
-    const dispatcher = new mod.ProxyAgent(proxyUrl) as unknown as Dispatcher;
-    SEARCH_PROXY_DISPATCHER = dispatcher;
+    const dispatcher = new mod.ProxyAgent(key) as unknown as Dispatcher;
+    SEARCH_PROXY_DISPATCHERS.set(key, dispatcher);
     return dispatcher;
   } catch {
-    SEARCH_PROXY_DISPATCHER = undefined;
     return undefined;
   }
 }
 
 let playwrightBrowserPromise: Promise<unknown> | null = null;
 
-async function fetchHtmlWithPlaywright(url: string): Promise<{ html: string; finalUrl: string }> {
+async function fetchHtmlWithPlaywright(url: string, proxyUrlOverride?: string): Promise<{ html: string; finalUrl: string }> {
   if (!isPlaywrightEnabled()) {
     throw new Error('Playwright is disabled (SEARCH_PLAYWRIGHT_ENABLED!=1)');
   }
 
   // Lazy import so tests/build don’t eagerly load Playwright.
   const pw = await import('playwright');
-  const proxyUrl = (process.env.SEARCH_PROXY_URL?.trim() || process.env.HH_PROXY_URL?.trim()) ?? '';
+  const proxyUrl = proxyUrlOverride ? normalizeProxyUrl(proxyUrlOverride) : '';
+  const pwProxy = proxyUrl ? toPlaywrightProxy(proxyUrl) : undefined;
+  if (SEARCH_PROXY_DEBUG) {
+    console.info('playwright.launch', {
+      proxy: proxyUrl ? redactProxyUrl(proxyUrl) : null,
+      has_auth: Boolean(pwProxy?.username || pwProxy?.password),
+    });
+  }
   const userAgent = getRandomUserAgent();
   const timeoutMs = playwrightTimeoutMs();
+  const observeMs = playwrightObserveMs();
 
   const launch = async () =>
     pw.chromium.launch({
       headless: playwrightHeadless(),
-      ...(proxyUrl ? { proxy: { server: proxyUrl } } : {}),
+      ...(pwProxy ? { proxy: pwProxy } : {}),
+      // When observing (headful debugging), slow down a bit so navigation is visible.
+      ...(observeMs > 0 && !playwrightHeadless() ? { slowMo: 50 } : {}),
     });
 
   let browser: Browser;
@@ -131,9 +225,20 @@ async function fetchHtmlWithPlaywright(url: string): Promise<{ html: string; fin
     }
     // Give client-side rendering / interstitials a moment.
     await page.waitForTimeout(900 + Math.round(Math.random() * 900));
+    // Optional: keep the window open longer for local debugging/observation.
+    if (observeMs > 0 && !playwrightHeadless()) {
+      await page.waitForTimeout(observeMs);
+    }
     const html = await page.content();
     const finalUrl = page.url();
     return { html, finalUrl };
+  } catch (e) {
+    // If navigation fails (e.g. proxy/connectivity), keep the window open in dev
+    // so the operator can see the error page and browser state.
+    if (observeMs > 0 && !playwrightHeadless()) {
+      await page.waitForTimeout(observeMs).catch(() => {});
+    }
+    throw e;
   } finally {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
@@ -151,7 +256,7 @@ export interface SearchResultItem {
   position: number;
 }
 
-export type SearchProvider = 'google' | 'duckduckgo';
+export type SearchProvider = 'google' | 'duckduckgo' | 'bing' | 'mojeek';
 
 export function buildGoogleSearchUrl(
   query: string,
@@ -169,6 +274,26 @@ export function buildDuckDuckGoSearchUrl(query: string): string {
   // Use "lite" endpoint: stable HTML and typically returns 200 for GET.
   // The "html" endpoint often responds with 202 and no results for server-side scraping.
   const url = new URL('https://lite.duckduckgo.com/lite/');
+  url.searchParams.set('q', query);
+  return url.toString();
+}
+
+export function buildBingSearchUrl(
+  query: string,
+  opts?: { count?: number; first?: number; setlang?: string; cc?: string },
+): string {
+  const url = new URL('https://www.bing.com/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('count', String(Math.max(5, Math.min(50, opts?.count ?? 10))));
+  url.searchParams.set('first', String(Math.max(1, Math.floor(opts?.first ?? 1))));
+  // `setlang` controls UI language; `cc` influences region.
+  url.searchParams.set('setlang', opts?.setlang ?? 'ru-ru');
+  url.searchParams.set('cc', opts?.cc ?? 'RU');
+  return url.toString();
+}
+
+export function buildMojeekSearchUrl(query: string): string {
+  const url = new URL('https://www.mojeek.com/search');
   url.searchParams.set('q', query);
   return url.toString();
 }
@@ -199,6 +324,34 @@ export class DuckDuckGoSearchError extends Error {
 
 export function isDuckDuckGoBlockedError(error: unknown): error is DuckDuckGoSearchError {
   return error instanceof DuckDuckGoSearchError && error.code === 'blocked';
+}
+
+export class BingSearchError extends Error {
+  code: 'blocked' | 'request_failed';
+
+  constructor(code: 'blocked' | 'request_failed', message: string) {
+    super(message);
+    this.name = 'BingSearchError';
+    this.code = code;
+  }
+}
+
+export function isBingBlockedError(error: unknown): error is BingSearchError {
+  return error instanceof BingSearchError && error.code === 'blocked';
+}
+
+export class MojeekSearchError extends Error {
+  code: 'blocked' | 'request_failed';
+
+  constructor(code: 'blocked' | 'request_failed', message: string) {
+    super(message);
+    this.name = 'MojeekSearchError';
+    this.code = code;
+  }
+}
+
+export function isMojeekBlockedError(error: unknown): error is MojeekSearchError {
+  return error instanceof MojeekSearchError && error.code === 'blocked';
 }
 
 let cheerioModule: typeof import('cheerio') | null = null;
@@ -254,7 +407,9 @@ function isSearchEngineHost(hostname: string) {
     host.includes('google.') ||
     host.includes('googleusercontent.com') ||
     host.includes('gstatic.com') ||
-    host.includes('duckduckgo.com')
+    host.includes('duckduckgo.com') ||
+    host.includes('bing.com') ||
+    host.includes('mojeek.com')
   );
 }
 
@@ -291,6 +446,7 @@ type GoogleSearchDebugInfo = {
   status: number;
   title: string | null;
   block_reason: string | null;
+  proxy: { kind: 'playwright' | 'undici' | 'none'; server: string | null };
   container_count: number;
   h3_count: number;
   anchor_with_h3_count: number;
@@ -303,6 +459,29 @@ type DuckDuckGoSearchDebugInfo = {
   status: number;
   title: string | null;
   block_reason: string | null;
+  proxy: { kind: 'playwright' | 'undici' | 'none'; server: string | null };
+  result_count: number;
+  html_snippet: string;
+};
+
+type BingSearchDebugInfo = {
+  request_url: string;
+  final_url: string;
+  status: number;
+  title: string | null;
+  block_reason: string | null;
+  proxy: { kind: 'playwright' | 'undici' | 'none'; server: string | null };
+  result_count: number;
+  html_snippet: string;
+};
+
+type MojeekSearchDebugInfo = {
+  request_url: string;
+  final_url: string;
+  status: number;
+  title: string | null;
+  block_reason: string | null;
+  proxy: { kind: 'playwright' | 'undici' | 'none'; server: string | null };
   result_count: number;
   html_snippet: string;
 };
@@ -582,6 +761,193 @@ function extractDuckDuckGoResultsFallback(html: string, query: string): SearchRe
   return results;
 }
 
+function decodeBingUParam(uParam: string): string | null {
+  // Bing redirects often look like: /ck/a?...&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS8&...
+  // Where `u` is base64-ish, sometimes url-safe, often prefixed with `a1`.
+  const raw = String(uParam || '').trim();
+  if (!raw) return null;
+  const stripped = raw.replace(/^a1/i, '');
+  const normalized = stripped.replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    const decoded = Buffer.from(normalized, 'base64').toString('utf8');
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function extractBingRedirect(href: string): string {
+  try {
+    const parsed = new URL(href, 'https://www.bing.com');
+    const host = parsed.hostname.toLowerCase();
+    if (!host.includes('bing.com')) return href;
+    if (parsed.pathname.startsWith('/ck/a')) {
+      const u = parsed.searchParams.get('u');
+      const decoded = u ? decodeBingUParam(u) : null;
+      if (decoded) return decoded;
+    }
+  } catch {
+    // ignore
+  }
+  return href;
+}
+
+export async function extractBingResults(html: string, query: string): Promise<SearchResultItem[]> {
+  const cheerio = await getCheerio();
+  if (!cheerio) {
+    return extractBingResultsFallback(html, query);
+  }
+  const $ = cheerio.load(html);
+  const results: SearchResultItem[] = [];
+  const seen = new Set<string>();
+
+  $('li.b_algo, li.b_ans, div.b_algo').each((_, el) => {
+    if (results.length >= 100) return;
+    const $el = $(el);
+    const a = $el.find('h2 a[href], h3 a[href], a[href]').first();
+    const title = a.text().trim();
+    let href = a.attr('href') || '';
+    if (!title || !href) return;
+    href = extractBingRedirect(href);
+
+    try {
+      const validLink = normalizeUrl(href);
+      const hostname = new URL(validLink).hostname;
+      if (isSearchEngineHost(hostname)) return;
+      const key = validLink.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const snippet =
+        $el.find('.b_caption p, .b_paractl p, p').first().text().trim() ||
+        $el.find('.b_snippet').first().text().trim() ||
+        '';
+
+      results.push({
+        query,
+        title,
+        link: validLink,
+        snippet: snippet.replace(/\s+/g, ' ').trim(),
+        position: results.length + 1,
+      });
+    } catch {
+      // ignore invalid urls
+    }
+  });
+
+  return results;
+}
+
+function extractBingResultsFallback(html: string, query: string): SearchResultItem[] {
+  const results: SearchResultItem[] = [];
+  const seen = new Set<string>();
+  // Very tolerant: look for algo blocks with an h2/h3 anchor.
+  const blockRegex = /<li[^>]+class=["'][^"']*\bb_algo\b[^"']*["'][\s\S]*?<\/li>/gi;
+  let blockMatch: RegExpExecArray | null;
+
+  while ((blockMatch = blockRegex.exec(html)) !== null) {
+    if (results.length >= 100) break;
+    const block = blockMatch[0];
+    const anchorMatch = block.match(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    if (!anchorMatch) continue;
+    const rawHref = anchorMatch[1] || '';
+    const title = stripHtml(anchorMatch[2] || '');
+    if (!rawHref || !title) continue;
+
+    try {
+      const cleaned = extractBingRedirect(rawHref);
+      const validLink = normalizeUrl(cleaned);
+      const hostname = new URL(validLink).hostname;
+      if (isSearchEngineHost(hostname)) continue;
+      const key = validLink.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const snippet = snippetMatch ? stripHtml(snippetMatch[1] || '') : '';
+
+      results.push({
+        query,
+        title,
+        link: validLink,
+        snippet,
+        position: results.length + 1,
+      });
+    } catch {
+      // ignore
+    }
+  }
+  return results;
+}
+
+export async function extractMojeekResults(html: string, query: string): Promise<SearchResultItem[]> {
+  const cheerio = await getCheerio();
+  if (!cheerio) return extractMojeekResultsFallback(html, query);
+  const $ = cheerio.load(html);
+  const results: SearchResultItem[] = [];
+  const seen = new Set<string>();
+
+  $('li.result, div.result, .results li, .result').each((_, el) => {
+    if (results.length >= 100) return;
+    const $el = $(el);
+    const a = $el.find('a[href]').first();
+    const title = a.text().trim();
+    const href = a.attr('href') || '';
+    if (!title || !href) return;
+
+    try {
+      const validLink = normalizeUrl(href);
+      const hostname = new URL(validLink).hostname;
+      if (isSearchEngineHost(hostname)) return;
+      const key = validLink.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const snippet =
+        $el.find('.snippet, p, .result__snippet, .desc').first().text().trim() ||
+        '';
+
+      results.push({
+        query,
+        title,
+        link: validLink,
+        snippet: snippet.replace(/\s+/g, ' ').trim(),
+        position: results.length + 1,
+      });
+    } catch {
+      // ignore
+    }
+  });
+
+  return results;
+}
+
+function extractMojeekResultsFallback(html: string, query: string): SearchResultItem[] {
+  const results: SearchResultItem[] = [];
+  const seen = new Set<string>();
+  const anchorRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorRegex.exec(html)) !== null) {
+    if (results.length >= 100) break;
+    const rawHref = match[1] || '';
+    const title = stripHtml(match[2] || '');
+    if (!rawHref || !title) continue;
+    try {
+      const validLink = normalizeUrl(rawHref);
+      const hostname = new URL(validLink).hostname;
+      if (isSearchEngineHost(hostname)) continue;
+      const key = validLink.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push({ query, title, link: validLink, snippet: '', position: results.length + 1 });
+    } catch {
+      // ignore
+    }
+  }
+  return results;
+}
+
 /**
  * Perform a Google search for the given query and return parsed results.
  * This uses direct scraping and is subject to rate limits and blocking.
@@ -593,6 +959,16 @@ export async function googleSearch(query: string, numResults = 10): Promise<Sear
 
 export async function duckDuckGoSearch(query: string): Promise<SearchResultItem[]> {
   const detailed = await duckDuckGoSearchDetailed(query);
+  return detailed.results;
+}
+
+export async function bingSearch(query: string): Promise<SearchResultItem[]> {
+  const detailed = await bingSearchDetailed(query);
+  return detailed.results;
+}
+
+export async function mojeekSearch(query: string): Promise<SearchResultItem[]> {
+  const detailed = await mojeekSearchDetailed(query);
   return detailed.results;
 }
 
@@ -614,12 +990,50 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
   };
 
   try {
-    const dispatcher = await getSearchProxyDispatcher();
+    // Default path: use Playwright (more resilient to enablejs/consent/captcha pages).
+    // Fallback path: direct fetch + HTML parsing (faster, but blocked more often).
+    if (isPlaywrightEnabled()) {
+      try {
+        const proxyUrl = pickSearchProxyUrl(0);
+        const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+        const blockedByUrl = detectGoogleBlockReasonByUrl(pw.finalUrl);
+        const blockReason = blockedByUrl ?? detectGoogleBlockReason(pw.html);
+        if (blockReason) throw new GoogleSearchError('blocked', blockReason);
+
+        const title = extractTitle(pw.html);
+        const { results, stats } = await extractGoogleResultsWithStats(pw.html, query);
+        return {
+          results,
+          debug: {
+            request_url: requestUrl,
+            final_url: pw.finalUrl,
+            status: 200,
+            title,
+            block_reason: null,
+            proxy: { kind: proxyUrl ? 'playwright' : 'none', server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
+            container_count: stats.container_count,
+            h3_count: stats.h3_count,
+            anchor_with_h3_count: stats.anchor_with_h3_count,
+            html_snippet: compressHtmlSnippet(pw.html),
+          },
+        };
+      } catch (e) {
+        // If Playwright returns a real "blocked" signal, don't waste time on fetch fallback.
+        // Otherwise, fall back to fetch (e.g. Playwright browser missing / launch failed).
+        if (e instanceof GoogleSearchError && e.code === 'blocked') throw e;
+      }
+    }
+
+    const proxyUrl = pickSearchProxyUrl(10);
+    const dispatcher = await getSearchProxyDispatcher(proxyUrl);
     const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
       method: 'GET',
       headers,
       ...(dispatcher ? { dispatcher } : {}),
     };
+    if (SEARCH_PROXY_DEBUG) {
+      console.info('google.fetch', { proxy: proxyUrl ? redactProxyUrl(proxyUrl) : null, via: dispatcher ? 'undici' : 'none' });
+    }
     const response = await fetch(requestUrl, fetchInit);
 
     if (!response.ok) {
@@ -635,7 +1049,7 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
     if (blockReason) {
       if (isPlaywrightEnabled()) {
         try {
-          const pw = await fetchHtmlWithPlaywright(requestUrl);
+          const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
           const pwBlockReason = detectGoogleBlockReason(pw.html);
           if (pwBlockReason) throw new GoogleSearchError('blocked', pwBlockReason);
           const title = extractTitle(pw.html);
@@ -673,6 +1087,7 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
         status: response.status,
         title,
         block_reason: null,
+        proxy: { kind: dispatcher ? 'undici' : 'none', server: dispatcher ? redactProxyUrl(proxyUrl) : null },
         container_count: stats.container_count,
         h3_count: stats.h3_count,
         anchor_with_h3_count: stats.anchor_with_h3_count,
@@ -699,32 +1114,88 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
     'User-Agent': getRandomUserAgent(),
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://duckduckgo.com/',
     'Cache-Control': 'no-cache',
     'Pragma': 'no-cache',
+    'Upgrade-Insecure-Requests': '1',
   };
+
+  // Default path: Playwright first (more likely to bypass 202 shell pages).
+  // Fallback path: direct fetch with retries/backoff.
+  if (isPlaywrightEnabled()) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        const backoffMs = 650 * 2 ** (attempt - 1) + Math.round(Math.random() * 650);
+        await sleep(backoffMs);
+      } else {
+        await sleep(250 + Math.round(Math.random() * 350));
+      }
+
+      try {
+        const proxyUrl = pickSearchProxyUrl(attempt);
+        const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+        const html = pw.html;
+        const title = extractTitle(html);
+        const lower = html.toLowerCase();
+        const blockReason =
+          lower.includes('access denied') || lower.includes('blocked') || lower.includes('captcha')
+            ? 'DuckDuckGo blocked the request'
+            : null;
+
+        const results = await extractDuckDuckGoResults(html, query);
+        if (blockReason && results.length === 0) {
+          if (attempt < 2) continue;
+          throw new DuckDuckGoSearchError('blocked', blockReason);
+        }
+
+        return {
+          results,
+          debug: {
+            request_url: requestUrl,
+            final_url: pw.finalUrl,
+            status: 200,
+            title,
+            block_reason: null,
+            proxy: { kind: proxyUrl ? 'playwright' : 'none', server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
+            result_count: results.length,
+            html_snippet: compressHtmlSnippet(html),
+          },
+        };
+      } catch (e) {
+        // If Playwright indicates a real "blocked" condition, surface it as-is.
+        // Otherwise (e.g. missing browser), fall back to fetch implementation below.
+        if (e instanceof DuckDuckGoSearchError && e.code === 'blocked') throw e;
+        if (attempt >= 2) break;
+      }
+    }
+  }
 
   // Light jitter + retries to reduce 202/429 bursts.
   // DDG sometimes returns 202 for bot-like traffic; a short backoff often fixes it.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     // Jitter between attempts, but keep first attempt fast.
     if (attempt > 0) {
-      const backoffMs = 600 * 2 ** (attempt - 1) + Math.round(Math.random() * 350);
+      const backoffMs = 900 * 2 ** (attempt - 1) + Math.round(Math.random() * 900);
       await sleep(backoffMs);
     } else {
-      await sleep(250 + Math.round(Math.random() * 250));
+      await sleep(400 + Math.round(Math.random() * 450));
     }
 
     try {
-      const dispatcher = await getSearchProxyDispatcher();
+      const proxyUrl = pickSearchProxyUrl(attempt);
+      const dispatcher = await getSearchProxyDispatcher(proxyUrl);
       const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         method: 'GET',
         headers,
         ...(dispatcher ? { dispatcher } : {}),
       };
+      if (SEARCH_PROXY_DEBUG) {
+        console.info('ddg.fetch', { proxy: proxyUrl ? redactProxyUrl(proxyUrl) : null, via: dispatcher ? 'undici' : 'none', attempt });
+      }
       const response = await fetch(requestUrl, fetchInit);
       if (!response.ok) {
         if (response.status === 429) {
-          if (attempt < 2) continue;
+          if (attempt < 4) continue;
           throw new DuckDuckGoSearchError('blocked', 'DuckDuckGo blocking: Too Many Requests (429)');
         }
         throw new DuckDuckGoSearchError('request_failed', `DuckDuckGo search failed with status ${response.status}`);
@@ -732,9 +1203,35 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
 
       // DDG sometimes returns 202 + a shell page without results for bot-like traffic.
       if (response.status === 202) {
+        const html = await response.text();
+        const title = extractTitle(html);
+        const lower = html.toLowerCase();
+        const blockReason =
+          lower.includes('access denied') || lower.includes('blocked') || lower.includes('captcha')
+            ? 'DuckDuckGo blocked the request (202)'
+            : null;
+
+        // Some 202 responses still contain results. Try parsing first.
+        const parsed = await extractDuckDuckGoResults(html, query);
+        if (!blockReason && parsed.length > 0) {
+          return {
+            results: parsed,
+            debug: {
+              request_url: requestUrl,
+              final_url: response.url,
+              status: 202,
+              title,
+              block_reason: null,
+              proxy: { kind: dispatcher ? 'undici' : 'none', server: dispatcher ? redactProxyUrl(proxyUrl) : null },
+              result_count: parsed.length,
+              html_snippet: compressHtmlSnippet(html),
+            },
+          };
+        }
+
         if (isPlaywrightEnabled()) {
           try {
-            const pw = await fetchHtmlWithPlaywright(requestUrl);
+            const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
             const results = await extractDuckDuckGoResults(pw.html, query);
             return {
               results,
@@ -744,6 +1241,7 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
                 status: 200,
                 title: extractTitle(pw.html),
                 block_reason: null,
+                proxy: { kind: proxyUrl ? 'playwright' : 'none', server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
                 result_count: results.length,
                 html_snippet: compressHtmlSnippet(pw.html),
               },
@@ -752,8 +1250,8 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
             console.warn('DuckDuckGo Playwright fallback failed:', e);
           }
         }
-        if (attempt < 2) continue;
-        throw new DuckDuckGoSearchError('blocked', 'DuckDuckGo blocked the request (202)');
+        if (attempt < 4) continue;
+        throw new DuckDuckGoSearchError('blocked', blockReason ?? 'DuckDuckGo blocked the request (202)');
       }
 
       const html = await response.text();
@@ -764,7 +1262,7 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
           ? 'DuckDuckGo blocked the request'
           : null;
       if (blockReason) {
-        if (attempt < 2) continue;
+        if (attempt < 4) continue;
         throw new DuckDuckGoSearchError('blocked', blockReason);
       }
 
@@ -778,6 +1276,7 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
           status: response.status,
           title,
           block_reason: null,
+          proxy: { kind: dispatcher ? 'undici' : 'none', server: dispatcher ? redactProxyUrl(proxyUrl) : null },
           result_count: results.length,
           html_snippet: compressHtmlSnippet(html),
         },
@@ -788,14 +1287,15 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
         console.error('DuckDuckGo search error:', error);
       }
       // Retry only on DDG blocking; rethrow otherwise.
-      if (error instanceof DuckDuckGoSearchError && error.code === 'blocked' && attempt < 2) {
+      if (error instanceof DuckDuckGoSearchError && error.code === 'blocked' && attempt < 4) {
         continue;
       }
 
       // Last chance: Playwright fallback for 202/blocked pages
       if (isPlaywrightEnabled() && error instanceof DuckDuckGoSearchError && error.code === 'blocked') {
         try {
-          const pw = await fetchHtmlWithPlaywright(requestUrl);
+          const proxyUrl = pickSearchProxyUrl(attempt + 1000);
+          const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
           const results = await extractDuckDuckGoResults(pw.html, query);
           return {
             results,
@@ -805,6 +1305,7 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
               status: 200,
               title: extractTitle(pw.html),
               block_reason: null,
+              proxy: { kind: proxyUrl ? 'playwright' : 'none', server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
               result_count: results.length,
               html_snippet: compressHtmlSnippet(pw.html),
             },
@@ -820,4 +1321,215 @@ export async function duckDuckGoSearchDetailed(query: string): Promise<{
 
   // Should be unreachable because loop either returns or throws.
   throw new DuckDuckGoSearchError('request_failed', 'DuckDuckGo search failed (unexpected)');
+}
+
+function detectBingBlockReason(html: string, finalUrl?: string): string | null {
+  const lower = html.toLowerCase();
+  if (finalUrl) {
+    try {
+      const u = new URL(finalUrl);
+      if (u.hostname.toLowerCase().includes('bing.com') && u.pathname.toLowerCase().includes('/sorry')) {
+        return 'Bing blocked the request (sorry redirect)';
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (lower.includes('unusual traffic') || lower.includes('automated queries')) return 'Bing blocked the request (unusual traffic)';
+  if (lower.includes('captcha') || lower.includes('verify you are human')) return 'Bing blocked the request (captcha)';
+  if (lower.includes('access denied')) return 'Bing blocked the request (access denied)';
+  return null;
+}
+
+export async function bingSearchDetailed(
+  query: string,
+  opts?: { maxPages?: number; pageSize?: number; maxResults?: number },
+): Promise<{ results: SearchResultItem[]; debug: BingSearchDebugInfo }> {
+  const maxPages = Math.max(1, Math.min(8, Math.floor(opts?.maxPages ?? 3)));
+  const pageSize = Math.max(5, Math.min(50, Math.floor(opts?.pageSize ?? 10)));
+  const maxResults = Math.max(1, Math.min(200, Math.floor(opts?.maxResults ?? 50)));
+
+  const headers = {
+    'User-Agent': getRandomUserAgent(),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Upgrade-Insecure-Requests': '1',
+  };
+
+  const collected: SearchResultItem[] = [];
+  const seen = new Set<string>();
+  let lastDebug: BingSearchDebugInfo | null = null;
+
+  for (let page = 0; page < maxPages; page++) {
+    // Jitter to avoid bursty traffic; aim for stability over speed.
+    await sleep(900 + Math.round(Math.random() * 1600));
+
+    const requestUrl = buildBingSearchUrl(query, { count: pageSize, first: 1 + page * pageSize, setlang: 'ru-ru', cc: 'RU' });
+    try {
+      const proxyUrl = pickSearchProxyUrl(page);
+      const dispatcher = await getSearchProxyDispatcher(proxyUrl);
+      const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
+        method: 'GET',
+        headers,
+        ...(dispatcher ? { dispatcher } : {}),
+      };
+      if (SEARCH_PROXY_DEBUG) {
+        console.info('bing.fetch', { proxy: proxyUrl ? redactProxyUrl(proxyUrl) : null, via: dispatcher ? 'undici' : 'none', page });
+      }
+      const response = await fetch(requestUrl, fetchInit);
+      if (!response.ok) {
+        if (response.status === 429) throw new BingSearchError('blocked', 'Bing blocking: Too Many Requests (429)');
+        throw new BingSearchError('request_failed', `Bing search failed with status ${response.status}`);
+      }
+
+      const html = await response.text();
+      const title = extractTitle(html);
+      const blockReason = detectBingBlockReason(html, response.url);
+      if (blockReason) throw new BingSearchError('blocked', blockReason);
+
+      const parsed = await extractBingResults(html, query);
+      for (const r of parsed) {
+        const key = r.link.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        collected.push({ ...r, position: collected.length + 1 });
+        if (collected.length >= maxResults) break;
+      }
+
+      lastDebug = {
+        request_url: requestUrl,
+        final_url: response.url,
+        status: response.status,
+        title,
+        block_reason: null,
+        proxy: { kind: dispatcher ? 'undici' : 'none', server: dispatcher ? redactProxyUrl(proxyUrl) : null },
+        result_count: collected.length,
+        html_snippet: compressHtmlSnippet(html),
+      };
+
+      if (parsed.length === 0) {
+        // If a page yields nothing, don’t hammer. Stop early.
+        break;
+      }
+      if (collected.length >= maxResults) break;
+    } catch (e) {
+      if (e instanceof BingSearchError && e.code === 'blocked') {
+        // If we already got something, return what we have.
+        if (collected.length > 0 && lastDebug) return { results: collected, debug: lastDebug };
+      }
+      throw e;
+    }
+  }
+
+  return {
+    results: collected,
+    debug:
+      lastDebug ??
+      ({
+        request_url: buildBingSearchUrl(query, { count: pageSize, first: 1, setlang: 'ru-ru', cc: 'RU' }),
+        final_url: buildBingSearchUrl(query, { count: pageSize, first: 1, setlang: 'ru-ru', cc: 'RU' }),
+        status: 200,
+        title: null,
+        block_reason: null,
+        proxy: { kind: 'none', server: null },
+        result_count: collected.length,
+        html_snippet: '',
+      } satisfies BingSearchDebugInfo),
+  };
+}
+
+function detectMojeekBlockReason(html: string, finalUrl?: string): string | null {
+  const lower = html.toLowerCase();
+  if (finalUrl) {
+    try {
+      const u = new URL(finalUrl);
+      if (u.hostname.toLowerCase().includes('mojeek.com') && u.pathname.toLowerCase().includes('/sorry')) {
+        return 'Mojeek blocked the request (sorry redirect)';
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (lower.includes('access denied')) return 'Mojeek blocked the request (access denied)';
+  if (lower.includes('captcha') || lower.includes('verify')) return 'Mojeek blocked the request (captcha)';
+  return null;
+}
+
+export async function mojeekSearchDetailed(
+  query: string,
+  opts?: { maxRetries?: number },
+): Promise<{ results: SearchResultItem[]; debug: MojeekSearchDebugInfo }> {
+  const requestUrl = buildMojeekSearchUrl(query);
+  const headers = {
+    'User-Agent': getRandomUserAgent(),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Upgrade-Insecure-Requests': '1',
+  };
+  const maxRetries = Math.max(1, Math.min(5, Math.floor(opts?.maxRetries ?? 3)));
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (attempt > 0) {
+      const backoffMs = 1200 * 2 ** (attempt - 1) + Math.round(Math.random() * 900);
+      await sleep(backoffMs);
+    } else {
+      await sleep(450 + Math.round(Math.random() * 650));
+    }
+
+    const proxyUrl = pickSearchProxyUrl(10_000 + attempt);
+    try {
+      const dispatcher = await getSearchProxyDispatcher(proxyUrl);
+      const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
+        method: 'GET',
+        headers,
+        ...(dispatcher ? { dispatcher } : {}),
+      };
+      if (SEARCH_PROXY_DEBUG) {
+        console.info('mojeek.fetch', { proxy: proxyUrl ? redactProxyUrl(proxyUrl) : null, via: dispatcher ? 'undici' : 'none', attempt });
+      }
+
+      const response = await fetch(requestUrl, fetchInit);
+      if (!response.ok) {
+        if (response.status === 429) {
+          if (attempt < maxRetries - 1) continue;
+          throw new MojeekSearchError('blocked', 'Mojeek blocking: Too Many Requests (429)');
+        }
+        throw new MojeekSearchError('request_failed', `Mojeek search failed with status ${response.status}`);
+      }
+
+      const html = await response.text();
+      const title = extractTitle(html);
+      const blockReason = detectMojeekBlockReason(html, response.url);
+      if (blockReason) {
+        if (attempt < maxRetries - 1) continue;
+        throw new MojeekSearchError('blocked', blockReason);
+      }
+
+      const results = await extractMojeekResults(html, query);
+      return {
+        results,
+        debug: {
+          request_url: requestUrl,
+          final_url: response.url,
+          status: response.status,
+          title,
+          block_reason: null,
+          proxy: { kind: dispatcher ? 'undici' : 'none', server: dispatcher ? redactProxyUrl(proxyUrl) : null },
+          result_count: results.length,
+          html_snippet: compressHtmlSnippet(html),
+        },
+      };
+    } catch (error) {
+      if (error instanceof MojeekSearchError && error.code === 'blocked' && attempt < maxRetries - 1) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new MojeekSearchError('request_failed', 'Mojeek search failed (unexpected)');
 }

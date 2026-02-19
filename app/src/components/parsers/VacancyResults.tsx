@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
-import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database } from 'lucide-react';
 
 type Props = {
   items: HHVacancyRow[];
@@ -11,6 +11,7 @@ type Props = {
   offset: number;
   loading: boolean;
   actionsBusy: boolean;
+  addToDatabaseDisabled?: boolean;
   jobId?: string | null;
   jobStatus?: ParserJobStatus | null;
   jobActionBusy?: boolean;
@@ -21,6 +22,7 @@ type Props = {
   onExportCsv: () => void;
   onExportExcel: () => void;
   onCopy: () => void;
+  onAddToDatabase?: () => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
 };
@@ -183,6 +185,7 @@ export function VacancyResults({
   offset,
   loading,
   actionsBusy,
+  addToDatabaseDisabled,
   jobId,
   jobStatus,
   jobActionBusy,
@@ -193,6 +196,7 @@ export function VacancyResults({
   onExportCsv,
   onExportExcel,
   onCopy,
+  onAddToDatabase,
   onStopJob,
   onDeleteJob,
 }: Props) {
@@ -221,6 +225,7 @@ export function VacancyResults({
     : '';
   const limitLabel = statsReady && limit ? ` · по ${limit}` : '';
   const actionsDisabled = actionsBusy || (count === 0 && items.length === 0);
+  const addToDbDisabled = actionsDisabled || !onAddToDatabase || Boolean(addToDatabaseDisabled);
   const jobControlsDisabled = jobActionBusy || !jobId;
   const searchUrl = buildSearchUrl(searchConfig);
   const filters = buildFilters(searchConfig);
@@ -287,7 +292,17 @@ export function VacancyResults({
             </p>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+          <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+            <button
+              type="button"
+              onClick={onAddToDatabase}
+              disabled={addToDbDisabled}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+              title="Откроет “Базы” и добавит результаты новой вкладкой"
+            >
+              <Database className="h-4 w-4" />
+              В базу
+            </button>
             <button
               type="button"
               onClick={onExportCsv}
