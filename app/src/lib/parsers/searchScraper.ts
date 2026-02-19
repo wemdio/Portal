@@ -1062,6 +1062,7 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
               status: 200,
               title,
               block_reason: null,
+              proxy: { kind: proxyUrl ? 'playwright' : 'none', server: proxyUrl ? redactProxyUrl(proxyUrl) : null },
               container_count: stats.container_count,
               h3_count: stats.h3_count,
               anchor_with_h3_count: stats.anchor_with_h3_count,
