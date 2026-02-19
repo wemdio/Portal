@@ -1247,35 +1247,37 @@ export function ProjectList() {
               </section>
 
               <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
-                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
-                      <span className="w-2 h-2 rounded-full bg-blue-600"></span>
-                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Подзадачи</span>
+                 <div>
+                    <div className="bg-blue-600 text-white text-sm font-bold uppercase tracking-wide rounded-t-xl px-4 py-2">
+                      Подзадачи
                     </div>
-                    <InlineTextarea
-                      value={getDraftValue(selectedProject, 'subtasks')}
-                      onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
-                      onCommit={(value) => void commitProjectUpdate(selectedProject, { subtasks: value })}
-                      disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                      placeholder="Список подзадач..."
-                      rows={4}
-                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
-                    />
+                    <div className="bg-gray-50 rounded-b-xl p-4 border border-t-0 border-gray-200">
+                      <InlineTextarea
+                        value={getDraftValue(selectedProject, 'subtasks')}
+                        onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
+                        onCommit={(value) => void commitProjectUpdate(selectedProject, { subtasks: value })}
+                        disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                        placeholder="Список подзадач..."
+                        rows={4}
+                        className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                      />
+                    </div>
                  </div>
-                 <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
-                      <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                      <span className="text-sm font-bold text-gray-900 uppercase tracking-wide">Комментарий передачи</span>
+                 <div>
+                    <div className="bg-amber-500 text-white text-sm font-bold uppercase tracking-wide rounded-t-xl px-4 py-2">
+                      Комментарий передачи
                     </div>
-                    <InlineTextarea
-                      value={getDraftValue(selectedProject, 'comments')}
-                      onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
-                      onCommit={(value) => void commitProjectUpdate(selectedProject, { comments: value })}
-                      disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                      placeholder="Внутренний комментарий..."
-                      rows={4}
-                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
-                    />
+                    <div className="bg-gray-50 rounded-b-xl p-4 border border-t-0 border-gray-200">
+                      <InlineTextarea
+                        value={getDraftValue(selectedProject, 'comments')}
+                        onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
+                        onCommit={(value) => void commitProjectUpdate(selectedProject, { comments: value })}
+                        disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                        placeholder="Внутренний комментарий..."
+                        rows={4}
+                        className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                      />
+                    </div>
                  </div>
               </section>
 
