@@ -12,20 +12,16 @@ export const SEARCH_CONFIG = {
       process.env.SEARCH_PLAYWRIGHT_ENABLED != null
         ? process.env.SEARCH_PLAYWRIGHT_ENABLED !== '0'
         : process.env.NODE_ENV !== 'test',
-    // In development, default to headful so the operator can observe browser behavior.
-    // In production (incl. Docker), default to headless to avoid GUI requirements.
+    // Default to headless: parsing should run in background without visible browser windows.
     HEADLESS:
       process.env.SEARCH_PLAYWRIGHT_HEADLESS != null
         ? process.env.SEARCH_PLAYWRIGHT_HEADLESS !== '0'
-        : process.env.NODE_ENV === 'production',
-    // Keep the browser window open briefly in development so it’s visible while debugging.
-    // Can be overridden via env if needed, but does not require env to work.
+        : true,
+    // Do not keep the browser window open; background-only by default.
     OBSERVE_MS:
       process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS != null
         ? Math.max(0, Math.floor(Number(process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS) || 0))
-        : process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'test'
-          ? 0
-          : 15000,
+        : 0,
     TIMEOUT_MS: Number(process.env.SEARCH_PLAYWRIGHT_TIMEOUT_MS) || 25000,
     REUSE_BROWSER: process.env.SEARCH_PLAYWRIGHT_REUSE_BROWSER !== '0',
   },
@@ -33,8 +29,9 @@ export const SEARCH_CONFIG = {
   // Настройки обогащения данных (Email)
   ENRICH: {
     EMAIL_ENABLED: process.env.SEARCH_ENRICH_EMAIL_ENABLED !== '0',
-    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 40,
-    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 8,
+    // Default higher: many sites expose emails only on /contacts, so enrichment needs a decent budget.
+    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 200,
+    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 10,
     CONCURRENCY: Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY) || 2,
   },
 
