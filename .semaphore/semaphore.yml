@@ -72,8 +72,7 @@ blocks:
             - >-
               printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
               "set -e;
-              DEPLOY_DIR='/home/Portal/prod';
-              cd \"${DEPLOY_DIR}\";
+              cd /home/Portal/prod;
               chmod +x drain-worker.sh;
               echo '--- Step 0: ensure deps (skip if already present) ---';
               if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found; cannot auto-install deps' && exit 1; fi;
