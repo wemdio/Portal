@@ -98,7 +98,13 @@ export default function UsersPage() {
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(text || `Request failed: ${res.status}`);
+      try {
+        const parsed = JSON.parse(text) as { error?: unknown };
+        const msg = typeof parsed?.error === 'string' ? parsed.error : '';
+        throw new Error(msg || text || `Request failed: ${res.status}`);
+      } catch {
+        throw new Error(text || `Request failed: ${res.status}`);
+      }
     }
 
     return (await res.json()) as T;
@@ -157,49 +163,45 @@ export default function UsersPage() {
       setError('Заполните все обязательные поля');
       return;
     }
+    if (newUser.password.trim().length < 8) {
+      setError('Пароль должен быть минимум 8 символов');
+      return;
+    }
+    if (newUser.password.trim().length > 72) {
+      setError('Пароль слишком длинный (максимум 72 символа)');
+      return;
+    }
 
     setCreating(true);
     setError('');
 
     try {
       const fullName = newUser.full_name || newUser.email.split('@')[0];
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: newUser.email,
-        password: newUser.password,
-        options: {
-          data: {
-            full_name: fullName,
-            role: newUser.role,
-          }
-        }
-      });
-
-      if (authError) throw authError;
-      if (!authData.user) throw new Error('Не удалось создать пользователя');
-
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .upsert({
-          id: authData.user.id,
+      const result = await apiFetch<{ ok: true; user: { id: string } }>('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
           email: newUser.email,
+          password: newUser.password,
           role: newUser.role,
           full_name: fullName,
-        });
-
-      if (profileError) throw profileError;
+        }),
+      });
 
       setShowCreateModal(false);
       setNewUser({ email: '', password: '', role: 'technician', full_name: '' });
       setSearchQuery(''); // Reset search when user is created
       void logAudit('admin.users.create.success', 'User created', {
-        targetUserId: authData.user.id,
+        targetUserId: result.user.id,
         role: newUser.role,
       });
       await fetchUsers();
     } catch (err: unknown) {
       void logError('admin.users.create.failed', err, { role: newUser.role });
       const message = getErrorMessage(err);
-      if (message.includes('already registered')) {
+      const lower = message.toLowerCase();
+      if (lower.includes('already registered')) {
+        setError('Пользователь с таким email уже существует');
+      } else if (lower.includes('already') || lower.includes('уже существует')) {
         setError('Пользователь с таким email уже существует');
       } else {
         setError(message || 'Ошибка создания пользователя');
@@ -517,7 +519,7 @@ export default function UsersPage() {
                   value={newUser.password}
                   onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Минимум 6 символов"
+                  placeholder="Минимум 8 символов"
                   required
                 />
               </div>
