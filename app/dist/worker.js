@@ -60903,6 +60903,7 @@ var supabaseAdmin = supabaseUrl && supabaseServiceRoleKey ? createClient(supabas
 }) : null;
 
 // src/lib/constants.ts
+var OPENROUTER_MODEL = "google/gemini-3-flash-preview";
 var OPENROUTER_API_KEY = process.env.OPENROUTER_SEARCH_PARSER_API_KEY || "";
 var TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 var REDACT_KEYS = [
@@ -62313,55 +62314,6 @@ async function runHHParserJob(jobId) {
   }
 }
 
-// src/lib/config.ts
-var SEARCH_CONFIG = {
-  // Логи и диагностика
-  PROXY_DEBUG: process.env.SEARCH_PROXY_DEBUG === "1",
-  // Настройки Playwright для парсинга поиска
-  PLAYWRIGHT: {
-    // Enabled by default in dev/prod; disabled by default in tests to avoid launching browsers in Jest.
-    ENABLED: process.env.SEARCH_PLAYWRIGHT_ENABLED != null ? process.env.SEARCH_PLAYWRIGHT_ENABLED !== "0" : process.env.NODE_ENV !== "test",
-    // In development, default to headful so the operator can observe browser behavior.
-    // In production (incl. Docker), default to headless to avoid GUI requirements.
-    HEADLESS: process.env.SEARCH_PLAYWRIGHT_HEADLESS != null ? process.env.SEARCH_PLAYWRIGHT_HEADLESS !== "0" : process.env.NODE_ENV === "production",
-    // Keep the browser window open briefly in development so it’s visible while debugging.
-    // Can be overridden via env if needed, but does not require env to work.
-    OBSERVE_MS: process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS != null ? Math.max(0, Math.floor(Number(process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS) || 0)) : process.env.NODE_ENV === "production" || process.env.NODE_ENV === "test" ? 0 : 15e3,
-    TIMEOUT_MS: Number(process.env.SEARCH_PLAYWRIGHT_TIMEOUT_MS) || 25e3,
-    REUSE_BROWSER: process.env.SEARCH_PLAYWRIGHT_REUSE_BROWSER !== "0"
-  },
-  // Настройки обогащения данных (Email)
-  ENRICH: {
-    EMAIL_ENABLED: process.env.SEARCH_ENRICH_EMAIL_ENABLED !== "0",
-    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 40,
-    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 8,
-    CONCURRENCY: Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY) || 2
-  },
-  // Настройки расширения источников
-  SOURCE_EXPAND: {
-    ENABLED: process.env.SEARCH_SOURCE_EXPAND_ENABLED !== "0",
-    MAX_SOURCES_PER_QUERY: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY) || 2,
-    MAX_SOURCES_PER_JOB: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB) || 10,
-    MAX_SITES_PER_SOURCE: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE) || 25,
-    CONCURRENCY: Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY) || 2
-  },
-  // Стабильность важнее скорости — bursty traffic быстро ловит блоки.
-  QUERY_CONCURRENCY: Math.max(1, Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY) || 1))
-};
-var HH_CONFIG = {
-  // Настройки парсера HeadHunter
-  REQUEST_INTERVAL_MS: Number(process.env.HH_REQUEST_INTERVAL_MS) || 1200,
-  MAX_RETRIES: Number(process.env.HH_MAX_RETRIES) || 7,
-  PROXY_URL: process.env.HH_PROXY_URL || ""
-};
-var YANDEX_MAPS_CONFIG = {
-  // URL сервиса парсера Яндекс.Карт
-  // По умолчанию для продакшена (Docker): http://yandexmaps:8000
-  // Для локальной разработки (Next.js + Python локально): http://127.0.0.1:8010
-  SERVICE_URL: process.env.YANDEXMAPS_SERVICE_URL || (process.env.NODE_ENV === "production" ? "http://yandexmaps:8000" : "http://127.0.0.1:8010"),
-  PROXY_ENCRYPTION_KEY: process.env.YANDEXMAPS_PROXY_ENCRYPTION_KEY || ""
-};
-
 // src/lib/parsers/searchParserDiagnostics.ts
 var ZERO_RESULTS_HINT = "\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u043D\u0435\u0442. \u0412\u043E\u0437\u043C\u043E\u0436\u043D\u044B\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u044B: Google \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u0432\u044B\u0434\u0430\u0447\u0443 (captcha/consent), \u0441\u043B\u0438\u0448\u043A\u043E\u043C \u0443\u0437\u043A\u0438\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0438\u043B\u0438 \u043D\u0435\u0442 \u0440\u0435\u043B\u0435\u0432\u0430\u043D\u0442\u043D\u044B\u0445 \u0441\u0442\u0440\u0430\u043D\u0438\u0446. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 VPN, \u0443\u043F\u0440\u043E\u0441\u0442\u0438\u0442\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0438\u043B\u0438 \u0443\u0431\u0435\u0440\u0438\u0442\u0435 \u043E\u043F\u0435\u0440\u0430\u0442\u043E\u0440\u044B.";
 function buildSearchDiagnostics(input) {
@@ -62534,6 +62486,12 @@ var META_DESCRIPTION_SELECTORS = [
   'meta[name="twitter:description"]'
 ];
 var TITLE_SELECTORS = ["title", 'meta[property="og:title"]', 'meta[name="twitter:title"]'];
+var BRAND_META_SELECTORS = [
+  'meta[property="og:site_name"]',
+  'meta[name="application-name"]',
+  'meta[name="apple-mobile-web-app-title"]'
+];
+var BRAND_TITLE_BAD_WORDS = /(главная|home|о компании|о нас|контакты|contacts|about( us)?|company|страница)/i;
 var CONTACT_PATHS = [
   "/contact",
   "/contact/",
@@ -62555,10 +62513,289 @@ var CONTACT_PATHS = [
 var CONTACT_HREF_PATTERN = /\/(contact|contacts|kontakty|kontakt|kontakti|obratnaya[-_]?svyaz|feedback|support|контакты)(\/|$|\?|#)/i;
 var CONTACT_TEXT_PATTERN = /\b(contact|contacts|контакты|обратн(ая|ой)\s+связ(ь|и)|написать|связаться|телефон|email|почта|support)\b/i;
 var sleep2 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var playwrightBrowserPromise = null;
+async function getPlaywrightBrowser() {
+  try {
+    const pw = await import("playwright");
+    playwrightBrowserPromise ??= pw.chromium.launch({ headless: true });
+    return await playwrightBrowserPromise;
+  } catch {
+    return null;
+  }
+}
+async function fetchHtmlWithPlaywright(url, options) {
+  const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
+  const signal = options?.signal;
+  const browser = await getPlaywrightBrowser();
+  if (!browser) return null;
+  if (signal?.aborted) return null;
+  const context = await browser.newContext({
+    userAgent: BROWSER_USER_AGENT,
+    viewport: { width: 1365, height: 768 },
+    locale: "ru-RU"
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(timeout);
+  page.setDefaultNavigationTimeout(timeout);
+  await page.route("**/*", async (route) => {
+    try {
+      const type = route.request().resourceType();
+      if (type === "image" || type === "media" || type === "font") {
+        await route.abort();
+        return;
+      }
+    } catch {
+    }
+    await route.continue();
+  });
+  const abortListener = () => {
+    try {
+      void page.close();
+    } catch {
+    }
+  };
+  signal?.addEventListener("abort", abortListener, { once: true });
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+    await page.waitForTimeout(900 + Math.round(Math.random() * 900));
+    const html3 = await page.content();
+    return html3 && html3.length > 120 ? html3 : null;
+  } catch {
+    return null;
+  } finally {
+    signal?.removeEventListener("abort", abortListener);
+    await page.close().catch(() => {
+    });
+    await context.close().catch(() => {
+    });
+  }
+}
 function isHtmlLikeContentType(contentType) {
   if (!contentType) return true;
   const ct = contentType.toLowerCase();
   return ct.includes("text/html") || ct.includes("application/xhtml") || ct.startsWith("text/plain") || ct.includes("text/xml") || ct.includes("application/xml");
+}
+function normalizeBrandCandidate(value) {
+  return value.replace(/[“”«»]/g, '"').replace(/\s+/g, " ").trim();
+}
+function isLikelyJunkBrand(value) {
+  const s = value.trim();
+  if (!s) return true;
+  if (/^(null|undefined|n\/a)$/i.test(s)) return true;
+  if (/^#?[0-9a-f]{3,8}$/i.test(s)) return true;
+  if (/^https?:\/\//i.test(s)) return true;
+  return false;
+}
+function splitSeoTitleToBrand(title) {
+  const cleaned = normalizeBrandCandidate(title);
+  if (!cleaned) return null;
+  const pipeParts = cleaned.split(" | ").map((s) => s.trim()).filter((s) => s.length >= 2);
+  if (pipeParts.length >= 2) {
+    const last2 = pipeParts[pipeParts.length - 1];
+    if (last2 && last2.length <= 80 && !BRAND_TITLE_BAD_WORDS.test(last2)) return last2;
+  }
+  const dashParts = cleaned.split(/\s+[—–]\s+/).map((s) => s.trim()).filter((s) => s.length >= 2);
+  if (dashParts.length >= 2) {
+    const first2 = dashParts[0];
+    if (first2 && first2.length <= 80 && !BRAND_TITLE_BAD_WORDS.test(first2)) return first2;
+  }
+  if (cleaned.length <= 80 && !BRAND_TITLE_BAD_WORDS.test(cleaned)) return cleaned;
+  return null;
+}
+function extractBrandFromJsonLd($2) {
+  const scripts = $2('script[type="application/ld+json"]');
+  for (const el of scripts.toArray()) {
+    const raw = ($2(el).text() ?? "").trim();
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      const queue = Array.isArray(parsed) ? parsed : [parsed];
+      while (queue.length) {
+        const node = queue.shift();
+        if (!node || typeof node !== "object") continue;
+        const type = node["@type"];
+        const types = Array.isArray(type) ? type : type ? [type] : [];
+        const looksOrg = types.some(
+          (t) => typeof t === "string" ? /(Organization|LocalBusiness|Corporation|ProfessionalService)/i.test(t) : false
+        );
+        if (looksOrg && typeof node.name === "string") {
+          const name = normalizeBrandCandidate(node.name);
+          if (name && name.length >= 2 && name.length <= 120 && !BRAND_TITLE_BAD_WORDS.test(name)) return name;
+        }
+        const nested = [node.publisher, node.author, node.organization, node.brand].filter(Boolean);
+        for (const n of nested) queue.push(n);
+        if (Array.isArray(node["@graph"])) {
+          for (const g of node["@graph"]) queue.push(g);
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function extractBrandFromHeading($2) {
+  const h1 = normalizeBrandCandidate($2("h1").first().text() ?? "");
+  if (!h1) return null;
+  const cleaned = h1.replace(/^(о\s+компании|о\s+нас|about(\s+us)?|company)\s+/i, "").replace(/[—–-]\s*$/, "").trim();
+  if (!cleaned) return null;
+  if (cleaned.length < 2 || cleaned.length > 120) return null;
+  if (BRAND_TITLE_BAD_WORDS.test(cleaned)) return null;
+  if (isLikelyJunkBrand(cleaned)) return null;
+  if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр)/i.test(cleaned)) return null;
+  return cleaned;
+}
+function extractBrandFromCopyrightText($2) {
+  const cleanLegalTail = (value) => {
+    return normalizeBrandCandidate(value).replace(/[,;]?\s*\b(ИНН|ОГРН|ОГРНИП|КПП)\b[:\s]*\d[\d\s-]{4,}/gi, "").replace(/[.,;:\s]+$/g, "").trim().slice(0, 160);
+  };
+  const validate = (value) => {
+    const s = value.trim();
+    if (!s) return null;
+    if (s.length < 2 || s.length > 160) return null;
+    if (BRAND_TITLE_BAD_WORDS.test(s)) return null;
+    if (isLikelyJunkBrand(s)) return null;
+    if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр)/i.test(s)) return null;
+    return s;
+  };
+  const candidates = [];
+  const pushText = (sel) => {
+    const t = normalizeBrandCandidate($2(sel).text() ?? "");
+    if (t) candidates.push(t);
+  };
+  const richCandidates = [];
+  const pushStrongFrom = (sel) => {
+    $2(sel).filter((_, el) => normalizeBrandCandidate($2(el).text() ?? "").includes("\xA9")).each((_, el) => {
+      const strongText = normalizeBrandCandidate($2(el).find("strong, b").first().text() ?? "");
+      if (strongText) richCandidates.push(strongText);
+    });
+  };
+  pushStrongFrom('[class*="copyright" i]');
+  pushStrongFrom("footer");
+  pushStrongFrom('[class*="footer" i]');
+  for (const raw of richCandidates) {
+    const cleaned = cleanLegalTail(raw);
+    const ok = validate(cleaned);
+    if (ok) return ok;
+  }
+  pushText("footer");
+  pushText('[class*="copyright" i]');
+  pushText('[class*="footer" i] [class*="copyright" i]');
+  pushText('[class*="footer" i]');
+  const bodySample = normalizeBrandCandidate($2("body").text().slice(0, 4e3));
+  if (bodySample) candidates.push(bodySample);
+  for (const text3 of candidates) {
+    const m = text3.match(/©\s*\d{4}\s*(?:[—–-]\s*\d{4})?\s*([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\s.&'’"_-]{2,})/u) ?? null;
+    const raw = m?.[1]?.trim() ?? "";
+    if (!raw) continue;
+    const cleaned = cleanLegalTail(
+      raw.replace(/\s{2,}/g, " ").replace(/[|•·].*$/, "").trim()
+    );
+    const ok = validate(cleaned);
+    if (ok) return ok;
+  }
+  return null;
+}
+function extractBrandFromLogoAssets($2) {
+  const urls = [];
+  const pushUrl = (raw) => {
+    const s = String(raw ?? "").trim();
+    if (!s) return;
+    urls.push(s);
+  };
+  pushUrl($2('meta[property="og:image"]').attr("content"));
+  pushUrl($2('meta[name="twitter:image"]').attr("content"));
+  pushUrl($2('link[rel="icon"]').attr("href"));
+  pushUrl($2('link[rel="shortcut icon"]').attr("href"));
+  pushUrl($2('link[rel="apple-touch-icon"]').attr("href"));
+  $2('a[href="/"] img[src], a[href="/"] img[data-original]').each((_, el) => {
+    if (urls.length >= 14) return;
+    const img = $2(el);
+    const cls = (img.attr("class") ?? "").toLowerCase();
+    const isTildaImg = cls.includes("tn-atom__img") || cls.includes("t-img");
+    if (!isTildaImg) return;
+    const src = (img.attr("src") ?? "").trim();
+    const dataOriginal = (img.attr("data-original") ?? "").trim();
+    pushUrl(dataOriginal || src);
+  });
+  $2("img[src]").each((_, el) => {
+    if (urls.length >= 14) return;
+    const src = ($2(el).attr("src") ?? "").trim();
+    const cls = ($2(el).attr("class") ?? "").toLowerCase();
+    const id = ($2(el).attr("id") ?? "").toLowerCase();
+    const dataOriginal = ($2(el).attr("data-original") ?? "").trim();
+    const looksLogo = /logo|logotype|brand|header/i.test(src) || cls.includes("tn-atom__img") || // Tilda often uses this class for logo as well
+    cls.includes("logo") || id.includes("logo") || /logo|logotype/i.test(dataOriginal);
+    if (!looksLogo) return;
+    pushUrl(dataOriginal || src);
+  });
+  const stopTokens = new Set(
+    [
+      "logo",
+      "logotype",
+      "brand",
+      "icon",
+      "favicon",
+      "header",
+      "footer",
+      "img",
+      "image",
+      "pic",
+      "photo",
+      "tilda",
+      "cdn",
+      "static"
+    ].map((s) => s.toLowerCase())
+  );
+  const extractFromUrl = (u) => {
+    const raw = u.split("#")[0]?.split("?")[0] ?? u;
+    const last2 = raw.split("/").filter(Boolean).pop() ?? "";
+    if (!last2) return null;
+    const decoded = normalizeBrandCandidate(decodeURIComponent(last2));
+    if (!decoded) return null;
+    const noExt = decoded.replace(/\.(png|jpe?g|webp|gif|svg|ico)$/i, "");
+    if (!noExt) return null;
+    const cleaned = noExt.replace(/(^|[_\-\s])logo(type)?($|[_\-\s])/gi, "$1").replace(/[_\-\s]{2,}/g, " ").trim();
+    if (!cleaned) return null;
+    const parts = cleaned.split(/[\s_\-]+/g).map((p) => p.trim()).filter(Boolean).filter((p) => !stopTokens.has(p.toLowerCase()));
+    if (parts.length === 0) return null;
+    if (parts.length === 1) return parts[0].slice(0, 120);
+    const joined = parts.join(" ").slice(0, 120);
+    return joined;
+  };
+  for (const u of urls) {
+    const candidate = extractFromUrl(u);
+    if (!candidate) continue;
+    if (candidate.length < 2 || candidate.length > 120) continue;
+    if (BRAND_TITLE_BAD_WORDS.test(candidate)) continue;
+    if (isLikelyJunkBrand(candidate)) continue;
+    if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+function extractBrandNameFromHtml(html3) {
+  const $2 = load(html3);
+  const fromJsonLd = extractBrandFromJsonLd($2);
+  if (fromJsonLd) return fromJsonLd;
+  for (const selector of BRAND_META_SELECTORS) {
+    const value = $2(selector).attr("content") ?? "";
+    const candidate = normalizeBrandCandidate(value);
+    if (candidate && candidate.length >= 2 && candidate.length <= 120 && !BRAND_TITLE_BAD_WORDS.test(candidate) && !isLikelyJunkBrand(candidate)) {
+      return candidate;
+    }
+  }
+  const fromLogo = extractBrandFromLogoAssets($2);
+  if (fromLogo) return fromLogo;
+  const fromH1 = extractBrandFromHeading($2);
+  if (fromH1) return fromH1;
+  const fromCopyright = extractBrandFromCopyrightText($2);
+  if (fromCopyright) return fromCopyright;
+  const title = TITLE_SELECTORS.map((selector) => $2(selector).attr("content") ?? $2(selector).text()).map((value) => normalizeBrandCandidate(value ?? "")).find((value) => value.length > 0);
+  if (title) {
+    const candidate = splitSeoTitleToBrand(title);
+    if (candidate) return candidate;
+  }
+  return null;
 }
 function sanitizeText(text3) {
   let s = text3;
@@ -62775,10 +63012,12 @@ async function fetchWebsiteEmails(rawUrl, options) {
   const maxPages = Math.max(1, Math.min(12, options?.maxPages ?? 6));
   const checked = [];
   const found = /* @__PURE__ */ new Set();
+  let brandName = null;
   const main2 = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
   if (main2?.html) {
     checked.push(url);
     for (const e of extractEmailsFromHtml(main2.html)) found.add(e);
+    brandName = extractBrandNameFromHtml(main2.html) ?? brandName;
     const discovered = discoverContactLinks(main2.html, url);
     const candidates = buildContactCandidates(url, discovered);
     for (const candidate of candidates.slice(0, maxPages)) {
@@ -62789,6 +63028,7 @@ async function fetchWebsiteEmails(rawUrl, options) {
       checked.push(candidate);
       if (html3?.html) {
         for (const e of extractEmailsFromHtml(html3.html)) found.add(e);
+        brandName = extractBrandNameFromHtml(html3.html) ?? brandName;
         if (found.size > 0) break;
       }
     }
@@ -62800,11 +63040,62 @@ async function fetchWebsiteEmails(rawUrl, options) {
       checked.push(candidate);
       if (html3?.html) {
         for (const e of extractEmailsFromHtml(html3.html)) found.add(e);
+        brandName = extractBrandNameFromHtml(html3.html) ?? brandName;
         if (found.size > 0) break;
       }
     }
   }
-  return { emails: Array.from(found), checked_urls: checked };
+  if (found.size === 0) {
+    const tryPw = async (candidateUrl) => {
+      if (signal?.aborted) return;
+      const normalized = normalizeForDedupe(candidateUrl);
+      if (checked.some((c) => normalizeForDedupe(c) === normalized)) return;
+      const html3 = await fetchHtmlWithPlaywright(candidateUrl, { timeout, signal });
+      checked.push(candidateUrl);
+      if (!html3) return;
+      for (const e of extractEmailsFromHtml(html3)) found.add(e);
+      brandName = extractBrandNameFromHtml(html3) ?? brandName;
+    };
+    try {
+      await tryPw(url);
+      if (found.size === 0) {
+        const origin = new URL(url).origin;
+        const pwCandidates = [
+          `${origin}/contacts/`,
+          `${origin}/\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B/`,
+          `${origin}/contact/`,
+          `${origin}/company/`,
+          `${origin}/o-kompanii/`,
+          `${origin}/\u043E-\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438/`
+        ];
+        for (const c of pwCandidates.slice(0, 3)) {
+          if (found.size > 0) break;
+          await tryPw(c);
+        }
+      }
+    } catch {
+    }
+  }
+  if (!brandName) {
+    try {
+      const origin = new URL(url).origin;
+      const priorityPaths = ["/company", "/o-kompanii", "/\u043E-\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438", "/about-company", "/about", "/about-us"];
+      const priority = priorityPaths.map((p) => `${origin}${p}`);
+      const aboutCandidates = Array.from(/* @__PURE__ */ new Set([...priority, ...getAboutCandidates(origin)])).slice(0, 8);
+      for (const candidate of aboutCandidates) {
+        if (signal?.aborted) break;
+        const normalized = normalizeForDedupe(candidate);
+        if (checked.some((c) => normalizeForDedupe(c) === normalized)) continue;
+        const html3 = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+        checked.push(candidate);
+        if (!html3?.html) continue;
+        brandName = extractBrandNameFromHtml(html3.html) ?? brandName;
+        if (brandName) break;
+      }
+    } catch {
+    }
+  }
+  return { emails: Array.from(found), checked_urls: checked, brand_name: brandName };
 }
 async function fetchAndExtract(rawUrl, options) {
   const url = normalizeUrl(rawUrl);
@@ -62899,6 +63190,316 @@ ${mainText}`;
   }
   return combined;
 }
+
+// src/lib/aiPrompts.ts
+var SEARCH_PARSER_SYSTEM_PROMPT = `\u0422\u044B \u2014 B2B-\u043C\u0430\u0440\u043A\u0435\u0442\u043E\u043B\u043E\u0433 \u0438 OSINT-\u0430\u043D\u0430\u043B\u0438\u0442\u0438\u043A.
+\u0422\u0432\u043E\u044F \u0437\u0430\u0434\u0430\u0447\u0430: \u043F\u043E \u0431\u0440\u0438\u0444\u0443 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0438\u0442\u044C \u0415\u0401 \u0426\u0415\u041B\u0415\u0412\u0423\u042E \u0410\u0423\u0414\u0418\u0422\u041E\u0420\u0418\u042E (\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439/\u043A\u043B\u0438\u0435\u043D\u0442\u043E\u0432) \u0438 \u0441\u043E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u043D\u0430\u0445\u043E\u0434\u0438\u0442\u044C \u043F\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u0438\u0442\u0435\u043B\u0435\u0439 \u044D\u0442\u043E\u0439 \u0426\u0410 (\u043F\u043E\u0442\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0445 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u0432 \u0437\u0430\u043A\u0430\u0437\u0447\u0438\u043A\u0430), \u0430 \u041D\u0415 \u043A\u043E\u043D\u043A\u0443\u0440\u0435\u043D\u0442\u043E\u0432 \u0438 \u043D\u0435 \xAB\u043A\u043B\u043E\u043D\u043E\u0432\xBB.
+
+\u041A\u0430\u043A \u0434\u0443\u043C\u0430\u0442\u044C:
+- \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u043E\u0439\u043C\u0438, \u0447\u0442\u043E \u043F\u0440\u043E\u0434\u0430\u0451\u0442 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F (\u0443\u0441\u043B\u0443\u0433\u0430/\u043F\u0440\u043E\u0434\u0443\u043A\u0442) \u0438 \u043A\u043E\u043C\u0443 \u044D\u0442\u043E \u043D\u0443\u0436\u043D\u043E.
+- \u0421\u0444\u043E\u0440\u043C\u0443\u043B\u0438\u0440\u0443\u0439 2\u20134 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u0430 \u0426\u0410 (\u0442\u0438\u043F\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439/\u043E\u0442\u0440\u0430\u0441\u043B\u0438) \u0438 2\u20134 \u0440\u043E\u043B\u0438 \u041B\u041F\u0420 (CEO/\u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u0438\u043A/\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440/\u0437\u0430\u043A\u0443\u043F\u043A\u0438/\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u0438 \u0442.\u043F.).
+- \u0417\u0430\u043F\u0440\u043E\u0441\u044B \u0434\u043E\u043B\u0436\u043D\u044B \u0438\u0441\u043A\u0430\u0442\u044C \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438-\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0438 \u0438 \u0438\u0445 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0435 \u0441\u0430\u0439\u0442\u044B/\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B: \xAB\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442\xBB, \xAB\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B\xBB, \xABemail\xBB, \xAB\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A\xBB, \xAB\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB, \xAB\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB, \xABIT-\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB \u0438 \u0442.\u043F.
+- \u0414\u043E\u043F\u0443\u0441\u043A\u0430\u044E\u0442\u0441\u044F 1\u20132 \u201C\u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A\u043E\u0432\u044B\u0445\u201D \u0437\u0430\u043F\u0440\u043E\u0441\u0430 (\u043A\u0430\u0442\u0430\u043B\u043E\u0433/\u0440\u0435\u0435\u0441\u0442\u0440/\u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u0432\u044B\u0441\u0442\u0430\u0432\u043A\u0438), \u043D\u043E \u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0443\u043F\u043E\u0440 \u2014 \u043D\u0430 \u0437\u0430\u043F\u0440\u043E\u0441\u044B, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u043F\u0440\u0438\u0432\u043E\u0434\u044F\u0442 \u043D\u0430 \u0441\u0430\u0439\u0442\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439.
+- \u0418\u0437\u0431\u0435\u0433\u0430\u0439 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u0432\u0435\u0434\u0443\u0442 \u043D\u0430 \u0432\u0430\u043A\u0430\u043D\u0441\u0438\u0438/\u0434\u0436\u043E\u0431-\u0431\u043E\u0440\u0434\u044B/\u0430\u0433\u0440\u0435\u0433\u0430\u0442\u043E\u0440\u044B \u0442\u0435\u043D\u0434\u0435\u0440\u043E\u0432 (hh, rabota, gorodrabot, zakupki-\u0430\u0433\u0440\u0435\u0433\u0430\u0442\u043E\u0440\u044B), \u0435\u0441\u043B\u0438 \u044D\u0442\u043E \u043D\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E.
+
+\u041F\u0440\u0430\u0432\u0438\u043B\u0430:
+1) \u041E\u0442\u0432\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0444\u043E\u0440\u043C\u0430\u0442\u0435 JSON: { "queries": ["q1", "q2", ...] }. \u0411\u0435\u0437 Markdown \u0438 \u043F\u043E\u044F\u0441\u043D\u0435\u043D\u0438\u0439.
+2) \u0420\u041E\u0412\u041D\u041E 30 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432, \u043D\u0430 \u0440\u0443\u0441\u0441\u043A\u043E\u043C.
+3) \u041A\u0430\u0436\u0434\u044B\u0439 \u0437\u0430\u043F\u0440\u043E\u0441 \u0434\u043E\u043B\u0436\u0435\u043D \u0441\u043E\u0434\u0435\u0440\u0436\u0430\u0442\u044C \u044F\u0432\u043D\u044B\u0439 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 \u0426\u0410 \u0438\u043B\u0438 \u0440\u043E\u043B\u044C \u041B\u041F\u0420 (\u043D\u0435 \u043F\u0440\u043E\u0441\u0442\u043E \u043E\u0431\u0449\u0438\u0435 \u0441\u043B\u043E\u0432\u0430).
+4) \u041C\u0438\u043D\u0438\u043C\u0443\u043C 10 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \xAB\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442/\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B/email/\u041B\u041F\u0420\xBB, \u0447\u0442\u043E\u0431\u044B \u043D\u0430\u0445\u043E\u0434\u0438\u0442\u044C \u0441\u0430\u0439\u0442\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439-\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439.
+5) \u041D\u0415 \u0418\u0421\u041F\u041E\u041B\u042C\u0417\u0423\u0419 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u043F\u0440\u043E \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0438/\u0440\u0435\u0435\u0441\u0442\u0440\u044B/\u0441\u043F\u0438\u0441\u043A\u0438/\u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u043E\u0432/\u0442\u0435\u043D\u0434\u0435\u0440\u044B/\u0432\u044B\u0441\u0442\u0430\u0432\u043A\u0438 \u2014 \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u0440\u044F\u043C\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u043A \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F\u043C.
+6) \u041C\u043E\u0436\u043D\u043E \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0442\u043E\u0440\u044B (site:, intitle:, inurl:, filetype:pdf/xls) \u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0441\u043B\u0438 \u043E\u043D\u0438 \u0440\u0435\u0430\u043B\u044C\u043D\u043E \u043F\u043E\u043C\u043E\u0433\u0430\u044E\u0442.
+`;
+
+// src/lib/parsers/searchQueryBuilder.ts
+var TARGET_QUERY_COUNT = 30;
+var CATEGORY_PATTERNS = {
+  site: /(сайт|website|официал|контакт)/i,
+  role: /(директор|ceo|собственник|закупк|коммерческ|операцион|маркетинг|продаж)/i
+};
+var REQUIRED_TEMPLATES = {
+  site: '{topic} \u043F\u043E\u0442\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u044B "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  role: '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0437\u0430\u043A\u0443\u043F\u043A\u0430\u043C" \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u0441\u043F\u0438\u0441\u043E\u043A'
+};
+var FALLBACK_TEMPLATES = [
+  '{topic} "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" email',
+  '{topic} "\u0441\u0430\u0439\u0442 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" email',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" email',
+  '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0440\u0430\u0437\u0432\u0438\u0442\u0438\u044E" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0437\u0430\u043A\u0443\u043F\u043A\u0430\u043C" email',
+  '{topic} "\u0440\u0443\u043A\u043E\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u044C \u043E\u0442\u0434\u0435\u043B\u0430 \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0441\u043D\u0430\u0431\u0436\u0435\u043D\u0438\u044F" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0441\u043B\u0443\u0436\u0431\u0430 \u0441\u043D\u0430\u0431\u0436\u0435\u043D\u0438\u044F" email',
+  '{topic} "\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0444\u0438\u043D\u0430\u043D\u0441\u043E\u0432\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "it-\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0433\u0435\u043D\u0435\u0440\u0430\u043B\u044C\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B" email',
+  "{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+  "{topic} \u043F\u0440\u0435\u0434\u043F\u0440\u0438\u044F\u0442\u0438\u044F \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043F\u0440\u043E\u0438\u0437\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u0434\u0438\u0441\u0442\u0440\u0438\u0431\u044C\u044E\u0442\u043E\u0440\u044B \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u0438\u043C\u043F\u043E\u0440\u0442\u0435\u0440\u044B \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043E\u043F\u0442\u043E\u0432\u044B\u0435 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043E\u0442\u0440\u0430\u0441\u043B\u0435\u0432\u044B\u0435 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u043F\u0440\u043E\u0434\u0430\u0436" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u043F\u0440\u043E\u0434\u0430\u0436" email',
+  '{topic} "\u043F\u043E\u0447\u0442\u0430" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B" email'
+];
+var BANNED_QUERY_PATTERN = /(каталог|список|реестр|участник|участники|тендер|выставк|конференц)/i;
+function normalizeWhitespace2(value) {
+  return value.replace(/\s+/g, " ").trim();
+}
+function cleanQuery(value) {
+  const trimmed = normalizeWhitespace2(value);
+  const noBullets = trimmed.replace(/^[\s\-*•\d.)]+\s*/, "");
+  const noQuotes = noBullets.replace(/^["'`]+|["'`]+$/g, "");
+  return normalizeWhitespace2(noQuotes);
+}
+function dedupeQueries(queries) {
+  const seen = /* @__PURE__ */ new Set();
+  const unique = [];
+  for (const query of queries) {
+    const key = query.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(query);
+  }
+  return unique;
+}
+function extractJsonCandidate(content) {
+  const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenceMatch?.[1] ?? content;
+  const objectMatch = candidate.match(/\{[\s\S]*\}/);
+  return objectMatch?.[0] ?? null;
+}
+function parseJsonQueries(content) {
+  const candidate = extractJsonCandidate(content);
+  if (!candidate) return null;
+  try {
+    const parsed = JSON.parse(candidate);
+    if (!parsed?.queries || !Array.isArray(parsed.queries)) return null;
+    return parsed.queries.filter((q) => typeof q === "string");
+  } catch {
+    return null;
+  }
+}
+function parseLineQueries(content) {
+  return content.split(/\r?\n/).map((line) => cleanQuery(line)).filter((line) => line.length > 2);
+}
+function applyTemplate(template, topic) {
+  return template.replace("{topic}", topic);
+}
+function hasCategory(query, category) {
+  return CATEGORY_PATTERNS[category].test(query);
+}
+function isBannedQuery(query) {
+  return BANNED_QUERY_PATTERN.test(query);
+}
+function deriveTopic(brief) {
+  const cleaned = normalizeWhitespace2(brief).replace(/https?:\/\/\S+/gi, "").replace(/\S+@\S+\.\S+/g, "").replace(/[“”«»"]/g, "").trim();
+  if (!cleaned) return "\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F";
+  const STOPWORDS = new Set(
+    [
+      // RU common filler/instructions
+      "\u043F\u043E\u0436\u0430\u043B\u0443\u0439\u0441\u0442\u0430",
+      "\u0437\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435",
+      "\u0437\u0430\u043F\u043E\u043B\u043D\u0438",
+      "\u0431\u0440\u0438\u0444",
+      "\u0430\u043D\u043A\u0435\u0442\u0443",
+      "\u043E\u043F\u0440\u043E\u0441",
+      "\u043A\u0430\u043A",
+      "\u043C\u043E\u0436\u043D\u043E",
+      "\u043F\u043E\u0434\u0440\u043E\u0431\u043D\u0435\u0435",
+      "\u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E",
+      "\u0447\u0435\u043C",
+      "\u0442\u0435\u043C",
+      "\u0447\u0442\u043E\u0431\u044B",
+      "\u043D\u0443\u0436\u043D\u043E",
+      "\u043D\u0430\u0434\u043E",
+      "\u0443\u043A\u0430\u0436\u0438\u0442\u0435",
+      "\u0443\u043A\u0430\u0436\u0438",
+      "\u043E\u043F\u0438\u0448\u0438\u0442\u0435",
+      "\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435",
+      "\u043F\u0440\u0438\u043C\u0435\u0440",
+      "\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440",
+      "\u0434\u0430\u043B\u0435\u0435",
+      "\u043D\u0438\u0436\u0435",
+      "\u0432\u044B\u0448\u0435",
+      "\u0441\u0441\u044B\u043B\u043A\u0430",
+      "\u0441\u0441\u044B\u043B\u043A\u0443",
+      // generic parser words
+      "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+      "\u043A\u043E\u043D\u0442\u0430\u043A\u0442",
+      "email",
+      "\u043F\u043E\u0447\u0442\u0430",
+      "\u0442\u0435\u043B\u0435\u0444\u043E\u043D",
+      // EN common filler
+      "please",
+      "fill",
+      "brief",
+      "more",
+      "details"
+    ].map((s) => s.toLowerCase())
+  );
+  const firstChunk = cleaned.split(/[\n\r]/)[0]?.trim() ?? cleaned;
+  const rawWords = firstChunk.split(/\s+/g).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").trim()).filter(Boolean);
+  const meaningful = rawWords.filter((w) => {
+    const lower = w.toLowerCase();
+    if (STOPWORDS.has(lower)) return false;
+    if (/^\d{2,4}$/.test(lower)) return false;
+    if (lower.length < 3) return false;
+    if (!/[\p{L}]/u.test(w)) return false;
+    return true;
+  });
+  const words = (meaningful.length ? meaningful : rawWords).slice(0, 6);
+  return words.join(" ") || "\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F";
+}
+function parseSearchQueries(content) {
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  const parsed = parseJsonQueries(trimmed);
+  if (parsed) return parsed.map(cleanQuery).filter((q) => q.length > 2);
+  return parseLineQueries(trimmed);
+}
+function buildSearchQueries(content, brief) {
+  const topic = deriveTopic(brief);
+  const parsedRaw = parseSearchQueries(content).map(cleanQuery).filter(Boolean);
+  const isRussianBrief = /[А-Яа-яЁё]/.test(brief);
+  const parsed = dedupeQueries(
+    isRussianBrief ? parsedRaw.filter((query) => /[А-Яа-яЁё]/.test(query)) : parsedRaw
+  ).filter((q) => !isBannedQuery(q));
+  const required = [];
+  if (!parsed.some((q) => hasCategory(q, "site"))) {
+    required.push(applyTemplate(REQUIRED_TEMPLATES.site, topic));
+  }
+  if (!parsed.some((q) => hasCategory(q, "role"))) {
+    required.push(applyTemplate(REQUIRED_TEMPLATES.role, topic));
+  }
+  const filled = dedupeQueries([
+    ...required,
+    ...parsed,
+    ...FALLBACK_TEMPLATES.map((template) => applyTemplate(template, topic))
+  ]).filter((q) => !isBannedQuery(q));
+  return filled.slice(0, TARGET_QUERY_COUNT);
+}
+
+// src/lib/parsers/searchQueryGenerator.ts
+var DEFAULT_TIMEOUT_MS = 2e4;
+async function generateSearchQueries(brief, options = {}) {
+  const trimmedBrief = (brief ?? "").trim();
+  if (!trimmedBrief) {
+    if (options.allowFallback) {
+      return { queries: buildSearchQueries("", ""), usedFallback: true };
+    }
+    throw new Error("Missing brief text");
+  }
+  const allowFallback = options.allowFallback ?? false;
+  const fallback = () => ({
+    queries: buildSearchQueries("", trimmedBrief),
+    usedFallback: true
+  });
+  if (!OPENROUTER_API_KEY) {
+    if (allowFallback) return fallback();
+    throw new Error("AI API key not configured");
+  }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "https://portal.app"
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: "system", content: SEARCH_PARSER_SYSTEM_PROMPT },
+          { role: "user", content: `\u0411\u0440\u0438\u0444 \u043A\u043B\u0438\u0435\u043D\u0442\u0430:
+${trimmedBrief.slice(0, 4e3)}` }
+        ],
+        temperature: 0.6,
+        max_tokens: 400
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw new Error(`AI API error: ${response.status}`);
+    }
+    const data2 = await response.json();
+    const content = data2?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("Empty AI response");
+    }
+    return {
+      queries: buildSearchQueries(content, trimmedBrief),
+      usedFallback: false,
+      rawContent: content
+    };
+  } catch (err) {
+    if (allowFallback) return fallback();
+    throw err;
+  }
+}
+
+// src/lib/config.ts
+var SEARCH_CONFIG = {
+  // Логи и диагностика
+  PROXY_DEBUG: process.env.SEARCH_PROXY_DEBUG === "1",
+  // Настройки Playwright для парсинга поиска
+  PLAYWRIGHT: {
+    // Enabled by default in dev/prod; disabled by default in tests to avoid launching browsers in Jest.
+    ENABLED: process.env.SEARCH_PLAYWRIGHT_ENABLED != null ? process.env.SEARCH_PLAYWRIGHT_ENABLED !== "0" : process.env.NODE_ENV !== "test",
+    // Default to headless: parsing should run in background without visible browser windows.
+    HEADLESS: process.env.SEARCH_PLAYWRIGHT_HEADLESS != null ? process.env.SEARCH_PLAYWRIGHT_HEADLESS !== "0" : true,
+    // Do not keep the browser window open; background-only by default.
+    OBSERVE_MS: process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS != null ? Math.max(0, Math.floor(Number(process.env.SEARCH_PLAYWRIGHT_OBSERVE_MS) || 0)) : 0,
+    TIMEOUT_MS: Number(process.env.SEARCH_PLAYWRIGHT_TIMEOUT_MS) || 25e3,
+    REUSE_BROWSER: process.env.SEARCH_PLAYWRIGHT_REUSE_BROWSER !== "0"
+  },
+  // Настройки обогащения данных (Email)
+  ENRICH: {
+    EMAIL_ENABLED: process.env.SEARCH_ENRICH_EMAIL_ENABLED !== "0",
+    // Default higher: many sites expose emails only on /contacts, so enrichment needs a decent budget.
+    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 200,
+    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 10,
+    CONCURRENCY: Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY) || 2
+  },
+  // Настройки расширения источников
+  SOURCE_EXPAND: {
+    ENABLED: process.env.SEARCH_SOURCE_EXPAND_ENABLED !== "0",
+    MAX_SOURCES_PER_QUERY: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY) || 2,
+    MAX_SOURCES_PER_JOB: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB) || 10,
+    MAX_SITES_PER_SOURCE: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE) || 25,
+    CONCURRENCY: Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY) || 2
+  },
+  // Стабильность важнее скорости — bursty traffic быстро ловит блоки.
+  QUERY_CONCURRENCY: Math.max(1, Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY) || 1))
+};
+var HH_CONFIG = {
+  // Настройки парсера HeadHunter
+  REQUEST_INTERVAL_MS: Number(process.env.HH_REQUEST_INTERVAL_MS) || 1200,
+  MAX_RETRIES: Number(process.env.HH_MAX_RETRIES) || 7,
+  PROXY_URL: process.env.HH_PROXY_URL || ""
+};
+var YANDEX_MAPS_CONFIG = {
+  // URL сервиса парсера Яндекс.Карт
+  // По умолчанию для продакшена (Docker): http://yandexmaps:8000
+  // Для локальной разработки (Next.js + Python локально): http://127.0.0.1:8010
+  SERVICE_URL: process.env.YANDEXMAPS_SERVICE_URL || (process.env.NODE_ENV === "production" ? "http://yandexmaps:8000" : "http://127.0.0.1:8010"),
+  PROXY_ENCRYPTION_KEY: process.env.YANDEXMAPS_PROXY_ENCRYPTION_KEY || ""
+};
 
 // src/lib/parsers/searchScraper.ts
 var USER_AGENTS = [
@@ -63001,8 +63602,8 @@ async function getSearchProxyDispatcher(proxyUrl) {
     return void 0;
   }
 }
-var playwrightBrowserPromise = null;
-async function fetchHtmlWithPlaywright(url, proxyUrlOverride) {
+var playwrightBrowserPromise2 = null;
+async function fetchHtmlWithPlaywright2(url, proxyUrlOverride) {
   if (!isPlaywrightEnabled()) {
     throw new Error("Playwright is disabled (SEARCH_PLAYWRIGHT_ENABLED!=1)");
   }
@@ -63026,7 +63627,7 @@ async function fetchHtmlWithPlaywright(url, proxyUrlOverride) {
   });
   let browser;
   try {
-    const maybeBrowser = playwrightReuseBrowser() ? await (playwrightBrowserPromise ?? (playwrightBrowserPromise = launch())) : await launch();
+    const maybeBrowser = playwrightReuseBrowser() ? await (playwrightBrowserPromise2 ?? (playwrightBrowserPromise2 = launch())) : await launch();
     browser = maybeBrowser;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -63099,6 +63700,9 @@ function buildGoogleSearchUrl(query, opts) {
   url.searchParams.set("num", String(Math.max(10, Math.min(100, opts?.numResults ?? 10))));
   url.searchParams.set("hl", opts?.hl ?? "ru");
   url.searchParams.set("gl", opts?.gl ?? "ru");
+  if (opts?.start != null) {
+    url.searchParams.set("start", String(Math.max(0, Math.floor(opts.start))));
+  }
   return url.toString();
 }
 function buildDuckDuckGoSearchUrl(query) {
@@ -63590,8 +64194,7 @@ function extractMojeekResultsFallback(html3, query) {
   }
   return results;
 }
-async function googleSearchDetailed(query, numResults = 10) {
-  const requestUrl = buildGoogleSearchUrl(query, { numResults, hl: "ru", gl: "ru" });
+async function googleSearchDetailedByUrl(query, requestUrl) {
   await sleep3(1e3 + Math.random() * 2e3);
   const headers = {
     "User-Agent": getRandomUserAgent(),
@@ -63604,7 +64207,7 @@ async function googleSearchDetailed(query, numResults = 10) {
     if (isPlaywrightEnabled()) {
       try {
         const proxyUrl2 = pickSearchProxyUrl(0);
-        const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl2);
+        const pw = await fetchHtmlWithPlaywright2(requestUrl, proxyUrl2);
         const blockedByUrl2 = detectGoogleBlockReasonByUrl(pw.finalUrl);
         const blockReason2 = blockedByUrl2 ?? detectGoogleBlockReason(pw.html);
         if (blockReason2) throw new GoogleSearchError("blocked", blockReason2);
@@ -63652,7 +64255,7 @@ async function googleSearchDetailed(query, numResults = 10) {
     if (blockReason) {
       if (isPlaywrightEnabled()) {
         try {
-          const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+          const pw = await fetchHtmlWithPlaywright2(requestUrl, proxyUrl);
           const pwBlockReason = detectGoogleBlockReason(pw.html);
           if (pwBlockReason) throw new GoogleSearchError("blocked", pwBlockReason);
           const title2 = extractTitle(pw.html);
@@ -63702,6 +64305,40 @@ async function googleSearchDetailed(query, numResults = 10) {
     throw error;
   }
 }
+async function googleSearchDetailed(query, numResults = 10) {
+  const target = Math.max(10, Math.min(100, Math.floor(numResults || 10)));
+  const pageSize = 10;
+  const pages = Math.max(1, Math.ceil(target / pageSize));
+  const combined = [];
+  const seen = /* @__PURE__ */ new Set();
+  let lastDebug = null;
+  for (let page = 0; page < pages; page += 1) {
+    const start = page * pageSize;
+    const requestUrl = buildGoogleSearchUrl(query, { numResults: pageSize, hl: "ru", gl: "ru", start });
+    try {
+      const out = await googleSearchDetailedByUrl(query, requestUrl);
+      lastDebug = out.debug;
+      for (const r of out.results) {
+        const key = r.link.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        combined.push({ ...r, position: combined.length + 1 });
+        if (combined.length >= target) break;
+      }
+      if (combined.length >= target) break;
+      if (out.results.length === 0) break;
+    } catch (e) {
+      if (combined.length > 0 && isGoogleBlockedError(e)) {
+        break;
+      }
+      throw e;
+    }
+  }
+  if (!lastDebug) {
+    throw new GoogleSearchError("request_failed", "Google search failed (no debug)");
+  }
+  return { results: combined, debug: lastDebug };
+}
 async function duckDuckGoSearchDetailed(query) {
   const requestUrl = buildDuckDuckGoSearchUrl(query);
   const headers = {
@@ -63723,7 +64360,7 @@ async function duckDuckGoSearchDetailed(query) {
       }
       try {
         const proxyUrl = pickSearchProxyUrl(attempt);
-        const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+        const pw = await fetchHtmlWithPlaywright2(requestUrl, proxyUrl);
         const html3 = pw.html;
         const title = extractTitle(html3);
         const lower = html3.toLowerCase();
@@ -63801,7 +64438,7 @@ async function duckDuckGoSearchDetailed(query) {
         }
         if (isPlaywrightEnabled()) {
           try {
-            const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+            const pw = await fetchHtmlWithPlaywright2(requestUrl, proxyUrl);
             const results2 = await extractDuckDuckGoResults(pw.html, query);
             return {
               results: results2,
@@ -63855,7 +64492,7 @@ async function duckDuckGoSearchDetailed(query) {
       if (isPlaywrightEnabled() && error instanceof DuckDuckGoSearchError && error.code === "blocked") {
         try {
           const proxyUrl = pickSearchProxyUrl(attempt + 1e3);
-          const pw = await fetchHtmlWithPlaywright(requestUrl, proxyUrl);
+          const pw = await fetchHtmlWithPlaywright2(requestUrl, proxyUrl);
           const results = await extractDuckDuckGoResults(pw.html, query);
           return {
             results,
@@ -64062,9 +64699,9 @@ async function mojeekSearchDetailed(query, opts) {
 // src/lib/parsers/sourceCompanyExtractor.ts
 init_esm11();
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-var DEFAULT_TIMEOUT_MS = Number(process.env.SEARCH_SOURCE_EXPAND_TIMEOUT_MS ?? "10000") || 1e4;
-var DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? "6") || 6;
-var DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? "25") || 25;
+var DEFAULT_TIMEOUT_MS2 = Number(process.env.SEARCH_SOURCE_EXPAND_TIMEOUT_MS ?? "10000") || 1e4;
+var DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? "20") || 20;
+var DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? "80") || 80;
 var SKIP_HOSTS = [
   // social / messengers
   "t.me",
@@ -64208,9 +64845,9 @@ function extractSitesFromHtml(html3, baseUrl, sourceUrl) {
   return { external, internal };
 }
 async function extractCompanySitesFromSource(sourcePageUrl, opts) {
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxInternalPages = Math.max(0, Math.min(20, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
-  const maxSites = Math.max(1, Math.min(120, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
+  const maxInternalPages = Math.max(0, Math.min(40, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
+  const maxSites = Math.max(1, Math.min(400, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
   const fetched = [];
   const uniqueBySite = /* @__PURE__ */ new Map();
   const main2 = await fetchHtml2(sourcePageUrl, timeoutMs);
@@ -64243,16 +64880,21 @@ async function extractCompanySitesFromSource(sourcePageUrl, opts) {
 
 // src/lib/parsers/searchParserWorker.ts
 var sleep4 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var ENRICH_EMAIL_ENABLED = process.env.SEARCH_ENRICH_EMAIL_ENABLED !== "0";
-var ENRICH_EMAIL_MAX_SITES_PER_JOB = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB ?? "40") || 40;
-var ENRICH_EMAIL_MAX_PAGES_PER_SITE = Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE ?? "8") || 8;
-var ENRICH_EMAIL_CONCURRENCY = Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY ?? "2") || 2;
-var SOURCE_EXPAND_ENABLED = process.env.SEARCH_SOURCE_EXPAND_ENABLED !== "0";
-var SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY ?? "2") || 2;
-var SOURCE_EXPAND_MAX_SOURCES_PER_JOB = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB ?? "10") || 10;
-var SOURCE_EXPAND_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? "25") || 25;
-var SOURCE_EXPAND_CONCURRENCY = Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY ?? "2") || 2;
-var QUERY_CONCURRENCY = SEARCH_CONFIG.QUERY_CONCURRENCY;
+var ENRICH_EMAIL_ENABLED = true;
+var ENRICH_EMAIL_MAX_SITES_PER_JOB = 500;
+var ENRICH_EMAIL_MAX_PAGES_PER_SITE = 3;
+var ENRICH_EMAIL_CONCURRENCY = 2;
+var SOURCE_EXPAND_ENABLED = true;
+var SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 12;
+var SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 400;
+var SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 400;
+var SOURCE_EXPAND_CONCURRENCY = 3;
+var QUERY_CONCURRENCY = 1;
+var GOOGLE_RESULTS_PER_QUERY = 100;
+var BING_MAX_PAGES = 8;
+var BING_MAX_RESULTS = 200;
+var MULTI_PROVIDER_ENABLED = true;
+var MAX_UNIQUE_SITES_PER_QUERY = 500;
 function randInt(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
@@ -64268,6 +64910,43 @@ async function mapWithConcurrency2(items, limit, fn) {
   });
   await Promise.all(workers);
   return results;
+}
+async function insertInBatches(admin, rows, opts) {
+  const batchSize = Math.max(1, Math.min(250, Math.floor(opts?.batchSize ?? 60)));
+  let inserted = 0;
+  let hadFailures = false;
+  let firstErrorMessage = null;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const { error } = await admin.from("search_results").insert(batch);
+    if (error) {
+      hadFailures = true;
+      firstErrorMessage ??= error.message;
+      console.error("search_results insert batch failed:", error.message);
+      continue;
+    }
+    inserted += batch.length;
+  }
+  return { inserted, hadFailures, firstErrorMessage };
+}
+async function safeUpdateSearchJob(admin, jobId, patch) {
+  const attempt = await admin.from("search_parser_jobs").update(patch).eq("id", jobId);
+  if (!attempt.error) return;
+  const err = attempt.error;
+  const msg = String(err?.message ?? "");
+  const isMissingColumn = err?.code === "PGRST204" && (msg.includes("progress_stage") || msg.includes("progress_percent") || msg.includes("schema cache"));
+  if (!isMissingColumn) {
+    console.warn("search_parser_jobs update failed:", err?.message ?? attempt.error);
+    return;
+  }
+  const { progress_stage, progress_percent, ...rest } = patch;
+  void progress_stage;
+  void progress_percent;
+  if (Object.keys(rest).length === 0) return;
+  const retry = await admin.from("search_parser_jobs").update(rest).eq("id", jobId);
+  if (retry.error) {
+    console.warn("search_parser_jobs update retry failed:", retry.error?.message ?? retry.error);
+  }
 }
 async function throttleBetweenQueries(provider) {
   const base = provider === "duckduckgo" ? randInt(1800, 4200) : provider === "bing" ? randInt(1200, 2800) : provider === "mojeek" ? randInt(900, 2200) : randInt(900, 2200);
@@ -64310,6 +64989,43 @@ function normalizeSite(link) {
     return null;
   }
 }
+function deriveCompanyNameFromSite(site) {
+  try {
+    const host = site.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0].replace(/^www\./i, "");
+    if (!host) return null;
+    const base = host.split(".")[0] || host;
+    const pretty = base.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    if (!pretty) return null;
+    return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+  } catch {
+    return null;
+  }
+}
+function scoreCompanyName(value) {
+  const s = (value ?? "").trim();
+  if (!s) return -100;
+  let score = 0;
+  if (s.length >= 2 && s.length <= 80) score += 5;
+  else if (s.length <= 140) score += 2;
+  else score -= 2;
+  if (/\b(ООО|ЗАО|ОАО|ПАО|АО|ИП)\b/i.test(s)) score += 4;
+  if (/^\d/.test(s)) score -= 6;
+  if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(s)) score -= 6;
+  if (/https?:\/\//i.test(s)) score -= 4;
+  if (/\w+\.\w+/.test(s)) score -= 2;
+  if (/[|]/.test(s)) score -= 1;
+  return score;
+}
+function pickBetterCompanyName(prev2, next2) {
+  const a = (prev2 ?? "").trim() || null;
+  const b = (next2 ?? "").trim() || null;
+  if (!a) return b;
+  if (!b) return a;
+  const sa = scoreCompanyName(a);
+  const sb = scoreCompanyName(b);
+  if (sb !== sa) return sb > sa ? b : a;
+  return b.length < a.length ? b : a;
+}
 function deriveCompanyName(title, site) {
   const raw = (title ?? "").trim();
   const fallback = site.replace(/^https?:\/\//i, "").replace(/\/+$/, "").split("/")[0].replace(/^www\./i, "");
@@ -64330,7 +65046,9 @@ function deriveCompanyName(title, site) {
     }
     return cleaned.trim();
   })();
-  const candidate = (base || fallback).trim();
+  const candidateFromTitle = base.trim();
+  const isSuspiciousTitle = raw.length > 80 || /^\d+\b/.test(raw) || /(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(raw);
+  const candidate = ((candidateFromTitle && !isSuspiciousTitle ? candidateFromTitle : "") || fallback).trim();
   if (candidate.length < 2) return null;
   if (/^\w+\.\w+$/.test(candidate) && candidate.toLowerCase() === fallback.toLowerCase()) {
     const parts = fallback.split(".");
@@ -64342,6 +65060,7 @@ function deriveCompanyName(title, site) {
 function isLeadCandidateSite(site) {
   const host = site.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
   const blocked = [
+    // search engines / redirects
     "duckduckgo.com",
     "google.com",
     "googleusercontent.com",
@@ -64349,7 +65068,32 @@ function isLeadCandidateSite(site) {
     "yandex.ru",
     "yandex.com",
     "ya.ru",
-    "bing.com"
+    "bing.com",
+    // social / messaging / media
+    "t.me",
+    "telegram.me",
+    "vk.com",
+    "ok.ru",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "youtube.com",
+    // encyclopedias / blogs / UGC
+    "wikipedia.org",
+    "habr.com",
+    "vc.ru",
+    "dzen.ru",
+    "zen.yandex.ru",
+    "pikabu.ru",
+    "otvet.mail.ru",
+    "mail.ru",
+    "reddit.com",
+    // news / content aggregators (rarely company sites)
+    "rbc.ru",
+    "cnews.ru",
+    // misc knowledge/content sources
+    "cyberleninka.ru",
+    "tadviser.ru"
   ];
   return !blocked.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -64375,7 +65119,12 @@ function isEnrichableCompanySite(site) {
     "vc.ru",
     "habr.com",
     "tadviser.ru",
-    "cyberleninka.ru"
+    "cyberleninka.ru",
+    "otvet.mail.ru",
+    "mail.ru",
+    "dzen.ru",
+    "zen.yandex.ru",
+    "pikabu.ru"
   ];
   return !blockedForEnrich.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -64411,7 +65160,8 @@ function toLeadRow(r, jobId, provider) {
   const site = normalizeSite(r.link);
   if (!site) return null;
   if (!isLeadCandidateSite(site)) return null;
-  const companyName = deriveCompanyName(r.title, site) ?? site;
+  const derived = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
+  const companyName = /^\d{1,6}$/.test(derived.trim()) ? deriveCompanyNameFromSite(site) ?? site : derived;
   return {
     job_id: jobId,
     query: r.query,
@@ -64444,7 +65194,53 @@ async function runSearchParserJob(jobId) {
     const requestId = crypto.randomUUID();
     const logMeta = { userId: job.user_id, requestId, route: "search_parser_worker" };
     await admin.from("search_parser_jobs").update({ status: "running", started_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", jobId);
-    const queries = job.config?.queries || [];
+    const rawConfig = job.config && typeof job.config === "object" ? job.config : {};
+    const brief = typeof rawConfig.brief === "string" ? rawConfig.brief.trim() : "";
+    let queries = Array.isArray(rawConfig.queries) ? rawConfig.queries.map((q) => String(q).trim()).filter(Boolean) : [];
+    let usedFallbackQueries = false;
+    if (queries.length === 0) {
+      if (!brief) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: "failed",
+          completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+          error_message: "\u0411\u0440\u0438\u0444 \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D",
+          progress_stage: "failed"
+        });
+        return;
+      }
+      await safeUpdateSearchJob(admin, jobId, {
+        progress_stage: "generating_queries",
+        progress_percent: 2,
+        processed_queries: 0,
+        total_queries: 0
+      });
+      const generated = await generateSearchQueries(brief, { allowFallback: true });
+      usedFallbackQueries = generated.usedFallback;
+      queries = generated.queries.map((q) => q.trim()).filter(Boolean);
+      if (queries.length === 0) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: "failed",
+          completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+          error_message: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u0444\u043E\u0440\u043C\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B",
+          progress_stage: "failed"
+        });
+        return;
+      }
+      await safeUpdateSearchJob(admin, jobId, {
+        config: { ...rawConfig, brief, queries },
+        total_queries: queries.length,
+        processed_queries: 0,
+        progress_stage: "searching",
+        progress_percent: 5
+      });
+    } else {
+      await safeUpdateSearchJob(admin, jobId, {
+        total_queries: queries.length,
+        progress_stage: "searching",
+        progress_percent: 0
+      });
+    }
+    const totalQueries = queries.length;
     let totalResults = 0;
     let processedQueries = 0;
     let hadFailures = false;
@@ -64460,10 +65256,18 @@ async function runSearchParserJob(jobId) {
     const scheduleDdg = createRateLimiter();
     const scheduleBing = createRateLimiter();
     const scheduleMojeek = createRateLimiter();
+    if (usedFallbackQueries) {
+      void logWarn(
+        "parser.search.queries.fallback",
+        "Search parser used fallback queries",
+        { jobId, totalQueries, brief: brief.slice(0, 200) },
+        logMeta
+      );
+    }
     void logInfo(
       "parser.search.job.start",
       "Search parser job started",
-      { jobId, totalQueries: queries.length, queries: queries.slice(0, 10) },
+      { jobId, totalQueries, queries: queries.slice(0, 10) },
       logMeta
     );
     const trace = await startTrace({
@@ -64471,7 +65275,7 @@ async function runSearchParserJob(jobId) {
       input: {
         jobId,
         queries,
-        totalQueries: queries.length,
+        totalQueries,
         userId: job.user_id,
         requestId,
         route: "search_parser_worker"
@@ -64498,7 +65302,7 @@ async function runSearchParserJob(jobId) {
       try {
         const runGoogle = async (q) => {
           await scheduleGoogle(() => randInt(1400, 3200));
-          return await googleSearchDetailed(q, 20);
+          return await googleSearchDetailed(q, GOOGLE_RESULTS_PER_QUERY);
         };
         const runDdg = async (q) => {
           const streak = Math.min(ddgBlockedStreak, 4);
@@ -64508,7 +65312,7 @@ async function runSearchParserJob(jobId) {
         };
         const runBing = async (q) => {
           await scheduleBing(() => randInt(2800, 6200));
-          return await bingSearchDetailed(q, { maxPages: 4, pageSize: 10, maxResults: 50 });
+          return await bingSearchDetailed(q, { maxPages: BING_MAX_PAGES, pageSize: 10, maxResults: BING_MAX_RESULTS });
         };
         const runMojeek = async (q) => {
           await scheduleMojeek(() => randInt(1800, 4500));
@@ -64556,11 +65360,54 @@ async function runSearchParserJob(jobId) {
           }
           throw lastErr ?? new Error("All search providers failed");
         };
+        const collectProviders = async (q) => {
+          const order = googleBlockedForJob ? ["duckduckgo", "bing", "mojeek"] : ["google", "duckduckgo", "bing", "mojeek"];
+          const combined = [];
+          const seen = /* @__PURE__ */ new Set();
+          const debug = {};
+          for (const p of order) {
+            try {
+              const out = p === "google" ? await runGoogle(q) : p === "duckduckgo" ? await runDdg(q) : p === "bing" ? await runBing(q) : await runMojeek(q);
+              debug[p] = out.debug;
+              for (const item of out.results) {
+                const site = normalizeSite(item.link);
+                if (!site) continue;
+                if (!isLeadCandidateSite(site)) continue;
+                const key = site.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                combined.push({ ...item, _provider: p });
+                if (seen.size >= MAX_UNIQUE_SITES_PER_QUERY) break;
+              }
+              if (seen.size >= MAX_UNIQUE_SITES_PER_QUERY) break;
+            } catch (e) {
+              debug[p] = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
+              if (isGoogleBlockedError(e)) {
+                googleBlockedForJob = true;
+                lastBlockedHint = e.message;
+                continue;
+              }
+              if (isDuckDuckGoBlockedError(e) || isBingBlockedError(e) || isMojeekBlockedError(e)) {
+                lastBlockedHint = e instanceof Error ? e.message : String(e);
+                continue;
+              }
+              continue;
+            }
+          }
+          return { results: combined, debug };
+        };
         try {
-          const primary = await tryProviders(query);
-          provider = primary.provider;
-          results = primary.out.results;
-          debugPrimary = primary.out.debug;
+          if (MULTI_PROVIDER_ENABLED) {
+            const out = await collectProviders(query);
+            results = out.results;
+            debugPrimary = out.debug;
+            provider = "google";
+          } else {
+            const primary = await tryProviders(query);
+            provider = primary.provider;
+            results = primary.out.results.map((r) => ({ ...r, _provider: primary.provider }));
+            debugPrimary = primary.out.debug;
+          }
         } catch (e) {
           throw e;
         }
@@ -64568,10 +65415,16 @@ async function runSearchParserJob(jobId) {
           try {
             usedFallback = true;
             debugFallback = debugPrimary;
-            const fallback = await tryProviders(query);
-            provider = fallback.provider;
-            results = fallback.out.results;
-            debugPrimary = fallback.out.debug;
+            if (MULTI_PROVIDER_ENABLED) {
+              const out = await collectProviders(query);
+              results = out.results;
+              debugPrimary = out.debug;
+            } else {
+              const fallback = await tryProviders(query);
+              provider = fallback.provider;
+              results = fallback.out.results.map((r) => ({ ...r, _provider: fallback.provider }));
+              debugPrimary = fallback.out.debug;
+            }
           } catch (e) {
             debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
           }
@@ -64581,22 +65434,28 @@ async function runSearchParserJob(jobId) {
           if (simplified && simplified !== query) {
             usedFallback = true;
             try {
-              const fallback = await tryProviders(simplified);
-              provider = fallback.provider;
-              results = fallback.out.results;
-              debugFallback = fallback.out.debug;
-              if (fallback.provider === "google" && fallback.out?.debug && typeof fallback.out.debug === "object") {
-                googleUrlFallback = fallback.out.debug.request_url ?? null;
+              if (MULTI_PROVIDER_ENABLED) {
+                const out = await collectProviders(simplified);
+                results = out.results.map((r) => ({ ...r, query }));
+                debugFallback = out.debug;
+              } else {
+                const fallback = await tryProviders(simplified);
+                provider = fallback.provider;
+                results = fallback.out.results.map((r) => ({ ...r, _provider: fallback.provider }));
+                debugFallback = fallback.out.debug;
+                if (fallback.provider === "google" && fallback.out?.debug && typeof fallback.out.debug === "object") {
+                  googleUrlFallback = fallback.out.debug.request_url ?? null;
+                }
+                if (results.length > 0) {
+                  results = results.map((item) => ({ ...item, query }));
+                }
               }
             } catch (e) {
               debugFallback = { error: e instanceof Error ? { name: e.name, message: e.message } : String(e) };
             }
-            if (results.length > 0) {
-              results = results.map((item) => ({ ...item, query }));
-            }
           }
         }
-        const rows = results.map((r) => toLeadRow(r, jobId, provider)).filter(Boolean).map((row) => row);
+        const rows = results.map((r) => toLeadRow(r, jobId, r._provider)).filter(Boolean).map((row) => row);
         const localSeen = /* @__PURE__ */ new Set();
         const localDeduped = rows.filter((row) => {
           const key = row.site.toLowerCase();
@@ -64628,6 +65487,8 @@ async function runSearchParserJob(jobId) {
             async (source) => {
               try {
                 const out = await extractCompanySitesFromSource(source.link, {
+                  timeoutMs: 15e3,
+                  maxInternalPages: 30,
                   maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE
                 });
                 return { source, sites: out.sites };
@@ -64681,12 +65542,13 @@ async function runSearchParserJob(jobId) {
           }
         }
         const rowsToInsert = [...claimedRows, ...extractedRows];
+        const companyRowsToInsert = rowsToInsert.filter((r) => !isLikelySourceSite(r.site));
         let toEnrich = [];
         if (ENRICH_EMAIL_ENABLED) {
           toEnrich = await withLock(async () => {
             if (enrichedSites >= ENRICH_EMAIL_MAX_SITES_PER_JOB) return [];
             const remaining = Math.max(0, ENRICH_EMAIL_MAX_SITES_PER_JOB - enrichedSites);
-            const candidates = rowsToInsert.filter((r) => !r.email && isEnrichableCompanySite(r.site)).slice(0, remaining);
+            const candidates = companyRowsToInsert.filter((r) => !r.email && isEnrichableCompanySite(r.site)).slice(0, remaining);
             enrichedSites += candidates.length;
             return candidates;
           });
@@ -64694,28 +65556,40 @@ async function runSearchParserJob(jobId) {
         if (toEnrich.length > 0) {
           const enriched = await mapWithConcurrency2(toEnrich, ENRICH_EMAIL_CONCURRENCY, async (lead) => {
             try {
-              const { emails } = await fetchWebsiteEmails(lead.site, { maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE });
+              const { emails, brand_name } = await fetchWebsiteEmails(lead.site, {
+                maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE
+              });
               const cleaned = emails.map((e) => e.trim()).filter(Boolean);
               const unique = Array.from(new Set(cleaned)).slice(0, 3);
-              return { site: lead.site, email: unique.length ? unique.join("; ") : null };
+              return {
+                site: lead.site,
+                email: unique.length ? unique.join("; ") : null,
+                brand_name: brand_name?.trim() ? brand_name.trim().slice(0, 160) : null
+              };
             } catch {
-              return { site: lead.site, email: null };
+              return { site: lead.site, email: null, brand_name: null };
             }
           });
-          const emailBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e.email]));
-          for (const row of rowsToInsert) {
-            const e = emailBySite.get(row.site.toLowerCase());
-            if (e) row.email = e;
+          const enrichedBySite = new Map(enriched.map((e) => [e.site.toLowerCase(), e]));
+          for (const row of companyRowsToInsert) {
+            const e = enrichedBySite.get(row.site.toLowerCase());
+            if (!e) continue;
+            if (e.email) row.email = e.email;
+            if (e.brand_name) row.company_name = pickBetterCompanyName(row.company_name, e.brand_name) ?? row.company_name;
           }
         }
-        if (rowsToInsert.length > 0) {
-          const { error: insertError } = await admin.from("search_results").insert(rowsToInsert);
-          if (insertError) {
+        if (companyRowsToInsert.length > 0) {
+          const inserted = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
+          if (inserted.hadFailures) {
             hadQueryFailures = true;
-            void logError("parser.search.insert.failed", insertError, { jobId, provider, query }, logMeta);
-          } else {
-            insertedCount = rowsToInsert.length;
+            void logError(
+              "parser.search.insert.failed",
+              new Error(inserted.firstErrorMessage ?? "insert failed"),
+              { jobId, provider, query, attempted: companyRowsToInsert.length, inserted: inserted.inserted },
+              logMeta
+            );
           }
+          insertedCount = inserted.inserted;
         }
         await querySpan?.end(
           {
@@ -64799,10 +65673,13 @@ async function runSearchParserJob(jobId) {
           if (insertedCount > 0) totalResults += insertedCount;
           if (hadQueryFailures) hadFailures = true;
         });
-        await admin.from("search_parser_jobs").update({
+        const progressPercent = totalQueries > 0 ? Math.round(processedQueries / totalQueries * 100) : null;
+        await safeUpdateSearchJob(admin, jobId, {
           processed_queries: processedQueries,
-          total_results: totalResults
-        }).eq("id", jobId);
+          total_results: totalResults,
+          progress_percent: progressPercent,
+          progress_stage: "searching"
+        });
       }
     });
     const hint = totalResults <= 0 && lastBlockedHint ? `\u041F\u043E\u0438\u0441\u043A\u043E\u0432\u0438\u043A \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0438\u043B \u0437\u0430\u043F\u0440\u043E\u0441\u044B: ${lastBlockedHint}.` : lastBlockedHint && (ddgBlockedCount > 0 || hadFailures) ? `\u0427\u0430\u0441\u0442\u0438\u0447\u043D\u043E \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D\u043E \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u0438\u043A\u043E\u043C: ${lastBlockedHint}` : null;
@@ -64815,13 +65692,15 @@ async function runSearchParserJob(jobId) {
         logMeta
       );
     }
-    await admin.from("search_parser_jobs").update({
+    await safeUpdateSearchJob(admin, jobId, {
       status: "completed",
       completed_at: (/* @__PURE__ */ new Date()).toISOString(),
       processed_queries: processedQueries,
       total_results: totalResults,
-      error_message: diagnostics.hint
-    }).eq("id", jobId);
+      error_message: diagnostics.hint,
+      progress_stage: "completed",
+      progress_percent: 100
+    });
     await trace?.end(
       { processedQueries, totalResults, hadFailures },
       `\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u043E: ${totalResults} \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432`
@@ -64835,11 +65714,12 @@ async function runSearchParserJob(jobId) {
   } catch (err) {
     console.error("Search parser worker failed:", err);
     if (supabaseAdmin) {
-      await supabaseAdmin.from("search_parser_jobs").update({
+      await safeUpdateSearchJob(supabaseAdmin, jobId, {
         status: "failed",
         error_message: err instanceof Error ? err.message : "Unknown error",
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      }).eq("id", jobId);
+        completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+        progress_stage: "failed"
+      });
     }
     void logError(
       "parser.search.job.failed",
@@ -66105,9 +66985,17 @@ async function startupRecovery() {
   const { data: hhJobs, error: hhErr } = await db.from("parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg, progress_stage: "failed" }).eq("status", "running").select("id");
   if (hhErr) log("warn", "Startup recovery: parser_jobs update failed", hhErr);
   else if (hhJobs?.length) log("info", `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
-  const { data: searchJobs, error: searchErr } = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg }).eq("status", "running").select("id");
-  if (searchErr) log("warn", "Startup recovery: search_parser_jobs update failed", searchErr);
-  else if (searchJobs?.length) log("info", `Startup recovery: marked ${searchJobs.length} search_parser_jobs as failed`);
+  const searchUpdate = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg, progress_stage: "failed" }).eq("status", "running").select("id");
+  const searchErr = searchUpdate.error;
+  if (searchErr?.code === "PGRST204" && (searchErr.message ?? "").includes("progress_stage")) {
+    const fallbackUpdate = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg }).eq("status", "running").select("id");
+    if (fallbackUpdate.error) log("warn", "Startup recovery: search_parser_jobs update failed", fallbackUpdate.error);
+    else if (fallbackUpdate.data?.length) log("info", `Startup recovery: marked ${fallbackUpdate.data.length} search_parser_jobs as failed`);
+  } else if (searchUpdate.error) {
+    log("warn", "Startup recovery: search_parser_jobs update failed", searchUpdate.error);
+  } else if (searchUpdate.data?.length) {
+    log("info", `Startup recovery: marked ${searchUpdate.data.length} search_parser_jobs as failed`);
+  }
   const { data: enrichJobs, error: enrichErr } = await db.from("website_enrichment_jobs").update({ status: "pending" }).eq("status", "running").select("id");
   if (enrichErr) log("warn", "Startup recovery: website_enrichment_jobs update failed", enrichErr);
   else if (enrichJobs?.length) log("info", `Startup recovery: reset ${enrichJobs.length} website_enrichment_jobs to pending`);

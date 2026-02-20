@@ -92,8 +92,19 @@ while true; do
   elapsed=$((elapsed + POLL_INTERVAL))
 done
 
-# Останавливаем воркер (SIGTERM → процесс должен уже выйти сам, docker stop просто убирает контейнер)
-echo "[drain] Stopping portal-worker container..."
-docker stop portal-worker 2>/dev/null || true
+# Останавливаем воркеры (SIGTERM → процесс должен уже выйти сам, docker stop просто убирает контейнер)
+# Поддерживаем старое имя `portal-worker` и новые раздельные воркеры.
+containers=(
+  "portal-worker"
+  "portal-worker-hh"
+  "portal-worker-search"
+  "portal-worker-enrich"
+  "portal-worker-yandexmaps"
+)
 
-echo "[drain] Worker stopped"
+echo "[drain] Stopping worker containers..."
+for c in "${containers[@]}"; do
+  docker stop "$c" 2>/dev/null || true
+done
+
+echo "[drain] Workers stopped"

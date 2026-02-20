@@ -20,7 +20,7 @@ type Lead = {
   created_at: string;
 };
 
-const exportHeader = ['Company', 'Site', 'Email', 'Description', 'Queries'];
+const exportHeader = ['Company', 'Site', 'Email', 'Description'];
 
 function tsvCell(value: unknown) {
   return String(value ?? '')
@@ -38,36 +38,7 @@ function safeHostname(url: string | null) {
   }
 }
 
-const SOURCE_HOST_SUBSTRINGS = [
-  // job boards
-  'hh.ru',
-  'rabota.ru',
-  'gorodrabot.ru',
-  'dreamjob.ru',
-  // tenders / procurement
-  'zakupki.gov.ru',
-  'zakupki.kontur.ru',
-  'rostender.info',
-  'synapsenet.ru',
-  'bicotender.ru',
-  // events / directories
-  '10times.com',
-  'expocentr.ru',
-  // obvious sources (registries/catalogs)
-  'gisp.gov.ru',
-  'energybase.ru',
-];
-
-function isLikelySourceSite(siteUrl: string | null) {
-  const host = safeHostname(siteUrl);
-  if (!host) return false;
-  if (SOURCE_HOST_SUBSTRINGS.some((s) => host === s || host.endsWith(`.${s}`))) return true;
-  // Heuristics: directories/registries/aggregators are rarely "buyers"
-  if (/(zakup|tender|torgi|vacanc|rabota|career|job|work|expo|catalog|directory|reest|reestr|spravochnik)/i.test(host)) {
-    return true;
-  }
-  return false;
-}
+// Note: the search parser stores/displays only company leads (source pages are used internally but not shown as results).
 
 function escapeHtml(value: unknown) {
   const text = String(value ?? '')
@@ -88,7 +59,6 @@ function exportRow(r: Lead) {
     r.site ?? '',
     r.email ?? '',
     r.description ?? '',
-    (r.queries ?? []).join(' · '),
   ];
 }
 
@@ -208,6 +178,71 @@ function formatDate(dateStr: string) {
   }
 }
 
+const SEARCH_STAGE_LABELS: Record<string, string> = {
+  pending: 'Ожидание',
+  generating_queries: 'Генерация запросов',
+  searching: 'Ищем компании',
+  enriching_emails: 'Ищем контакты',
+  expanding_sources: 'Собираем сайты из источников',
+  saving: 'Сохраняем в базу',
+  completed: 'Завершено',
+  failed: 'Ошибка',
+  cancelled: 'Остановлено',
+};
+
+function resolveSearchStageLabel(job: SearchParserJob, stoppedByUser: boolean) {
+  if (stoppedByUser) return SEARCH_STAGE_LABELS.cancelled;
+  if (job.progress_stage && SEARCH_STAGE_LABELS[job.progress_stage]) {
+    return SEARCH_STAGE_LABELS[job.progress_stage];
+  }
+  if (job.status === 'completed') return SEARCH_STAGE_LABELS.completed;
+  if (job.status === 'failed') return stoppedByUser ? SEARCH_STAGE_LABELS.cancelled : SEARCH_STAGE_LABELS.failed;
+  if (job.status === 'pending') return SEARCH_STAGE_LABELS.pending;
+  return 'В процессе';
+}
+
+function getSearchProgress(job: SearchParserJob) {
+  const stoppedByUser = isStoppedByUser(job.status, job.error_message);
+  const stageLabel = resolveSearchStageLabel(job, stoppedByUser);
+  const progressFromJob =
+    typeof job.progress_percent === 'number'
+      ? Math.max(0, Math.min(100, Math.round(job.progress_percent)))
+      : null;
+  const totalQueries = Number.isFinite(job.total_queries) ? job.total_queries : 0;
+  const processedQueries = Number.isFinite(job.processed_queries) ? job.processed_queries : 0;
+  const fallbackProgress =
+    job.status === 'completed'
+      ? 100
+      : totalQueries > 0
+        ? Math.min(100, Math.round((processedQueries / totalQueries) * 100))
+        : null;
+  // If the job is still pending and we don't have progress yet,
+  // render 0% instead of an indeterminate bar.
+  const progressValue =
+    progressFromJob ??
+    fallbackProgress ??
+    (job.status === 'pending' || (job.status === 'running' && totalQueries === 0) ? 0 : null);
+
+  return {
+    stoppedByUser,
+    stageLabel,
+    progressValue,
+    hasProgress: progressValue != null,
+  };
+}
+
+function getUserSearchQuery(job: SearchParserJob) {
+  const brief = typeof job.config?.brief === 'string' ? job.config.brief.trim() : '';
+  return brief || '';
+}
+
+function truncateUiText(value: string, maxLen: number) {
+  const s = (value ?? '').trim();
+  if (!s) return '';
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+}
+
 function useTimedFlag(durationMs: number) {
   const [flag, setFlag] = useState(false);
   const timerRef = useRef<number | null>(null);
@@ -255,6 +290,7 @@ export function SearchParserView() {
   const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
+  const latestCreatedAtRef = useRef<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
   const leads = useMemo(() => {
@@ -264,6 +300,33 @@ export function SearchParserView() {
       if (!aa) return bb || null;
       if (!bb) return aa || null;
       return bb.length > aa.length ? bb : aa;
+    };
+
+    const scoreCompanyName = (value: string | null) => {
+      const s = (value ?? '').trim();
+      if (!s) return -100;
+      let score = 0;
+      if (s.length >= 2 && s.length <= 80) score += 5;
+      else if (s.length <= 140) score += 2;
+      else score -= 2;
+      if (/\b(ООО|ЗАО|ОАО|ПАО|АО|ИП)\b/i.test(s)) score += 4;
+      if (/^\d/.test(s)) score -= 6;
+      if (/(рейтинг|топ|лучши|обзор|каталог|список|реестр|ваканс|новост|блог|статья)/i.test(s)) score -= 6;
+      if (/https?:\/\//i.test(s)) score -= 4;
+      if (/\w+\.\w+/.test(s)) score -= 2;
+      if (/[|]/.test(s)) score -= 1;
+      return score;
+    };
+
+    const pickBetterCompanyName = (a: string | null, b: string | null) => {
+      const aa = (a ?? '').trim();
+      const bb = (b ?? '').trim();
+      if (!aa) return bb || null;
+      if (!bb) return aa || null;
+      const sa = scoreCompanyName(aa);
+      const sb = scoreCompanyName(bb);
+      if (sb !== sa) return sb > sa ? bb : aa;
+      return bb.length < aa.length ? bb : aa;
     };
 
     const mergeEmails = (prev: string | null, next: string | null) => {
@@ -301,7 +364,7 @@ export function SearchParserView() {
         continue;
       }
 
-      existing.company_name = pickBetterText(existing.company_name, r.company_name ?? null);
+      existing.company_name = pickBetterCompanyName(existing.company_name, r.company_name ?? null);
       existing.site = existing.site ?? (r.site ?? null);
       existing.email = mergeEmails(existing.email, r.email ?? null);
       existing.description = pickBetterText(existing.description, (r.description ?? r.snippet ?? null) as string | null);
@@ -316,17 +379,7 @@ export function SearchParserView() {
     });
   }, [results]);
 
-  const categorizedLeads = useMemo(() => {
-    const companies: Lead[] = [];
-    const sources: Lead[] = [];
-    for (const lead of leads) {
-      if (isLikelySourceSite(lead.site)) sources.push(lead);
-      else companies.push(lead);
-    }
-    return { companies, sources };
-  }, [leads]);
-  const companyLeads = categorizedLeads.companies;
-  const sourceLeads = categorizedLeads.sources;
+  const companyLeads = leads;
 
   const getAccessToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -354,6 +407,10 @@ export function SearchParserView() {
     return (await res.json()) as T;
   }, [getAccessToken]);
 
+  useEffect(() => {
+    latestCreatedAtRef.current = results.length ? results[results.length - 1]?.created_at ?? null : null;
+  }, [results]);
+
   const refreshJobs = useCallback(async () => {
     try {
       const { data } = await supabase.from('search_parser_jobs').select('*').order('created_at', { ascending: false });
@@ -363,15 +420,35 @@ export function SearchParserView() {
     }
   }, []);
 
-  const loadResults = useCallback(async (jobId: string) => {
-    setLoadingResults(true);
-    try {
-      const data = await apiFetch<{ results: SearchResult[] }>(`/api/parsers/search/${jobId}/results`);
-      if (data.results) setResults(data.results);
-    } finally {
-      setLoadingResults(false);
-    }
-  }, [apiFetch]);
+  const loadResults = useCallback(
+    async (jobId: string, mode: 'initial' | 'incremental' = 'initial') => {
+      const isInitial = mode === 'initial';
+      if (isInitial) setLoadingResults(true);
+      try {
+        const after = !isInitial ? latestCreatedAtRef.current : null;
+        const url = after
+          ? `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}`
+          : `/api/parsers/search/${jobId}/results`;
+        const data = await apiFetch<{ results: SearchResult[] }>(url);
+        const incoming = data.results ?? [];
+        if (incoming.length === 0) return;
+        setResults((prev) => {
+          if (isInitial || prev.length === 0) return incoming;
+          const seen = new Set(prev.map((r) => r.id));
+          const merged = [...prev];
+          for (const r of incoming) {
+            if (seen.has(r.id)) continue;
+            seen.add(r.id);
+            merged.push(r);
+          }
+          return merged;
+        });
+      } finally {
+        if (isInitial) setLoadingResults(false);
+      }
+    },
+    [apiFetch],
+  );
 
   useEffect(() => {
     refreshJobs();
@@ -379,9 +456,12 @@ export function SearchParserView() {
 
   useEffect(() => {
     if (activeJobId) {
-      loadResults(activeJobId);
+      setResults([]);
+      latestCreatedAtRef.current = null;
+      loadResults(activeJobId, 'initial');
     } else {
       setResults([]);
+      latestCreatedAtRef.current = null;
     }
   }, [activeJobId, loadResults]);
 
@@ -391,19 +471,24 @@ export function SearchParserView() {
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = setInterval(() => {
         refreshJobs();
-        loadResults(activeJobId);
+        // Only append new rows; don't flicker the table.
+        loadResults(activeJobId, 'incremental');
       }, 5000);
       return () => clearInterval(interval);
     }
   }, [activeJob, activeJobId, refreshJobs, loadResults]);
 
-  const handleStart = useCallback(async (queries: string[]) => {
+  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[] }) => {
     setBusy(true);
     setError(null);
     try {
+      const normalized = { ...payload };
+      if (typeof normalized.brief === 'string') {
+        normalized.brief = normalized.brief.trim();
+      }
       const data = await apiFetch<{ job: SearchParserJob }>('/api/parsers/search', {
         method: 'POST',
-        body: JSON.stringify({ queries }),
+        body: JSON.stringify(normalized),
       });
       await refreshJobs();
       setActiveJobId(data.job.id);
@@ -501,20 +586,21 @@ export function SearchParserView() {
   }, [companyLeads]);
 
   const handleRepeat = useCallback(async () => {
-    const queries = (activeJob?.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
+    if (!activeJob) return;
+    const brief = typeof activeJob.config?.brief === 'string' ? activeJob.config.brief.trim() : '';
+    if (brief) {
+      await handleStart({ brief });
+      return;
+    }
+    const queries = (activeJob.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
     if (queries.length === 0) return;
-    await handleStart(queries);
+    await handleStart({ queries });
   }, [activeJob, handleStart]);
 
-  const jobQueries = useMemo(() => {
-    return (activeJob?.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
-  }, [activeJob]);
-  const hasQueries = jobQueries.length > 0;
-  const processedQueries = activeJob?.processed_queries ?? 0;
-  const totalQueries = activeJob?.total_queries ?? jobQueries.length;
-  const totalResults = activeJob?.total_results ?? leads.length;
   const totalCompanies = companyLeads.length;
-  const totalSources = sourceLeads.length;
+  const activeProgress = activeJob ? getSearchProgress(activeJob) : null;
+  const activeUserQuery = activeJob ? getUserSearchQuery(activeJob) : '';
+  const activeUserQueryUi = activeUserQuery ? truncateUiText(activeUserQuery, 160) : '';
   const jobControlsDisabled = !activeJobId || jobActionId === activeJobId || busy;
   const exportDisabled = companyLeads.length === 0;
   const copyDisabled = exportDisabled || copying;
@@ -537,16 +623,12 @@ export function SearchParserView() {
 
       const MAX_ROWS = 5000;
       const rows = [
-        ['Company', 'Site', 'Email', 'Description', 'Queries', 'Sources', 'JobId', 'Parser'],
+        ['Company', 'Site', 'Email', 'Description'],
         ...companyLeads.slice(0, MAX_ROWS).map((r) => [
           r.company_name ?? '',
           r.site ?? '',
           r.email ?? '',
           r.description ?? '',
-          (r.queries ?? []).join(' · '),
-          String(r.sources ?? 1),
-          activeJobId ?? '',
-          'search',
         ]),
       ];
 
@@ -590,7 +672,7 @@ export function SearchParserView() {
         </div>
       ) : null}
 
-      <SearchParserForm onStart={handleStart} busy={busy} />
+      <SearchParserForm onStart={(brief) => void handleStart({ brief })} busy={busy} />
 
       <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         {/* Jobs List */}
@@ -602,26 +684,60 @@ export function SearchParserView() {
             </button>
           </div>
           <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
-            {jobs.map(job => (
-              <button
-                key={job.id}
-                onClick={() => setActiveJobId(job.id)}
-                className={`w-full text-left px-6 py-4 hover:bg-gray-50 transition-colors ${activeJobId === job.id ? 'bg-blue-50' : ''}`}
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <JobStatus status={job.status} errorMessage={job.error_message} />
-                  <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
-                </div>
-                <div className="text-sm font-medium text-gray-900 truncate">
-                  {job.config.queries?.[0] || 'Без запросов'}
-                  {job.config.queries?.length > 1 && ` (+${job.config.queries.length - 1})`}
-                </div>
-                <div className="mt-2 text-xs text-gray-500 flex justify-between">
-                  <span>Запросов обработано: {job.processed_queries}/{job.total_queries}</span>
-                  <span>Найдено: {job.total_results}</span>
-                </div>
-              </button>
-            ))}
+            {jobs.map((job) => {
+              const jobProgress = getSearchProgress(job);
+              const userQuery = getUserSearchQuery(job);
+              const title = userQuery || 'Без запроса';
+              const titleUi = userQuery ? truncateUiText(userQuery, 90) : title;
+              return (
+                <button
+                  key={job.id}
+                  onClick={() => setActiveJobId(job.id)}
+                  className={`w-full text-left px-6 py-4 hover:bg-gray-50 transition-colors ${activeJobId === job.id ? 'bg-blue-50' : ''}`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <JobStatus status={job.status} errorMessage={job.error_message} />
+                    <span className="text-xs text-gray-400">{formatDate(job.created_at)}</span>
+                  </div>
+                  <div className="text-sm font-medium text-gray-900 line-clamp-2" title={userQuery || undefined}>
+                    Запрос: {titleUi}
+                  </div>
+                  <div className="mt-3">
+                    <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+                      {jobProgress.hasProgress ? (
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            jobProgress.stoppedByUser
+                              ? 'bg-amber-500'
+                              : job.status === 'failed'
+                                ? 'bg-red-500'
+                                : job.status === 'completed'
+                                  ? 'bg-emerald-500'
+                                  : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${jobProgress.progressValue ?? 0}%` }}
+                        />
+                      ) : (
+                        <div className="h-full w-1/3 bg-emerald-400 animate-pulse" />
+                      )}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
+                      <span>
+                        {jobProgress.hasProgress
+                          ? `Прогресс: ${jobProgress.progressValue}% — ${jobProgress.stageLabel}`
+                          : `Статус: ${jobProgress.stageLabel}`}
+                      </span>
+                      <span>Компаний: {job.total_results ?? 0}</span>
+                      {job.error_message ? (
+                        <span className={`${jobProgress.stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
+                          {jobProgress.stoppedByUser ? 'Остановлено' : job.error_message}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
             {jobs.length === 0 && (
                <div className="px-6 py-8 text-center text-gray-400 text-sm">Нет истории</div>
             )}
@@ -640,14 +756,40 @@ export function SearchParserView() {
                   </div>
                 </div>
                 <p className="text-sm text-gray-500">
-                  {activeJob ? (
-                    <>
-                      Компаний: {totalCompanies} · Источников: {totalSources} · Всего ссылок: {totalResults} · Запросов: {processedQueries}/{totalQueries}
-                    </>
-                  ) : (
-                    `${totalCompanies} компаний`
-                  )}
+                  {activeJob ? `Компаний: ${totalCompanies}` : `${totalCompanies} компаний`}
                 </p>
+                {activeJob ? (
+                  <p className="mt-1 text-xs text-gray-500" title={activeUserQuery || undefined}>
+                    Запрос: {activeUserQuery ? activeUserQueryUi : '—'}
+                  </p>
+                ) : null}
+                {activeJob && activeProgress ? (
+                  <div className="mt-2">
+                    <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+                      {activeProgress.hasProgress ? (
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            activeProgress.stoppedByUser
+                              ? 'bg-amber-500'
+                              : activeJob.status === 'failed'
+                                ? 'bg-red-500'
+                                : activeJob.status === 'completed'
+                                  ? 'bg-emerald-500'
+                                  : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${activeProgress.progressValue ?? 0}%` }}
+                        />
+                      ) : (
+                        <div className="h-full w-1/3 bg-emerald-400 animate-pulse" />
+                      )}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      {activeProgress.hasProgress
+                        ? `Прогресс: ${activeProgress.progressValue}% — ${activeProgress.stageLabel}`
+                        : `Статус: ${activeProgress.stageLabel}`}
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-nowrap">
@@ -660,6 +802,16 @@ export function SearchParserView() {
                 >
                   <Database className="h-4 w-4" />
                   В базу
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRepeat}
+                  disabled={!activeJob || busy}
+                  className="inline-flex w-full flex-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-gray-50 px-2.5 py-2 text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50 sm:w-auto sm:bg-transparent sm:px-3 sm:py-2 sm:text-sm sm:text-gray-700"
+                  title="Повторить запуск"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Повторить
                 </button>
                 <button
                   type="button"
@@ -721,38 +873,6 @@ export function SearchParserView() {
             </div>
           </div>
 
-          {activeJob ? (
-            <div className="px-6 py-3 border-b border-gray-200 bg-gray-50 text-xs text-gray-600">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="font-medium text-gray-700">Запросы поиска</div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleRepeat}
-                    disabled={!hasQueries || busy}
-                    className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-                  >
-                    Повторить
-                  </button>
-                </div>
-              </div>
-              <div className={`mt-2 flex flex-wrap gap-2 ${hasQueries ? '' : 'text-gray-500'}`}>
-                {hasQueries ? (
-                  jobQueries.map((query, index) => (
-                    <span
-                      key={`${query}-${index}`}
-                      className="max-w-[280px] truncate rounded-full border border-gray-200 bg-white px-2 py-0.5 text-gray-700"
-                      title={query}
-                    >
-                      {query}
-                    </span>
-                  ))
-                ) : (
-                  <span>Запросы не указаны</span>
-                )}
-              </div>
-            </div>
-          ) : null}
-
           {activeJob?.error_message ? (
             <div
               className={`px-6 py-3 border-b text-sm ${
@@ -807,15 +927,9 @@ export function SearchParserView() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="text-sm font-medium text-blue-600 hover:underline block"
-                                    title={(r.queries ?? []).join(' · ')}
                                   >
                                      {r.company_name ?? '—'}
                                   </a>
-                                  {r.queries.length ? (
-                                    <div className="mt-1 text-[11px] text-gray-500 line-clamp-1" title={r.queries.join(' · ')}>
-                                      Найдено по: {r.queries.join(' · ')}
-                                    </div>
-                                  ) : null}
                                </td>
                                <td className="px-4 py-3">
                                  <div className="flex items-center gap-2 max-w-[320px]">
@@ -865,11 +979,6 @@ export function SearchParserView() {
               <p className="mt-2 text-sm text-gray-600">
                 Будут удалены запуск и все результаты поиска. Действие необратимо.
               </p>
-              {activeJob?.id === deleteCandidateId ? (
-                <div className="mt-3 text-xs text-gray-500">
-                  Запросы: {hasQueries ? jobQueries.join(' · ') : '—'}
-                </div>
-              ) : null}
             </div>
             <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
               <button

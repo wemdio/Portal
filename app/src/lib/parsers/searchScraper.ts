@@ -260,13 +260,16 @@ export type SearchProvider = 'google' | 'duckduckgo' | 'bing' | 'mojeek';
 
 export function buildGoogleSearchUrl(
   query: string,
-  opts?: { numResults?: number; hl?: string; gl?: string },
+  opts?: { numResults?: number; hl?: string; gl?: string; start?: number },
 ): string {
   const url = new URL('https://www.google.com/search');
   url.searchParams.set('q', query);
   url.searchParams.set('num', String(Math.max(10, Math.min(100, opts?.numResults ?? 10))));
   url.searchParams.set('hl', opts?.hl ?? 'ru');
   url.searchParams.set('gl', opts?.gl ?? 'ru');
+  if (opts?.start != null) {
+    url.searchParams.set('start', String(Math.max(0, Math.floor(opts.start))));
+  }
   return url.toString();
 }
 
@@ -972,12 +975,10 @@ export async function mojeekSearch(query: string): Promise<SearchResultItem[]> {
   return detailed.results;
 }
 
-export async function googleSearchDetailed(query: string, numResults = 10): Promise<{
+async function googleSearchDetailedByUrl(query: string, requestUrl: string): Promise<{
   results: SearchResultItem[];
   debug: GoogleSearchDebugInfo;
 }> {
-  const requestUrl = buildGoogleSearchUrl(query, { numResults, hl: 'ru', gl: 'ru' });
-
   // Random delay before request to reduce bot detection
   await sleep(1000 + Math.random() * 2000);
 
@@ -1103,6 +1104,51 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
     }
     throw error;
   }
+}
+
+export async function googleSearchDetailed(query: string, numResults = 10): Promise<{
+  results: SearchResultItem[];
+  debug: GoogleSearchDebugInfo;
+}> {
+  const target = Math.max(10, Math.min(100, Math.floor(numResults || 10)));
+  const pageSize = 10;
+  const pages = Math.max(1, Math.ceil(target / pageSize));
+
+  const combined: SearchResultItem[] = [];
+  const seen = new Set<string>();
+  let lastDebug: GoogleSearchDebugInfo | null = null;
+
+  for (let page = 0; page < pages; page += 1) {
+    const start = page * pageSize;
+    const requestUrl = buildGoogleSearchUrl(query, { numResults: pageSize, hl: 'ru', gl: 'ru', start });
+    try {
+      const out = await googleSearchDetailedByUrl(query, requestUrl);
+      lastDebug = out.debug;
+      for (const r of out.results) {
+        const key = r.link.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        combined.push({ ...r, position: combined.length + 1 });
+        if (combined.length >= target) break;
+      }
+      if (combined.length >= target) break;
+      // If a page yields nothing, stop early (likely block/empty).
+      if (out.results.length === 0) break;
+    } catch (e) {
+      // If we already collected something, return partial results (max-yield mode).
+      if (combined.length > 0 && isGoogleBlockedError(e)) {
+        break;
+      }
+      throw e;
+    }
+  }
+
+  if (!lastDebug) {
+    // Should be unreachable unless buildGoogleSearchUrl throws (it shouldn't).
+    throw new GoogleSearchError('request_failed', 'Google search failed (no debug)');
+  }
+
+  return { results: combined, debug: lastDebug };
 }
 
 export async function duckDuckGoSearchDetailed(query: string): Promise<{

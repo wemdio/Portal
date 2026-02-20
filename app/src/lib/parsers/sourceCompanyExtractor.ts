@@ -13,8 +13,8 @@ const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.SEARCH_SOURCE_EXPAND_TIMEOUT_MS ?? '10000') || 10000;
-const DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? '6') || 6;
-const DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? '25') || 25;
+const DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? '20') || 20;
+const DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? '80') || 80;
 
 const SKIP_HOSTS = [
   // social / messengers
@@ -185,8 +185,8 @@ export async function extractCompanySitesFromSource(
   opts?: { timeoutMs?: number; maxInternalPages?: number; maxSites?: number },
 ): Promise<{ sites: ExtractedCompanySite[]; debug: { fetched: string[]; internalQueued: number } }> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxInternalPages = Math.max(0, Math.min(20, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
-  const maxSites = Math.max(1, Math.min(120, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
+  const maxInternalPages = Math.max(0, Math.min(40, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
+  const maxSites = Math.max(1, Math.min(400, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
 
   const fetched: string[] = [];
   const uniqueBySite = new Map<string, ExtractedCompanySite>();
