@@ -208,22 +208,25 @@ function extractBrandFromJsonLd($: cheerio.CheerioAPI): string | null {
       const parsed = JSON.parse(raw) as unknown;
       const queue: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
       while (queue.length) {
-        const node = queue.shift() as any;
-        if (!node || typeof node !== 'object') continue;
+        const rawNode = queue.shift();
+        if (!rawNode || typeof rawNode !== 'object') continue;
+        const node = rawNode as Record<string, unknown>;
         const type = node['@type'];
         const types = Array.isArray(type) ? type : type ? [type] : [];
         const looksOrg = types.some((t: unknown) =>
           typeof t === 'string' ? /(Organization|LocalBusiness|Corporation|ProfessionalService)/i.test(t) : false,
         );
-        if (looksOrg && typeof node.name === 'string') {
-          const name = normalizeBrandCandidate(node.name);
+        const nameRaw = node['name'];
+        if (looksOrg && typeof nameRaw === 'string') {
+          const name = normalizeBrandCandidate(nameRaw);
           if (name && name.length >= 2 && name.length <= 120 && !BRAND_TITLE_BAD_WORDS.test(name)) return name;
         }
         // common nesting
-        const nested = [node.publisher, node.author, node.organization, node.brand].filter(Boolean);
+        const nested = [node['publisher'], node['author'], node['organization'], node['brand']].filter(Boolean);
         for (const n of nested) queue.push(n);
-        if (Array.isArray(node['@graph'])) {
-          for (const g of node['@graph']) queue.push(g);
+        const graph = node['@graph'];
+        if (Array.isArray(graph)) {
+          for (const g of graph) queue.push(g);
         }
       }
     } catch {

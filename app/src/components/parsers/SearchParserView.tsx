@@ -29,15 +29,6 @@ function tsvCell(value: unknown) {
     .replaceAll('\r', ' ');
 }
 
-function safeHostname(url: string | null) {
-  if (!url) return null;
-  try {
-    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
 // Note: the search parser stores/displays only company leads (source pages are used internally but not shown as results).
 
 function escapeHtml(value: unknown) {
@@ -241,32 +232,6 @@ function truncateUiText(value: string, maxLen: number) {
   if (!s) return '';
   if (s.length <= maxLen) return s;
   return `${s.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
-}
-
-function useTimedFlag(durationMs: number) {
-  const [flag, setFlag] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  const trigger = useCallback(() => {
-    setFlag(true);
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-    }
-    timerRef.current = window.setTimeout(() => {
-      setFlag(false);
-      timerRef.current = null;
-    }, durationMs);
-  }, [durationMs]);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-      }
-    };
-  }, []);
-
-  return { flag, trigger };
 }
 
 function getExportFilename(extension: string) {
