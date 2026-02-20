@@ -5,6 +5,7 @@ import { startTrace } from '@/lib/tracer';
 import { buildSearchDiagnostics } from '@/lib/parsers/searchParserDiagnostics';
 import { simplifySearchQuery } from '@/lib/parsers/searchQueryUtils';
 import { fetchWebsiteEmails } from '@/lib/enrich/websiteParser';
+import { generateSearchQueries } from '@/lib/parsers/searchQueryGenerator';
 import type { SearchResultItem } from './searchScraper';
 import {
   bingSearchDetailed,
@@ -28,9 +29,9 @@ const ENRICH_EMAIL_MAX_PAGES_PER_SITE = 3;
 const ENRICH_EMAIL_CONCURRENCY = 2;
 
 const SOURCE_EXPAND_ENABLED = true;
-const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 10;
-const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 250;
-const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 250;
+const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 12;
+const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 400;
+const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 400;
 const SOURCE_EXPAND_CONCURRENCY = 3;
 
 // Lower concurrency -> fewer blocks -> more total sites, given enough time.
@@ -90,6 +91,39 @@ async function insertInBatches<T extends Record<string, unknown>>(
   }
 
   return { inserted, hadFailures, firstErrorMessage };
+}
+
+async function safeUpdateSearchJob(
+  admin: NonNullable<typeof supabaseAdmin>,
+  jobId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const attempt = await admin.from('search_parser_jobs').update(patch).eq('id', jobId);
+  if (!attempt.error) return;
+
+  const err = attempt.error as { code?: string; message?: string };
+  const msg = String(err?.message ?? '');
+  const isMissingColumn =
+    err?.code === 'PGRST204' &&
+    (msg.includes("progress_stage") || msg.includes("progress_percent") || msg.includes("schema cache"));
+
+  if (!isMissingColumn) {
+    console.warn('search_parser_jobs update failed:', err?.message ?? attempt.error);
+    return;
+  }
+
+  const { progress_stage, progress_percent, ...rest } = patch as Record<string, unknown> & {
+    progress_stage?: unknown;
+    progress_percent?: unknown;
+  };
+  void progress_stage;
+  void progress_percent;
+
+  if (Object.keys(rest).length === 0) return;
+  const retry = await admin.from('search_parser_jobs').update(rest).eq('id', jobId);
+  if (retry.error) {
+    console.warn('search_parser_jobs update retry failed:', (retry.error as { message?: string })?.message ?? retry.error);
+  }
 }
 
 async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
@@ -254,9 +288,9 @@ function isLeadCandidateSite(site: string): boolean {
     .replace(/\/+$/, '')
     .toLowerCase();
 
-  // We accept almost any source domain for leads.
-  // Only exclude obvious search engine / redirect hosts that are never "companies".
+  // Exclude obvious non-company / UGC / platforms.
   const blocked = [
+    // search engines / redirects
     'duckduckgo.com',
     'google.com',
     'googleusercontent.com',
@@ -265,6 +299,31 @@ function isLeadCandidateSite(site: string): boolean {
     'yandex.com',
     'ya.ru',
     'bing.com',
+    // social / messaging / media
+    't.me',
+    'telegram.me',
+    'vk.com',
+    'ok.ru',
+    'facebook.com',
+    'instagram.com',
+    'linkedin.com',
+    'youtube.com',
+    // encyclopedias / blogs / UGC
+    'wikipedia.org',
+    'habr.com',
+    'vc.ru',
+    'dzen.ru',
+    'zen.yandex.ru',
+    'pikabu.ru',
+    'otvet.mail.ru',
+    'mail.ru',
+    'reddit.com',
+    // news / content aggregators (rarely company sites)
+    'rbc.ru',
+    'cnews.ru',
+    // misc knowledge/content sources
+    'cyberleninka.ru',
+    'tadviser.ru',
   ];
   return !blocked.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -297,6 +356,11 @@ function isEnrichableCompanySite(site: string): boolean {
     'habr.com',
     'tadviser.ru',
     'cyberleninka.ru',
+    'otvet.mail.ru',
+    'mail.ru',
+    'dzen.ru',
+    'zen.yandex.ru',
+    'pikabu.ru',
   ];
   return !blockedForEnrich.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -353,7 +417,9 @@ function toLeadRow(
   const site = normalizeSite(r.link);
   if (!site) return null;
   if (!isLeadCandidateSite(site)) return null;
-  const companyName = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
+  const derived = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
+  const companyName =
+    /^\d{1,6}$/.test(derived.trim()) ? (deriveCompanyNameFromSite(site) ?? site) : derived;
 
   return {
     job_id: jobId,
@@ -403,7 +469,60 @@ export async function runSearchParserJob(jobId: string) {
       .update({ status: 'running', started_at: new Date().toISOString() })
       .eq('id', jobId);
 
-    const queries = (job.config as { queries?: string[] })?.queries || [];
+    const rawConfig =
+      job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string }) : {};
+    const brief = typeof rawConfig.brief === 'string' ? rawConfig.brief.trim() : '';
+    let queries = Array.isArray(rawConfig.queries) ? rawConfig.queries.map((q) => String(q).trim()).filter(Boolean) : [];
+    let usedFallbackQueries = false;
+
+    if (queries.length === 0) {
+      if (!brief) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: 'Бриф не указан',
+          progress_stage: 'failed',
+        });
+        return;
+      }
+
+      await safeUpdateSearchJob(admin, jobId, {
+        progress_stage: 'generating_queries',
+        progress_percent: 2,
+        processed_queries: 0,
+        total_queries: 0,
+      });
+
+      const generated = await generateSearchQueries(brief, { allowFallback: true });
+      usedFallbackQueries = generated.usedFallback;
+      queries = generated.queries.map((q) => q.trim()).filter(Boolean);
+
+      if (queries.length === 0) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: 'Не удалось сформировать поисковые запросы',
+          progress_stage: 'failed',
+        });
+        return;
+      }
+
+      await safeUpdateSearchJob(admin, jobId, {
+        config: { ...rawConfig, brief, queries },
+        total_queries: queries.length,
+        processed_queries: 0,
+        progress_stage: 'searching',
+        progress_percent: 5,
+      });
+    } else {
+      await safeUpdateSearchJob(admin, jobId, {
+        total_queries: queries.length,
+        progress_stage: 'searching',
+        progress_percent: 0,
+      });
+    }
+
+    const totalQueries = queries.length;
 
     let totalResults = 0;
     let processedQueries = 0;
@@ -423,10 +542,18 @@ export async function runSearchParserJob(jobId: string) {
     const scheduleBing = createRateLimiter();
     const scheduleMojeek = createRateLimiter();
 
+    if (usedFallbackQueries) {
+      void logWarn(
+        'parser.search.queries.fallback',
+        'Search parser used fallback queries',
+        { jobId, totalQueries, brief: brief.slice(0, 200) },
+        logMeta,
+      );
+    }
     void logInfo(
       'parser.search.job.start',
       'Search parser job started',
-      { jobId, totalQueries: queries.length, queries: queries.slice(0, 10) },
+      { jobId, totalQueries, queries: queries.slice(0, 10) },
       logMeta,
     );
 
@@ -435,7 +562,7 @@ export async function runSearchParserJob(jobId: string) {
       input: {
         jobId,
         queries,
-        totalQueries: queries.length,
+        totalQueries,
         userId: job.user_id,
         requestId,
         route: 'search_parser_worker',
@@ -705,6 +832,8 @@ export async function runSearchParserJob(jobId: string) {
             async (source) => {
               try {
                 const out = await extractCompanySitesFromSource(source.link, {
+                  timeoutMs: 15000,
+                  maxInternalPages: 30,
                   maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE,
                 });
                 return { source, sites: out.sites };
@@ -912,13 +1041,13 @@ export async function runSearchParserJob(jobId: string) {
           if (insertedCount > 0) totalResults += insertedCount;
           if (hadQueryFailures) hadFailures = true;
         });
-        await admin
-          .from('search_parser_jobs')
-          .update({
-            processed_queries: processedQueries,
-            total_results: totalResults,
-          })
-          .eq('id', jobId);
+        const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
+        await safeUpdateSearchJob(admin, jobId, {
+          processed_queries: processedQueries,
+          total_results: totalResults,
+          progress_percent: progressPercent,
+          progress_stage: 'searching',
+        });
       }
     });
 
@@ -941,16 +1070,15 @@ export async function runSearchParserJob(jobId: string) {
     }
 
     // 4. Complete
-    await admin
-      .from('search_parser_jobs')
-      .update({  
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        processed_queries: processedQueries,
-        total_results: totalResults,
-        error_message: diagnostics.hint,
-      })
-      .eq('id', jobId);
+    await safeUpdateSearchJob(admin, jobId, {
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      processed_queries: processedQueries,
+      total_results: totalResults,
+      error_message: diagnostics.hint,
+      progress_stage: 'completed',
+      progress_percent: 100,
+    });
 
     await trace?.end(
       { processedQueries, totalResults, hadFailures },
@@ -965,14 +1093,12 @@ export async function runSearchParserJob(jobId: string) {
   } catch (err) {
     console.error('Search parser worker failed:', err);
     if (supabaseAdmin) {
-      await supabaseAdmin
-        .from('search_parser_jobs')
-        .update({ 
-          status: 'failed', 
-          error_message: err instanceof Error ? err.message : 'Unknown error',
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', jobId);
+      await safeUpdateSearchJob(supabaseAdmin, jobId, {
+        status: 'failed',
+        error_message: err instanceof Error ? err.message : 'Unknown error',
+        completed_at: new Date().toISOString(),
+        progress_stage: 'failed',
+      });
     }
     void logError(
       'parser.search.job.failed',

@@ -60903,6 +60903,7 @@ var supabaseAdmin = supabaseUrl && supabaseServiceRoleKey ? createClient(supabas
 }) : null;
 
 // src/lib/constants.ts
+var OPENROUTER_MODEL = "google/gemini-3-flash-preview";
 var OPENROUTER_API_KEY = process.env.OPENROUTER_SEARCH_PARSER_API_KEY || "";
 var TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 var REDACT_KEYS = [
@@ -63190,6 +63191,268 @@ ${mainText}`;
   return combined;
 }
 
+// src/lib/aiPrompts.ts
+var SEARCH_PARSER_SYSTEM_PROMPT = `\u0422\u044B \u2014 B2B-\u043C\u0430\u0440\u043A\u0435\u0442\u043E\u043B\u043E\u0433 \u0438 OSINT-\u0430\u043D\u0430\u043B\u0438\u0442\u0438\u043A.
+\u0422\u0432\u043E\u044F \u0437\u0430\u0434\u0430\u0447\u0430: \u043F\u043E \u0431\u0440\u0438\u0444\u0443 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0438\u0442\u044C \u0415\u0401 \u0426\u0415\u041B\u0415\u0412\u0423\u042E \u0410\u0423\u0414\u0418\u0422\u041E\u0420\u0418\u042E (\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439/\u043A\u043B\u0438\u0435\u043D\u0442\u043E\u0432) \u0438 \u0441\u043E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u043D\u0430\u0445\u043E\u0434\u0438\u0442\u044C \u043F\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u0438\u0442\u0435\u043B\u0435\u0439 \u044D\u0442\u043E\u0439 \u0426\u0410 (\u043F\u043E\u0442\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0445 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u0432 \u0437\u0430\u043A\u0430\u0437\u0447\u0438\u043A\u0430), \u0430 \u041D\u0415 \u043A\u043E\u043D\u043A\u0443\u0440\u0435\u043D\u0442\u043E\u0432 \u0438 \u043D\u0435 \xAB\u043A\u043B\u043E\u043D\u043E\u0432\xBB.
+
+\u041A\u0430\u043A \u0434\u0443\u043C\u0430\u0442\u044C:
+- \u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043F\u043E\u0439\u043C\u0438, \u0447\u0442\u043E \u043F\u0440\u043E\u0434\u0430\u0451\u0442 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F (\u0443\u0441\u043B\u0443\u0433\u0430/\u043F\u0440\u043E\u0434\u0443\u043A\u0442) \u0438 \u043A\u043E\u043C\u0443 \u044D\u0442\u043E \u043D\u0443\u0436\u043D\u043E.
+- \u0421\u0444\u043E\u0440\u043C\u0443\u043B\u0438\u0440\u0443\u0439 2\u20134 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u0430 \u0426\u0410 (\u0442\u0438\u043F\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439/\u043E\u0442\u0440\u0430\u0441\u043B\u0438) \u0438 2\u20134 \u0440\u043E\u043B\u0438 \u041B\u041F\u0420 (CEO/\u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u0438\u043A/\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440/\u0437\u0430\u043A\u0443\u043F\u043A\u0438/\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u0438 \u0442.\u043F.).
+- \u0417\u0430\u043F\u0440\u043E\u0441\u044B \u0434\u043E\u043B\u0436\u043D\u044B \u0438\u0441\u043A\u0430\u0442\u044C \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438-\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0438 \u0438 \u0438\u0445 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0435 \u0441\u0430\u0439\u0442\u044B/\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B: \xAB\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442\xBB, \xAB\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B\xBB, \xABemail\xBB, \xAB\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A\xBB, \xAB\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB, \xAB\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB, \xABIT-\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440\xBB \u0438 \u0442.\u043F.
+- \u0414\u043E\u043F\u0443\u0441\u043A\u0430\u044E\u0442\u0441\u044F 1\u20132 \u201C\u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A\u043E\u0432\u044B\u0445\u201D \u0437\u0430\u043F\u0440\u043E\u0441\u0430 (\u043A\u0430\u0442\u0430\u043B\u043E\u0433/\u0440\u0435\u0435\u0441\u0442\u0440/\u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u0438 \u0432\u044B\u0441\u0442\u0430\u0432\u043A\u0438), \u043D\u043E \u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0443\u043F\u043E\u0440 \u2014 \u043D\u0430 \u0437\u0430\u043F\u0440\u043E\u0441\u044B, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u043F\u0440\u0438\u0432\u043E\u0434\u044F\u0442 \u043D\u0430 \u0441\u0430\u0439\u0442\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439.
+- \u0418\u0437\u0431\u0435\u0433\u0430\u0439 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u0432\u0435\u0434\u0443\u0442 \u043D\u0430 \u0432\u0430\u043A\u0430\u043D\u0441\u0438\u0438/\u0434\u0436\u043E\u0431-\u0431\u043E\u0440\u0434\u044B/\u0430\u0433\u0440\u0435\u0433\u0430\u0442\u043E\u0440\u044B \u0442\u0435\u043D\u0434\u0435\u0440\u043E\u0432 (hh, rabota, gorodrabot, zakupki-\u0430\u0433\u0440\u0435\u0433\u0430\u0442\u043E\u0440\u044B), \u0435\u0441\u043B\u0438 \u044D\u0442\u043E \u043D\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E.
+
+\u041F\u0440\u0430\u0432\u0438\u043B\u0430:
+1) \u041E\u0442\u0432\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0444\u043E\u0440\u043C\u0430\u0442\u0435 JSON: { "queries": ["q1", "q2", ...] }. \u0411\u0435\u0437 Markdown \u0438 \u043F\u043E\u044F\u0441\u043D\u0435\u043D\u0438\u0439.
+2) \u0420\u041E\u0412\u041D\u041E 30 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432, \u043D\u0430 \u0440\u0443\u0441\u0441\u043A\u043E\u043C.
+3) \u041A\u0430\u0436\u0434\u044B\u0439 \u0437\u0430\u043F\u0440\u043E\u0441 \u0434\u043E\u043B\u0436\u0435\u043D \u0441\u043E\u0434\u0435\u0440\u0436\u0430\u0442\u044C \u044F\u0432\u043D\u044B\u0439 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 \u0426\u0410 \u0438\u043B\u0438 \u0440\u043E\u043B\u044C \u041B\u041F\u0420 (\u043D\u0435 \u043F\u0440\u043E\u0441\u0442\u043E \u043E\u0431\u0449\u0438\u0435 \u0441\u043B\u043E\u0432\u0430).
+4) \u041C\u0438\u043D\u0438\u043C\u0443\u043C 10 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \xAB\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442/\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B/email/\u041B\u041F\u0420\xBB, \u0447\u0442\u043E\u0431\u044B \u043D\u0430\u0445\u043E\u0434\u0438\u0442\u044C \u0441\u0430\u0439\u0442\u044B \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0439-\u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439.
+5) \u041D\u0415 \u0418\u0421\u041F\u041E\u041B\u042C\u0417\u0423\u0419 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u043F\u0440\u043E \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0438/\u0440\u0435\u0435\u0441\u0442\u0440\u044B/\u0441\u043F\u0438\u0441\u043A\u0438/\u0443\u0447\u0430\u0441\u0442\u043D\u0438\u043A\u043E\u0432/\u0442\u0435\u043D\u0434\u0435\u0440\u044B/\u0432\u044B\u0441\u0442\u0430\u0432\u043A\u0438 \u2014 \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u0440\u044F\u043C\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u043A \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F\u043C.
+6) \u041C\u043E\u0436\u043D\u043E \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0442\u043E\u0440\u044B (site:, intitle:, inurl:, filetype:pdf/xls) \u0442\u043E\u043B\u044C\u043A\u043E \u0435\u0441\u043B\u0438 \u043E\u043D\u0438 \u0440\u0435\u0430\u043B\u044C\u043D\u043E \u043F\u043E\u043C\u043E\u0433\u0430\u044E\u0442.
+`;
+
+// src/lib/parsers/searchQueryBuilder.ts
+var TARGET_QUERY_COUNT = 30;
+var CATEGORY_PATTERNS = {
+  site: /(сайт|website|официал|контакт)/i,
+  role: /(директор|ceo|собственник|закупк|коммерческ|операцион|маркетинг|продаж)/i
+};
+var REQUIRED_TEMPLATES = {
+  site: '{topic} \u043F\u043E\u0442\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u044B "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  role: '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0437\u0430\u043A\u0443\u043F\u043A\u0430\u043C" \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u0441\u043F\u0438\u0441\u043E\u043A'
+};
+var FALLBACK_TEMPLATES = [
+  '{topic} "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442" email',
+  '{topic} "\u0441\u0430\u0439\u0442 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" email',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043C\u043C\u0435\u0440\u0447\u0435\u0441\u043A\u0438\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" email',
+  '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0440\u0430\u0437\u0432\u0438\u0442\u0438\u044E" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440 \u043F\u043E \u0437\u0430\u043A\u0443\u043F\u043A\u0430\u043C" email',
+  '{topic} "\u0440\u0443\u043A\u043E\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u044C \u043E\u0442\u0434\u0435\u043B\u0430 \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0441\u043D\u0430\u0431\u0436\u0435\u043D\u0438\u044F" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0441\u043B\u0443\u0436\u0431\u0430 \u0441\u043D\u0430\u0431\u0436\u0435\u043D\u0438\u044F" email',
+  '{topic} "\u043E\u043F\u0435\u0440\u0430\u0446\u0438\u043E\u043D\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0444\u0438\u043D\u0430\u043D\u0441\u043E\u0432\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "it-\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u0433\u0435\u043D\u0435\u0440\u0430\u043B\u044C\u043D\u044B\u0439 \u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0440" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B" email',
+  "{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+  "{topic} \u043F\u0440\u0435\u0434\u043F\u0440\u0438\u044F\u0442\u0438\u044F \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043F\u0440\u043E\u0438\u0437\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u0434\u0438\u0441\u0442\u0440\u0438\u0431\u044C\u044E\u0442\u043E\u0440\u044B \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u0438\u043C\u043F\u043E\u0440\u0442\u0435\u0440\u044B \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043E\u043F\u0442\u043E\u0432\u044B\u0435 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0430\u0439\u0442",
+  "{topic} \u043E\u0442\u0440\u0430\u0441\u043B\u0435\u0432\u044B\u0435 \u043A\u043E\u043C\u043F\u0430\u043D\u0438\u0438 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u0437\u0430\u043A\u0443\u043F\u043E\u043A" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u043F\u0440\u043E\u0434\u0430\u0436" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043E\u0442\u0434\u0435\u043B \u043F\u0440\u043E\u0434\u0430\u0436" email',
+  '{topic} "\u043F\u043E\u0447\u0442\u0430" \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+  '{topic} "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B" email'
+];
+var BANNED_QUERY_PATTERN = /(каталог|список|реестр|участник|участники|тендер|выставк|конференц)/i;
+function normalizeWhitespace2(value) {
+  return value.replace(/\s+/g, " ").trim();
+}
+function cleanQuery(value) {
+  const trimmed = normalizeWhitespace2(value);
+  const noBullets = trimmed.replace(/^[\s\-*•\d.)]+\s*/, "");
+  const noQuotes = noBullets.replace(/^["'`]+|["'`]+$/g, "");
+  return normalizeWhitespace2(noQuotes);
+}
+function dedupeQueries(queries) {
+  const seen = /* @__PURE__ */ new Set();
+  const unique = [];
+  for (const query of queries) {
+    const key = query.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(query);
+  }
+  return unique;
+}
+function extractJsonCandidate(content) {
+  const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenceMatch?.[1] ?? content;
+  const objectMatch = candidate.match(/\{[\s\S]*\}/);
+  return objectMatch?.[0] ?? null;
+}
+function parseJsonQueries(content) {
+  const candidate = extractJsonCandidate(content);
+  if (!candidate) return null;
+  try {
+    const parsed = JSON.parse(candidate);
+    if (!parsed?.queries || !Array.isArray(parsed.queries)) return null;
+    return parsed.queries.filter((q) => typeof q === "string");
+  } catch {
+    return null;
+  }
+}
+function parseLineQueries(content) {
+  return content.split(/\r?\n/).map((line) => cleanQuery(line)).filter((line) => line.length > 2);
+}
+function applyTemplate(template, topic) {
+  return template.replace("{topic}", topic);
+}
+function hasCategory(query, category) {
+  return CATEGORY_PATTERNS[category].test(query);
+}
+function isBannedQuery(query) {
+  return BANNED_QUERY_PATTERN.test(query);
+}
+function deriveTopic(brief) {
+  const cleaned = normalizeWhitespace2(brief).replace(/https?:\/\/\S+/gi, "").replace(/\S+@\S+\.\S+/g, "").replace(/[“”«»"]/g, "").trim();
+  if (!cleaned) return "\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F";
+  const STOPWORDS = new Set(
+    [
+      // RU common filler/instructions
+      "\u043F\u043E\u0436\u0430\u043B\u0443\u0439\u0441\u0442\u0430",
+      "\u0437\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435",
+      "\u0437\u0430\u043F\u043E\u043B\u043D\u0438",
+      "\u0431\u0440\u0438\u0444",
+      "\u0430\u043D\u043A\u0435\u0442\u0443",
+      "\u043E\u043F\u0440\u043E\u0441",
+      "\u043A\u0430\u043A",
+      "\u043C\u043E\u0436\u043D\u043E",
+      "\u043F\u043E\u0434\u0440\u043E\u0431\u043D\u0435\u0435",
+      "\u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E",
+      "\u0447\u0435\u043C",
+      "\u0442\u0435\u043C",
+      "\u0447\u0442\u043E\u0431\u044B",
+      "\u043D\u0443\u0436\u043D\u043E",
+      "\u043D\u0430\u0434\u043E",
+      "\u0443\u043A\u0430\u0436\u0438\u0442\u0435",
+      "\u0443\u043A\u0430\u0436\u0438",
+      "\u043E\u043F\u0438\u0448\u0438\u0442\u0435",
+      "\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435",
+      "\u043F\u0440\u0438\u043C\u0435\u0440",
+      "\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440",
+      "\u0434\u0430\u043B\u0435\u0435",
+      "\u043D\u0438\u0436\u0435",
+      "\u0432\u044B\u0448\u0435",
+      "\u0441\u0441\u044B\u043B\u043A\u0430",
+      "\u0441\u0441\u044B\u043B\u043A\u0443",
+      // generic parser words
+      "\u043A\u043E\u043D\u0442\u0430\u043A\u0442\u044B",
+      "\u043A\u043E\u043D\u0442\u0430\u043A\u0442",
+      "email",
+      "\u043F\u043E\u0447\u0442\u0430",
+      "\u0442\u0435\u043B\u0435\u0444\u043E\u043D",
+      // EN common filler
+      "please",
+      "fill",
+      "brief",
+      "more",
+      "details"
+    ].map((s) => s.toLowerCase())
+  );
+  const firstChunk = cleaned.split(/[\n\r]/)[0]?.trim() ?? cleaned;
+  const rawWords = firstChunk.split(/\s+/g).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").trim()).filter(Boolean);
+  const meaningful = rawWords.filter((w) => {
+    const lower = w.toLowerCase();
+    if (STOPWORDS.has(lower)) return false;
+    if (/^\d{2,4}$/.test(lower)) return false;
+    if (lower.length < 3) return false;
+    if (!/[\p{L}]/u.test(w)) return false;
+    return true;
+  });
+  const words = (meaningful.length ? meaningful : rawWords).slice(0, 6);
+  return words.join(" ") || "\u043A\u043E\u043C\u043F\u0430\u043D\u0438\u044F";
+}
+function parseSearchQueries(content) {
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  const parsed = parseJsonQueries(trimmed);
+  if (parsed) return parsed.map(cleanQuery).filter((q) => q.length > 2);
+  return parseLineQueries(trimmed);
+}
+function buildSearchQueries(content, brief) {
+  const topic = deriveTopic(brief);
+  const parsedRaw = parseSearchQueries(content).map(cleanQuery).filter(Boolean);
+  const isRussianBrief = /[А-Яа-яЁё]/.test(brief);
+  const parsed = dedupeQueries(
+    isRussianBrief ? parsedRaw.filter((query) => /[А-Яа-яЁё]/.test(query)) : parsedRaw
+  ).filter((q) => !isBannedQuery(q));
+  const required = [];
+  if (!parsed.some((q) => hasCategory(q, "site"))) {
+    required.push(applyTemplate(REQUIRED_TEMPLATES.site, topic));
+  }
+  if (!parsed.some((q) => hasCategory(q, "role"))) {
+    required.push(applyTemplate(REQUIRED_TEMPLATES.role, topic));
+  }
+  const filled = dedupeQueries([
+    ...required,
+    ...parsed,
+    ...FALLBACK_TEMPLATES.map((template) => applyTemplate(template, topic))
+  ]).filter((q) => !isBannedQuery(q));
+  return filled.slice(0, TARGET_QUERY_COUNT);
+}
+
+// src/lib/parsers/searchQueryGenerator.ts
+var DEFAULT_TIMEOUT_MS = 2e4;
+async function generateSearchQueries(brief, options = {}) {
+  const trimmedBrief = (brief ?? "").trim();
+  if (!trimmedBrief) {
+    if (options.allowFallback) {
+      return { queries: buildSearchQueries("", ""), usedFallback: true };
+    }
+    throw new Error("Missing brief text");
+  }
+  const allowFallback = options.allowFallback ?? false;
+  const fallback = () => ({
+    queries: buildSearchQueries("", trimmedBrief),
+    usedFallback: true
+  });
+  if (!OPENROUTER_API_KEY) {
+    if (allowFallback) return fallback();
+    throw new Error("AI API key not configured");
+  }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "https://portal.app"
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: "system", content: SEARCH_PARSER_SYSTEM_PROMPT },
+          { role: "user", content: `\u0411\u0440\u0438\u0444 \u043A\u043B\u0438\u0435\u043D\u0442\u0430:
+${trimmedBrief.slice(0, 4e3)}` }
+        ],
+        temperature: 0.6,
+        max_tokens: 400
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw new Error(`AI API error: ${response.status}`);
+    }
+    const data2 = await response.json();
+    const content = data2?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("Empty AI response");
+    }
+    return {
+      queries: buildSearchQueries(content, trimmedBrief),
+      usedFallback: false,
+      rawContent: content
+    };
+  } catch (err) {
+    if (allowFallback) return fallback();
+    throw err;
+  }
+}
+
 // src/lib/config.ts
 var SEARCH_CONFIG = {
   // Логи и диагностика
@@ -64436,9 +64699,9 @@ async function mojeekSearchDetailed(query, opts) {
 // src/lib/parsers/sourceCompanyExtractor.ts
 init_esm11();
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-var DEFAULT_TIMEOUT_MS = Number(process.env.SEARCH_SOURCE_EXPAND_TIMEOUT_MS ?? "10000") || 1e4;
-var DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? "6") || 6;
-var DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? "25") || 25;
+var DEFAULT_TIMEOUT_MS2 = Number(process.env.SEARCH_SOURCE_EXPAND_TIMEOUT_MS ?? "10000") || 1e4;
+var DEFAULT_MAX_INTERNAL_PAGES = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_INTERNAL_PAGES ?? "20") || 20;
+var DEFAULT_MAX_SITES_PER_SOURCE = Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE ?? "80") || 80;
 var SKIP_HOSTS = [
   // social / messengers
   "t.me",
@@ -64582,9 +64845,9 @@ function extractSitesFromHtml(html3, baseUrl, sourceUrl) {
   return { external, internal };
 }
 async function extractCompanySitesFromSource(sourcePageUrl, opts) {
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const maxInternalPages = Math.max(0, Math.min(20, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
-  const maxSites = Math.max(1, Math.min(120, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
+  const maxInternalPages = Math.max(0, Math.min(40, opts?.maxInternalPages ?? DEFAULT_MAX_INTERNAL_PAGES));
+  const maxSites = Math.max(1, Math.min(400, opts?.maxSites ?? DEFAULT_MAX_SITES_PER_SOURCE));
   const fetched = [];
   const uniqueBySite = /* @__PURE__ */ new Map();
   const main2 = await fetchHtml2(sourcePageUrl, timeoutMs);
@@ -64622,9 +64885,9 @@ var ENRICH_EMAIL_MAX_SITES_PER_JOB = 500;
 var ENRICH_EMAIL_MAX_PAGES_PER_SITE = 3;
 var ENRICH_EMAIL_CONCURRENCY = 2;
 var SOURCE_EXPAND_ENABLED = true;
-var SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 10;
-var SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 250;
-var SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 250;
+var SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 12;
+var SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 400;
+var SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 400;
 var SOURCE_EXPAND_CONCURRENCY = 3;
 var QUERY_CONCURRENCY = 1;
 var GOOGLE_RESULTS_PER_QUERY = 100;
@@ -64665,6 +64928,25 @@ async function insertInBatches(admin, rows, opts) {
     inserted += batch.length;
   }
   return { inserted, hadFailures, firstErrorMessage };
+}
+async function safeUpdateSearchJob(admin, jobId, patch) {
+  const attempt = await admin.from("search_parser_jobs").update(patch).eq("id", jobId);
+  if (!attempt.error) return;
+  const err = attempt.error;
+  const msg = String(err?.message ?? "");
+  const isMissingColumn = err?.code === "PGRST204" && (msg.includes("progress_stage") || msg.includes("progress_percent") || msg.includes("schema cache"));
+  if (!isMissingColumn) {
+    console.warn("search_parser_jobs update failed:", err?.message ?? attempt.error);
+    return;
+  }
+  const { progress_stage, progress_percent, ...rest } = patch;
+  void progress_stage;
+  void progress_percent;
+  if (Object.keys(rest).length === 0) return;
+  const retry = await admin.from("search_parser_jobs").update(rest).eq("id", jobId);
+  if (retry.error) {
+    console.warn("search_parser_jobs update retry failed:", retry.error?.message ?? retry.error);
+  }
 }
 async function throttleBetweenQueries(provider) {
   const base = provider === "duckduckgo" ? randInt(1800, 4200) : provider === "bing" ? randInt(1200, 2800) : provider === "mojeek" ? randInt(900, 2200) : randInt(900, 2200);
@@ -64778,6 +65060,7 @@ function deriveCompanyName(title, site) {
 function isLeadCandidateSite(site) {
   const host = site.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
   const blocked = [
+    // search engines / redirects
     "duckduckgo.com",
     "google.com",
     "googleusercontent.com",
@@ -64785,7 +65068,32 @@ function isLeadCandidateSite(site) {
     "yandex.ru",
     "yandex.com",
     "ya.ru",
-    "bing.com"
+    "bing.com",
+    // social / messaging / media
+    "t.me",
+    "telegram.me",
+    "vk.com",
+    "ok.ru",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "youtube.com",
+    // encyclopedias / blogs / UGC
+    "wikipedia.org",
+    "habr.com",
+    "vc.ru",
+    "dzen.ru",
+    "zen.yandex.ru",
+    "pikabu.ru",
+    "otvet.mail.ru",
+    "mail.ru",
+    "reddit.com",
+    // news / content aggregators (rarely company sites)
+    "rbc.ru",
+    "cnews.ru",
+    // misc knowledge/content sources
+    "cyberleninka.ru",
+    "tadviser.ru"
   ];
   return !blocked.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -64811,7 +65119,12 @@ function isEnrichableCompanySite(site) {
     "vc.ru",
     "habr.com",
     "tadviser.ru",
-    "cyberleninka.ru"
+    "cyberleninka.ru",
+    "otvet.mail.ru",
+    "mail.ru",
+    "dzen.ru",
+    "zen.yandex.ru",
+    "pikabu.ru"
   ];
   return !blockedForEnrich.some((b) => host === b || host.endsWith(`.${b}`));
 }
@@ -64847,7 +65160,8 @@ function toLeadRow(r, jobId, provider) {
   const site = normalizeSite(r.link);
   if (!site) return null;
   if (!isLeadCandidateSite(site)) return null;
-  const companyName = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
+  const derived = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
+  const companyName = /^\d{1,6}$/.test(derived.trim()) ? deriveCompanyNameFromSite(site) ?? site : derived;
   return {
     job_id: jobId,
     query: r.query,
@@ -64880,7 +65194,53 @@ async function runSearchParserJob(jobId) {
     const requestId = crypto.randomUUID();
     const logMeta = { userId: job.user_id, requestId, route: "search_parser_worker" };
     await admin.from("search_parser_jobs").update({ status: "running", started_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", jobId);
-    const queries = job.config?.queries || [];
+    const rawConfig = job.config && typeof job.config === "object" ? job.config : {};
+    const brief = typeof rawConfig.brief === "string" ? rawConfig.brief.trim() : "";
+    let queries = Array.isArray(rawConfig.queries) ? rawConfig.queries.map((q) => String(q).trim()).filter(Boolean) : [];
+    let usedFallbackQueries = false;
+    if (queries.length === 0) {
+      if (!brief) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: "failed",
+          completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+          error_message: "\u0411\u0440\u0438\u0444 \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D",
+          progress_stage: "failed"
+        });
+        return;
+      }
+      await safeUpdateSearchJob(admin, jobId, {
+        progress_stage: "generating_queries",
+        progress_percent: 2,
+        processed_queries: 0,
+        total_queries: 0
+      });
+      const generated = await generateSearchQueries(brief, { allowFallback: true });
+      usedFallbackQueries = generated.usedFallback;
+      queries = generated.queries.map((q) => q.trim()).filter(Boolean);
+      if (queries.length === 0) {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: "failed",
+          completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+          error_message: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u0444\u043E\u0440\u043C\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B",
+          progress_stage: "failed"
+        });
+        return;
+      }
+      await safeUpdateSearchJob(admin, jobId, {
+        config: { ...rawConfig, brief, queries },
+        total_queries: queries.length,
+        processed_queries: 0,
+        progress_stage: "searching",
+        progress_percent: 5
+      });
+    } else {
+      await safeUpdateSearchJob(admin, jobId, {
+        total_queries: queries.length,
+        progress_stage: "searching",
+        progress_percent: 0
+      });
+    }
+    const totalQueries = queries.length;
     let totalResults = 0;
     let processedQueries = 0;
     let hadFailures = false;
@@ -64896,10 +65256,18 @@ async function runSearchParserJob(jobId) {
     const scheduleDdg = createRateLimiter();
     const scheduleBing = createRateLimiter();
     const scheduleMojeek = createRateLimiter();
+    if (usedFallbackQueries) {
+      void logWarn(
+        "parser.search.queries.fallback",
+        "Search parser used fallback queries",
+        { jobId, totalQueries, brief: brief.slice(0, 200) },
+        logMeta
+      );
+    }
     void logInfo(
       "parser.search.job.start",
       "Search parser job started",
-      { jobId, totalQueries: queries.length, queries: queries.slice(0, 10) },
+      { jobId, totalQueries, queries: queries.slice(0, 10) },
       logMeta
     );
     const trace = await startTrace({
@@ -64907,7 +65275,7 @@ async function runSearchParserJob(jobId) {
       input: {
         jobId,
         queries,
-        totalQueries: queries.length,
+        totalQueries,
         userId: job.user_id,
         requestId,
         route: "search_parser_worker"
@@ -65119,6 +65487,8 @@ async function runSearchParserJob(jobId) {
             async (source) => {
               try {
                 const out = await extractCompanySitesFromSource(source.link, {
+                  timeoutMs: 15e3,
+                  maxInternalPages: 30,
                   maxSites: SOURCE_EXPAND_MAX_SITES_PER_SOURCE
                 });
                 return { source, sites: out.sites };
@@ -65303,10 +65673,13 @@ async function runSearchParserJob(jobId) {
           if (insertedCount > 0) totalResults += insertedCount;
           if (hadQueryFailures) hadFailures = true;
         });
-        await admin.from("search_parser_jobs").update({
+        const progressPercent = totalQueries > 0 ? Math.round(processedQueries / totalQueries * 100) : null;
+        await safeUpdateSearchJob(admin, jobId, {
           processed_queries: processedQueries,
-          total_results: totalResults
-        }).eq("id", jobId);
+          total_results: totalResults,
+          progress_percent: progressPercent,
+          progress_stage: "searching"
+        });
       }
     });
     const hint = totalResults <= 0 && lastBlockedHint ? `\u041F\u043E\u0438\u0441\u043A\u043E\u0432\u0438\u043A \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0438\u043B \u0437\u0430\u043F\u0440\u043E\u0441\u044B: ${lastBlockedHint}.` : lastBlockedHint && (ddgBlockedCount > 0 || hadFailures) ? `\u0427\u0430\u0441\u0442\u0438\u0447\u043D\u043E \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D\u043E \u043F\u043E\u0438\u0441\u043A\u043E\u0432\u0438\u043A\u043E\u043C: ${lastBlockedHint}` : null;
@@ -65319,13 +65692,15 @@ async function runSearchParserJob(jobId) {
         logMeta
       );
     }
-    await admin.from("search_parser_jobs").update({
+    await safeUpdateSearchJob(admin, jobId, {
       status: "completed",
       completed_at: (/* @__PURE__ */ new Date()).toISOString(),
       processed_queries: processedQueries,
       total_results: totalResults,
-      error_message: diagnostics.hint
-    }).eq("id", jobId);
+      error_message: diagnostics.hint,
+      progress_stage: "completed",
+      progress_percent: 100
+    });
     await trace?.end(
       { processedQueries, totalResults, hadFailures },
       `\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u043E: ${totalResults} \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432`
@@ -65339,11 +65714,12 @@ async function runSearchParserJob(jobId) {
   } catch (err) {
     console.error("Search parser worker failed:", err);
     if (supabaseAdmin) {
-      await supabaseAdmin.from("search_parser_jobs").update({
+      await safeUpdateSearchJob(supabaseAdmin, jobId, {
         status: "failed",
         error_message: err instanceof Error ? err.message : "Unknown error",
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      }).eq("id", jobId);
+        completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+        progress_stage: "failed"
+      });
     }
     void logError(
       "parser.search.job.failed",
@@ -66609,9 +66985,17 @@ async function startupRecovery() {
   const { data: hhJobs, error: hhErr } = await db.from("parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg, progress_stage: "failed" }).eq("status", "running").select("id");
   if (hhErr) log("warn", "Startup recovery: parser_jobs update failed", hhErr);
   else if (hhJobs?.length) log("info", `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
-  const { data: searchJobs, error: searchErr } = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg }).eq("status", "running").select("id");
-  if (searchErr) log("warn", "Startup recovery: search_parser_jobs update failed", searchErr);
-  else if (searchJobs?.length) log("info", `Startup recovery: marked ${searchJobs.length} search_parser_jobs as failed`);
+  const searchUpdate = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg, progress_stage: "failed" }).eq("status", "running").select("id");
+  const searchErr = searchUpdate.error;
+  if (searchErr?.code === "PGRST204" && (searchErr.message ?? "").includes("progress_stage")) {
+    const fallbackUpdate = await db.from("search_parser_jobs").update({ status: "failed", completed_at: now, error_message: errorMsg }).eq("status", "running").select("id");
+    if (fallbackUpdate.error) log("warn", "Startup recovery: search_parser_jobs update failed", fallbackUpdate.error);
+    else if (fallbackUpdate.data?.length) log("info", `Startup recovery: marked ${fallbackUpdate.data.length} search_parser_jobs as failed`);
+  } else if (searchUpdate.error) {
+    log("warn", "Startup recovery: search_parser_jobs update failed", searchUpdate.error);
+  } else if (searchUpdate.data?.length) {
+    log("info", `Startup recovery: marked ${searchUpdate.data.length} search_parser_jobs as failed`);
+  }
   const { data: enrichJobs, error: enrichErr } = await db.from("website_enrichment_jobs").update({ status: "pending" }).eq("status", "running").select("id");
   if (enrichErr) log("warn", "Startup recovery: website_enrichment_jobs update failed", enrichErr);
   else if (enrichJobs?.length) log("info", `Startup recovery: reset ${enrichJobs.length} website_enrichment_jobs to pending`);

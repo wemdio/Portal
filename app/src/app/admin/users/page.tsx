@@ -36,6 +36,11 @@ export default function UsersPage() {
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const [resettingUserId, setResettingUserId] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const [revealPassword, setRevealPassword] = useState(false);
+
   const fetchUsers = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -72,6 +77,76 @@ export default function UsersPage() {
       setLoading(false);
     }
   }, [fetchUsers]);
+
+  const getAccessToken = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token ?? null;
+  }, []);
+
+  const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
+    const token = await getAccessToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const res = await fetch(path, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers ?? {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `Request failed: ${res.status}`);
+    }
+
+    return (await res.json()) as T;
+  }, [getAccessToken]);
+
+  async function handleResetPassword() {
+    if (!resettingUserId) return;
+    const pw = newPassword.trim();
+    if (pw.length < 8) {
+      setError('Пароль должен быть минимум 8 символов');
+      return;
+    }
+    if (pw.length > 72) {
+      setError('Пароль слишком длинный (максимум 72 символа)');
+      return;
+    }
+
+    setResetting(true);
+    setError('');
+    try {
+      await apiFetch<{ ok: true }>(`/api/admin/users/${resettingUserId}/password`, {
+        method: 'POST',
+        body: JSON.stringify({ password: pw }),
+      });
+      void logAudit('admin.users.password.update.success', 'User password updated (client)', {
+        targetUserId: resettingUserId,
+      });
+      setResettingUserId(null);
+      setNewPassword('');
+      setRevealPassword(false);
+    } catch (err: unknown) {
+      void logError('admin.users.password.update.failed', err, { targetUserId: resettingUserId });
+      setError(getErrorMessage(err) || 'Ошибка обновления пароля');
+    } finally {
+      setResetting(false);
+    }
+  }
+
+  function generatePassword() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
+    const len = 14;
+    let out = '';
+    for (let i = 0; i < len; i += 1) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)] ?? '';
+    }
+    setNewPassword(out);
+    setRevealPassword(true);
+  }
 
   useEffect(() => {
     void checkAccess();
@@ -353,6 +428,18 @@ export default function UsersPage() {
                         >
                           ✎
                         </button>
+                        <button
+                          onClick={() => {
+                            setError('');
+                            setResettingUserId(user.id);
+                            setNewPassword('');
+                            setRevealPassword(false);
+                          }}
+                          className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                          title="Сменить пароль"
+                        >
+                          🔑
+                        </button>
                         {user.id !== currentUserId && (
                           <button
                             onClick={() => setDeletingUserId(user.id)}
@@ -511,6 +598,102 @@ export default function UsersPage() {
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center"
               >
                 {deleting ? 'Удаление...' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resettingUserId && (
+        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900">Сменить пароль</h3>
+              <button
+                onClick={() => {
+                  setResettingUserId(null);
+                  setNewPassword('');
+                  setRevealPassword(false);
+                  setError('');
+                }}
+                className="p-1 hover:bg-gray-100 rounded"
+                aria-label="Закрыть"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="text-sm text-gray-600">
+                Админ задаёт новый пароль пользователю. Сообщите пароль пользователю безопасным способом.
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Новый пароль <span className="text-red-500">*</span>
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type={revealPassword ? 'text' : 'password'}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Минимум 8 символов"
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setRevealPassword((v) => !v)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    title={revealPassword ? 'Скрыть' : 'Показать'}
+                  >
+                    {revealPassword ? 'Скрыть' : 'Показать'}
+                  </button>
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={generatePassword}
+                    className="text-sm text-blue-600 hover:text-blue-800"
+                  >
+                    Сгенерировать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        if (!newPassword.trim()) return;
+                        await navigator.clipboard.writeText(newPassword.trim());
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    className="text-sm text-gray-600 hover:text-gray-800"
+                    disabled={!newPassword.trim()}
+                  >
+                    Копировать
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setResettingUserId(null);
+                  setNewPassword('');
+                  setRevealPassword(false);
+                  setError('');
+                }}
+                className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={handleResetPassword}
+                disabled={resetting || newPassword.trim().length < 8}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {resetting ? 'Сохранение...' : 'Сохранить'}
               </button>
             </div>
           </div>
