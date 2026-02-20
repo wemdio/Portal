@@ -19,12 +19,12 @@ describe('searchQueryBuilder', () => {
   });
 
   describe('buildSearchQueries', () => {
-    it('fills missing categories and returns 8 queries', () => {
+    it('fills missing categories and returns 30 queries', () => {
       const queries = buildSearchQueries('', 'Маркетинговые агентства для SaaS');
-      expect(queries).toHaveLength(8);
+      expect(queries).toHaveLength(30);
       expect(queries.every((q) => q.trim().length > 0)).toBe(true);
       expect(new Set(queries.map((q) => q.toLowerCase())).size).toBe(queries.length);
-      expect(queries.some((q) => /(каталог|список|реестр|участник|тендер)/i.test(q))).toBe(true);
+      expect(queries.some((q) => /(каталог|список|реестр|участник|тендер|выставк|конференц)/i.test(q))).toBe(false);
       expect(queries.some((q) => /сайт/i.test(q))).toBe(true);
       expect(queries.some((q) => /(директор|ceo|закупк|коммерческ)/i.test(q))).toBe(true);
     });
