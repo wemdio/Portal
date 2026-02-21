@@ -214,12 +214,10 @@ export default function UsersPage() {
   async function handleUpdateRole(userId: string, newRole: UserRole) {
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ role: newRole })
-        .eq('id', userId);
-
-      if (error) throw error;
+      await apiFetch<{ ok: true }>(`/api/admin/users/${userId}/role`, {
+        method: 'POST',
+        body: JSON.stringify({ role: newRole }),
+      });
 
       setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
       setEditingUserId(null);

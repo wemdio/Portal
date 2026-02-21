@@ -1,143 +1,46 @@
 'use client';
 
-import { useState } from 'react';
-import { uploadCSV } from '@/lib/csvUpload';
 import Link from 'next/link';
-import { logAudit, logError } from '@/lib/loggerClient';
 import { AdminTracesPanel } from '@/components/AdminTracesPanel';
 import { useIsTma } from '@/lib/useIsTma';
 
 export default function AdminPage() {
   const isTma = useIsTma();
-  const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [status, setStatus] = useState<{ type: 'success' | 'error' | 'warning' | null; message: string; details?: string[] }>({ type: null, message: '' });
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setFile(e.target.files[0]);
-      setStatus({ type: null, message: '' });
-    }
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
-
-    setUploading(true);
-    setStatus({ type: null, message: '' });
-
-    try {
-      void logAudit('admin.csv.upload.start', 'CSV upload started', {
-        fileName: file.name,
-        fileSize: file.size,
-      });
-      const result = await uploadCSV(file);
-      if (result.count > 0) {
-        setStatus({ type: 'success', message: `Успешно импортировано проектов: ${result.count}` });
-        setFile(null);
-        void logAudit('admin.csv.upload.success', 'CSV upload completed', { count: result.count });
-      } else {
-        setStatus({ 
-          type: 'warning', 
-          message: 'Файл прочитан, но проекты не найдены. Возможно, не совпали заголовки.',
-          details: result.headers 
-        });
-        void logAudit('admin.csv.upload.empty', 'CSV upload completed with no rows', {
-          headers: result.headers ?? [],
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Ошибка при загрузке CSV';
-      void logError('admin.csv.upload.failed', error, { fileName: file.name, fileSize: file.size });
-      setStatus({ type: 'error', message });
-    } finally {
-      setUploading(false);
-    }
-  };
 
   return (
     <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
       <h1 className={`${isTma ? 'text-xl' : 'text-3xl'} font-bold mb-6 sm:mb-8 text-gray-900`}>Админ панель</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-        <Link 
+        <Link
           href="/admin/users"
           className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >
-          <div className="flex items-center mb-4">
-            <div className="ml-4">
-              <h2 className="text-lg font-semibold text-gray-900">Управление пользователями</h2>
-              <p className="text-sm text-gray-500">Создание пользователей и назначение ролей</p>
+          <div className="flex h-full flex-col">
+            <div className="flex items-center mb-4">
+              <div className="ml-4">
+                <h2 className="text-lg font-semibold text-gray-900">Управление пользователями</h2>
+                <p className="text-sm text-gray-500">Создание пользователей и назначение ролей</p>
+              </div>
             </div>
+            <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
           </div>
-          <p className="text-sm text-blue-600 font-medium">Перейти →</p>
         </Link>
 
-        <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-6'}`}>
-          <div className="flex items-center mb-4">
-            <div className="ml-4">
-              <h2 className="text-lg font-semibold text-gray-900">Импорт данных</h2>
-              <p className="text-sm text-gray-500">Загрузка проектов из CSV</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-6'}`}>
-        <h2 className="text-xl font-semibold mb-4 text-gray-900">Импорт проектов из CSV</h2>
-        <p className="text-gray-500 mb-6 text-sm">
-          Загрузите ваш Excel файл (сохраненный как CSV), чтобы заполнить базу данных.
-          <br/>Убедитесь, что первая строка содержит заголовки: Название, Статус проекта, Контролирует и т.д.
-        </p>
-
-        <div className={`flex items-center ${isTma ? 'flex-col gap-3' : 'space-x-4'}`}>
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handleFileChange}
-            className="block w-full text-sm text-gray-500
-              file:mr-4 file:py-2 file:px-4
-              file:rounded-md file:border-0
-              file:text-sm file:font-semibold
-              file:bg-blue-50 file:text-blue-700
-              hover:file:bg-blue-100"
-          />
-          <button
-            onClick={handleUpload}
-            disabled={!file || uploading}
-            className={`inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${isTma ? 'w-full' : ''}`}
-          >
-            {uploading ? 'Импорт...' : 'Загрузить данные'}
-          </button>
-        </div>
-
-        {status.type === 'success' && (
-          <div className="mt-4 p-4 rounded-md bg-green-50 border border-green-200 flex items-center text-green-700">
-            {status.message}
-          </div>
-        )}
-
-        {status.type === 'warning' && (
-          <div className="mt-4 p-4 rounded-md bg-yellow-50 border border-yellow-200 text-yellow-800">
-            <div className="flex items-center">
-              {status.message}
-            </div>
-            {status.details && (
-              <div className="mt-2 text-xs font-mono bg-yellow-100 p-2 rounded overflow-auto">
-                <p className="font-semibold">Обнаруженные заголовки в файле:</p>
-                <p>{status.details.join(', ')}</p>
-                <p className="mt-2 font-semibold">Ожидаемые (пример):</p>
-                <p>Название, Статус проекта, Контролирует...</p>
+        <Link
+          href="/admin/import"
+          className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
+        >
+          <div className="flex h-full flex-col">
+            <div className="flex items-center mb-4">
+              <div className="ml-4">
+                <h2 className="text-lg font-semibold text-gray-900">Импорт данных</h2>
+                <p className="text-sm text-gray-500">Загрузка проектов из CSV</p>
               </div>
-            )}
+            </div>
+            <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
           </div>
-        )}
-
-        {status.type === 'error' && (
-          <div className="mt-4 p-4 rounded-md bg-red-50 border border-red-200 flex items-center text-red-700">
-            {status.message}
-          </div>
-        )}
+        </Link>
       </div>
 
       <div className="mt-8">

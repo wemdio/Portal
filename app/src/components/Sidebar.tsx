@@ -9,6 +9,7 @@ import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems } from '@/lib/navigation';
+import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -33,6 +34,9 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userFullName, setUserFullName] = useState<string | null>(null);
+  const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
+  const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [tmaTheme, setTmaTheme] = useState<TmaTheme>(() => {
     if (typeof window === 'undefined') return 'dark';
@@ -44,11 +48,15 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   async function fetchUserRole(userId: string) {
     const { data } = await supabase
       .from('profiles')
-      .select('role')
+      .select('role, full_name, avatar_url')
       .eq('id', userId)
       .single();
 
-    return data?.role as UserRole | null;
+    return {
+      role: (data?.role as UserRole | null) ?? null,
+      full_name: typeof data?.full_name === 'string' ? data.full_name : null,
+      avatar_url: typeof data?.avatar_url === 'string' ? data.avatar_url : null,
+    };
   }
 
   useEffect(() => {
@@ -60,13 +68,17 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       if (!session) {
         setUserEmail(null);
         setUserRole(null);
+        setUserFullName(null);
+        setUserAvatarUrl(null);
         return;
       }
 
       setUserEmail(session.user.email ?? null);
-      const role = await fetchUserRole(session.user.id);
+      const profile = await fetchUserRole(session.user.id);
       if (!isMounted) return;
-      setUserRole(role);
+      setUserRole(profile.role);
+      setUserFullName(profile.full_name);
+      setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
     };
 
     void (async () => {
@@ -164,14 +176,72 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
         }`}
       >
-        <div className="mb-3 px-2">
-          <p className={`text-sm font-medium truncate ${isTma ? 'tma-text' : 'text-gray-900'}`} title={userEmail || ''}>
-            {userEmail?.split('@')[0] || 'User'}
-          </p>
-          <p className={`text-xs mt-0.5 ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
-            {userRole ? ROLE_LABELS[userRole] : '...'}
-          </p>
-        </div>
+        <Link
+          href={'/profile' as Route}
+          onClick={() => onMobileClose?.()}
+          className={`mb-3 flex items-center gap-3 rounded-xl px-2 py-2 transition ${
+            isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-gray-50'
+          }`}
+          aria-label="Открыть профиль"
+        >
+          {userAvatarUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={userAvatarUrl}
+              alt=""
+              className="h-10 w-10 rounded-full object-cover ring-1 ring-black/5"
+              onError={() => {
+                if (avatarTriedSigned) {
+                  setUserAvatarUrl(null);
+                  return;
+                }
+                setAvatarTriedSigned(true);
+                void (async () => {
+                  const { data: { session } } = await supabase.auth.getSession();
+                  const token = session?.access_token;
+                  if (!token) {
+                    setUserAvatarUrl(null);
+                    return;
+                  }
+                  const res = await fetch('/api/profile/avatar/signed', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${token}` },
+                  });
+                  if (!res.ok) {
+                    setUserAvatarUrl(null);
+                    return;
+                  }
+                  const data = (await res.json()) as { readUrl?: unknown };
+                  if (typeof data.readUrl === 'string' && data.readUrl.trim()) {
+                    setUserAvatarUrl(data.readUrl.trim());
+                  } else {
+                    setUserAvatarUrl(null);
+                  }
+                })();
+              }}
+            />
+          ) : (
+            <div
+              className={`h-10 w-10 rounded-full flex items-center justify-center text-sm font-bold ring-1 ring-black/5 ${
+                isTma ? 'tma-chip' : 'bg-gray-100 text-gray-700'
+              }`}
+              aria-hidden="true"
+            >
+              {(userFullName || userEmail?.split('@')[0] || 'U').slice(0, 1).toUpperCase()}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p
+              className={`text-sm font-medium truncate ${isTma ? 'tma-text' : 'text-gray-900'}`}
+              title={userFullName || userEmail || ''}
+            >
+              {userFullName || userEmail?.split('@')[0] || 'User'}
+            </p>
+            <p className={`text-xs mt-0.5 truncate ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
+              {userRole ? ROLE_LABELS[userRole] : '...'}
+            </p>
+          </div>
+        </Link>
         {isTma && (
           <div
             className="mb-3 rounded-xl border p-2"
