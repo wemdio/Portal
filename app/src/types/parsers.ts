@@ -36,10 +36,12 @@ export interface SearchParserJob {
   id: string;
   user_id: string;
   status: ParserJobStatus;
-  config: { queries: string[] };
+  config: { queries?: string[]; brief?: string };
   total_queries: number;
   processed_queries: number;
   total_results: number;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;

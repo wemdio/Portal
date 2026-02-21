@@ -2,84 +2,24 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Loader2, Sparkles, Play, Plus, Trash2, RefreshCcw } from 'lucide-react';
+import { Loader2, Play } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
 interface Props {
-  onStart: (queries: string[]) => void;
+  onStart: (brief: string) => void;
   busy: boolean;
 }
 
 export function SearchParserForm({ onStart, busy }: Props) {
   const [brief, setBrief] = useState('');
-  const [generating, setGenerating] = useState(false);
   const [pdfUploading, setPdfUploading] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
-  const [queries, setQueries] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [regeneratingQueryIndex, setRegeneratingQueryIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const getAccessToken = async () => {
     const { data: { session } } = await supabase.auth.getSession();
     return session?.access_token ?? null;
-  };
-
-  const handleGenerate = async () => {
-    if (!brief.trim()) return;
-    setGenerating(true);
-    setError(null);
-    try {
-      const token = await getAccessToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/parsers/search/generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ brief: brief.trim() }),
-      });
-      if (!res.ok) throw new Error('Failed to generate queries');
-      const data = await res.json();
-      if (data.queries && Array.isArray(data.queries)) {
-        setQueries(data.queries);
-      }
-    } catch {
-      setError('Ошибка генерации запросов. Попробуйте еще раз.');
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const handleRegenerateQuery = async (index: number) => {
-    if (!brief.trim()) return;
-    setRegeneratingQueryIndex(index);
-    setError(null);
-    try {
-      const token = await getAccessToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/parsers/search/generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ brief: brief.trim() }),
-      });
-      if (!res.ok) throw new Error('Failed to regenerate query');
-      const data = await res.json();
-      if (data.queries && Array.isArray(data.queries) && data.queries.length > 0) {
-        const newQuery = data.queries[0];
-        const nextQueries = [...queries];
-        nextQueries[index] = newQuery;
-        setQueries(nextQueries);
-      }
-    } catch {
-      setError('Ошибка перегенерации запроса. Попробуйте еще раз.');
-    } finally {
-      setRegeneratingQueryIndex(null);
-    }
   };
 
   const handlePdfUpload = async (file: File) => {
@@ -114,18 +54,13 @@ export function SearchParserForm({ onStart, busy }: Props) {
     }
   };
 
-  const addQuery = () => {
-    setQueries([...queries, '']);
-  };
-
-  const removeQuery = (index: number) => {
-    setQueries(queries.filter((_, i) => i !== index));
-  };
-
-  const updateQuery = (index: number, value: string) => {
-    const next = [...queries];
-    next[index] = value;
-    setQueries(next);
+  const handleStart = () => {
+    if (!brief.trim()) {
+      setError('Введите бриф или описание задачи.');
+      return;
+    }
+    setError(null);
+    onStart(brief.trim());
   };
 
   return (
@@ -133,7 +68,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
       <div>
         <h2 className="text-lg font-semibold text-gray-900">Поиск Google/Yandex</h2>
         <p className="text-sm text-gray-500 mt-1">
-          Генерация запросов на основе брифа и парсинг выдачи.
+          Сформируем 30 поисковых запросов автоматически и запустим парсинг.
         </p>
       </div>
 
@@ -172,86 +107,25 @@ export function SearchParserForm({ onStart, busy }: Props) {
           </div>
         </div>
 
-        <button
-          onClick={handleGenerate}
-          disabled={generating || !brief.trim()}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {generating ? (
-            <Loader2 className="animate-spin h-4 w-4 mr-2" />
-          ) : (
-            <Sparkles className="h-4 w-4 mr-2" />
-          )}
-          Сгенерировать запросы (AI)
-        </button>
-
         {error && (
           <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">
             {error}
           </div>
         )}
-
-        {queries.length > 0 && (
-          <div className="space-y-3 pt-4 border-t border-gray-100">
-            <div className="flex items-center justify-between">
-              <label className="block text-sm font-medium text-gray-700">
-                Поисковые запросы ({queries.length})
-              </label>
-              <button
-                onClick={addQuery}
-                className="text-sm text-blue-600 hover:text-blue-800 flex items-center"
-              >
-                <Plus className="h-4 w-4 mr-1" />
-                Добавить
-              </button>
-            </div>
-            
-            <div className="space-y-2">
-              {queries.map((q, idx) => (
-                <div key={idx} className="flex gap-2">
-                  <button
-                    onClick={() => handleRegenerateQuery(idx)}
-                    disabled={generating || regeneratingQueryIndex === idx || !brief.trim()}
-                    className="text-gray-400 hover:text-blue-500 p-2 disabled:opacity-50"
-                    title="Перегенерировать запрос"
-                  >
-                    {regeneratingQueryIndex === idx ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <RefreshCcw className="h-4 w-4" />
-                    )}
-                  </button>
-                  <input
-                    value={q}
-                    onChange={(e) => updateQuery(idx, e.target.value)}
-                    className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
-                  />
-                  <button
-                    onClick={() => removeQuery(idx)}
-                    className="text-gray-400 hover:text-red-500 p-2"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            <div className="pt-4">
-              <button
-                onClick={() => onStart(queries.filter(q => q.trim()))}
-                disabled={busy || queries.filter(q => q.trim()).length === 0}
-                className="w-full inline-flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl shadow-sm text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-              >
-                {busy ? (
-                  <Loader2 className="animate-spin h-5 w-5 mr-2" />
-                ) : (
-                  <Play className="h-5 w-5 mr-2" />
-                )}
-                Запустить парсинг
-              </button>
-            </div>
-          </div>
-        )}
+        <div className="pt-2">
+          <button
+            onClick={handleStart}
+            disabled={busy || !brief.trim()}
+            className="w-full inline-flex items-center justify-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl shadow-sm text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+          >
+            {busy ? (
+              <Loader2 className="animate-spin h-5 w-5 mr-2" />
+            ) : (
+              <Play className="h-5 w-5 mr-2" />
+            )}
+            Запустить парсинг
+          </button>
+        </div>
       </div>
     </div>
   );

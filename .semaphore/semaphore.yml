@@ -65,20 +65,41 @@ blocks:
             minutes: 120
           commands:
             - sudo apt-get update && sudo apt-get install -y sshpass
+            - >-
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
+              "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
             - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml drain-worker.sh ${USER}@${HOST}:/home/Portal/prod/'
             - >-
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "set -e; cd /home/Portal/prod/; chmod +x drain-worker.sh;
+              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
+              "set -e;
+              cd /home/Portal/prod;
+              chmod +x drain-worker.sh;
+              echo '--- Step 0: ensure deps (skip if already present) ---';
+              if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found; cannot auto-install deps' && exit 1; fi;
+              if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+                sudo -n apt-get update;
+                sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 ca-certificates;
+              fi;
+              if ! command -v docker >/dev/null 2>&1 || ! sudo -n docker compose version >/dev/null 2>&1; then
+                echo '[deps] Installing Docker + Compose plugin (get.docker.com)...';
+                sudo -n curl -fsSL https://get.docker.com -o /tmp/get-docker.sh;
+                sudo -n sh /tmp/get-docker.sh;
+                sudo -n systemctl enable --now docker >/dev/null 2>&1 || true;
+              else
+                echo '[deps] Docker + Compose already installed — skipping';
+              fi;
               echo '--- Step 1: drain worker (wait for current job to finish) ---';
-              sudo bash drain-worker.sh;
+              sudo -n bash drain-worker.sh;
               echo '--- Step 2: pull new images ---';
-              echo '${DOCKER_PASSWORD}' | sudo docker login -u '${DOCKER_USERNAME}' --password-stdin;
-              sudo docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker;
+              sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker;
               echo '--- Step 3: restart portal + yandexmaps ---';
-              sudo docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo docker rm -f;
-              sudo docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo docker rm -f;
-              sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps;
+              sudo -n docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo -n docker rm -f;
+              sudo -n docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo -n docker rm -f;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps;
               echo '--- Step 4: restart worker with new code ---';
-              sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker;
-              sudo docker image prune -f; sudo docker volume prune -f;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker;
+              sudo -n docker image prune -f;
+              sudo -n docker volume prune -f;
               echo '--- Deploy complete ---'"
 

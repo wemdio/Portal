@@ -21,12 +21,23 @@ export async function GET(
   if (!user) return jsonError('Unauthorized', 401);
 
   const { id } = await params;
+  const after = req.nextUrl.searchParams.get('after')?.trim() || null;
   
-  const { data: results, error } = await supabase
-    .from('search_results')
-    .select('*')
-    .eq('job_id', id)
-    .order('created_at', { ascending: true });
+  // Ensure the job belongs to the current user.
+  const { data: job, error: jobError } = await supabase
+    .from('search_parser_jobs')
+    .select('id,user_id')
+    .eq('id', id)
+    .single();
+  if (jobError || !job) return jsonError('Not found', 404);
+  if (job.user_id !== user.id) return jsonError('Forbidden', 403);
+
+  let query = supabase.from('search_results').select('*').eq('job_id', id);
+  if (after) {
+    // incremental mode: return only rows created after the last seen timestamp
+    query = query.gt('created_at', after);
+  }
+  const { data: results, error } = await query.order('created_at', { ascending: true });
 
   if (error) {
     return jsonError(error.message, 500);

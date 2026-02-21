@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
@@ -38,8 +38,19 @@ const DEFAULT_CAPACITY = 4;
 const MANAGER_ROLES = new Set<UserRole>(['manager', 'director', 'admin']);
 const SPECIALIST_ROLES = new Set<UserRole>(['technician', 'marketer', 'sales']);
 
+type SortDir = 'asc' | 'desc';
+type SpecialistSortKey = 'name' | 'status' | 'fact' | 'prep' | 'plan' | 'load';
+type ManagerSortKey = SpecialistSortKey;
+
+type SortState<K extends string> = { key: K; dir: SortDir } | null;
+
 function normalizeAssigneeName(value: string | null | undefined): string {
   return value?.trim() || '';
+}
+
+function nextSort<K extends string>(prev: SortState<K>, key: K, defaultDir: SortDir): SortState<K> {
+  if (!prev || prev.key !== key) return { key, dir: defaultDir };
+  return { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
 }
 
 export default function TeamPage() {
@@ -48,6 +59,8 @@ export default function TeamPage() {
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
   const [capacities, setCapacities] = useState<Record<string, number>>({});
+  const [specialistSort, setSpecialistSort] = useState<SortState<SpecialistSortKey>>({ key: 'fact', dir: 'desc' });
+  const [managerSort, setManagerSort] = useState<SortState<ManagerSortKey>>({ key: 'fact', dir: 'desc' });
 
   useEffect(() => {
     void fetchData();
@@ -174,12 +187,8 @@ export default function TeamPage() {
       }
     });
 
-    const specialists = Array.from(statsMap.values()).sort(
-      (a, b) => b.fact - a.fact || a.name.localeCompare(b.name, 'ru-RU'),
-    );
-    const managers = Array.from(managerMap.values()).sort(
-      (a, b) => b.fact - a.fact || a.name.localeCompare(b.name, 'ru-RU'),
-    );
+    const specialists = Array.from(statsMap.values());
+    const managers = Array.from(managerMap.values());
 
     return { specialists, managers };
   }, [projects, profiles, capacities]);
@@ -195,6 +204,85 @@ export default function TeamPage() {
     if (ratio < 0.7) return { label: 'Свободен', color: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' };
     return { label: 'Норма', color: 'text-blue-700 bg-blue-50 ring-blue-600/20' };
   };
+
+  const getLoadScore = (fact: number, plan: number) => {
+    const ratio = fact / plan;
+    if (ratio > 1.1) return 2; // Перегруз
+    if (ratio < 0.7) return 0; // Свободен
+    return 1; // Норма
+  };
+
+  const sortedManagers = useMemo(() => {
+    const base = [...specialistStats.managers];
+    const s = managerSort;
+    if (!s) return base;
+
+    const dirMul = s.dir === 'asc' ? 1 : -1;
+    base.sort((a, b) => {
+      switch (s.key) {
+        case 'name':
+          return dirMul * a.name.localeCompare(b.name, 'ru-RU');
+        case 'fact':
+          return dirMul * (a.fact - b.fact) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'prep':
+          return dirMul * (a.prep - b.prep) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'plan':
+          return dirMul * (a.plan - b.plan) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'load': {
+          const la = a.plan > 0 ? a.fact / a.plan : 0;
+          const lb = b.plan > 0 ? b.fact / b.plan : 0;
+          return dirMul * (la - lb) || a.name.localeCompare(b.name, 'ru-RU');
+        }
+        case 'status':
+          return dirMul * (getLoadScore(a.fact, a.plan) - getLoadScore(b.fact, b.plan)) || a.name.localeCompare(b.name, 'ru-RU');
+        default:
+          return 0;
+      }
+    });
+    return base;
+  }, [specialistStats.managers, managerSort]);
+
+  const sortedSpecialists = useMemo(() => {
+    const base = [...specialistStats.specialists];
+    const s = specialistSort;
+    if (!s) return base;
+
+    const dirMul = s.dir === 'asc' ? 1 : -1;
+    base.sort((a, b) => {
+      switch (s.key) {
+        case 'name':
+          return dirMul * a.name.localeCompare(b.name, 'ru-RU');
+        case 'fact':
+          return dirMul * (a.fact - b.fact) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'prep':
+          return dirMul * (a.prep - b.prep) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'plan':
+          return dirMul * (a.plan - b.plan) || a.name.localeCompare(b.name, 'ru-RU');
+        case 'load': {
+          const la = a.plan > 0 ? a.fact / a.plan : 0;
+          const lb = b.plan > 0 ? b.fact / b.plan : 0;
+          return dirMul * (la - lb) || a.name.localeCompare(b.name, 'ru-RU');
+        }
+        case 'status':
+          return dirMul * (getLoadScore(a.fact, a.plan) - getLoadScore(b.fact, b.plan)) || a.name.localeCompare(b.name, 'ru-RU');
+        default:
+          return 0;
+      }
+    });
+    return base;
+  }, [specialistStats.specialists, specialistSort]);
+
+  const sortIndicator = (active: boolean, dir: SortDir) => {
+    if (!active) return null;
+    return (
+      <span aria-hidden="true" className="ml-1 text-[10px] text-gray-400">
+        {dir === 'asc' ? '▲' : '▼'}
+      </span>
+    );
+  };
+
+  const headerButtonClass =
+    'inline-flex items-center gap-1 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700 select-none';
 
   if (loading) {
     return (
@@ -278,26 +366,76 @@ export default function TeamPage() {
           <table className="min-w-full divide-y divide-gray-100">
             <thead className="bg-gray-50/50">
               <tr>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left text-xs font-semibold text-gray-500 uppercase tracking-wider`}>Лид</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>Статус</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left`}>
+                  <button
+                    type="button"
+                    onClick={() => setManagerSort((prev) => nextSort(prev, 'name', 'asc'))}
+                    className={headerButtonClass}
+                  >
+                    Лид
+                    {sortIndicator(managerSort?.key === 'name', managerSort?.dir ?? 'asc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
+                  <button
+                    type="button"
+                    onClick={() => setManagerSort((prev) => nextSort(prev, 'status', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    Статус
+                    {sortIndicator(managerSort?.key === 'status', managerSort?.dir ?? 'desc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
                   <div className="flex flex-col items-center gap-1">
-                    <span>Факт</span>
+                    <button
+                      type="button"
+                      onClick={() => setManagerSort((prev) => nextSort(prev, 'fact', 'desc'))}
+                      className={headerButtonClass}
+                    >
+                      Факт
+                      {sortIndicator(managerSort?.key === 'fact', managerSort?.dir ?? 'desc')}
+                    </button>
                     <span className="text-[10px] normal-case text-gray-400">В работе</span>
                   </div>
                 </th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
                   <div className="flex flex-col items-center gap-1">
-                    <span>Преп</span>
+                    <button
+                      type="button"
+                      onClick={() => setManagerSort((prev) => nextSort(prev, 'prep', 'desc'))}
+                      className={headerButtonClass}
+                    >
+                      Преп
+                      {sortIndicator(managerSort?.key === 'prep', managerSort?.dir ?? 'desc')}
+                    </button>
                     <span className="text-[10px] normal-case text-gray-400">Подготовка</span>
                   </div>
                 </th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>План (Max)</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-48`}>Загрузка</th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
+                  <button
+                    type="button"
+                    onClick={() => setManagerSort((prev) => nextSort(prev, 'plan', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    План (Max)
+                    {sortIndicator(managerSort?.key === 'plan', managerSort?.dir ?? 'desc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left w-48`}>
+                  <button
+                    type="button"
+                    onClick={() => setManagerSort((prev) => nextSort(prev, 'load', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    Загрузка
+                    {sortIndicator(managerSort?.key === 'load', managerSort?.dir ?? 'desc')}
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 bg-white">
-              {specialistStats.managers.map((stat) => {
+              {sortedManagers.map((stat) => {
                 const status = getLoadStatus(stat.fact, stat.plan);
                 const loadPercent = Math.min(100, Math.round((stat.fact / stat.plan) * 100));
                 
@@ -379,26 +517,76 @@ export default function TeamPage() {
           <table className="min-w-full divide-y divide-gray-100">
             <thead className="bg-gray-50/50">
               <tr>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left text-xs font-semibold text-gray-500 uppercase tracking-wider`}>Специалист</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>Статус</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left`}>
+                  <button
+                    type="button"
+                    onClick={() => setSpecialistSort((prev) => nextSort(prev, 'name', 'asc'))}
+                    className={headerButtonClass}
+                  >
+                    Специалист
+                    {sortIndicator(specialistSort?.key === 'name', specialistSort?.dir ?? 'asc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
+                  <button
+                    type="button"
+                    onClick={() => setSpecialistSort((prev) => nextSort(prev, 'status', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    Статус
+                    {sortIndicator(specialistSort?.key === 'status', specialistSort?.dir ?? 'desc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
                   <div className="flex flex-col items-center gap-1">
-                    <span>Факт</span>
+                    <button
+                      type="button"
+                      onClick={() => setSpecialistSort((prev) => nextSort(prev, 'fact', 'desc'))}
+                      className={headerButtonClass}
+                    >
+                      Факт
+                      {sortIndicator(specialistSort?.key === 'fact', specialistSort?.dir ?? 'desc')}
+                    </button>
                     <span className="text-[10px] normal-case text-gray-400">В работе</span>
                   </div>
                 </th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
                   <div className="flex flex-col items-center gap-1">
-                    <span>Преп</span>
+                    <button
+                      type="button"
+                      onClick={() => setSpecialistSort((prev) => nextSort(prev, 'prep', 'desc'))}
+                      className={headerButtonClass}
+                    >
+                      Преп
+                      {sortIndicator(specialistSort?.key === 'prep', specialistSort?.dir ?? 'desc')}
+                    </button>
                     <span className="text-[10px] normal-case text-gray-400">Подготовка</span>
                   </div>
                 </th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center text-xs font-semibold text-gray-500 uppercase tracking-wider`}>План (Max)</th>
-                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-48`}>Загрузка</th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-center`}>
+                  <button
+                    type="button"
+                    onClick={() => setSpecialistSort((prev) => nextSort(prev, 'plan', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    План (Max)
+                    {sortIndicator(specialistSort?.key === 'plan', specialistSort?.dir ?? 'desc')}
+                  </button>
+                </th>
+                <th className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} text-left w-48`}>
+                  <button
+                    type="button"
+                    onClick={() => setSpecialistSort((prev) => nextSort(prev, 'load', 'desc'))}
+                    className={headerButtonClass}
+                  >
+                    Загрузка
+                    {sortIndicator(specialistSort?.key === 'load', specialistSort?.dir ?? 'desc')}
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 bg-white">
-              {specialistStats.specialists.map((stat) => {
+              {sortedSpecialists.map((stat) => {
                 const status = getLoadStatus(stat.fact, stat.plan);
                 const loadPercent = Math.min(100, Math.round((stat.fact / stat.plan) * 100));
                 

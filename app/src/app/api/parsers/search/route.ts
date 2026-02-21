@@ -38,18 +38,28 @@ export async function POST(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
 
   try {
-    const { queries } = await req.json();
-    if (!queries || !Array.isArray(queries) || queries.length === 0) {
-      return jsonError('Missing or empty queries', 400);
+    const payload = await req.json();
+    const queries =
+      Array.isArray(payload?.queries) ? payload.queries.filter((q: unknown) => typeof q === 'string' && q.trim()) : [];
+    const brief = typeof payload?.brief === 'string' ? payload.brief.trim() : '';
+    const hasQueries = queries.length > 0;
+
+    if (!hasQueries && !brief) {
+      return jsonError('Missing brief or queries', 400);
     }
+
+    const config = {
+      ...(brief ? { brief } : {}),
+      ...(hasQueries ? { queries } : {}),
+    };
 
     const { data: job, error } = await supabase
       .from('search_parser_jobs')
       .insert({
         user_id: user.id,
         status: 'pending',
-        config: { queries },
-        total_queries: queries.length,
+        config,
+        total_queries: hasQueries ? queries.length : 0,
       })
       .select()
       .single();

@@ -11,23 +11,23 @@ RUN npm ci --ignore-scripts
 # Install Chromium + system dependencies
 RUN npx playwright install chromium --with-deps
 
-# Stage 2: Build worker bundle with esbuild
+# Stage 2: Build worker bundles with esbuild
 FROM node:20-slim AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY app/ ./
 
-# Bundle worker into a single JS file.
+# Bundle workers into JS files.
 # --conditions=react-server: makes server-only resolve to empty module,
 # so loggerServer, tracer, supabaseAdmin etc. work fine outside Next.js.
 # --external:playwright: keep playwright as a runtime require (native binaries).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN node_modules/.bin/esbuild worker/index.ts \
+RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts \
   --bundle \
   --platform=node \
   --target=node20 \
-  --outfile=dist/worker.js \
+  --outdir=dist/workers \
   --tsconfig=tsconfig.json \
   --conditions=react-server \
   --external:playwright \
@@ -48,9 +48,10 @@ RUN npx playwright install-deps chromium
 # Runtime node_modules (for Playwright native modules)
 COPY --from=deps /app/node_modules ./node_modules
 
-# Compiled worker bundle
-COPY --from=builder /app/dist/worker.js ./worker.js
+# Compiled worker bundles
+COPY --from=builder /app/dist/workers ./workers
 
 USER worker
 
-CMD ["node", "worker.js"]
+ENV WORKER_KIND=all
+CMD ["node", "workers/runner.js"]

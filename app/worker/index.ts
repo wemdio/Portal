@@ -55,13 +55,25 @@ async function startupRecovery(): Promise<void> {
   else if (hhJobs?.length) log('info', `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
 
   // Search parser
-  const { data: searchJobs, error: searchErr } = await db
+  const searchUpdate = await db
     .from('search_parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg })
+    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
     .eq('status', 'running')
     .select('id');
-  if (searchErr) log('warn', 'Startup recovery: search_parser_jobs update failed', searchErr);
-  else if (searchJobs?.length) log('info', `Startup recovery: marked ${searchJobs.length} search_parser_jobs as failed`);
+  const searchErr = searchUpdate.error as { code?: string; message?: string } | null;
+  if (searchErr?.code === 'PGRST204' && (searchErr.message ?? '').includes("progress_stage")) {
+    const fallbackUpdate = await db
+      .from('search_parser_jobs')
+      .update({ status: 'failed', completed_at: now, error_message: errorMsg })
+      .eq('status', 'running')
+      .select('id');
+    if (fallbackUpdate.error) log('warn', 'Startup recovery: search_parser_jobs update failed', fallbackUpdate.error);
+    else if (fallbackUpdate.data?.length) log('info', `Startup recovery: marked ${fallbackUpdate.data.length} search_parser_jobs as failed`);
+  } else if (searchUpdate.error) {
+    log('warn', 'Startup recovery: search_parser_jobs update failed', searchUpdate.error);
+  } else if (searchUpdate.data?.length) {
+    log('info', `Startup recovery: marked ${searchUpdate.data.length} search_parser_jobs as failed`);
+  }
 
   // Website enrichment — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
   const { data: enrichJobs, error: enrichErr } = await db
