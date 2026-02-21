@@ -48,6 +48,7 @@ const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENC
 const DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL_MS ?? String(24 * 60 * 60 * 1000));
 const JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? '2000');
 const SUPABASE_QUERY_TIMEOUT_MS = 30_000;
+const GREYLIST_DELAY_MS = Number(process.env.EMAIL_VALIDATION_GREYLIST_DELAY_MS ?? String(5 * 60 * 1000));
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -182,12 +183,18 @@ async function countQueue(jobId: string, status: QueueStatus): Promise<number> {
   } catch { return 0; }
 }
 
+function isGreylistError(error: string | undefined): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return lower.includes('greylist') || lower.includes('временн') || lower.includes('450') || lower.includes('451');
+}
+
 function shouldRetry(error: string | undefined, attempts: number): boolean {
   if (attempts >= MAX_ATTEMPTS) return false;
   if (!error) return false;
   const retryable = [
     'greylist', 'timeout', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED',
-    'EHOSTUNREACH', 'ENETUNREACH', 'временн',
+    'EHOSTUNREACH', 'ENETUNREACH', 'временн', '450', '451',
   ];
   const lower = error.toLowerCase();
   return retryable.some((k) => lower.includes(k.toLowerCase()));
@@ -333,9 +340,12 @@ export async function runEmailValidationJob(jobId: string) {
 
             const result = await validateEmail(item.email_normalized, domainCache);
 
-            // Greylisting: re-queue for retry
             if (result.error && result.result === 'unknown' && shouldRetry(result.error, item.attempt_count)) {
-              await requeueItem(item);
+              const greylist = isGreylistError(result.error);
+              if (greylist) {
+                workerLog('info', `Greylisting detected for ${item.email_normalized}, retry in ${GREYLIST_DELAY_MS / 1000}s`);
+              }
+              await requeueItem(item, greylist);
               return;
             }
 
@@ -349,7 +359,7 @@ export async function runEmailValidationJob(jobId: string) {
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'Ошибка валидации';
             if (shouldRetry(msg, item.attempt_count)) {
-              await requeueItem(item);
+              await requeueItem(item, isGreylistError(msg));
             } else {
               await updateQueueItemResult(item, null, 'failed', msg);
               errors += 1;
@@ -466,12 +476,17 @@ async function updateQueueItemResult(
   }
 }
 
-async function requeueItem(item: QueueItem): Promise<void> {
+async function requeueItem(item: QueueItem, greylist = false): Promise<void> {
   if (!supabaseAdmin) return;
   try {
+    const now = new Date().toISOString();
+    const update: Record<string, unknown> = { status: 'pending', updated_at: now };
+    if (greylist) {
+      update.retry_after = new Date(Date.now() + GREYLIST_DELAY_MS).toISOString();
+    }
     await supabaseAdmin
       .from('email_validation_queue')
-      .update({ status: 'pending', updated_at: new Date().toISOString() })
+      .update(update)
       .eq('id', item.id);
   } catch {
     // Non-critical
