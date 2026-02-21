@@ -123,6 +123,26 @@ npm start
 docker-compose -f docker-compose.prod.yml up -d
 ```
 
+## Парсеры: масштабирование и безопасный роллаут
+
+### Двухэтапное включение конкурентности
+
+1. Этап A: задеплоить безопасные изменения (атомарный claim, конфиг), держать конкурентность низкой.
+2. Этап B: повышать конкурентность постепенно, наблюдая стабильность.
+
+### Где настраивается конкурентность (в коде)
+
+- Worker-конкурентность: `MAX_CONCURRENCY` в `app/worker/hh.ts`, `app/worker/search.ts`, `app/worker/enrich.ts`, `app/worker/yandexmaps.ts`
+- Search-конкурентность внутри job: `SEARCH_CONFIG` в `app/src/lib/config.ts`
+- YandexMaps сервис: `YANDEXMAPS_CONCURRENCY` (Semaphore) в `services/yandexmaps/server.py`
+
+### Чеклист после повышения
+
+- Нет дублей выполнения job под нагрузкой.
+- Среднее время job снижается, success rate приемлемый.
+- Ошибки Supabase и блокировки провайдеров не растут.
+- Запас RAM стабильно >20–30%.
+
 ## Telegram Mini App (TMA)
 
 ### Требования

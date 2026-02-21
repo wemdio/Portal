@@ -160,8 +160,15 @@ async function claimEnrichJob(): Promise<string | null> {
 
   if (!pending) return null;
 
-  // Enrichment runner handles its own 'pending' → 'running' transition
-  return pending.id;
+  const { data: claimed } = await db
+    .from('website_enrichment_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
 }
 
 async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
@@ -181,8 +188,19 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
 
   if (!pending) return null;
 
-  const stage = (pending.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
-  return { id: pending.id as string, stage };
+  const { data: claimed } = await db
+    .from('yandex_maps_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .eq('progress_stage', pending.progress_stage)
+    .select('id, progress_stage')
+    .maybeSingle();
+
+  if (!claimed) return null;
+
+  const stage = (claimed.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
+  return { id: claimed.id as string, stage };
 }
 
 // --------------------------------------------------------------------------
