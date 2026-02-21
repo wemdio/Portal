@@ -65,26 +65,9 @@ export function checkSyntax(email: string): { valid: boolean; error?: string } {
 
 // ─── 3. Disposable Provider Detection ───────────────────────────────────────
 
-import disposableDomainsList from 'disposable-email/domains.json';
+import disposableDomainsList from './disposableDomains.json';
 
-const EXTRA_DISPOSABLE_DOMAINS = [
-  'guerrillamail.com','guerrillamail.net','guerrillamail.info','guerrillamail.biz',
-  'guerrillamail.de','guerrillamailblock.com','sharklasers.com','grr.la',
-  'tempail.com','tempr.email','mytemp.email','temp-mail.io','tmpmail.org',
-  'tmpmail.net','tmail.ws','mt2015.com','thankyou2010.com','mailzilla.com',
-  'mailzilla.org','emkei.cz','anonymbox.com','rmqkr.net','emailigo.de',
-  'antichef.net','binkmail.com','chammy.info','devnullmail.com','getairmail.com',
-  'ichimail.com','killmail.com','mobi.web.id','nwldx.com','pjjkp.com',
-  'rootfest.net','shieldemail.com','sogetthis.com','spambob.net','spambog.com',
-  'spamfree24.org','urhen.com','wuzup.net','zoemail.org','damnthespam.com',
-  'einrot.com','flurred.com','imstations.com','mailnator.com','cuvox.de',
-  'jourrapide.com','superrito.com','armyspy.com','gustr.com','rhyta.com',
-];
-
-const DISPOSABLE_DOMAINS = new Set([
-  ...(disposableDomainsList as string[]),
-  ...EXTRA_DISPOSABLE_DOMAINS,
-]);
+const DISPOSABLE_DOMAINS = new Set(disposableDomainsList as string[]);
 
 export function isDisposable(domain: string): boolean {
   return DISPOSABLE_DOMAINS.has(domain.toLowerCase());

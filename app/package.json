@@ -34,7 +34,6 @@
     "cheerio": "^1.2.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
-    "disposable-email": "^0.2.3",
     "docx": "^9.5.3",
     "dotenv": "^17.2.3",
     "file-saver": "^2.0.5",
