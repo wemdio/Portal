@@ -181,6 +181,17 @@ type EmailScrapingState = {
   jobId: string | null;
 };
 
+type EmailValidationState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isValidating: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+  jobId: string | null;
+};
+
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -205,6 +216,9 @@ const SITE_AVAILABILITY_BATCH_SIZE = 50;
 const SITE_AVAILABILITY_MAX_RETRIES = 2;
 const SITE_AVAILABILITY_RETRY_BASE_DELAY = 1200;
 const SITE_AVAILABILITY_HIGHLIGHT_DURATION = 2500;
+const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
+const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
+const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 32;
 const VIRTUAL_OVERSCAN = 10;
@@ -747,6 +761,17 @@ export function DatabaseSpreadsheet() {
     jobId: null,
   });
   const emailScrapingAbortRef = useRef<AbortController | null>(null);
+  const [emailValidation, setEmailValidation] = useState<EmailValidationState>({
+    isOpen: false,
+    sourceCol: 0,
+    isValidating: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+    jobId: null,
+  });
+  const emailValidationAbortRef = useRef<AbortController | null>(null);
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -4256,6 +4281,243 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Email Validation (Валидация почт) ──────────────────────────────
+
+  const openEmailValidationModal = () => {
+    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null }));
+  };
+
+  const closeEmailValidationModal = () => {
+    setEmailValidation((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleStopEmailValidation = async () => {
+    if (!emailValidation.isValidating || !emailValidation.jobId) return;
+    if (!window.confirm('Остановить валидацию почт? Уже проверенные результаты сохранятся.')) return;
+    const jobId = emailValidation.jobId;
+    if (emailValidationAbortRef.current) emailValidationAbortRef.current.abort();
+
+    const token = await getFreshToken();
+    if (token) {
+      try {
+        await fetch(`/api/email-validation/jobs/${jobId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ action: 'cancel' }),
+        });
+      } catch { /* ignore */ }
+    }
+    setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
+    setLastAction({ message: 'Валидация почт остановлена', time: Date.now() });
+  };
+
+  const handleStartEmailValidation = async () => {
+    if (!activeTab || emailValidation.isValidating) return;
+
+    const rowsToProcess: { rowIndex: number; email: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const email = String(activeTab.data[i]?.[emailValidation.sourceCol] ?? '').trim();
+      if (!email) continue;
+      rowsToProcess.push({ rowIndex: i, email });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setEmailValidation((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setEmailValidation((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    emailValidationAbortRef.current = new AbortController();
+
+    setEmailValidation((prev) => ({
+      ...prev,
+      isValidating: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Валидация почт');
+
+    const sourceLabel = headerLabels[emailValidation.sourceCol] || toColumnLabel(emailValidation.sourceCol);
+    const startCol = activeTab.data[0].length;
+    const resultColIndex = startCol;
+    const qualityColIndex = startCol + 1;
+    const detailsColIndex = startCol + 2;
+
+    const baseData = activeTab.data.map((row, rowIdx) => {
+      const extended = [...row];
+      while (extended.length <= detailsColIndex) extended.push('');
+      if (rowIdx === 0) {
+        extended[resultColIndex] = `Результат (${sourceLabel})`;
+        extended[qualityColIndex] = `Качество`;
+        extended[detailsColIndex] = `Детали`;
+      }
+      return extended;
+    });
+
+    setTabs((prev) =>
+      prev.map((t) => (t.id === activeTab.id ? { ...t, data: baseData } : t)),
+    );
+
+    try {
+      const startRes = await fetch('/api/email-validation/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+        body: JSON.stringify({ rows: rowsToProcess }),
+        signal: emailValidationAbortRef.current?.signal,
+      });
+
+      const startData = await parseJsonResponse<{
+        job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
+      }>(startRes, 'email_validation.start');
+
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу валидации');
+      }
+
+      const jobId = startData.job_id;
+      const total = startData.total ?? rowsToProcess.length;
+
+      setEmailValidation((prev) => ({
+        ...prev,
+        isOpen: false,
+        isValidating: true,
+        jobId,
+        totalRows: total,
+        currentRow: startData.processed ?? 0,
+        progress: total > 0 ? Math.round(((startData.processed ?? 0) / total) * 100) : 0,
+      }));
+
+      // Poll for results
+      let resultCursor: string | null = null;
+      let consecutiveErrors = 0;
+      let lastProgressTime = Date.now();
+      let token = currentToken;
+      const signal = emailValidationAbortRef.current?.signal;
+
+      const RESULT_LABELS: Record<string, string> = {
+        ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
+        catch_all: 'Catch-All', unknown: 'Неизвестно',
+      };
+      const QUALITY_LABELS: Record<string, string> = {
+        good: 'Хороший', bad: 'Плохой', risky: 'Рискованный',
+      };
+
+      while (true) {
+        if (signal?.aborted) throw new Error('AbortError');
+        await new Promise((r) => setTimeout(r, EMAIL_VALIDATION_PROGRESS_INTERVAL_MS));
+
+        const fetchResults = (tkn: string) =>
+          fetch(
+            `/api/email-validation/jobs/${jobId}/results?cursor=${encodeURIComponent(resultCursor ?? '')}&limit=500`,
+            { headers: { Authorization: `Bearer ${tkn}` }, signal },
+          );
+
+        let res = await fetchResults(token);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) { token = refreshed; res = await fetchResults(token); }
+          else throw new Error('Сессия истекла. Войдите заново.');
+        }
+
+        if (!res.ok) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES) {
+            throw new Error('Слишком много ошибок API подряд');
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        consecutiveErrors = 0;
+
+        const data = await parseJsonResponse<{
+          job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+          results: Array<{
+            row_index: number; result: string | null; quality: string | null;
+            is_free: boolean; is_role: boolean; is_disposable: boolean; is_catch_all: boolean;
+            did_you_mean: string | null; status: string; last_error: string | null;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'email_validation.results');
+
+        if (data.results && data.results.length > 0) {
+          lastProgressTime = Date.now();
+          setTabs((prev) =>
+            prev.map((t) => {
+              if (t.id !== activeTab.id) return t;
+              const newData = t.data.map((row) => [...row]);
+              for (const r of data.results) {
+                if (r.row_index >= 0 && r.row_index < newData.length) {
+                  while (newData[r.row_index].length <= detailsColIndex) newData[r.row_index].push('');
+
+                  const resultText = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
+                  const qualityText = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
+
+                  const detailParts: string[] = [];
+                  if (r.is_free) detailParts.push('Free');
+                  if (r.is_role) detailParts.push('Role');
+                  if (r.is_disposable) detailParts.push('Disposable');
+                  if (r.is_catch_all) detailParts.push('Catch-All');
+                  if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
+                  if (r.last_error && r.status === 'failed') detailParts.push(r.last_error);
+
+                  newData[r.row_index][resultColIndex] = resultText;
+                  newData[r.row_index][qualityColIndex] = qualityText;
+                  newData[r.row_index][detailsColIndex] = detailParts.join('; ');
+                }
+              }
+              return { ...t, data: newData };
+            }),
+          );
+        }
+
+        if (data.next_cursor) resultCursor = data.next_cursor;
+
+        const processed = data.job?.processed ?? 0;
+        const jobTotal = data.job?.total ?? total;
+        setEmailValidation((prev) => ({
+          ...prev,
+          currentRow: Math.min(processed, jobTotal),
+          progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+        }));
+
+        const jobStatus = data.job?.status;
+        if (jobStatus === 'completed' || jobStatus === 'failed' || jobStatus === 'cancelled') break;
+
+        if (Date.now() - lastProgressTime > EMAIL_VALIDATION_STALL_TIMEOUT_MS) {
+          throw new Error('Валидация зависла: нет прогресса');
+        }
+      }
+
+      setEmailValidation((prev) => ({ ...prev, isValidating: false, jobId: null }));
+      setLastAction({ message: `Валидация почт завершена`, time: Date.now() });
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'AbortError')) {
+        setLastAction({ message: 'Валидация почт отменена', time: Date.now() });
+        setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Произошла ошибка';
+        setEmailValidation((prev) => ({
+          ...prev,
+          error: errorMsg,
+          isValidating: false,
+          isOpen: true,
+          jobId: null,
+        }));
+        setLastAction({ message: `Валидация почт: ошибка — ${errorMsg}`, time: Date.now() });
+      }
+    } finally {
+      emailValidationAbortRef.current = null;
+    }
+  };
+
   // ── Name Cleanup (Очистка названий) ──────────────────────────────
 
   const openNameCleanupModal = () => {
@@ -4864,6 +5126,15 @@ export function DatabaseSpreadsheet() {
           className="inline-flex items-center rounded bg-rose-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-rose-700 disabled:bg-gray-300"
         >
           {emailScraping.isGenerating ? `Почты... ${emailScraping.progress}%` : 'Найти почты'}
+        </button>
+
+        <button
+          type="button"
+          onClick={openEmailValidationModal}
+          disabled={colCount === 0 || emailValidation.isValidating}
+          className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-emerald-700 disabled:bg-gray-300"
+        >
+          {emailValidation.isValidating ? `Валидация... ${emailValidation.progress}%` : 'Валидация почт'}
         </button>
 
         <button
@@ -6246,6 +6517,150 @@ export function DatabaseSpreadsheet() {
                   >
                     <span>@</span>
                     Найти почты
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Email Validation Modal ─────────────────────────────── */}
+      {emailValidation.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm font-bold text-lg">
+                  ✓
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Валидация почт</h3>
+                  <p className="text-xs text-gray-500 font-medium">Проверка существования и качества email-адресов</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeEmailValidationModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-6 px-6 py-6">
+              {emailValidation.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {emailValidation.error}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с email-адресами
+                </label>
+                <div className="relative">
+                  <select
+                    value={emailValidation.sourceCol}
+                    onChange={(e) =>
+                      setEmailValidation((prev) => ({ ...prev, sourceCol: Number(e.target.value), error: null }))
+                    }
+                    disabled={emailValidation.isValidating}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={index} value={index}>{label || toColumnLabel(index)}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 leading-relaxed space-y-1.5">
+                <p className="font-semibold">Проверки:</p>
+                <p>Синтаксис, DNS/MX-записи домена, SMTP-верификация, catch-all детекция, одноразовые провайдеры, ролевые аккаунты, бесплатные провайдеры, коррекция опечаток, greylisting.</p>
+                <p>Результат: 3 новых столбца — <span className="font-semibold">Результат</span>, <span className="font-semibold">Качество</span>, <span className="font-semibold">Детали</span>.</p>
+                <p>
+                  Строк для обработки: <span className="font-semibold text-gray-900">{
+                    activeTab ? activeTab.data.slice(1).filter((row) => {
+                      const v = row[emailValidation.sourceCol]?.trim();
+                      return v && v.length > 0;
+                    }).length : 0
+                  }</span>
+                </p>
+              </div>
+
+              {emailValidation.isValidating ? (
+                <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
+                  <p className="text-xs text-emerald-700 leading-relaxed">
+                    Валидация выполняется в фоне. Можно закрыть окно и продолжать работу.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
+                  <p className="text-xs text-amber-800 leading-relaxed">
+                    SMTP-проверка может занять время (до 10 сек на email). Для больших списков процесс может выполняться несколько минут.
+                  </p>
+                </div>
+              )}
+
+              {emailValidation.isValidating && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-spin text-emerald-600">⟳</span>
+                      Валидация...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {emailValidation.currentRow} / {emailValidation.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-emerald-600 transition-all duration-300 ease-out"
+                      style={{ width: `${emailValidation.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {emailValidation.isValidating ? (
+                  <>Обработано: {emailValidation.currentRow} / {emailValidation.totalRows}</>
+                ) : (
+                  <>Будет обработано: <span className="text-gray-900">{
+                    activeTab ? activeTab.data.slice(1).filter((row) => {
+                      const v = row[emailValidation.sourceCol]?.trim();
+                      return v && v.length > 0;
+                    }).length : 0
+                  } строк</span></>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeEmailValidationModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  Закрыть
+                </button>
+                {emailValidation.isValidating ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopEmailValidation()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartEmailValidation()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <span>✓</span>
+                    Начать валидацию
                   </button>
                 )}
               </div>
