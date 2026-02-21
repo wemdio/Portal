@@ -48,7 +48,24 @@ SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 SUPABASE_DB_URL=your_database_url
 DATABASE_URL=your_database_url
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+S3_BUCKET=your_s3_bucket_name
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=your_s3_access_key_id
+S3_SECRET_ACCESS_KEY=your_s3_secret_access_key
+# Optional for S3-compatible storage (MinIO, Supabase Storage S3 protocol, etc.)
+S3_ENDPOINT=http://localhost:9000
+# Base URL where uploaded objects are publicly accessible (S3 website / CDN / public bucket URL)
+# Example: https://my-bucket.s3.eu-central-1.amazonaws.com
+S3_PUBLIC_BASE_URL=https://your-cdn-or-public-bucket-base
 ```
+
+Для **Supabase Storage (S3 protocol)**:
+
+- `S3_ENDPOINT`: возьмите из Supabase Dashboard → Storage → S3 → **Endpoint** (пример: `https://<project-ref>.supabase.co/storage/v1/s3`)
+- `S3_REGION`: значение **Region** с этого же экрана
+- `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`: создайте **Access key** там же
+- `S3_BUCKET`: это **bucket id** в Supabase Storage (в проекте должен существовать, например `avatars`)
+- `S3_PUBLIC_BASE_URL` можно **не задавать**, если bucket публичный — публичный URL будет выведен автоматически из `S3_ENDPOINT`
 
 `SUPABASE_DB_URL` или `DATABASE_URL` используются для проверки соединения и автоприменения миграций при старте/деплое.
 Локально миграции запускаются автоматически при `npm run dev` и `npm start`.
