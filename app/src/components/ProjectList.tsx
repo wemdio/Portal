@@ -665,7 +665,7 @@ export function ProjectList() {
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Специалист</th>
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Лид (PM)</th>
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Формат</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи/Комм.</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-50 bg-white">

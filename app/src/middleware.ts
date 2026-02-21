@@ -9,6 +9,17 @@ export async function middleware(request: NextRequest) {
   })
 
   const pathname = request.nextUrl.pathname
+
+  if (pathname.startsWith('/api/ai-caller')) {
+    const referer = request.headers.get('referer') ?? ''
+    if (referer.includes('/tools/ai-caller-v2')) {
+      const headers = new Headers(request.headers)
+      headers.set('x-ai-caller-provider', 'elevenlabs')
+      return NextResponse.next({ request: { headers } })
+    }
+    return response
+  }
+
   if (pathname.startsWith('/api')) {
     return response
   }

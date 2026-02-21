@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { getAssistant, updateAssistant, deleteAssistant } from '@/lib/vapi';
+import { getAssistant, updateAssistant, deleteAssistant } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,11 +16,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   const { id } = await ctx.params;
 
   try {
-    const assistant = await getAssistant(id);
+    const assistant = await getAssistant(id, provider);
     return NextResponse.json({ assistant });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -35,6 +37,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   const { id } = await ctx.params;
 
@@ -46,7 +49,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
   }
 
   try {
-    const assistant = await updateAssistant(id, body);
+    const assistant = await updateAssistant(id, body, provider);
     return NextResponse.json({ assistant });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -62,11 +65,12 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   const { id } = await ctx.params;
 
   try {
-    await deleteAssistant(id);
+    await deleteAssistant(id, provider);
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';

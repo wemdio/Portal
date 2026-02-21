@@ -19,6 +19,7 @@ interface Props {
   assistants: VapiAssistant[];
   loading: boolean;
   onRefresh: () => void;
+  apiBase?: string;
 }
 
 const ENDED_REASON_MAP: Record<string, string> = {
@@ -80,7 +81,13 @@ function formatDate(dateStr?: string): string {
   });
 }
 
-export function CallHistoryTab({ calls, assistants, loading, onRefresh }: Props) {
+export function CallHistoryTab({
+  calls,
+  assistants,
+  loading,
+  onRefresh,
+  apiBase = '/api/ai-caller',
+}: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailCall, setDetailCall] = useState<VapiCall | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -102,7 +109,7 @@ export function CallHistoryTab({ calls, assistants, loading, onRefresh }: Props)
 
     try {
       const token = await getToken();
-      const res = await fetch(`/api/ai-caller/calls/${callId}`, {
+      const res = await fetch(`${apiBase}/calls/${callId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
