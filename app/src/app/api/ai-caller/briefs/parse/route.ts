@@ -7,6 +7,8 @@ export const dynamic = 'force-dynamic';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-2.5-pro';
 
+import { VOICEMAIL_DETECTION_BLOCK, CAMPAIGN_PRESETS, fillTemplate } from '@/lib/ai-caller-prompts';
+
 const META_PROMPT = `Ты — эксперт по настройке AI-ассистентов для телефонных звонков.
 
 ЗАДАЧА:
@@ -23,6 +25,8 @@ const META_PROMPT = `Ты — эксперт по настройке AI-асси
 8. Фразы должны быть КОРОТКИЕ (1-2 предложения за раз)
 9. НИКАКИХ длинных монологов — это телефонный разговор
 10. Добавь правила: не повторять информацию, не спорить, не давить
+11. ОБЯЗАТЕЛЬНО включи в конце промпта следующий блок (дословно):
+${VOICEMAIL_DETECTION_BLOCK}
 
 ФОРМАТ ОТВЕТА — верни JSON:
 {
@@ -51,10 +55,12 @@ export async function POST(req: NextRequest) {
 
   // Parse multipart form data
   let briefText = '';
+  let presetId = '';
   try {
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const text = formData.get('text') as string | null;
+    presetId = (formData.get('presetId') as string | null) ?? '';
 
     if (file) {
       const buffer = Buffer.from(await file.arrayBuffer());
@@ -95,6 +101,23 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const preset = presetId ? CAMPAIGN_PRESETS.find((p) => p.id === presetId) : null;
+
+  // If preset provided, use AI to extract variables from brief, then fill template
+  const presetMetaPrompt = preset
+    ? `Ты — эксперт по настройке AI-ассистентов для телефонных звонков.
+
+На основе брифа компании извлеки следующую информацию и верни JSON:
+{
+  "persona_name": "Женское имя менеджера (придумай подходящее, типичное для менеджера по продажам)",
+  "company_from": "Название компании-отправителя (от чьего имени звоним)",
+  "offer_summary": "Краткое описание предложения (2-3 предложения, суть коммерческого предложения из брифа)",
+  "companyName": "Название компании-отправителя"
+}
+
+Верни ТОЛЬКО валидный JSON. Никакого текста до или после.`
+    : null;
+
   // Generate prompt via AI
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -108,10 +131,14 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
-          { role: 'system', content: META_PROMPT },
+          { role: 'system', content: presetMetaPrompt ?? META_PROMPT },
           {
             role: 'user',
-            content: `БРИФ КОМПАНИИ:\n---\n${briefText.slice(0, 12000)}\n---\n\nСоздай системный промпт для AI-ассистента на основе этого брифа.`,
+            content: `БРИФ КОМПАНИИ:\n---\n${briefText.slice(0, 12000)}\n---\n\n${
+              preset
+                ? 'Извлеки информацию из этого брифа.'
+                : 'Создай системный промпт для AI-ассистента на основе этого брифа.'
+            }`,
           },
         ],
         temperature: 0.4,
@@ -139,12 +166,32 @@ export async function POST(req: NextRequest) {
     try {
       parsed = JSON.parse(content);
     } catch {
-      // Try to extract JSON from text
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         return NextResponse.json({ error: 'AI вернул некорректный JSON' }, { status: 502 });
       }
       parsed = JSON.parse(jsonMatch[0]);
+    }
+
+    if (preset) {
+      const vars: Record<string, string> = {
+        persona_name: parsed.persona_name || 'Евгения',
+        company_from: parsed.company_from || parsed.companyName || '',
+        offer_summary: parsed.offer_summary || '',
+        contact_name: '{{contact_name}}',
+        company_name: '{{company_name}}',
+        contact_greeting: '{{contact_greeting}}',
+        email: '{{email}}',
+      };
+
+      return NextResponse.json({
+        personaName: vars.persona_name,
+        systemPrompt: fillTemplate(preset.promptTemplate, vars),
+        firstMessage: fillTemplate(preset.firstMessageTemplate, vars),
+        companyName: parsed.company_from || parsed.companyName || '',
+        briefText: briefText.slice(0, 5000),
+        presetId: preset.id,
+      });
     }
 
     return NextResponse.json({

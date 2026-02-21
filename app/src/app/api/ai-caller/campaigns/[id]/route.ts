@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,10 +16,11 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  const provider = resolveAiCallerProvider(req);
   const { id } = await ctx.params;
 
   const [campaignRes, contactsRes] = await Promise.all([
-    supabase.from('ai_campaigns').select('*').eq('id', id).single(),
+    supabase.from('ai_campaigns').select('*').eq('id', id).eq('provider', provider).single(),
     supabase
       .from('ai_campaign_contacts')
       .select('*')
@@ -45,6 +47,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  const provider = resolveAiCallerProvider(req);
   const { id } = await ctx.params;
   let body: Record<string, unknown>;
   try {
@@ -53,10 +56,22 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
+  const { data: existingCampaign } = await supabase
+    .from('ai_campaigns')
+    .select('id')
+    .eq('id', id)
+    .eq('provider', provider)
+    .maybeSingle();
+
+  if (!existingCampaign) {
+    return NextResponse.json({ error: 'Кампания не найдена' }, { status: 404 });
+  }
+
   const { error } = await supabase
     .from('ai_campaigns')
     .update({ ...body, updated_at: new Date().toISOString() })
-    .eq('id', id);
+    .eq('id', id)
+    .eq('provider', provider);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
@@ -71,9 +86,25 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  const provider = resolveAiCallerProvider(req);
   const { id } = await ctx.params;
 
-  const { error } = await supabase.from('ai_campaigns').delete().eq('id', id);
+  const { data: existingCampaign } = await supabase
+    .from('ai_campaigns')
+    .select('id')
+    .eq('id', id)
+    .eq('provider', provider)
+    .maybeSingle();
+
+  if (!existingCampaign) {
+    return NextResponse.json({ error: 'Кампания не найдена' }, { status: 404 });
+  }
+
+  const { error } = await supabase
+    .from('ai_campaigns')
+    .delete()
+    .eq('id', id)
+    .eq('provider', provider);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

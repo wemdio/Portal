@@ -1,5 +1,6 @@
 /* ──────────────────────────────────────────────
-   AI Caller – типы для интеграции с Vapi.ai
+   AI Caller – провайдер-агностичные типы
+   (совместимы с Vapi и ElevenLabs ConvAI)
    ────────────────────────────────────────────── */
 
 // ── Vapi Assistant ──
@@ -102,12 +103,15 @@ export type AiCallerTab = 'test-call' | 'assistants' | 'campaigns' | 'analytics'
 
 export type VoiceProvider = '11labs' | 'playht' | 'cartesia';
 
+export type VoiceScope = 'vapi' | 'elevenlabs' | 'any';
+
 export interface VoicePreset {
   id: string;
   label: string;
   provider: VoiceProvider;
   voiceId: string;
   group: string;
+  scope: VoiceScope;
   // ElevenLabs
   model?: string;
   stability?: number;
@@ -136,12 +140,13 @@ export interface LlmPreset {
 // ── Presets (constant data) ──
 
 export const VOICE_PRESETS: VoicePreset[] = [
-  // ── ElevenLabs ──
+  // ── Vapi: ElevenLabs (Vapi-specific voice IDs) ──
   {
     id: 'kate',
     label: 'Kate — Спокойная и дружелюбная',
     provider: '11labs',
     group: 'ElevenLabs',
+    scope: 'vapi',
     voiceId: 'tOo2BJ74frmnPadsDNIi',
     model: 'eleven_multilingual_v2',
     stability: 0.55,
@@ -150,119 +155,166 @@ export const VOICE_PRESETS: VoicePreset[] = [
     speed: 0.88,
   },
   {
-    id: 'mariia',
-    label: 'Mariia_R — Тёплая и мягкая',
+    id: 'kate-turbo',
+    label: 'Kate Turbo — Быстрый ответ',
     provider: '11labs',
     group: 'ElevenLabs',
-    voiceId: 'RxZqkSWQzJ6HCRFMiyqe',
-    model: 'eleven_multilingual_v2',
+    scope: 'vapi',
+    voiceId: 'tOo2BJ74frmnPadsDNIi',
+    model: 'eleven_turbo_v2_5',
     stability: 0.5,
-    similarityBoost: 0.75,
+    similarityBoost: 0.78,
     style: 0.3,
-    speed: 0.88,
+    speed: 0.92,
+  },
+  // ── Vapi: Cartesia ──
+  {
+    id: 'cartesia-ru-1',
+    label: 'Cartesia Русский 1',
+    provider: 'cartesia',
+    group: 'Cartesia',
+    scope: 'vapi',
+    voiceId: '779673f3-895f-4935-b6b5-b031dc78b319',
+    cartesiaModel: 'sonic-2',
+    cartesiaLanguage: 'ru',
   },
   {
-    id: 'nadia',
-    label: 'Nadia — Молодая и энергичная',
+    id: 'cartesia-ru-4',
+    label: 'Cartesia Русский 2',
+    provider: 'cartesia',
+    group: 'Cartesia',
+    scope: 'vapi',
+    voiceId: '642014de-c0e3-4133-adc0-36b5309c23e6',
+    cartesiaModel: 'sonic-2',
+    cartesiaLanguage: 'ru',
+  },
+  {
+    id: 'cartesia-ru-1-s3',
+    label: 'Cartesia Русский 1 (sonic-3)',
+    provider: 'cartesia',
+    group: 'Cartesia sonic-3',
+    scope: 'vapi',
+    voiceId: '779673f3-895f-4935-b6b5-b031dc78b319',
+    cartesiaModel: 'sonic-3',
+    cartesiaLanguage: 'ru',
+  },
+  {
+    id: 'cartesia-ru-4-s3',
+    label: 'Cartesia Русский 2 (sonic-3)',
+    provider: 'cartesia',
+    group: 'Cartesia sonic-3',
+    scope: 'vapi',
+    voiceId: '642014de-c0e3-4133-adc0-36b5309c23e6',
+    cartesiaModel: 'sonic-3',
+    cartesiaLanguage: 'ru',
+  },
+  // ── ElevenLabs ConvAI: Женские русские голоса ──
+  {
+    id: 'el-kate',
+    label: 'Kate — Спокойная, естественная',
     provider: '11labs',
-    group: 'ElevenLabs',
-    voiceId: 'GBv7mTt0atIp3Br8iCZE',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: '7G0NvIkWRnU0Dqjgz13p',
+    model: 'eleven_multilingual_v2',
+    stability: 0.48,
+    similarityBoost: 0.82,
+    speed: 1.0,
+  },
+  {
+    id: 'el-rina',
+    label: 'Rina — Мягкая, выразительная',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: 'ycbyWsnf4hqZgdpKHqiU',
     model: 'eleven_multilingual_v2',
     stability: 0.5,
-    similarityBoost: 0.75,
-    style: 0.4,
-    speed: 0.9,
-  },
-  {
-    id: 'ekaterina',
-    label: 'Ekaterina — Деловая и уверенная',
-    provider: '11labs',
-    group: 'ElevenLabs',
-    voiceId: 'UhKFMrGGBHcGHwwt3X1R',
-    model: 'eleven_multilingual_v2',
-    stability: 0.55,
     similarityBoost: 0.8,
-    style: 0.25,
-    speed: 0.88,
-  },
-  // ── PlayHT ──
-  {
-    id: 'playht-jennifer',
-    label: 'Jennifer — Мягкая, женская',
-    provider: 'playht',
-    group: 'PlayHT',
-    voiceId: 'jennifer',
-    playhtModel: 'Play3.0-mini',
-    language: 'russian',
     speed: 1.0,
-    temperature: 0.5,
-    emotion: 'female_happy',
   },
   {
-    id: 'playht-melissa',
-    label: 'Melissa — Спокойная, женская',
-    provider: 'playht',
-    group: 'PlayHT',
-    voiceId: 'melissa',
-    playhtModel: 'Play3.0-mini',
-    language: 'russian',
+    id: 'el-natalia',
+    label: 'Natalia — Нежная и тёплая',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: 'dHAwRJVaEPhU907QLTPW',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
     speed: 1.0,
-    temperature: 0.5,
   },
   {
-    id: 'playht-ruby',
-    label: 'Ruby — Энергичная, женская',
-    provider: 'playht',
-    group: 'PlayHT',
-    voiceId: 'ruby',
-    playhtModel: 'Play3.0-mini',
-    language: 'russian',
+    id: 'el-victoria',
+    label: 'Victoria — Энергичная, деловая',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: 'FZGeNF7bE3syeQOynDKC',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
     speed: 1.0,
-    temperature: 0.6,
-    emotion: 'female_happy',
   },
   {
-    id: 'playht-jack',
-    label: 'Jack — Уверенный, мужской',
-    provider: 'playht',
-    group: 'PlayHT',
-    voiceId: 'jack',
-    playhtModel: 'Play3.0-mini',
-    language: 'russian',
+    id: 'el-kari',
+    label: 'Kari — Дружелюбная, тёплая',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: 'Jbte7ht1CqapnZvc4KpK',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
     speed: 1.0,
-    temperature: 0.5,
   },
-  // ── Cartesia ──
   {
-    id: 'cartesia-default-f',
-    label: 'Sonic — Женский, мультиязычный',
-    provider: 'cartesia',
-    group: 'Cartesia',
-    voiceId: 'a0e99841-438c-4a64-b679-ae501e7d6091',
-    cartesiaModel: 'sonic-2',
-    cartesiaLanguage: 'ru',
+    id: 'el-alina',
+    label: 'Alina — Молодая, динамичная',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: 'dVRDrbP5ULGXB94se4KZ',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
     speed: 1.0,
-    experimentalEmotion: 'positivity:high',
+  },
+  // ── ElevenLabs ConvAI: Мужские русские голоса ──
+  {
+    id: 'el-maxim',
+    label: 'Maxim — Спокойный, нейтральный',
+    provider: '11labs',
+    group: 'Мужские',
+    scope: 'elevenlabs',
+    voiceId: 'HcaxAsrhw4ByUo4CBCBN',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
+    speed: 1.0,
   },
   {
-    id: 'cartesia-default-m',
-    label: 'Sonic — Мужской, мультиязычный',
-    provider: 'cartesia',
-    group: 'Cartesia',
-    voiceId: '41534e16-2966-4c6b-9670-111411def906',
-    cartesiaModel: 'sonic-2',
-    cartesiaLanguage: 'ru',
+    id: 'el-dmitry',
+    label: 'Dmitry — Чёткий, энергичный',
+    provider: '11labs',
+    group: 'Мужские',
+    scope: 'elevenlabs',
+    voiceId: 'kwajW3Xh5svCeKU5ky2S',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.8,
     speed: 1.0,
   },
 ];
 
 export const LLM_PRESETS: LlmPreset[] = [
   {
-    id: 'gpt41',
-    label: 'GPT-4.1',
+    id: 'gpt4o-mini',
+    label: 'GPT-4o mini',
     provider: 'openai',
-    model: 'gpt-4.1',
-    description: 'Быстрый и качественный — рекомендуется',
+    model: 'gpt-4o-mini',
+    description: 'Быстрый и дешёвый — для обзвонов',
   },
   {
     id: 'gpt4o',
@@ -270,6 +322,13 @@ export const LLM_PRESETS: LlmPreset[] = [
     provider: 'openai',
     model: 'gpt-4o',
     description: 'Мультимодальный, хороший баланс',
+  },
+  {
+    id: 'gpt41',
+    label: 'GPT-4.1',
+    provider: 'openai',
+    model: 'gpt-4.1',
+    description: 'Быстрый и качественный',
   },
   {
     id: 'claude-sonnet',
@@ -286,6 +345,13 @@ export const LLM_PRESETS: LlmPreset[] = [
     description: 'Мощная модель Google',
   },
 ];
+
+// ── Provider-agnostic aliases ──
+
+export type AiAssistant = VapiAssistant;
+export type AiPhoneNumber = VapiPhoneNumber;
+export type AiCall = VapiCall;
+export type AiCallMessage = VapiCallMessage;
 
 export const DEFAULT_PIPELINE_SETTINGS = {
   transcriber: {

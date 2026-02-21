@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { getCall } from '@/lib/vapi';
+import { getCall } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,9 +18,10 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { id } = await ctx.params;
+  const provider = resolveAiCallerProvider(req);
 
   try {
-    const call = await getCall(id);
+    const call = await getCall(id, provider);
     return NextResponse.json({ call });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';

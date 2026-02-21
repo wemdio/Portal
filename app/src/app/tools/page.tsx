@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Sparkles, Mail, Search, PhoneCall } from 'lucide-react';
+import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines } from 'lucide-react';
 
 export default function ToolsPage() {
   return (
@@ -49,6 +49,28 @@ export default function ToolsPage() {
             <PhoneCall className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
           </div>
           <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
+            Открыть →
+          </div>
+        </Link>
+        <Link
+          href={'/tools/ai-caller-v2' as Route}
+          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-base font-semibold text-gray-900">AI Звонилка v2</p>
+                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 rounded">
+                  ElevenLabs
+                </span>
+              </div>
+              <p className="text-sm text-gray-500">
+                Естественный голос через ElevenLabs Conversational AI.
+              </p>
+            </div>
+            <AudioLines className="h-8 w-8 text-emerald-500 group-hover:text-emerald-600 transition-colors" />
+          </div>
+          <div className="mt-4 text-sm font-medium text-emerald-600 group-hover:text-emerald-700">
             Открыть →
           </div>
         </Link>

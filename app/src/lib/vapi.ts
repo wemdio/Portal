@@ -95,9 +95,39 @@ export function createCall(data: {
   assistantId: string;
   phoneNumberId: string;
   customer: { number: string };
+  contactData?: {
+    contactName?: string;
+    companyName?: string;
+    email?: string;
+  };
 }) {
+  const payload: Record<string, unknown> = {
+    assistantId: data.assistantId,
+    phoneNumberId: data.phoneNumberId,
+    customer: data.customer,
+  };
+
+  if (data.contactData) {
+    const parts: string[] = [];
+    if (data.contactData.contactName) parts.push(`Имя контакта: ${data.contactData.contactName}`);
+    if (data.contactData.companyName) parts.push(`Компания: ${data.contactData.companyName}`);
+    if (data.contactData.email) parts.push(`Email: ${data.contactData.email}`);
+    if (parts.length > 0) {
+      payload.assistantOverrides = {
+        variableValues: {
+          contact_name: data.contactData.contactName ?? '',
+          company_name: data.contactData.companyName ?? '',
+          email: data.contactData.email ?? '',
+          contact_greeting: data.contactData.contactName
+            ? `, ${data.contactData.contactName}`
+            : '',
+        },
+      };
+    }
+  }
+
   return vapiRequest<Record<string, unknown>>('/call/phone', {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify(payload),
   });
 }

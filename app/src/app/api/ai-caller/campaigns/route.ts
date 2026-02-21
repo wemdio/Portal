@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,9 +14,12 @@ export async function GET(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  const provider = resolveAiCallerProvider(req);
+
   const { data, error } = await supabase
     .from('ai_campaigns')
     .select('*')
+    .eq('provider', provider)
     .order('created_at', { ascending: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -24,6 +28,8 @@ export async function GET(req: NextRequest) {
 
 /** POST — создать кампанию */
 export async function POST(req: NextRequest) {
+  const provider = resolveAiCallerProvider(req);
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -57,6 +63,7 @@ export async function POST(req: NextRequest) {
       name: body.name,
       assistant_id: body.assistantId,
       phone_number_id: body.phoneNumberId,
+      provider,
       status: 'draft',
       total_contacts: body.contacts.length,
       called_contacts: 0,

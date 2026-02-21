@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { getCall } from '@/lib/vapi';
+import { getCall } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,8 +16,19 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   const { id: campaignId } = await ctx.params;
+  const { data: campaignForProvider } = await supabase
+    .from('ai_campaigns')
+    .select('id, successful_contacts')
+    .eq('id', campaignId)
+    .eq('provider', provider)
+    .maybeSingle();
+
+  if (!campaignForProvider) {
+    return NextResponse.json({ error: 'Кампания не найдена' }, { status: 404 });
+  }
 
   let body: { contactId?: string; callId?: string };
   try {
@@ -32,7 +44,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   // Fetch call details from Vapi
   let callData: Record<string, unknown> | null = null;
   try {
-    callData = await getCall(body.callId) as Record<string, unknown>;
+    callData = await getCall(body.callId, provider) as Record<string, unknown>;
   } catch {
     // Call details unavailable
   }
@@ -57,19 +69,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
   // Update campaign counters
   if (isSuccessful) {
-    const { data: campaign } = await supabase
-      .from('ai_campaigns')
-      .select('successful_contacts')
-      .eq('id', campaignId)
-      .single();
-
     await supabase
       .from('ai_campaigns')
       .update({
-        successful_contacts: (campaign?.successful_contacts ?? 0) + 1,
+        successful_contacts: (campaignForProvider.successful_contacts ?? 0) + 1,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', campaignId);
+      .eq('id', campaignId)
+      .eq('provider', provider);
   }
 
   return NextResponse.json({ ok: true, duration, endedReason, isSuccessful });
