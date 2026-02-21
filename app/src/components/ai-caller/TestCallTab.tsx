@@ -79,7 +79,7 @@ export function TestCallTab({
         }
       }, 2500);
     },
-    [getToken],
+    [getToken, apiBase],
   );
 
   async function makeCall() {
