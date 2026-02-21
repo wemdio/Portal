@@ -25,6 +25,9 @@ switch (kind) {
   case 'yandexmaps':
     run('./yandexmaps');
     break;
+  case 'emailvalidation':
+    run('./emailvalidation');
+    break;
   case 'all':
   default:
     run('./index');
