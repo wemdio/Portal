@@ -30,9 +30,9 @@ services:
     networks:
       - portal-network
 
-  worker:
+  worker-hh:
     image: ${DOCKER_USERNAME}/portal-worker:prod
-    container_name: portal-worker
+    container_name: portal-worker-hh
     env_file:
       - .env
     environment:
@@ -44,13 +44,71 @@ services:
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-2000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=hh
+    stop_grace_period: 30m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-search:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-search
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - HH_PROXY_URL=${HH_PROXY_URL}
+      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
+      - HH_MAX_RETRIES=${HH_MAX_RETRIES}
+      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-2000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=search
+    stop_grace_period: 30m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-enrich:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-enrich
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-2000}
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=enrich
+    stop_grace_period: 30m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-yandexmaps:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-yandexmaps
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
-      - WORKER_POLL_INTERVAL_MS=3000
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-2000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      - WORKER_KIND=yandexmaps
     depends_on:
       - yandexmaps
-    stop_grace_period: 4h
+    stop_grace_period: 30m
     restart: unless-stopped
     networks:
       - portal-network

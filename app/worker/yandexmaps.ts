@@ -30,8 +30,19 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
     .maybeSingle();
 
   if (!pending) return null;
-  const stage = (pending.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
-  return { id: pending.id as string, stage };
+
+  const { data: claimed } = await db
+    .from('yandex_maps_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .eq('progress_stage', pending.progress_stage)
+    .select('id, progress_stage')
+    .maybeSingle();
+
+  if (!claimed) return null;
+  const stage = (claimed.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
+  return { id: claimed.id as string, stage };
 }
 
 async function pollOnce(): Promise<boolean> {
