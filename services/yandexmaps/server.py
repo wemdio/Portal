@@ -8,7 +8,8 @@ from yandex_parser import Organization, ProxySettings, YandexMapsParser
 
 
 app = FastAPI()
-_lock = asyncio.Lock()
+YANDEXMAPS_CONCURRENCY = 2
+_REQUEST_SEMAPHORE = asyncio.Semaphore(YANDEXMAPS_CONCURRENCY)
 
 
 class ProxyModel(BaseModel):
@@ -101,7 +102,7 @@ async def health():
 
 @app.post("/collect-links", response_model=CollectLinksResponse)
 async def collect_links(req: CollectLinksRequest):
-  async with _lock:
+  async with _REQUEST_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
       links = await asyncio.to_thread(parser.collect_organization_links, req.search_url, req.max_results)
@@ -114,7 +115,7 @@ async def collect_links(req: CollectLinksRequest):
 
 @app.post("/parse-orgs", response_model=ParseOrgsResponse)
 async def parse_orgs(req: ParseOrgsRequest):
-  async with _lock:
+  async with _REQUEST_SEMAPHORE:
     parser = YandexMapsParser(proxy_settings=_to_proxy_settings(req.proxy), headless=req.headless)
     try:
       orgs = await asyncio.to_thread(parser.parse_organizations_from_links, req.links)

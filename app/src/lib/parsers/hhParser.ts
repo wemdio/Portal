@@ -4,7 +4,8 @@ import { logInfo, logError } from '@/lib/loggerServer';
 import type { Span } from '@/lib/tracer';
 
 export type HHSearchConfig = {
-  text: string;
+  text?: string;
+  url?: string;
   area?: string | string[];
   salary_from?: number;
   currency?: string;
@@ -288,6 +289,38 @@ function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefin
   }
 
   return Object.keys(cleaned).length > 0 ? cleaned : undefined;
+}
+
+export function parseHhSearchUrl(url: string): HHSearchConfig {
+  const urlObj = new URL(url);
+  const params = urlObj.searchParams;
+
+  const config: HHSearchConfig = {
+    text: params.get('text') || '',
+    area: params.getAll('area'),
+    date_from: params.get('date_from') || undefined,
+    date_to: params.get('date_to') || undefined,
+    // Add any other parameters you want to extract from the URL
+    params: {},
+  };
+
+  // Populate generic params from the URL that are not directly mapped to HHSearchConfig fields
+  for (const [key, value] of params.entries()) {
+    if (!(key in config)) { // Avoid overwriting already mapped fields
+      const existing = config.params![key];
+      if (existing) {
+        if (Array.isArray(existing)) {
+          (existing as string[]).push(value);
+        } else {
+          config.params![key] = [existing as string, value];
+        }
+      } else {
+        config.params![key] = value;
+      }
+    }
+  }
+
+  return normalizeSearchParams(config);
 }
 
 function getParamValues(params: HHSearchParams | undefined, key: string): string[] {
@@ -749,7 +782,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 export async function fetchVacancies(
-  config: HHSearchConfig,
+  configOrUrl: HHSearchConfig | string,
   options?: FetchVacanciesOptions,
 ): Promise<{ found: number; vacancies: HHVacancy[] }> {
   const cancelInterval = options?.cancelCheckIntervalMs ?? 5000;
@@ -774,7 +807,7 @@ export async function fetchVacancies(
     options.onProgress(payload);
   };
 
-  const normalized = normalizeSearchParams(config);
+  const normalized = typeof configOrUrl === 'string' ? normalizeSearchParams(parseHhSearchUrl(configOrUrl)) : normalizeSearchParams(configOrUrl);
   const shouldFetchEmployers = normalized.fetch_employers !== false;
   options?.onStage?.('partitioning');
   const partitionSpan = await options?.trace?.startChild({

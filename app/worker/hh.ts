@@ -2,7 +2,8 @@ import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
-const MAX_CONCURRENCY = 2;
+const MAX_CONCURRENCY = 3;
+const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '15') * 60 * 1000;
 const WORKER_ID = `hh-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
@@ -55,7 +56,7 @@ async function pollOnce(): Promise<boolean> {
   if (!jobId) return false;
   const task = (async () => {
     log('info', `Running HH parser job ${jobId}`);
-    await runHHParserJob(jobId);
+    await runHHParserJob(jobId, DRAIN_TIMEOUT_MS);
   })();
   running.add(task);
   void task.finally(() => running.delete(task));

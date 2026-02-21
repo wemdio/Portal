@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError, logInfo } from '@/lib/loggerServer';
-import { fetchVacancies, HHApiError, ParserJobCancelledError, type ParserProgressStage } from '@/lib/parsers/hhParser';
+import { fetchVacancies, HHApiError, ParserJobCancelledError, withTimeout, type ParserProgressStage } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
 import { startTrace } from '@/lib/tracer';
 
@@ -84,7 +84,7 @@ async function upsertInBatches(
   }
 }
 
-export async function runHHParserJob(jobId: string): Promise<void> {
+export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Promise<void> {
   if (!supabaseAdmin) {
     console.error('[hhRunner] supabaseAdmin not configured');
     return;
@@ -107,7 +107,8 @@ export async function runHHParserJob(jobId: string): Promise<void> {
   }
 
   const config = job.config as HHSearchConfig;
-  const searchText = config.text;
+  const searchText = config.text ?? config.url ?? '';
+  const fetchParam = config.url ?? config;
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id as string, requestId, route: 'hh_runner_worker' };
@@ -164,152 +165,174 @@ export async function runHHParserJob(jobId: string): Promise<void> {
   let lastPercent: number | null = 0;
 
   try {
-    let lastProgressAt = 0;
-    let lastFound: number | null = null;
-    let lastParsed: number | null = null;
-    let lastEmployersTotal: number | null = null;
-    let lastEmployersDone: number | null = null;
-    let lastSavedTotal: number | null = null;
-    let lastSavedDone: number | null = null;
+    await withTimeout(
+      (async () => {
+        let lastProgressAt = 0;
+        let lastFound: number | null = null;
+        let lastParsed: number | null = null;
+        let lastEmployersTotal: number | null = null;
+        let lastEmployersDone: number | null = null;
+        let lastSavedTotal: number | null = null;
+        let lastSavedDone: number | null = null;
 
-    const updateProgress = async (
-      progress: {
-        found?: number;
-        parsed?: number;
-        employersTotal?: number;
-        employersDone?: number;
-        savedTotal?: number;
-        savedDone?: number;
-      },
-      force = false,
-    ) => {
-      const now = Date.now();
-      const nextFound = progress.found ?? lastFound ?? null;
-      const nextParsed = progress.parsed ?? lastParsed ?? null;
-      const nextEmployersTotal = progress.employersTotal ?? lastEmployersTotal ?? null;
-      const nextEmployersDone = progress.employersDone ?? lastEmployersDone ?? null;
-      const nextSavedTotal = progress.savedTotal ?? lastSavedTotal ?? null;
-      const nextSavedDone = progress.savedDone ?? lastSavedDone ?? null;
-      const computedPercent = computeProgressPercent({
-        found: nextFound,
-        parsed: nextParsed,
-        employersTotal: nextEmployersTotal,
-        employersDone: nextEmployersDone,
-        savedTotal: nextSavedTotal,
-        savedDone: nextSavedDone,
-      });
-      const nextPercent = lastPercent == null ? computedPercent : Math.max(lastPercent, computedPercent);
-      if (!force && now - lastProgressAt < 2000) return;
-      if (
-        !force &&
-        nextFound === lastFound &&
-        nextParsed === lastParsed &&
-        nextEmployersTotal === lastEmployersTotal &&
-        nextEmployersDone === lastEmployersDone &&
-        nextSavedTotal === lastSavedTotal &&
-        nextSavedDone === lastSavedDone &&
-        nextPercent === lastPercent
-      ) return;
-      lastProgressAt = now;
-      lastFound = nextFound;
-      lastParsed = nextParsed;
-      lastEmployersTotal = nextEmployersTotal;
-      lastEmployersDone = nextEmployersDone;
-      lastSavedTotal = nextSavedTotal;
-      lastSavedDone = nextSavedDone;
-      lastPercent = nextPercent;
-      const { error } = await db
-        .from('parser_jobs')
-        .update({ total_found: nextFound, total_parsed: nextParsed, progress_percent: nextPercent })
-        .eq('id', jobId);
-      if (error) {
-        await logError('parser.hh.progress.update.failed', error, { jobId, searchText }, logMeta);
-      }
-    };
+        const updateProgress = async (
+          progress: {
+            found?: number;
+            parsed?: number;
+            employersTotal?: number;
+            employersDone?: number;
+            savedTotal?: number;
+            savedDone?: number;
+          },
+          force = false,
+        ) => {
+          const now = Date.now();
+          const nextFound = progress.found ?? lastFound ?? null;
+          const nextParsed = progress.parsed ?? lastParsed ?? null;
+          const nextEmployersTotal = progress.employersTotal ?? lastEmployersTotal ?? null;
+          const nextEmployersDone = progress.employersDone ?? lastEmployersDone ?? null;
+          const nextSavedTotal = progress.savedTotal ?? lastSavedTotal ?? null;
+          const nextSavedDone = progress.savedDone ?? lastSavedDone ?? null;
+          const computedPercent = computeProgressPercent({
+            found: nextFound,
+            parsed: nextParsed,
+            employersTotal: nextEmployersTotal,
+            employersDone: nextEmployersDone,
+            savedTotal: nextSavedTotal,
+            savedDone: nextSavedDone,
+          });
+          const nextPercent = lastPercent == null ? computedPercent : Math.max(lastPercent, computedPercent);
+          if (!force && now - lastProgressAt < 2000) return;
+          if (
+            !force &&
+            nextFound === lastFound &&
+            nextParsed === lastParsed &&
+            nextEmployersTotal === lastEmployersTotal &&
+            nextEmployersDone === lastEmployersDone &&
+            nextSavedTotal === lastSavedTotal &&
+            nextSavedDone === lastSavedDone &&
+            nextPercent === lastPercent
+          ) return;
+          lastProgressAt = now;
+          lastFound = nextFound;
+          lastParsed = nextParsed;
+          lastEmployersTotal = nextEmployersTotal;
+          lastEmployersDone = nextEmployersDone;
+          lastSavedTotal = nextSavedTotal;
+          lastSavedDone = nextSavedDone;
+          lastPercent = nextPercent;
+          const { error } = await db
+            .from('parser_jobs')
+            .update({ total_found: nextFound, total_parsed: nextParsed, progress_percent: nextPercent })
+            .eq('id', jobId);
+          if (error) {
+            await logError('parser.hh.progress.update.failed', error, { jobId, searchText }, logMeta);
+          }
+        };
 
-    await updateStage('partitioning');
-    const fetchSpan = await trace?.startChild({
-      name: 'hh.fetch_vacancies',
-      input: { searchText, config },
-      message: 'Загрузка вакансий с HH API',
-    });
-
-    const { found, vacancies } = await fetchVacancies(config, {
-      jobId,
-      logMeta,
-      searchText,
-      trace,
-      shouldCancel,
-      onProgress: (progress) => {
-        void updateProgress({
-          found: progress.found,
-          parsed: progress.parsed,
-          employersTotal: progress.employersTotal,
-          employersDone: progress.employersFetched,
+        await updateStage('partitioning');
+        const fetchSpan = await trace?.startChild({
+          name: 'hh.fetch_vacancies',
+          input: { searchText, config },
+          message: 'Загрузка вакансий с HH API',
         });
-      },
-      onStage: (stage) => {
-        void updateStage(stage);
-      },
-    });
 
-    const employersTotal = new Set(
-      vacancies.map((vacancy) => vacancy.employer_id).filter((id): id is string => Boolean(id)),
-    ).size;
-    await updateProgress({ found, parsed: vacancies.length, employersTotal, employersDone: employersTotal }, true);
-    await fetchSpan?.end(
-      { found, fetched: vacancies.length, uniqueEmployers: employersTotal },
-      `Загружено ${vacancies.length} вакансий из ${found} найденных`,
+        const { found, vacancies } = await fetchVacancies(fetchParam, {
+          jobId,
+          logMeta,
+          searchText,
+          trace,
+          shouldCancel,
+          onProgress: (progress) => {
+            void updateProgress({
+              found: progress.found,
+              parsed: progress.parsed,
+              employersTotal: progress.employersTotal,
+              employersDone: progress.employersFetched,
+            });
+          },
+          onStage: (stage) => {
+            void updateStage(stage);
+          },
+        });
+
+        const employersTotal = new Set(
+          vacancies.map((vacancy) => vacancy.employer_id).filter((id): id is string => Boolean(id)),
+        ).size;
+        await updateProgress({ found, parsed: vacancies.length, employersTotal, employersDone: employersTotal }, true);
+        await fetchSpan?.end(
+          { found, fetched: vacancies.length, uniqueEmployers: employersTotal },
+          `Загружено ${vacancies.length} вакансий из ${found} найденных`,
+        );
+        await logInfo('parser.hh.fetch.completed', 'HH vacancies fetched', { jobId, searchText, found, fetched: vacancies.length }, logMeta);
+
+        await updateStage('saving');
+        const saveSpan = await trace?.startChild({
+          name: 'hh.save_to_db',
+          input: { rows: vacancies.length },
+          message: 'Сохранение в базу данных',
+        });
+
+        const rows = vacancies.map((v) => toDbRow(jobId, v));
+        await updateProgress({ savedTotal: rows.length, savedDone: 0 }, true);
+        await logInfo('parser.hh.upsert.start', 'HH vacancies upsert started', { jobId, searchText, rows: rows.length }, logMeta);
+        await upsertInBatches(db, rows, (saved, total) =>
+          updateProgress({ savedTotal: total, savedDone: saved }, saved === total),
+        );
+        await saveSpan?.end({ savedRows: rows.length }, `Сохранено ${rows.length} записей`);
+        await logInfo('parser.hh.upsert.completed', 'HH vacancies upsert completed', { jobId, searchText }, logMeta);
+
+        const { error: doneError } = await db
+          .from('parser_jobs')
+          .update({
+            status: 'completed',
+            total_found: found,
+            total_parsed: vacancies.length,
+            completed_at: new Date().toISOString(),
+            error_message: null,
+            progress_percent: 100,
+            progress_stage: 'completed',
+          })
+          .eq('id', jobId);
+
+        if (doneError) {
+          await logError('parser.hh.execute.update_failed', doneError, { jobId, searchText }, logMeta);
+          await trace?.fail(doneError);
+          return;
+        }
+
+        await trace?.end(
+          { found, parsed: vacancies.length, elapsed_ms: Date.now() - startedAt },
+          `Завершено: ${vacancies.length} вакансий за ${Math.round((Date.now() - startedAt) / 1000)}с`,
+        );
+        await logAudit('parser.hh.execute.completed', 'HH parser execution completed', {
+          jobId, searchText, found, parsed: vacancies.length, elapsed_ms: Date.now() - startedAt,
+        }, logMeta);
+      })(),
+      drainTimeoutMs,
+      () => new ParserJobCancelledError('Job timed out'),
     );
-    await logInfo('parser.hh.fetch.completed', 'HH vacancies fetched', { jobId, searchText, found, fetched: vacancies.length }, logMeta);
-
-    await updateStage('saving');
-    const saveSpan = await trace?.startChild({
-      name: 'hh.save_to_db',
-      input: { rows: vacancies.length },
-      message: 'Сохранение в базу данных',
-    });
-
-    const rows = vacancies.map((v) => toDbRow(jobId, v));
-    await updateProgress({ savedTotal: rows.length, savedDone: 0 }, true);
-    await logInfo('parser.hh.upsert.start', 'HH vacancies upsert started', { jobId, searchText, rows: rows.length }, logMeta);
-    await upsertInBatches(db, rows, (saved, total) =>
-      updateProgress({ savedTotal: total, savedDone: saved }, saved === total),
-    );
-    await saveSpan?.end({ savedRows: rows.length }, `Сохранено ${rows.length} записей`);
-    await logInfo('parser.hh.upsert.completed', 'HH vacancies upsert completed', { jobId, searchText }, logMeta);
-
-    const { error: doneError } = await db
-      .from('parser_jobs')
-      .update({
-        status: 'completed',
-        total_found: found,
-        total_parsed: vacancies.length,
-        completed_at: new Date().toISOString(),
-        error_message: null,
-        progress_percent: 100,
-        progress_stage: 'completed',
-      })
-      .eq('id', jobId);
-
-    if (doneError) {
-      await logError('parser.hh.execute.update_failed', doneError, { jobId, searchText }, logMeta);
-      await trace?.fail(doneError);
-      return;
-    }
-
-    await trace?.end(
-      { found, parsed: vacancies.length, elapsed_ms: Date.now() - startedAt },
-      `Завершено: ${vacancies.length} вакансий за ${Math.round((Date.now() - startedAt) / 1000)}с`,
-    );
-    await logAudit('parser.hh.execute.completed', 'HH parser execution completed', {
-      jobId, searchText, found, parsed: vacancies.length, elapsed_ms: Date.now() - startedAt,
-    }, logMeta);
   } catch (err: unknown) {
     if (err instanceof ParserJobCancelledError) {
       await updateStage('cancelled');
-      await trace?.cancel('Задача отменена пользователем');
-      await logAudit('parser.hh.execute.cancelled', 'HH parser execution cancelled', { jobId, searchText }, logMeta);
+      const message = err.message === 'Job timed out'
+        ? 'Задача превысила лимит времени выполнения (30 минут). Пожалуйста, попробуйте запустить парсинг еще раз.'
+        : 'Задача отменена пользователем';
+      await trace?.cancel(message);
+      await logAudit('parser.hh.execute.cancelled', 'HH parser execution cancelled', { jobId, searchText, message }, logMeta);
+      const { error: updateError } = await db
+        .from('parser_jobs')
+        .update({
+          status: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: message,
+          progress_percent: lastPercent ?? null,
+          progress_stage: 'failed',
+        })
+        .eq('id', jobId);
+      if (updateError) {
+        await logError('parser.hh.execute.update_failed_on_cancel', updateError, { jobId, searchText, message }, logMeta);
+      }
       return;
     }
 

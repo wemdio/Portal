@@ -81,7 +81,6 @@ export async function runYandexMapsCollectLinks(jobId: string) {
   const job = await getJob(jobId);
   if (!job) return;
 
-  if (job.status === 'running') return;
   if (job.status === 'completed') return;
 
   const requestId = crypto.randomUUID();
@@ -191,7 +190,6 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
   const job = await getJob(jobId);
   if (!job) return;
 
-  if (job.status === 'running') return;
   if (job.status === 'completed') return;
 
   const requestId = crypto.randomUUID();

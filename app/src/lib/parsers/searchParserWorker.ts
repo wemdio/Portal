@@ -1,4 +1,5 @@
 
+import { SEARCH_CONFIG } from '@/lib/config';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { startTrace } from '@/lib/tracer';
@@ -21,21 +22,31 @@ import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const toNonNegativeInt = (value: number, fallback: number) => {
+  const normalized = Number.isFinite(value) ? Math.floor(value) : fallback;
+  return normalized >= 0 ? normalized : fallback;
+};
+
+const toPositiveInt = (value: number, fallback: number) => {
+  const normalized = Number.isFinite(value) ? Math.floor(value) : fallback;
+  return normalized > 0 ? normalized : fallback;
+};
+
 // Max-yield defaults: prioritize collecting *more unique sites* with fewer blocks.
 // Email enrichment can become the bottleneck; keep it lightweight so lead collection keeps moving.
-const ENRICH_EMAIL_ENABLED = true;
-const ENRICH_EMAIL_MAX_SITES_PER_JOB = 500;
-const ENRICH_EMAIL_MAX_PAGES_PER_SITE = 3;
-const ENRICH_EMAIL_CONCURRENCY = 2;
+const ENRICH_EMAIL_ENABLED = SEARCH_CONFIG.ENRICH.EMAIL_ENABLED;
+const ENRICH_EMAIL_MAX_SITES_PER_JOB = toNonNegativeInt(SEARCH_CONFIG.ENRICH.MAX_SITES_PER_JOB, 500);
+const ENRICH_EMAIL_MAX_PAGES_PER_SITE = toPositiveInt(SEARCH_CONFIG.ENRICH.MAX_PAGES_PER_SITE, 3);
+const ENRICH_EMAIL_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.ENRICH.CONCURRENCY, 2);
 
-const SOURCE_EXPAND_ENABLED = true;
-const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = 12;
-const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = 400;
-const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = 400;
-const SOURCE_EXPAND_CONCURRENCY = 3;
+const SOURCE_EXPAND_ENABLED = SEARCH_CONFIG.SOURCE_EXPAND.ENABLED;
+const SOURCE_EXPAND_MAX_SOURCES_PER_QUERY = toNonNegativeInt(SEARCH_CONFIG.SOURCE_EXPAND.MAX_SOURCES_PER_QUERY, 12);
+const SOURCE_EXPAND_MAX_SOURCES_PER_JOB = toNonNegativeInt(SEARCH_CONFIG.SOURCE_EXPAND.MAX_SOURCES_PER_JOB, 400);
+const SOURCE_EXPAND_MAX_SITES_PER_SOURCE = toNonNegativeInt(SEARCH_CONFIG.SOURCE_EXPAND.MAX_SITES_PER_SOURCE, 400);
+const SOURCE_EXPAND_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.SOURCE_EXPAND.CONCURRENCY, 3);
 
 // Lower concurrency -> fewer blocks -> more total sites, given enough time.
-const QUERY_CONCURRENCY = 1;
+const QUERY_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.QUERY_CONCURRENCY, 1);
 
 const GOOGLE_RESULTS_PER_QUERY = 100;
 const BING_MAX_PAGES = 8;
