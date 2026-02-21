@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { createCall } from '@/lib/vapi';
+import { createCall } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +16,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   const { id: campaignId } = await ctx.params;
 
@@ -23,6 +25,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     .from('ai_campaigns')
     .select('*')
     .eq('id', campaignId)
+    .eq('provider', provider)
     .single();
 
   if (!campaign) {
@@ -48,7 +51,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     await supabase
       .from('ai_campaigns')
       .update({ status: 'completed', updated_at: new Date().toISOString() })
-      .eq('id', campaignId);
+      .eq('id', campaignId)
+      .eq('provider', provider);
 
     return NextResponse.json({ done: true, message: 'Все контакты обзвонены' });
   }
@@ -69,7 +73,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       assistantId: campaign.assistant_id,
       phoneNumberId: campaign.phone_number_id,
       customer: { number: phone },
-    });
+      contactData: {
+        contactName: contact.contact_name || undefined,
+        companyName: contact.company_name || undefined,
+        email: contact.email || undefined,
+      },
+    }, provider);
 
     // Update contact with call ID
     await supabase
@@ -84,7 +93,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         called_contacts: (campaign.called_contacts ?? 0) + 1,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', campaignId);
+      .eq('id', campaignId)
+      .eq('provider', provider);
 
     return NextResponse.json({
       done: false,

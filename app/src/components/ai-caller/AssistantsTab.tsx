@@ -15,7 +15,7 @@ import {
   Brain,
   X,
 } from 'lucide-react';
-import type { VapiAssistant } from '@/types/ai-caller';
+import type { VapiAssistant, VoicePreset } from '@/types/ai-caller';
 import {
   VOICE_PRESETS,
   LLM_PRESETS,
@@ -26,6 +26,8 @@ interface Props {
   assistants: VapiAssistant[];
   loading: boolean;
   onRefresh: () => void;
+  apiBase?: string;
+  provider?: 'vapi' | 'elevenlabs';
 }
 
 type FormData = {
@@ -36,18 +38,24 @@ type FormData = {
   llmPreset: string;
 };
 
-const INITIAL_FORM: FormData = {
-  name: '',
-  firstMessage: '',
-  systemPrompt: '',
-  voicePreset: 'kate',
-  llmPreset: 'gpt41',
-};
+function defaultVoice(provider: string): string {
+  return provider === 'elevenlabs' ? 'el-kate' : 'kate';
+}
 
-export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
+export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/ai-caller', provider = 'vapi' }: Props) {
+  const voicePresets: VoicePreset[] = VOICE_PRESETS.filter(
+    (v) => v.scope === provider || v.scope === 'any',
+  );
+  const initialForm: FormData = {
+    name: '',
+    firstMessage: '',
+    systemPrompt: '',
+    voicePreset: defaultVoice(provider),
+    llmPreset: 'gpt4o-mini',
+  };
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<FormData>(INITIAL_FORM);
+  const [form, setForm] = useState<FormData>(initialForm);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -70,7 +78,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch('/api/ai-caller/briefs/parse', {
+      const res = await fetch(`${apiBase}/briefs/parse`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -102,7 +110,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
   // ── CRUD ──
 
   async function saveAssistant() {
-    const voice = VOICE_PRESETS.find((v) => v.id === form.voicePreset) ?? VOICE_PRESETS[0];
+    const voice = voicePresets.find((v) => v.id === form.voicePreset) ?? voicePresets[0];
     const llm = LLM_PRESETS.find((l) => l.id === form.llmPreset) ?? LLM_PRESETS[0];
 
     let voiceConfig: Record<string, unknown>;
@@ -150,7 +158,8 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
         temperature: 0.7,
       },
       voice: voiceConfig,
-      ...DEFAULT_PIPELINE_SETTINGS,
+      language: 'ru',
+      ...(provider === 'vapi' ? DEFAULT_PIPELINE_SETTINGS : {}),
     };
 
     setSaving(true);
@@ -159,8 +168,8 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
     try {
       const token = await getToken();
       const url = editingId
-        ? `/api/ai-caller/assistants/${editingId}`
-        : '/api/ai-caller/assistants';
+        ? `${apiBase}/assistants/${editingId}`
+        : `${apiBase}/assistants`;
 
       const res = await fetch(url, {
         method: editingId ? 'PATCH' : 'POST',
@@ -181,7 +190,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
 
       setShowForm(false);
       setEditingId(null);
-      setForm(INITIAL_FORM);
+      setForm(initialForm);
       onRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
@@ -196,7 +205,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
     setDeleting(id);
     try {
       const token = await getToken();
-      await fetch(`/api/ai-caller/assistants/${id}`, {
+      await fetch(`${apiBase}/assistants/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -210,9 +219,9 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
   function startEdit(a: VapiAssistant) {
     const voiceId = a.voice?.voiceId;
     const voiceProvider = a.voice?.provider;
-    const voicePreset = VOICE_PRESETS.find(
+    const voicePreset = voicePresets.find(
       (v) => v.voiceId === voiceId && (!voiceProvider || v.provider === voiceProvider),
-    )?.id ?? 'kate';
+    )?.id ?? defaultVoice(provider);
     const modelName = a.model?.model;
     const llmPreset = LLM_PRESETS.find((l) => l.model === modelName)?.id ?? 'gpt41';
     const systemPrompt =
@@ -233,7 +242,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
   function cancelForm() {
     setShowForm(false);
     setEditingId(null);
-    setForm(INITIAL_FORM);
+    setForm(initialForm);
     setError('');
   }
 
@@ -257,7 +266,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
         </p>
         <button
           onClick={() => {
-            setForm(INITIAL_FORM);
+            setForm(initialForm);
             setEditingId(null);
             setShowForm(true);
             setError('');
@@ -367,9 +376,9 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
                 }
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
-                {Array.from(new Set(VOICE_PRESETS.map((v) => v.group))).map((group) => (
+                {Array.from(new Set(voicePresets.map((v) => v.group))).map((group) => (
                   <optgroup key={group} label={group}>
-                    {VOICE_PRESETS.filter((v) => v.group === group).map((v) => (
+                    {voicePresets.filter((v) => v.group === group).map((v) => (
                       <option key={v.id} value={v.id}>
                         {v.label}
                       </option>
@@ -435,7 +444,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
         <div className="space-y-3">
           {assistants.map((a) => {
             const isExpanded = expandedId === a.id;
-            const voicePreset = VOICE_PRESETS.find(
+            const matchedVoice = voicePresets.find(
               (v) => v.voiceId === a.voice?.voiceId && (!a.voice?.provider || v.provider === a.voice.provider),
             );
             const llmPreset = LLM_PRESETS.find(
@@ -463,7 +472,7 @@ export function AssistantsTab({ assistants, loading, onRefresh }: Props) {
                       <div className="flex items-center gap-3 text-xs text-gray-400 mt-0.5">
                         <span className="inline-flex items-center gap-1">
                           <Mic className="h-3 w-3" />
-                          {voicePreset?.label.split(' —')[0] || a.voice?.voiceId || '—'}
+                          {matchedVoice?.label.split(' —')[0] || a.voice?.voiceId || '—'}
                         </span>
                         <span className="inline-flex items-center gap-1">
                           <Brain className="h-3 w-3" />

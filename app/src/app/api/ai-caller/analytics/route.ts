@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { getCall } from '@/lib/vapi';
+import { getCall, parseProvider } from '@/lib/ai-caller-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = parseProvider(req.headers.get('x-ai-caller-provider'));
 
   if (!OPENROUTER_API_KEY) {
     return NextResponse.json({ error: 'OPENROUTER_BRIEF_API_KEY не настроен' }, { status: 500 });
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest) {
 
   for (const callId of newCallIds.slice(0, 50)) {
     try {
-      const callData = (await getCall(callId)) as Record<string, unknown>;
+      const callData = (await getCall(callId, provider)) as Record<string, unknown>;
       const transcript = (callData.transcript as string) || '';
       const customerNumber = (callData.customer as Record<string, string>)?.number || '';
       const assistantName = (callData.assistant as Record<string, string>)?.name || '';

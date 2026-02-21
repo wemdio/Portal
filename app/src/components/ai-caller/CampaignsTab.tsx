@@ -19,6 +19,7 @@ import {
   Square,
 } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber } from '@/types/ai-caller';
+import { CAMPAIGN_PRESETS } from '@/lib/ai-caller-prompts';
 
 interface Campaign {
   id: string;
@@ -71,6 +72,13 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const [formName, setFormName] = useState('');
   const [formAssistant, setFormAssistant] = useState('');
   const [formPhone, setFormPhone] = useState('');
+  const [formPreset, setFormPreset] = useState<string>(CAMPAIGN_PRESETS[0]?.id ?? '');
+  const [formUseExistingAssistant, setFormUseExistingAssistant] = useState(false);
+  const [parsingBrief, setParsingBrief] = useState(false);
+  const [briefGenerated, setBriefGenerated] = useState(false);
+  const [generatedPrompt, setGeneratedPrompt] = useState('');
+  const [generatedFirstMsg, setGeneratedFirstMsg] = useState('');
+  const [generatedName, setGeneratedName] = useState('');
   const [parsedContacts, setParsedContacts] = useState<
     { phone: string; company?: string; name?: string; email?: string }[]
   >([]);
@@ -137,6 +145,35 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const effectiveAssistant = formAssistant || (assistants.length ? assistants[0].id : '');
   const effectivePhone = formPhone || (phoneNumbers.length ? phoneNumbers[0].id : '');
 
+  // ── Brief Upload (preset-based) ──
+
+  async function handleBriefUpload(file: File) {
+    setParsingBrief(true);
+    setError('');
+    try {
+      const token = await getToken();
+      const fd = new FormData();
+      fd.append('file', file);
+      if (formPreset) fd.append('presetId', formPreset);
+
+      const res = await fetch('/api/ai-caller/briefs/parse', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Ошибка парсинга брифа'); setParsingBrief(false); return; }
+
+      setGeneratedPrompt(data.systemPrompt || '');
+      setGeneratedFirstMsg(data.firstMessage || '');
+      setGeneratedName(data.personaName ? `${data.personaName} - ${data.companyName || 'Campaign'}` : '');
+      setBriefGenerated(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка');
+    }
+    setParsingBrief(false);
+  }
+
   // ── CSV Upload ──
 
   function handleCsvUpload(file: File) {
@@ -191,18 +228,50 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   // ── Create Campaign ──
 
   async function createCampaign() {
-    if (!formName.trim() || !effectiveAssistant || !effectivePhone || !parsedContacts.length) return;
+    if (!formName.trim() || !effectivePhone || !parsedContacts.length) return;
 
     setCreating(true);
     setError('');
     try {
       const token = await getToken();
+      let assistantId = effectiveAssistant;
+
+      // If brief was generated, auto-create assistant first
+      if (briefGenerated && generatedPrompt && !formUseExistingAssistant) {
+        const asstRes = await fetch('/api/ai-caller/assistants', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            name: (generatedName || formName).slice(0, 40),
+            firstMessage: generatedFirstMsg,
+            model: {
+              provider: 'openai',
+              model: 'gpt-4o-mini',
+              messages: [{ role: 'system', content: generatedPrompt }],
+              temperature: 0.7,
+            },
+            voice: {
+              provider: '11labs',
+              voiceId: '7G0NvIkWRnU0Dqjgz13p',
+              model: 'eleven_multilingual_v2',
+              stability: 0.48,
+              similarityBoost: 0.82,
+              speed: 1.0,
+            },
+          }),
+        });
+        const asstData = await asstRes.json();
+        if (!asstRes.ok) { setError(asstData.error || 'Ошибка создания ассистента'); setCreating(false); return; }
+        assistantId = asstData.assistant?.id;
+        if (!assistantId) { setError('Не удалось создать ассистента'); setCreating(false); return; }
+      }
+
       const res = await fetch('/api/ai-caller/campaigns', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           name: formName,
-          assistantId: effectiveAssistant,
+          assistantId,
           phoneNumberId: effectivePhone,
           contacts: parsedContacts,
         }),
@@ -213,6 +282,10 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       setShowCreate(false);
       setFormName('');
       setParsedContacts([]);
+      setBriefGenerated(false);
+      setGeneratedPrompt('');
+      setGeneratedFirstMsg('');
+      setGeneratedName('');
       fetchCampaigns();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
@@ -448,7 +521,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       return;
     }
 
-    // Fetch recording URL from Vapi
     setLoadingAudio(vapiCallId);
     try {
       const token = await getToken();
@@ -457,13 +529,18 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       });
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
-      const url = (call?.recordingUrl as string)
+      let url = (call?.recordingUrl as string)
         || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
         || '';
 
       if (!url) {
         setLoadingAudio(null);
         return;
+      }
+
+      if (url.startsWith('/api/')) {
+        const sep = url.includes('?') ? '&' : '?';
+        url = `${url}${sep}token=${encodeURIComponent(token)}`;
       }
 
       setRecordingUrls((prev) => ({ ...prev, [vapiCallId]: url }));
@@ -556,7 +633,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Название</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Название кампании</label>
             <input
               type="text"
               value={formName}
@@ -566,12 +643,98 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {/* Preset selection */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Сценарий звонка</label>
+            <div className="space-y-2">
+              {CAMPAIGN_PRESETS.map((p) => (
+                <label
+                  key={p.id}
+                  className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                    formPreset === p.id && !formUseExistingAssistant
+                      ? 'border-blue-400 bg-blue-50'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="preset"
+                    checked={formPreset === p.id && !formUseExistingAssistant}
+                    onChange={() => { setFormPreset(p.id); setFormUseExistingAssistant(false); }}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-900">{p.label}</span>
+                    <p className="text-xs text-gray-500 mt-0.5">{p.description}</p>
+                  </div>
+                </label>
+              ))}
+              <label
+                className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  formUseExistingAssistant
+                    ? 'border-blue-400 bg-blue-50'
+                    : 'border-gray-200 bg-white hover:border-gray-300'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="preset"
+                  checked={formUseExistingAssistant}
+                  onChange={() => setFormUseExistingAssistant(true)}
+                  className="mt-0.5"
+                />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">Свой ассистент</span>
+                  <p className="text-xs text-gray-500 mt-0.5">Выбрать ранее созданного ассистента</p>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          {/* Brief upload (for presets) */}
+          {!formUseExistingAssistant && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Загрузить бриф компании (PDF/TXT)
+              </label>
+              <p className="text-xs text-gray-400 mb-2">
+                AI извлечёт информацию из брифа и создаст ассистента под выбранный сценарий.
+              </p>
+              <div className="flex items-center gap-3">
+                <label className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors">
+                  <FileSpreadsheet className="h-4 w-4" />
+                  {parsingBrief ? 'Обработка...' : 'Загрузить бриф'}
+                  <input
+                    type="file"
+                    accept=".pdf,.txt,.md,.doc,.docx"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleBriefUpload(file);
+                      e.target.value = '';
+                    }}
+                    disabled={parsingBrief}
+                  />
+                </label>
+                {parsingBrief && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+                {briefGenerated && <CheckCircle className="h-4 w-4 text-green-500" />}
+              </div>
+              {briefGenerated && (
+                <div className="mt-2 rounded-lg border border-green-200 bg-green-50 p-3">
+                  <p className="text-xs font-medium text-green-700">Ассистент будет создан автоматически: {generatedName}</p>
+                  <p className="text-xs text-green-600 mt-1 line-clamp-2">{generatedPrompt.slice(0, 150)}...</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Existing assistant (if "own assistant" selected) */}
+          {formUseExistingAssistant && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Ассистент</label>
               <select
-              value={effectiveAssistant}
-              onChange={(e) => setFormAssistant(e.target.value)}
+                value={effectiveAssistant}
+                onChange={(e) => setFormAssistant(e.target.value)}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
                 {assistants.map((a) => (
@@ -579,18 +742,20 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Звонить с номера</label>
-              <select
+          )}
+
+          {/* Phone number */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Звонить с номера</label>
+            <select
               value={effectivePhone}
               onChange={(e) => setFormPhone(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              >
-                {phoneNumbers.map((p) => (
-                  <option key={p.id} value={p.id}>{p.number || p.name || p.id}</option>
-                ))}
-              </select>
-            </div>
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            >
+              {phoneNumbers.map((p) => (
+                <option key={p.id} value={p.id}>{p.number || p.name || p.id}</option>
+              ))}
+            </select>
           </div>
 
           {/* CSV Upload */}
@@ -599,7 +764,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
               Загрузить базу контактов (CSV)
             </label>
             <p className="text-xs text-gray-400 mb-2">
-              Колонки: телефон (обязательно), компания, имя, email. Разделитель: запятая, точка с запятой или табуляция.
+              Колонки: телефон (обязательно), компания, имя, email + любые другие. AI будет использовать имя и компанию при звонке.
             </p>
             <label className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors">
               <FileSpreadsheet className="h-4 w-4" />
@@ -647,7 +812,12 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
           <div className="flex items-center gap-3 pt-2">
             <button
               onClick={createCampaign}
-              disabled={creating || !formName.trim() || !parsedContacts.length}
+              disabled={
+                creating
+                || !formName.trim()
+                || !parsedContacts.length
+                || (!formUseExistingAssistant && !briefGenerated)
+              }
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {creating && <Loader2 className="h-4 w-4 animate-spin" />}

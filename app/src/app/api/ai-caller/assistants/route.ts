@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { listAssistants, createAssistant } from '@/lib/vapi';
+import { listAssistants, createAssistant, parseProvider } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,9 +14,10 @@ export async function GET(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   try {
-    const assistants = await listAssistants();
+    const assistants = await listAssistants(provider);
     return NextResponse.json({ assistants });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -31,6 +33,7 @@ export async function POST(req: NextRequest) {
   const supabase = createAuthedSupabaseClient(token);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const provider = resolveAiCallerProvider(req);
 
   let body: Record<string, unknown>;
   try {
@@ -47,7 +50,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const assistant = await createAssistant(body);
+    const assistant = await createAssistant(body, provider);
     return NextResponse.json({ assistant }, { status: 201 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
