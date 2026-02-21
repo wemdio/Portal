@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { listAssistants, createAssistant, parseProvider } from '@/lib/ai-caller-provider';
+import { listAssistants, createAssistant } from '@/lib/ai-caller-provider';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
