@@ -65,29 +65,25 @@ export function checkSyntax(email: string): { valid: boolean; error?: string } {
 
 // ─── 3. Disposable Provider Detection ───────────────────────────────────────
 
+import disposableDomainsList from 'disposable-email/domains.json';
+
+const EXTRA_DISPOSABLE_DOMAINS = [
+  'guerrillamail.com','guerrillamail.net','guerrillamail.info','guerrillamail.biz',
+  'guerrillamail.de','guerrillamailblock.com','sharklasers.com','grr.la',
+  'tempail.com','tempr.email','mytemp.email','temp-mail.io','tmpmail.org',
+  'tmpmail.net','tmail.ws','mt2015.com','thankyou2010.com','mailzilla.com',
+  'mailzilla.org','emkei.cz','anonymbox.com','rmqkr.net','emailigo.de',
+  'antichef.net','binkmail.com','chammy.info','devnullmail.com','getairmail.com',
+  'ichimail.com','killmail.com','mobi.web.id','nwldx.com','pjjkp.com',
+  'rootfest.net','shieldemail.com','sogetthis.com','spambob.net','spambog.com',
+  'spamfree24.org','urhen.com','wuzup.net','zoemail.org','damnthespam.com',
+  'einrot.com','flurred.com','imstations.com','mailnator.com','cuvox.de',
+  'jourrapide.com','superrito.com','armyspy.com','gustr.com','rhyta.com',
+];
+
 const DISPOSABLE_DOMAINS = new Set([
-  'mailinator.com','guerrillamail.com','guerrillamail.net','tempmail.com','throwaway.email',
-  'temp-mail.org','10minutemail.com','trashmail.com','trashmail.net','yopmail.com','yopmail.fr',
-  'sharklasers.com','guerrillamailblock.com','grr.la','dispostable.com','mailnesia.com',
-  'tempail.com','tempr.email','discard.email','maildrop.cc','mohmal.com','burnermail.io',
-  'mailcatch.com','mintemail.com','getnada.com','emailondeck.com','spamgourmet.com',
-  'mytemp.email','fakeinbox.com','safetymail.info','tempmailaddress.com','email-fake.com',
-  'crazymailing.com','mailpoof.com','tempinbox.com','temp-mail.io','emailfake.com',
-  'tmpmail.org','tmpmail.net','harakirimail.com','33mail.com','mailforspam.com',
-  'guerrillamail.info','guerrillamail.biz','guerrillamail.de','grr.la','guerrillamailblock.com',
-  'tmail.ws','mt2015.com','thankyou2010.com','trash-mail.com','bugmenot.com','mailinator.net',
-  'mailinator.us','spamhereplease.com','thisisnotmyrealemail.com','trashymail.com',
-  'trashymail.net','mailmetrash.com','filzmail.com','sneakemail.com','mailexpire.com',
-  'tempomail.fr','jetable.fr.nf','courrieltemporaire.com','lol.ovpn.to','despammed.com',
-  'kurzepost.de','objectmail.com','proxymail.eu','rcpt.at','trash-mail.at','trashmail.at',
-  'trashmail.me','wegwerfmail.de','wegwerfmail.net','mailzilla.com','mailzilla.org',
-  'emkei.cz','anonymbox.com','rmqkr.net','emailigo.de','antichef.net','binkmail.com',
-  'chammy.info','devnullmail.com','getairmail.com','ichimail.com','killmail.com',
-  'mobi.web.id','nwldx.com','pjjkp.com','rootfest.net','shieldemail.com','sogetthis.com',
-  'spambob.net','spambog.com','spamfree24.org','teleworm.us','urhen.com','wuzup.net',
-  'za.com','zoemail.org','damnthespam.com','dayrep.com','einrot.com','flurred.com',
-  'imstations.com','mailnator.com','cuvox.de','jourrapide.com','superrito.com',
-  'armyspy.com','gustr.com','rhyta.com','teleworm.us','dayrep.com',
+  ...(disposableDomainsList as string[]),
+  ...EXTRA_DISPOSABLE_DOMAINS,
 ]);
 
 export function isDisposable(domain: string): boolean {
