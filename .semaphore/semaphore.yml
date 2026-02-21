@@ -92,13 +92,13 @@ blocks:
               sudo -n bash drain-worker.sh;
               echo '--- Step 2: pull new images ---';
               sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
-              sudo -n docker compose -p portal -f docker-compose.prod.yml pull portal yandexmaps worker;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml pull;
               echo '--- Step 3: restart portal + yandexmaps ---';
               sudo -n docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo -n docker rm -f;
               sudo -n docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo -n docker rm -f;
               sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps;
-              echo '--- Step 4: restart worker with new code ---';
-              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker;
+              echo '--- Step 4: restart workers with new code ---';
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
               sudo -n docker image prune -f;
               sudo -n docker volume prune -f;
               echo '--- Deploy complete ---'"
