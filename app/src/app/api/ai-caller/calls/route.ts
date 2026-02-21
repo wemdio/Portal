@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { listCalls, createCall } from '@/lib/vapi';
+import { listCalls, createCall } from '@/lib/ai-caller-provider';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,9 +18,10 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const assistantId = searchParams.get('assistantId') ?? undefined;
   const limit = parseInt(searchParams.get('limit') ?? '30', 10);
+  const provider = resolveAiCallerProvider(req);
 
   try {
-    const calls = await listCalls({ assistantId, limit });
+    const calls = await listCalls({ assistantId, limit }, provider);
     return NextResponse.json({ calls });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -44,6 +46,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { assistantId, phoneNumberId, customerNumber } = body;
+  const provider = resolveAiCallerProvider(req);
 
   if (!assistantId || !phoneNumberId || !customerNumber) {
     return NextResponse.json(
@@ -66,7 +69,7 @@ export async function POST(req: NextRequest) {
       assistantId,
       phoneNumberId,
       customer: { number: normalized },
-    });
+    }, provider);
     return NextResponse.json({ call }, { status: 201 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';

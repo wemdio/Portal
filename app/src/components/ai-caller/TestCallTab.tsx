@@ -9,6 +9,8 @@ interface Props {
   assistants: VapiAssistant[];
   phoneNumbers: VapiPhoneNumber[];
   loading: boolean;
+  apiBase?: string;
+  platformLabel?: string;
 }
 
 const STATUS_MAP: Record<string, { label: string; color: string }> = {
@@ -30,7 +32,13 @@ const ENDED_REASON_MAP: Record<string, string> = {
   'manually-canceled': 'Отменён вручную',
 };
 
-export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
+export function TestCallTab({
+  assistants,
+  phoneNumbers,
+  loading,
+  apiBase = '/api/ai-caller',
+  platformLabel = 'Vapi',
+}: Props) {
   const [selectedAssistant, setSelectedAssistant] = useState('');
   const [selectedPhone, setSelectedPhone] = useState('');
   const [customerNumber, setCustomerNumber] = useState('');
@@ -55,7 +63,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
       pollRef.current = setInterval(async () => {
         try {
           const token = await getToken();
-          const res = await fetch(`/api/ai-caller/calls/${callId}`, {
+          const res = await fetch(`${apiBase}/calls/${callId}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
           const data = await res.json();
@@ -71,7 +79,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
         }
       }, 2500);
     },
-    [getToken],
+    [getToken, apiBase],
   );
 
   async function makeCall() {
@@ -83,7 +91,7 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
 
     try {
       const token = await getToken();
-      const res = await fetch('/api/ai-caller/calls', {
+      const res = await fetch(`${apiBase}/calls`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -374,8 +382,8 @@ export function TestCallTab({ assistants, phoneNumbers, loading }: Props) {
       {!activeCall && !calling && (
         <div className="rounded-xl bg-blue-50 border border-blue-100 px-5 py-4 text-sm text-blue-700">
           Выберите ассистента, номер для звонка и введите номер клиента. 
-          После нажатия «Позвонить» Vapi инициирует исходящий звонок, и вы увидите 
-          статус и транскрипт в реальном времени.
+          После нажатия «Позвонить» {platformLabel} инициирует исходящий звонок. 
+          Статус и транскрипт появятся после завершения звонка.
         </div>
       )}
     </div>

@@ -233,11 +233,15 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
       });
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
-      const url = (call?.recordingUrl as string)
+      let url = (call?.recordingUrl as string)
         || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
         || '';
 
       if (!url) { setLoadingAudio(null); return; }
+      if (url.startsWith('/api/')) {
+        const sep = url.includes('?') ? '&' : '?';
+        url = `${url}${sep}token=${encodeURIComponent(token)}`;
+      }
       setRecordingUrls((prev) => ({ ...prev, [vapiCallId]: url }));
       startAudio(vapiCallId, url);
     } catch { /* ignore */ }
@@ -285,8 +289,15 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json();
-        url = data.recordingUrl || data.artifact?.recordingUrl || '';
+        const call = data.call as Record<string, unknown> | undefined;
+        url = (call?.recordingUrl as string)
+          || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
+          || '';
         if (url) {
+          if (url.startsWith('/api/')) {
+            const sep = url.includes('?') ? '&' : '?';
+            url = `${url}${sep}token=${encodeURIComponent(token)}`;
+          }
           setRecordingUrls((prev) => ({ ...prev, [callId]: url }));
         }
       } catch {
