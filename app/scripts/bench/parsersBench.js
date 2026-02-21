@@ -1,6 +1,3 @@
-/* eslint-disable no-console */
-const { createClient } = require('@supabase/supabase-js');
-
 function mustEnv(name) {
   const v = String(process.env[name] ?? '').trim();
   if (!v) throw new Error(`Missing required env: ${name}`);
@@ -200,11 +197,9 @@ async function waitForStatus(admin, table, id, opts) {
   let last = null;
 
   while (Date.now() < timeoutAt) {
-    // eslint-disable-next-line no-await-in-loop
     const row = await fetchRow(admin, table, id, opts.fields);
     last = row;
     if (opts.isDone(row)) return row;
-    // eslint-disable-next-line no-await-in-loop
     await sleep(opts.pollMs);
   }
 
@@ -269,6 +264,7 @@ async function runYandexTwoStep(admin, jobId, opts) {
 }
 
 async function run() {
+  const { createClient } = await import('@supabase/supabase-js');
   const args = parseArgs(process.argv.slice(2));
 
   const SUPABASE_URL = mustEnv('NEXT_PUBLIC_SUPABASE_URL');
