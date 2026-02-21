@@ -16,6 +16,7 @@ import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/li
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '15') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
 let shuttingDown = false;
@@ -239,7 +240,7 @@ async function pollOnce(): Promise<boolean> {
   const hhJobId = await claimHHJob();
   if (hhJobId) {
     log('info', `Running HH parser job ${hhJobId}`);
-    await runHHParserJob(hhJobId);
+    await runHHParserJob(hhJobId, DRAIN_TIMEOUT_MS);
     return true;
   }
 

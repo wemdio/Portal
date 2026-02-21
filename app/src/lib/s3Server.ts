@@ -22,14 +22,33 @@ export type PresignedAvatarRead = {
   key: string;
 };
 
-const bucket = requireEnv('S3_BUCKET');
-const region = process.env.S3_REGION ?? 'us-east-1';
-const accessKeyId = requireEnv('S3_ACCESS_KEY_ID');
-const secretAccessKey = requireEnv('S3_SECRET_ACCESS_KEY');
-const endpoint = process.env.S3_ENDPOINT;
-const publicBaseUrl = process.env.S3_PUBLIC_BASE_URL;
+let _s3: S3Client | null = null;
+let _bucket: string | null = null;
+let _region: string | null = null;
+let _endpoint: string | undefined;
+let _publicBaseUrl: string | undefined;
 
-function tryDeriveSupabasePublicBaseUrl(): string | null {
+function getConfig() {
+  if (!_bucket) {
+    _bucket = requireEnv('S3_BUCKET');
+    _region = process.env.S3_REGION ?? 'us-east-1';
+    _endpoint = process.env.S3_ENDPOINT;
+    _publicBaseUrl = process.env.S3_PUBLIC_BASE_URL;
+
+    const accessKeyId = requireEnv('S3_ACCESS_KEY_ID');
+    const secretAccessKey = requireEnv('S3_SECRET_ACCESS_KEY');
+
+    _s3 = new S3Client({
+      region: _region,
+      credentials: { accessKeyId, secretAccessKey },
+      endpoint: _endpoint || undefined,
+      forcePathStyle: Boolean(_endpoint),
+    });
+  }
+  return { s3: _s3!, bucket: _bucket, region: _region!, endpoint: _endpoint, publicBaseUrl: _publicBaseUrl };
+}
+
+function tryDeriveSupabasePublicBaseUrl(endpoint: string | undefined, bucket: string): string | null {
   if (!endpoint) return null;
   const m = endpoint.match(/^https?:\/\/([^/]+)\/storage\/v1\/s3\/?$/i);
   if (!m) return null;
@@ -38,19 +57,11 @@ function tryDeriveSupabasePublicBaseUrl(): string | null {
   return `https://${publicHost}/storage/v1/object/public/${encodeURIComponent(bucket)}`;
 }
 
-const s3 = new S3Client({
-  region,
-  credentials: { accessKeyId, secretAccessKey },
-  endpoint: endpoint || undefined,
-  forcePathStyle: Boolean(endpoint),
-});
-
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
 function encodePath(value: string): string {
-  // Encode each path segment but keep slashes.
   return value
     .split('/')
     .map((segment) => encodeURIComponent(segment))
@@ -58,21 +69,21 @@ function encodePath(value: string): string {
 }
 
 export function getPublicObjectUrl(key: string): string {
+  const { bucket, region, endpoint, publicBaseUrl } = getConfig();
+
   if (publicBaseUrl) {
     return `${normalizeBaseUrl(publicBaseUrl)}/${encodePath(key)}`;
   }
 
-  const supabaseBase = tryDeriveSupabasePublicBaseUrl();
+  const supabaseBase = tryDeriveSupabasePublicBaseUrl(endpoint, bucket);
   if (supabaseBase) {
     return `${supabaseBase}/${encodePath(key)}`;
   }
 
-  // Default AWS-style URL.
   if (!endpoint) {
     return `https://${encodeURIComponent(bucket)}.s3.${region}.amazonaws.com/${encodePath(key)}`;
   }
 
-  // Generic S3-compatible endpoint fallback (path-style).
   return `${normalizeBaseUrl(endpoint)}/${encodeURIComponent(bucket)}/${encodePath(key)}`;
 }
 
@@ -81,10 +92,9 @@ export async function createAvatarUploadUrl(params: {
   contentType: string;
   ext: string;
 }): Promise<PresignedAvatarUpload> {
+  const { s3, bucket } = getConfig();
   const safeExt = params.ext.toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
   const timestamp = Date.now();
-  // Store avatars under a fixed prefix ("folder") in the bucket.
-  // In S3 this is just a key prefix; no separate folder creation is required.
   const key = `avatars/${params.userId}/avatar-${timestamp}.${safeExt}`;
 
   const command = new PutObjectCommand({
@@ -101,6 +111,7 @@ export async function createAvatarUploadUrl(params: {
 }
 
 export async function createAvatarReadUrl(params: { key: string }): Promise<PresignedAvatarRead> {
+  const { s3, bucket } = getConfig();
   const command = new GetObjectCommand({
     Bucket: bucket,
     Key: params.key,
@@ -108,4 +119,3 @@ export async function createAvatarReadUrl(params: { key: string }): Promise<Pres
   const readUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 10 });
   return { readUrl, key: params.key };
 }
-
