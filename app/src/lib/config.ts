@@ -30,22 +30,22 @@ export const SEARCH_CONFIG = {
   ENRICH: {
     EMAIL_ENABLED: process.env.SEARCH_ENRICH_EMAIL_ENABLED !== '0',
     // Default higher: many sites expose emails only on /contacts, so enrichment needs a decent budget.
-    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 200,
-    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 10,
-    CONCURRENCY: Number(process.env.SEARCH_ENRICH_EMAIL_CONCURRENCY) || 2,
+    MAX_SITES_PER_JOB: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_SITES_PER_JOB) || 500,
+    MAX_PAGES_PER_SITE: Number(process.env.SEARCH_ENRICH_EMAIL_MAX_PAGES_PER_SITE) || 3,
+    CONCURRENCY: 2,
   },
 
   // Настройки расширения источников
   SOURCE_EXPAND: {
     ENABLED: process.env.SEARCH_SOURCE_EXPAND_ENABLED !== '0',
-    MAX_SOURCES_PER_QUERY: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY) || 2,
-    MAX_SOURCES_PER_JOB: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB) || 10,
-    MAX_SITES_PER_SOURCE: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE) || 25,
-    CONCURRENCY: Number(process.env.SEARCH_SOURCE_EXPAND_CONCURRENCY) || 2,
+    MAX_SOURCES_PER_QUERY: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_QUERY) || 12,
+    MAX_SOURCES_PER_JOB: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SOURCES_PER_JOB) || 400,
+    MAX_SITES_PER_SOURCE: Number(process.env.SEARCH_SOURCE_EXPAND_MAX_SITES_PER_SOURCE) || 400,
+    CONCURRENCY: 3,
   },
 
   // Стабильность важнее скорости — bursty traffic быстро ловит блоки.
-  QUERY_CONCURRENCY: Math.max(1, Math.min(3, Number(process.env.SEARCH_QUERY_CONCURRENCY) || 1)),
+  QUERY_CONCURRENCY: 2,
 };
 
 export const HH_CONFIG = {

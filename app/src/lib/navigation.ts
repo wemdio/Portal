@@ -16,5 +16,5 @@ export const navItems: NavItem[] = [
   { name: 'Календарь почт', href: '/billing-calendar', billingCalendarOnly: true },
   { name: 'Регламент', href: '/reglament' },
   { name: 'Админ', href: '/admin', adminOnly: true },
-  { name: 'Настройки', href: '/settings' },
+  { name: 'Профиль', href: '/profile' },
 ];

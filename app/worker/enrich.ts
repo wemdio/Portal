@@ -2,7 +2,7 @@ import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
-const MAX_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 2;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
@@ -28,7 +28,18 @@ async function claimEnrichJob(): Promise<string | null> {
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
-  return pending?.id ?? null;
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('website_enrichment_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
 }
 
 async function pollOnce(): Promise<boolean> {
