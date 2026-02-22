@@ -2,6 +2,10 @@
 /* eslint-disable react/no-unescaped-entities, @next/next/no-img-element */
 
 import { useEffect, useRef, useState } from 'react';
+import { ReglamentRenderer } from '@/components/ReglamentRenderer';
+import { supabase } from '@/lib/supabaseClient';
+import { useIsTma } from '@/lib/useIsTma';
+import type { ReglamentDocument } from '@/types';
 
 
 interface SearchResult {
@@ -24,7 +28,108 @@ type DetailsItem = {
   links?: ContentLink[];
 };
 
+type ReglamentListItem = Pick<
+  ReglamentDocument,
+  'id' | 'slug' | 'title' | 'summary' | 'updated_at' | 'published_at' | 'content'
+>;
+
+const dateFormatter = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
+
+function formatDate(value?: string | null) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : dateFormatter.format(date);
+}
+
+function isEmptyContent(content?: ReglamentDocument['content'] | null) {
+  if (!content || content.type !== 'doc') return true;
+  const nodes = content.content ?? [];
+  if (nodes.length === 0) return true;
+  if (nodes.length === 1) {
+    const first = nodes[0] as { type?: string; content?: unknown[] };
+    if (first.type === 'paragraph' && (!first.content || first.content.length === 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export default function ReglamentPage() {
+  const isTma = useIsTma();
+  const [document, setDocument] = useState<ReglamentListItem | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDocuments = async () => {
+      setLoading(true);
+      setError(null);
+      const { data, error: loadError } = await supabase
+        .from('reglament_documents')
+        .select('id, slug, title, summary, updated_at, published_at, content')
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .order('updated_at', { ascending: false })
+        .limit(1);
+
+      if (!isMounted) return;
+
+      if (loadError) {
+        setError(`Не удалось загрузить документы: ${loadError.message}`);
+        setLoading(false);
+        return;
+      }
+
+      const item = (data ?? [])[0] as ReglamentListItem | undefined;
+      setDocument(item ?? null);
+      setLoading(false);
+    };
+
+    void loadDocuments();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  if (!loading && (!document || isEmptyContent(document.content))) {
+    return <LegacyReglamentPage />;
+  }
+
+  return (
+    <div className={`max-w-5xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <div className="mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Регламент</h1>
+        <p className="text-sm text-gray-500 mt-2">
+          Актуальные инструкции и рабочие регламенты для команды
+        </p>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500">
+          Загрузка документов...
+        </div>
+      ) : document ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">{document.title}</h2>
+          <p className="text-xs text-gray-500 mb-6">
+            Опубликовано: {formatDate(document.published_at || document.updated_at)}
+          </p>
+          <ReglamentRenderer content={document.content} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function LegacyReglamentPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showResults, setShowResults] = useState(false);

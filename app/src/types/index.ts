@@ -8,6 +8,7 @@ export type ProjectStatus =
 
 export * from './parsers';
 export * from './email-sequence';
+export * from './reglament';
 
 export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead';
 
