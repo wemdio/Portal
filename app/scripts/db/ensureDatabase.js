@@ -44,11 +44,15 @@ function shouldUseSsl(dbUrl) {
   return false;
 }
 
-function resolveMigrationsDir() {
-  return (
-    process.env.DB_MIGRATIONS_DIR ||
-    path.resolve(process.cwd(), '..', 'supabase', 'migrations')
-  );
+function resolveMigrationsDirCandidates() {
+  if (process.env.DB_MIGRATIONS_DIR) return [process.env.DB_MIGRATIONS_DIR];
+
+  // In local dev, cwd is usually `app/` → migrations are `../supabase/migrations`.
+  // In Docker image we copy migrations into `/app/supabase/migrations`.
+  return [
+    path.resolve(process.cwd(), 'supabase', 'migrations'),
+    path.resolve(process.cwd(), '..', 'supabase', 'migrations'),
+  ];
 }
 
 async function ensureDatabase() {
@@ -60,11 +64,20 @@ async function ensureDatabase() {
     return;
   }
 
-  const migrationsDir = resolveMigrationsDir();
-  try {
-    await fs.access(migrationsDir);
-  } catch {
-    console.warn(`[db] Папка миграций не найдена: ${migrationsDir}. Пропускаем.`);
+  const dirCandidates = resolveMigrationsDirCandidates();
+  let migrationsDir = '';
+  for (const dir of dirCandidates) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await fs.access(dir);
+      migrationsDir = dir;
+      break;
+    } catch {
+      // try next
+    }
+  }
+  if (!migrationsDir) {
+    console.warn(`[db] Папка миграций не найдена. Пробовали: ${dirCandidates.join(', ')}. Пропускаем.`);
     return;
   }
   const ssl = shouldUseSsl(dbUrl) ? { rejectUnauthorized: false } : undefined;
