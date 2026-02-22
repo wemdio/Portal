@@ -57,7 +57,9 @@ export default function AdminReglamentPage() {
   };
 
   useEffect(() => {
-    void loadDocuments();
+    setTimeout(() => {
+      void loadDocuments();
+    }, 0);
   }, []);
 
   const handleCreate = async () => {
