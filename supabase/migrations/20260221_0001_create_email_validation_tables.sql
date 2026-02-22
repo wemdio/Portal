@@ -67,29 +67,36 @@ alter table public.email_validation_queue enable row level security;
 alter table public.email_validation_domain_cache enable row level security;
 
 -- Jobs: owners can CRUD
+drop policy if exists email_validation_jobs_select_own on public.email_validation_jobs;
 create policy email_validation_jobs_select_own
   on public.email_validation_jobs for select using (auth.uid() = user_id);
+drop policy if exists email_validation_jobs_insert_own on public.email_validation_jobs;
 create policy email_validation_jobs_insert_own
   on public.email_validation_jobs for insert with check (auth.uid() = user_id);
+drop policy if exists email_validation_jobs_update_own on public.email_validation_jobs;
 create policy email_validation_jobs_update_own
   on public.email_validation_jobs for update
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists email_validation_jobs_delete_own on public.email_validation_jobs;
 create policy email_validation_jobs_delete_own
   on public.email_validation_jobs for delete using (auth.uid() = user_id);
 
 -- Queue: read/write only via owning job
+drop policy if exists email_validation_queue_select_own_job on public.email_validation_queue;
 create policy email_validation_queue_select_own_job
   on public.email_validation_queue for select
   using (exists (
     select 1 from public.email_validation_jobs j
     where j.id = email_validation_queue.job_id and j.user_id = auth.uid()
   ));
+drop policy if exists email_validation_queue_insert_own_job on public.email_validation_queue;
 create policy email_validation_queue_insert_own_job
   on public.email_validation_queue for insert
   with check (exists (
     select 1 from public.email_validation_jobs j
     where j.id = email_validation_queue.job_id and j.user_id = auth.uid()
   ));
+drop policy if exists email_validation_queue_update_own_job on public.email_validation_queue;
 create policy email_validation_queue_update_own_job
   on public.email_validation_queue for update
   using (exists (
@@ -100,6 +107,7 @@ create policy email_validation_queue_update_own_job
     select 1 from public.email_validation_jobs j
     where j.id = email_validation_queue.job_id and j.user_id = auth.uid()
   ));
+drop policy if exists email_validation_queue_delete_own_job on public.email_validation_queue;
 create policy email_validation_queue_delete_own_job
   on public.email_validation_queue for delete
   using (exists (
@@ -108,6 +116,7 @@ create policy email_validation_queue_delete_own_job
   ));
 
 -- Domain cache: only service role (no user policies needed)
+drop policy if exists email_validation_domain_cache_select_admin on public.email_validation_domain_cache;
 create policy email_validation_domain_cache_select_admin
   on public.email_validation_domain_cache for select
   using (exists (
