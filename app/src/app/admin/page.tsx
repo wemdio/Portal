@@ -28,6 +28,21 @@ export default function AdminPage() {
         </Link>
 
         <Link
+          href="/admin/reglament"
+          className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
+        >
+          <div className="flex h-full flex-col">
+            <div className="flex items-center mb-4">
+              <div className="ml-4">
+                <h2 className="text-lg font-semibold text-gray-900">Регламенты</h2>
+                <p className="text-sm text-gray-500">Создание и редактирование документов</p>
+              </div>
+            </div>
+            <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
+          </div>
+        </Link>
+
+        <Link
           href="/admin/import"
           className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >

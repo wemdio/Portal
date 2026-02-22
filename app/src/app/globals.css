@@ -252,3 +252,112 @@ input[type=number]::-webkit-outer-spin-button {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+.reglament-content li > p {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.reglament-content li > p > span.flex {
+  display: inline-flex;
+}
+
+.reglament-prose {
+  color: #111827;
+  line-height: 1.7;
+}
+
+.reglament-prose > *:not([class]) + *:not([class]) {
+  margin-top: 0.85rem;
+}
+
+.reglament-prose h2:not([class]) {
+  font-size: 1.6rem;
+  line-height: 1.25;
+  font-weight: 700;
+  margin-top: 1.6rem;
+}
+
+.reglament-prose h3:not([class]) {
+  font-size: 1.25rem;
+  line-height: 1.3;
+  font-weight: 600;
+  margin-top: 1.2rem;
+}
+
+.reglament-prose ul:not([class]),
+.reglament-prose ol:not([class]) {
+  list-style: none; /* Убираем маркеры по умолчанию */
+  padding-left: 0;
+}
+
+.reglament-prose a:not([class]) {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.reglament-prose img:not([class]) {
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+}
+
+.reglament-prose blockquote:not([class]) {
+  border-left: 4px solid #e5e7eb;
+  background: #f9fafb;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+}
+
+.reglament-editor .reglament-prose {
+  min-height: 360px;
+  outline: none;
+}
+
+.reglament-callout {
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.reglament-callout[data-variant='info'] {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.reglament-callout[data-variant='warning'] {
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+
+.reglament-callout[data-variant='danger'] {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
+.reglament-callout[data-variant='success'] {
+  background: #dcfce7;
+  border-color: #86efac;
+}
+
+.reglament-callout[data-variant='note'] {
+  background: #f5f3ff;
+  border-color: #c4b5fd;
+}
+
+.reglament-content .group > .flex > div.p-2.bg-indigo-100 {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background-color: #e0e7ff; /* indigo-100 */
+}
