@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import type { JSONContent } from '@tiptap/core';
 import { generateJSON } from '@tiptap/html';
 import { ReglamentEditor } from '@/components/ReglamentEditor';
@@ -33,7 +33,6 @@ function formatDate(value?: string | null) {
 
 export default function AdminReglamentEditPage() {
   const isTma = useIsTma();
-  const router = useRouter();
   const params = useParams<{ id: string }>();
   const docId = params?.id;
 
@@ -45,7 +44,6 @@ export default function AdminReglamentEditPage() {
   const [status, setStatus] = useState<ReglamentStatus>('draft');
   const [content, setContent] = useState<JSONContent>(DEFAULT_REGLAMENT_CONTENT);
   const [metadata, setMetadata] = useState<ReglamentDocState | null>(null);
-  const [dirty, setDirty] = useState(false);
   const initialRef = useRef<ReglamentDocState | null>(null);
   const legacyRootRef = useRef<HTMLDivElement>(null);
   const scaleContainerRef = useRef<HTMLDivElement>(null);
@@ -53,6 +51,12 @@ export default function AdminReglamentEditPage() {
   const legacyImportedRef = useRef(false);
 
   const canPublish = useMemo(() => title.trim().length > 0, [title]);
+  const dirty = useMemo(() => {
+    if (!metadata) return false;
+    const contentSerialized = JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT);
+    const baselineSerialized = JSON.stringify((metadata.content ?? DEFAULT_REGLAMENT_CONTENT) as JSONContent);
+    return title !== 'Регламент' || status !== metadata.status || contentSerialized !== baselineSerialized;
+  }, [content, metadata, status, title]);
 
   useEffect(() => {
     if (!docId) return;
@@ -81,7 +85,6 @@ export default function AdminReglamentEditPage() {
       setStatus(docData.status ?? 'draft');
       setContent((docData.content ?? DEFAULT_REGLAMENT_CONTENT) as JSONContent);
       initialRef.current = docData;
-      setDirty(false);
       setLoading(false);
     };
 
@@ -92,37 +95,31 @@ export default function AdminReglamentEditPage() {
   }, [docId]);
 
   useEffect(() => {
-    if (!initialRef.current) return;
-    const initial = initialRef.current;
-    const contentSerialized = JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT);
-    const initialSerialized = JSON.stringify(initial.content ?? DEFAULT_REGLAMENT_CONTENT);
-    const hasChanges =
-      title !== 'Регламент' ||
-      status !== initial.status ||
-      contentSerialized !== initialSerialized;
-    setDirty(hasChanges);
-  }, [title, status, content]);
-
-  useEffect(() => {
     if (!metadata || legacyImportedRef.current) return;
     if (metadata.slug !== 'reglament') return;
-    const nodes = content?.content ?? [];
-    const isEmptyDoc =
-      !content ||
-      content.type !== 'doc' ||
-      nodes.length === 0 ||
-      (nodes.length === 1 &&
-        (nodes[0] as { type?: string; content?: unknown[] }).type === 'paragraph' &&
-        (!(nodes[0] as { content?: unknown[] }).content || (nodes[0] as { content?: unknown[] }).content?.length === 0));
-    const isLegacyStructureMissing = !JSON.stringify(content ?? {}).includes('sectionBlock');
-    const isFresh = metadata.created_at && metadata.updated_at && metadata.created_at === metadata.updated_at;
-    if (!isEmptyDoc && !isLegacyStructureMissing) return;
-    if (!isFresh && !isEmptyDoc) return;
-    const container = legacyRootRef.current?.querySelector('.reglament-content') as HTMLElement | null;
-    if (!container) return;
-    const json = generateJSON(container.innerHTML, REGLAMENT_EXTENSIONS);
-    legacyImportedRef.current = true;
-    setContent(json as JSONContent);
+
+    const importLegacy = () => {
+      const nodes = content?.content ?? [];
+      const isEmptyDoc =
+        !content ||
+        content.type !== 'doc' ||
+        nodes.length === 0 ||
+        (nodes.length === 1 &&
+          (nodes[0] as { type?: string; content?: unknown[] }).type === 'paragraph' &&
+          (!(nodes[0] as { content?: unknown[] }).content ||
+            (nodes[0] as { content?: unknown[] }).content?.length === 0));
+      const isLegacyStructureMissing = !JSON.stringify(content ?? {}).includes('sectionBlock');
+      const isFresh = metadata.created_at && metadata.updated_at && metadata.created_at === metadata.updated_at;
+      if (!isEmptyDoc && !isLegacyStructureMissing) return;
+      if (!isFresh && !isEmptyDoc) return;
+      const container = legacyRootRef.current?.querySelector('.reglament-content') as HTMLElement | null;
+      if (!container) return;
+      const json = generateJSON(container.innerHTML, REGLAMENT_EXTENSIONS);
+      legacyImportedRef.current = true;
+      setContent(json as JSONContent);
+    };
+
+    importLegacy();
   }, [content, metadata]);
 
   useEffect(() => {
@@ -194,7 +191,6 @@ export default function AdminReglamentEditPage() {
     setMetadata(updated);
     initialRef.current = updated;
     setStatus(finalStatus);
-    setDirty(false);
     setSaveMessage('Сохранено');
   };
 
