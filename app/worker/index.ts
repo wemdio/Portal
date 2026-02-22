@@ -13,8 +13,10 @@ import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
+import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '15') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
 let shuttingDown = false;
@@ -92,6 +94,15 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (ymErr) log('warn', 'Startup recovery: yandex_maps_jobs update failed', ymErr);
   else if (ymJobs?.length) log('info', `Startup recovery: marked ${ymJobs.length} yandex_maps_jobs as failed`);
+
+  // Email validation — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
+  const { data: evJobs, error: evErr } = await db
+    .from('email_validation_jobs')
+    .update({ status: 'pending' })
+    .eq('status', 'running')
+    .select('id');
+  if (evErr) log('warn', 'Startup recovery: email_validation_jobs update failed', evErr);
+  else if (evJobs?.length) log('info', `Startup recovery: reset ${evJobs.length} email_validation_jobs to pending`);
 }
 
 // --------------------------------------------------------------------------
@@ -203,6 +214,21 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
   return { id: claimed.id as string, stage };
 }
 
+async function claimEmailValidationJob(): Promise<string | null> {
+  const db = supabaseAdmin!;
+
+  const { data: pending } = await db
+    .from('email_validation_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+  return pending.id as string;
+}
+
 // --------------------------------------------------------------------------
 // Single poll tick — tries to pick up one job of any type
 // --------------------------------------------------------------------------
@@ -214,7 +240,7 @@ async function pollOnce(): Promise<boolean> {
   const hhJobId = await claimHHJob();
   if (hhJobId) {
     log('info', `Running HH parser job ${hhJobId}`);
-    await runHHParserJob(hhJobId);
+    await runHHParserJob(hhJobId, DRAIN_TIMEOUT_MS);
     return true;
   }
 
@@ -241,6 +267,13 @@ async function pollOnce(): Promise<boolean> {
       log('info', `Running YandexMaps parse-orgs job ${ymJob.id}`);
       await runYandexMapsParseOrganizations(ymJob.id);
     }
+    return true;
+  }
+
+  const evJobId = await claimEmailValidationJob();
+  if (evJobId) {
+    log('info', `Running email validation job ${evJobId}`);
+    await runEmailValidationJob(evJobId);
     return true;
   }
 

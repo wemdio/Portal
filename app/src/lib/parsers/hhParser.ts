@@ -164,7 +164,7 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+export async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => reject(onTimeout()), ms);
@@ -684,7 +684,7 @@ async function partitionFallback(config: HHSearchConfig, allowDateFallback = tru
     return parts;
   }
 
-  if (config.text.includes('|')) {
+  if (config.text?.includes('|')) {
     const parts = config.text
       .split('|')
       .map((s) => s.trim())

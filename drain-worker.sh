@@ -36,6 +36,7 @@ count_running() {
     "search_parser_jobs:search_parser"
     "website_enrichment_jobs:website_enrichment"
     "yandex_maps_jobs:yandex_maps"
+    "email_validation_jobs:email_validation"
   )
   local total=0
   local parts=()
@@ -100,6 +101,7 @@ containers=(
   "portal-worker-search"
   "portal-worker-enrich"
   "portal-worker-yandexmaps"
+  "portal-worker-emailvalidation"
 )
 
 echo "[drain] Stopping worker containers..."
