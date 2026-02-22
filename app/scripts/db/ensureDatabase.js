@@ -68,7 +68,6 @@ async function ensureDatabase() {
   let migrationsDir = '';
   for (const dir of dirCandidates) {
     try {
-      // eslint-disable-next-line no-await-in-loop
       await fs.access(dir);
       migrationsDir = dir;
       break;
