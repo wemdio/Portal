@@ -77,7 +77,7 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
     const serialized = JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT);
     if (serialized !== lastContentRef.current) {
       lastContentRef.current = serialized;
-      editor.commands.setContent(content ?? DEFAULT_REGLAMENT_CONTENT, false);
+      editor.commands.setContent(content ?? DEFAULT_REGLAMENT_CONTENT, { emitUpdate: false });
     }
   }, [content, editor]);
 
