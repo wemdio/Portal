@@ -159,6 +159,28 @@ export default function AdminReglamentEditPage() {
     const finalStatus = nextStatus ?? status;
     const publishedAt = finalStatus === 'published' ? (metadata?.published_at ?? now) : null;
 
+    if (finalStatus === 'published') {
+      const { data: publishedDocs, error: publishedError } = await supabase
+        .from('reglament_documents')
+        .select('id, title')
+        .eq('status', 'published')
+        .neq('id', docId)
+        .limit(1);
+
+      if (publishedError) {
+        setError(`Не удалось проверить опубликованные документы: ${publishedError.message}`);
+        setSaving(false);
+        return;
+      }
+
+      if (publishedDocs && publishedDocs.length > 0) {
+        const already = publishedDocs[0] as { id: string; title: string };
+        setError(`Уже опубликован регламент «${already.title}». Сначала снимите его с публикации.`);
+        setSaving(false);
+        return;
+      }
+    }
+
     const { error: updateError } = await supabase
       .from('reglament_documents')
       .update({

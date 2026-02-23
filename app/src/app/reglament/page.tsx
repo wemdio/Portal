@@ -94,7 +94,26 @@ export default function ReglamentPage() {
   }, []);
 
   if (!loading && (!document || isEmptyContent(document.content))) {
-    return <LegacyReglamentPage />;
+    return (
+      <div className={`max-w-5xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+        <div className="mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Регламент</h1>
+          <p className="text-sm text-gray-500 mt-2">
+            Актуальные инструкции и рабочие регламенты для команды
+          </p>
+        </div>
+
+        {error ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+            {error}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-gray-200 bg-white p-8 text-sm text-gray-600">
+            Регламент компании скоро будет добавлен.
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (

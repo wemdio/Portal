@@ -21,6 +21,26 @@ export default function ImportLegacyReglamentPage() {
     setError(null);
     setResult(null);
 
+    const { data: publishedDocs, error: publishedError } = await supabase
+      .from('reglament_documents')
+      .select('id, title, slug')
+      .eq('status', 'published')
+      .neq('slug', 'reglament')
+      .limit(1);
+
+    if (publishedError) {
+      setError(`Не удалось проверить опубликованные документы: ${publishedError.message}`);
+      setLoading(false);
+      return;
+    }
+
+    if (publishedDocs && publishedDocs.length > 0) {
+      const already = publishedDocs[0] as { id: string; title: string; slug: string };
+      setError(`Уже опубликован регламент «${already.title}». Сначала снимите его с публикации.`);
+      setLoading(false);
+      return;
+    }
+
     const container = legacyRootRef.current?.querySelector('.reglament-content') as HTMLElement | null;
     if (!container) {
       setError('Не удалось найти legacy-контент для импорта.');
