@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { AdminTracesPanel } from '@/components/AdminTracesPanel';
+import { Users, FileText, Database, Activity } from 'lucide-react';
 import { useIsTma } from '@/lib/useIsTma';
 
 export default function AdminPage() {
@@ -17,11 +17,12 @@ export default function AdminPage() {
           className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >
           <div className="flex h-full flex-col">
-            <div className="flex items-center mb-4">
-              <div className="ml-4">
+            <div className="flex items-start justify-between mb-4">
+              <div>
                 <h2 className="text-lg font-semibold text-gray-900">Управление пользователями</h2>
                 <p className="text-sm text-gray-500">Создание пользователей и назначение ролей</p>
               </div>
+              <Users className="w-6 h-6 text-blue-600/80" />
             </div>
             <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
           </div>
@@ -32,11 +33,12 @@ export default function AdminPage() {
           className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >
           <div className="flex h-full flex-col">
-            <div className="flex items-center mb-4">
-              <div className="ml-4">
+            <div className="flex items-start justify-between mb-4">
+              <div>
                 <h2 className="text-lg font-semibold text-gray-900">Регламенты</h2>
                 <p className="text-sm text-gray-500">Создание и редактирование документов</p>
               </div>
+              <FileText className="w-6 h-6 text-blue-600/80" />
             </div>
             <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
           </div>
@@ -47,19 +49,32 @@ export default function AdminPage() {
           className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
         >
           <div className="flex h-full flex-col">
-            <div className="flex items-center mb-4">
-              <div className="ml-4">
+            <div className="flex items-start justify-between mb-4">
+              <div>
                 <h2 className="text-lg font-semibold text-gray-900">Импорт данных</h2>
                 <p className="text-sm text-gray-500">Загрузка проектов из CSV</p>
               </div>
+              <Database className="w-6 h-6 text-blue-600/80" />
             </div>
             <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
           </div>
         </Link>
-      </div>
 
-      <div className="mt-8">
-        <AdminTracesPanel />
+        <Link
+          href="/admin/traces"
+          className={`bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ${isTma ? 'p-4' : 'p-6'}`}
+        >
+          <div className="flex h-full flex-col">
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Трассировки задач</h2>
+                <p className="text-sm text-gray-500">Дерево выполнения задач и логи</p>
+              </div>
+              <Activity className="w-6 h-6 text-blue-600/80" />
+            </div>
+            <p className="mt-auto text-sm text-blue-600 font-medium">Перейти →</p>
+          </div>
+        </Link>
       </div>
 
     </div>

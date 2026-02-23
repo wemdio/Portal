@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
@@ -294,6 +295,12 @@ export default function UsersPage() {
 
   return (
     <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <div className="mb-6">
+        <Link href="/admin" className="text-sm font-medium text-blue-600 hover:text-blue-700">
+          ← Назад в админку
+        </Link>
+      </div>
+
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
         <div>
           <h1 className={`${isTma ? 'text-xl' : 'text-3xl'} font-bold text-gray-900`}>Управление пользователями</h1>

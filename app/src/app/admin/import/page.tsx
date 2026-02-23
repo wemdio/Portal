@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useRef, useState } from 'react';
 import { uploadCSV } from '@/lib/csvUpload';
 import { logAudit, logError } from '@/lib/loggerClient';
@@ -59,6 +60,12 @@ export default function AdminImportPage() {
 
   return (
     <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <div className="mb-6">
+        <Link href="/admin" className="text-sm font-medium text-blue-600 hover:text-blue-700">
+          ← Назад в админку
+        </Link>
+      </div>
+
       <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${isTma ? 'p-4' : 'p-6'}`}>
         <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold mb-4 text-gray-900`}>Импорт проектов из CSV</h1>
         <p className="text-gray-500 mb-6 text-sm">
