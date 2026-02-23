@@ -24,7 +24,7 @@ export function ReglamentRenderer({ content }: ReglamentRendererProps) {
 
   useEffect(() => {
     if (!editor) return;
-    editor.commands.setContent(content ?? DEFAULT_REGLAMENT_CONTENT, false);
+    editor.commands.setContent(content ?? DEFAULT_REGLAMENT_CONTENT, { emitUpdate: false });
   }, [content, editor]);
 
   if (!editor) return null;
