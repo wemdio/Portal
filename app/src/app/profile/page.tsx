@@ -98,8 +98,8 @@ export default function ProfilePage() {
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [avatarRefreshKey, setAvatarRefreshKey] = useState(0);
-  const [signedAvatarUrl, setSignedAvatarUrl] = useState<string | null>(null);
-  const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
+  const [signedAvatar, setSignedAvatar] = useState<{ key: string; url: string } | null>(null);
+  const signedAttemptedKeyRef = useRef<string | null>(null);
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -126,15 +126,28 @@ export default function ProfilePage() {
 
   const avatarUrl = useMemo(() => {
     const base = normalizePublicAvatarUrl(profile?.avatar_url) ?? '';
-    if (signedAvatarUrl) return signedAvatarUrl;
+    const currentKey = base ? extractAvatarKeyFromPublicUrl(base) : null;
+    if (signedAvatar && currentKey && signedAvatar.key === currentKey) return signedAvatar.url;
     if (!base) return '';
     const join = base.includes('?') ? '&' : '?';
     return `${base}${join}v=${avatarRefreshKey}`;
-  }, [profile?.avatar_url, avatarRefreshKey, signedAvatarUrl]);
+  }, [profile?.avatar_url, avatarRefreshKey, signedAvatar]);
+
+  function extractAvatarKeyFromPublicUrl(url: string): string | null {
+    const clean = url.split(/[?#]/)[0] ?? '';
+    const m = clean.match(/\/storage\/v1\/object\/public\/[^/]+\/(.+)$/i);
+    if (!m) return null;
+    const key = decodeURIComponent(m[1] ?? '');
+    return key && key.startsWith('avatars/') ? key : null;
+  }
 
   async function fetchSignedAvatarUrl() {
-    if (avatarTriedSigned) return;
-    setAvatarTriedSigned(true);
+    const base = normalizePublicAvatarUrl(profile?.avatar_url) ?? '';
+    const currentKey = base ? extractAvatarKeyFromPublicUrl(base) : null;
+    if (!currentKey) return;
+    if (signedAttemptedKeyRef.current === currentKey) return;
+    signedAttemptedKeyRef.current = currentKey;
+
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
@@ -146,9 +159,15 @@ export default function ProfilePage() {
         },
       });
       if (!res.ok) return;
-      const data = (await res.json()) as { readUrl?: unknown };
-      if (typeof data.readUrl === 'string' && data.readUrl.trim()) {
-        setSignedAvatarUrl(data.readUrl.trim());
+      const data = (await res.json()) as { readUrl?: unknown; key?: unknown };
+      if (
+        typeof data.readUrl === 'string' &&
+        data.readUrl.trim() &&
+        typeof data.key === 'string' &&
+        data.key.trim() &&
+        data.key.trim() === currentKey
+      ) {
+        setSignedAvatar({ url: data.readUrl.trim(), key: currentKey });
       }
     } catch {
       // ignore, fallback to initials
@@ -336,6 +355,8 @@ export default function ProfilePage() {
       if (profileErr) throw profileErr;
 
       setProfile((updated as ProfileRow) ?? null);
+      setSignedAvatar(null);
+      signedAttemptedKeyRef.current = null;
       setAvatarRefreshKey(Date.now());
       setMessage('Аватар обновлён');
       void logAudit('profile.avatar.update.success', 'Avatar updated', { userId });
@@ -404,7 +425,7 @@ export default function ProfilePage() {
               {uploadingAvatar ? 'Загрузка...' : 'Сменить аватар'}
             </button>
             <span className="text-xs text-gray-500">
-              Любой размер, до 10MB (обрежем и сожмём)
+              до 10MB
             </span>
           </div>
         </div>
