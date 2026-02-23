@@ -96,6 +96,27 @@ export default function AdminReglamentPage() {
   const togglePublish = async (doc: ReglamentListItem) => {
     const nextStatus = doc.status === 'published' ? 'draft' : 'published';
     const now = new Date().toISOString();
+
+    if (nextStatus === 'published') {
+      const { data: publishedDocs, error: publishedError } = await supabase
+        .from('reglament_documents')
+        .select('id, title')
+        .eq('status', 'published')
+        .neq('id', doc.id)
+        .limit(1);
+
+      if (publishedError) {
+        setError(`Не удалось проверить опубликованные документы: ${publishedError.message}`);
+        return;
+      }
+
+      if (publishedDocs && publishedDocs.length > 0) {
+        const already = publishedDocs[0] as { id: string; title: string };
+        setError(`Уже опубликован регламент «${already.title}». Сначала снимите его с публикации.`);
+        return;
+      }
+    }
+
     const { error: updateError } = await supabase
       .from('reglament_documents')
       .update({
