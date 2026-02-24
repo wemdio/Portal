@@ -13,10 +13,10 @@ export default function ToolsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 justify-items-start">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
         <Link
           href={'/tools/done-for-you' as Route}
-          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300"
+          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300 min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -38,7 +38,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href={'/tools/ai-caller' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -55,7 +55,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href={'/tools/ai-caller-v2' as Route}
-          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300"
+          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300 min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -77,7 +77,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href="/tools/databases"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -94,7 +94,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href="/parsers"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -112,7 +112,7 @@ export default function ToolsPage() {
 
         <Link
           href={'/tools/email-sequence' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -128,7 +128,9 @@ export default function ToolsPage() {
           </div>
         </Link>
 
-        <RdpToolCard />
+        <div className="min-w-0 flex flex-col h-full">
+          <RdpToolCard />
+        </div>
       </div>
     </div>
   );
