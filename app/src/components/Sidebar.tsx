@@ -122,11 +122,11 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   const sidebarContent = (
     <>
       <div
-        className={`flex h-12 items-center px-5 border-b flex-shrink-0 safe-top ${
+        className={`flex h-10 items-center px-3 border-b flex-shrink-0 safe-top ${
           isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
         }`}
       >
-        <span className={`text-base font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>Portal</span>
+        <span className={`text-xs font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>Portal</span>
         {isTma && (
           <button
             type="button"
@@ -140,7 +140,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         )}
       </div>
 
-      <nav className="flex-1 space-y-0.5 px-3 py-4 overflow-y-auto">
+      <nav className="flex-1 space-y-0.5 px-1.5 py-2 overflow-y-auto">
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
@@ -156,7 +156,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               key={item.name}
               href={item.href as Route}
               onClick={() => onMobileClose?.()}
-              className={`flex items-center rounded-md px-3 py-2 text-sm transition-colors duration-200
+              className={`flex items-center rounded-md px-2 py-1 text-[11px] truncate transition-colors duration-200
                 ${isActive
                   ? (isTma
                       ? 'tma-chip-active font-medium'
@@ -174,14 +174,14 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       </nav>
 
       <div
-        className={`p-3 border-t flex-shrink-0 safe-bottom ${
+        className={`p-1.5 border-t flex-shrink-0 safe-bottom ${
           isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
         }`}
       >
         <Link
           href={'/profile' as Route}
           onClick={() => onMobileClose?.()}
-          className={`mb-3 flex items-center gap-3 rounded-xl px-2 py-2 transition ${
+          className={`mb-2 flex items-center gap-2 rounded-lg px-1.5 py-1.5 transition ${
             isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-gray-50'
           }`}
           aria-label="Открыть профиль"
@@ -191,7 +191,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             <img
               src={userAvatarUrl}
               alt=""
-              className="h-10 w-10 rounded-full object-cover ring-1 ring-black/5"
+              className="h-7 w-7 rounded-full object-cover ring-1 ring-black/5"
               onError={() => {
                 if (avatarTriedSigned) {
                   setUserAvatarUrl(null);
@@ -224,7 +224,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             />
           ) : (
             <div
-              className={`h-10 w-10 rounded-full flex items-center justify-center text-sm font-bold ring-1 ring-black/5 ${
+              className={`h-7 w-7 rounded-full flex items-center justify-center text-[10px] font-bold ring-1 ring-black/5 ${
                 isTma ? 'tma-chip' : 'bg-gray-100 text-gray-700'
               }`}
               aria-hidden="true"
@@ -234,12 +234,12 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           )}
           <div className="min-w-0 flex-1">
             <p
-              className={`text-sm font-medium truncate ${isTma ? 'tma-text' : 'text-gray-900'}`}
+              className={`text-[11px] font-medium truncate leading-tight ${isTma ? 'tma-text' : 'text-gray-900'}`}
               title={userFullName || userEmail || ''}
             >
               {userFullName || userEmail?.split('@')[0] || 'User'}
             </p>
-            <p className={`text-xs mt-0.5 truncate ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
+            <p className={`text-[10px] mt-0.5 truncate leading-tight ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
               {userRole ? ROLE_LABELS[userRole] : '...'}
             </p>
           </div>
@@ -276,7 +276,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         )}
         <button
           onClick={handleSignOut}
-          className={`flex w-full items-center rounded-md px-2 py-1.5 text-sm transition-colors ${
+          className={`flex w-full items-center rounded-md px-1.5 py-1 text-[11px] transition-colors ${
             isTma
               ? 'tma-danger hover:bg-[color:var(--tma-surface-2)]'
               : 'text-gray-500 hover:bg-gray-50 hover:text-red-600'
@@ -324,7 +324,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       return (
         <div
           className="fixed left-0 top-0 h-screen z-50"
-          style={{ width: hovered ? 240 : 12 }}
+          style={{ width: hovered ? 160 : 12 }}
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
         >
@@ -332,7 +332,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
           )}
           <div
-            className={`absolute left-0 top-0 h-full w-60 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
+            className={`absolute left-0 top-0 h-full w-40 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
               transition-all duration-200 ease-out
               ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
           >
@@ -343,7 +343,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     }
 
     return (
-      <div className="fixed left-0 top-0 z-40 flex h-screen w-60 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+      <div className="fixed left-0 top-0 z-40 flex h-screen w-40 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
         {sidebarContent}
       </div>
     );

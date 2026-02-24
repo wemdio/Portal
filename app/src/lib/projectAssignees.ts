@@ -24,6 +24,24 @@ export function buildAssigneeOptions(profiles: AssigneeProfile[]): string[] {
   return Array.from(unique).sort((a, b) => a.localeCompare(b, 'ru-RU'));
 }
 
+/**
+ * Maps stale display names (email local parts) to current full_name
+ * for profiles where the user has since set a proper name.
+ */
+export function buildRenameMap(profiles: AssigneeProfile[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const profile of profiles) {
+    const fullName = profile.full_name?.trim();
+    const email = profile.email?.trim();
+    if (!fullName || !email) continue;
+    const localPart = email.split('@')[0]?.trim();
+    if (localPart && localPart !== fullName) {
+      map.set(localPart, fullName);
+    }
+  }
+  return map;
+}
+
 export function ensureCurrentAssigneeOption(
   options: string[],
   currentValue: string | null | undefined,

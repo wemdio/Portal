@@ -3503,7 +3503,7 @@ var require_helpers = __commonJS({
     exports2.generateCallbackId = generateCallbackId;
     exports2.parseParametersFromURL = parseParametersFromURL;
     exports2.decodeJWT = decodeJWT;
-    exports2.sleep = sleep8;
+    exports2.sleep = sleep9;
     exports2.retryable = retryable;
     exports2.generatePKCEVerifier = generatePKCEVerifier;
     exports2.generatePKCEChallenge = generatePKCEChallenge;
@@ -3640,7 +3640,7 @@ var require_helpers = __commonJS({
       };
       return data2;
     }
-    async function sleep8(time) {
+    async function sleep9(time) {
       return await new Promise((accept) => {
         setTimeout(() => accept(null), time);
       });
@@ -7189,14 +7189,14 @@ var require_GoTrueClient = __commonJS({
             this.broadcastChannel.postMessage({ event, session });
           }
           const errors2 = [];
-          const promises = Array.from(this.stateChangeEmitters.values()).map(async (x) => {
+          const promises2 = Array.from(this.stateChangeEmitters.values()).map(async (x) => {
             try {
               await x.callback(event, session);
             } catch (e) {
               errors2.push(e);
             }
           });
-          await Promise.all(promises);
+          await Promise.all(promises2);
           if (errors2.length > 0) {
             for (let i = 0; i < errors2.length; i += 1) {
               console.error(errors2[i]);
@@ -8922,7 +8922,7 @@ var require_util = __commonJS({
     var { kDestroyed, kBodyUsed, kListeners, kBody } = require_symbols();
     var { IncomingMessage } = require("node:http");
     var stream = require("node:stream");
-    var net = require("node:net");
+    var net2 = require("node:net");
     var { stringify: stringify2 } = require("node:querystring");
     var { EventEmitter: EE } = require("node:events");
     var timers = require_timers();
@@ -9071,7 +9071,7 @@ var require_util = __commonJS({
       }
       assert(typeof host === "string");
       const servername = getHostname(host);
-      if (net.isIP(servername)) {
+      if (net2.isIP(servername)) {
         return "";
       }
       return servername;
@@ -10644,7 +10644,7 @@ var require_dispatcher_base = __commonJS({
 var require_connect = __commonJS({
   "node_modules/undici/lib/core/connect.js"(exports2, module2) {
     "use strict";
-    var net = require("node:net");
+    var net2 = require("node:net");
     var assert = require("node:assert");
     var util = require_util();
     var { InvalidArgumentError } = require_errors2();
@@ -10713,7 +10713,7 @@ var require_connect = __commonJS({
         } else {
           assert(!httpSocket, "httpSocket can only be sent on TLS update");
           port = port || 80;
-          socket = net.connect({
+          socket = net2.connect({
             highWaterMark: 64 * 1024,
             // Same as nodejs fs streams.
             ...options,
@@ -16215,7 +16215,7 @@ var require_client = __commonJS({
   "node_modules/undici/lib/dispatcher/client.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var net = require("node:net");
+    var net2 = require("node:net");
     var http = require("node:http");
     var util = require_util();
     var { ClientStats } = require_stats();
@@ -16367,7 +16367,7 @@ var require_client = __commonJS({
         if (maxRequestsPerClient != null && (!Number.isInteger(maxRequestsPerClient) || maxRequestsPerClient < 0)) {
           throw new InvalidArgumentError("maxRequestsPerClient must be a positive number");
         }
-        if (localAddress != null && (typeof localAddress !== "string" || net.isIP(localAddress) === 0)) {
+        if (localAddress != null && (typeof localAddress !== "string" || net2.isIP(localAddress) === 0)) {
           throw new InvalidArgumentError("localAddress must be valid string IP address");
         }
         if (maxResponseSize != null && (!Number.isInteger(maxResponseSize) || maxResponseSize < -1)) {
@@ -16532,7 +16532,7 @@ var require_client = __commonJS({
         const idx = hostname.indexOf("]");
         assert(idx !== -1);
         const ip = hostname.substring(1, idx);
-        assert(net.isIPv6(ip));
+        assert(net2.isIPv6(ip));
         hostname = ip;
       }
       client[kConnecting] = true;
@@ -17900,7 +17900,7 @@ var require_retry_handler = __commonJS({
           this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
           return;
         }
-        function shouldRetry(passedErr) {
+        function shouldRetry2(passedErr) {
           if (passedErr) {
             this.headersSent = true;
             this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
@@ -17917,7 +17917,7 @@ var require_retry_handler = __commonJS({
             state: { counter: this.retryCount },
             opts: { retryOptions: this.retryOpts, ...this.opts }
           },
-          shouldRetry.bind(this)
+          shouldRetry2.bind(this)
         );
       }
       onRequestStart(controller, context) {
@@ -18096,7 +18096,7 @@ var require_retry_handler = __commonJS({
           this.handler.onResponseError?.(controller, err);
           return;
         }
-        function shouldRetry(returnedErr) {
+        function shouldRetry2(returnedErr) {
           if (!returnedErr) {
             this.retry(controller);
             return;
@@ -18114,7 +18114,7 @@ var require_retry_handler = __commonJS({
             state: { counter: this.retryCount },
             opts: { retryOptions: this.retryOpts, ...this.opts }
           },
-          shouldRetry.bind(this)
+          shouldRetry2.bind(this)
         );
       }
     };
@@ -61379,8 +61379,8 @@ async function fetchWithRetry(url, opts) {
       const retryAfter = res.headers.get("retry-after");
       const retryAfterMsRaw = retryAfter ? Number(retryAfter) * 1e3 : null;
       const retryAfterMs = retryAfterMsRaw != null && Number.isFinite(retryAfterMsRaw) ? Math.min(retryAfterMsRaw, maxDelayMs) : null;
-      const shouldRetry = res.status === 429 || res.status === 403 || res.status >= 500 && res.status <= 599;
-      if (!shouldRetry) {
+      const shouldRetry2 = res.status === 429 || res.status === 403 || res.status >= 500 && res.status <= 599;
+      if (!shouldRetry2) {
         const bodyText = await res.text().catch(() => "");
         const details = parseHhError(bodyText);
         const message = buildHhErrorMessage(res.status, details, bodyText);
@@ -62611,21 +62611,24 @@ function extractBrandFromJsonLd($2) {
       const parsed = JSON.parse(raw);
       const queue = Array.isArray(parsed) ? parsed : [parsed];
       while (queue.length) {
-        const node = queue.shift();
-        if (!node || typeof node !== "object") continue;
+        const rawNode = queue.shift();
+        if (!rawNode || typeof rawNode !== "object") continue;
+        const node = rawNode;
         const type = node["@type"];
         const types = Array.isArray(type) ? type : type ? [type] : [];
         const looksOrg = types.some(
           (t) => typeof t === "string" ? /(Organization|LocalBusiness|Corporation|ProfessionalService)/i.test(t) : false
         );
-        if (looksOrg && typeof node.name === "string") {
-          const name = normalizeBrandCandidate(node.name);
+        const nameRaw = node["name"];
+        if (looksOrg && typeof nameRaw === "string") {
+          const name = normalizeBrandCandidate(nameRaw);
           if (name && name.length >= 2 && name.length <= 120 && !BRAND_TITLE_BAD_WORDS.test(name)) return name;
         }
-        const nested = [node.publisher, node.author, node.organization, node.brand].filter(Boolean);
+        const nested = [node["publisher"], node["author"], node["organization"], node["brand"]].filter(Boolean);
         for (const n of nested) queue.push(n);
-        if (Array.isArray(node["@graph"])) {
-          for (const g of node["@graph"]) queue.push(g);
+        const graph = node["@graph"];
+        if (Array.isArray(graph)) {
+          for (const g of graph) queue.push(g);
         }
       }
     } catch {
@@ -66576,14 +66579,14 @@ async function runWebsiteEnrichmentJob(jobId) {
             }
           } catch (error2) {
             const errorMessage = error2 instanceof Error ? error2.message : "\u041E\u0448\u0438\u0431\u043A\u0430 \u043E\u0431\u043E\u0433\u0430\u0449\u0435\u043D\u0438\u044F";
-            const shouldRetry = shouldRetryEnrichmentItem(errorMessage, item.attempt_count, MAX_ATTEMPTS);
+            const shouldRetry2 = shouldRetryEnrichmentItem(errorMessage, item.attempt_count, MAX_ATTEMPTS);
             const marked = await updateQueueItem(
               item,
               { error: errorMessage },
-              shouldRetry ? "pending" : "failed"
+              shouldRetry2 ? "pending" : "failed"
             );
             if (marked) {
-              if (!shouldRetry) {
+              if (!shouldRetry2) {
                 errors2 += 1;
                 finalized = true;
               }
@@ -66962,6 +66965,1081 @@ async function runYandexMapsParseOrganizations(jobId) {
   }
 }
 
+// src/lib/emailValidation/validator.ts
+var dns = __toESM(require("dns"));
+var net = __toESM(require("net"));
+
+// src/lib/emailValidation/shared.ts
+var EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+var MAX_EMAIL_LENGTH = 254;
+var MAX_LOCAL_LENGTH = 64;
+function checkSyntax(email) {
+  if (!email || email.length === 0) return { valid: false, error: "\u041F\u0443\u0441\u0442\u043E\u0439 email" };
+  if (email.length > MAX_EMAIL_LENGTH) return { valid: false, error: `\u0414\u043B\u0438\u043D\u0430 \u043F\u0440\u0435\u0432\u044B\u0448\u0430\u0435\u0442 ${MAX_EMAIL_LENGTH} \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432` };
+  const atIndex = email.lastIndexOf("@");
+  if (atIndex < 1) return { valid: false, error: "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u0441\u0438\u043C\u0432\u043E\u043B @" };
+  const local = email.substring(0, atIndex);
+  const domain = email.substring(atIndex + 1);
+  if (local.length > MAX_LOCAL_LENGTH) return { valid: false, error: `\u041B\u043E\u043A\u0430\u043B\u044C\u043D\u0430\u044F \u0447\u0430\u0441\u0442\u044C \u0434\u043B\u0438\u043D\u043D\u0435\u0435 ${MAX_LOCAL_LENGTH} \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432` };
+  if (!domain || domain.length === 0) return { valid: false, error: "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u0434\u043E\u043C\u0435\u043D" };
+  if (!domain.includes(".")) return { valid: false, error: "\u0414\u043E\u043C\u0435\u043D \u0431\u0435\u0437 \u0442\u043E\u0447\u043A\u0438 (\u043D\u0435\u0442 TLD)" };
+  const tld = domain.split(".").pop();
+  if (tld.length < 2) return { valid: false, error: "TLD \u0441\u043B\u0438\u0448\u043A\u043E\u043C \u043A\u043E\u0440\u043E\u0442\u043A\u0438\u0439" };
+  if (local.startsWith(".") || local.endsWith(".")) return { valid: false, error: "\u0422\u043E\u0447\u043A\u0430 \u0432 \u043D\u0430\u0447\u0430\u043B\u0435/\u043A\u043E\u043D\u0446\u0435 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0439 \u0447\u0430\u0441\u0442\u0438" };
+  if (local.includes("..")) return { valid: false, error: "\u0414\u0432\u043E\u0439\u043D\u0430\u044F \u0442\u043E\u0447\u043A\u0430 \u0432 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0439 \u0447\u0430\u0441\u0442\u0438" };
+  if (!EMAIL_RE.test(email)) return { valid: false, error: "\u041D\u0435\u0432\u0430\u043B\u0438\u0434\u043D\u044B\u0439 \u0444\u043E\u0440\u043C\u0430\u0442 email" };
+  return { valid: true };
+}
+var DISPOSABLE_DOMAINS = /* @__PURE__ */ new Set([
+  "mailinator.com",
+  "guerrillamail.com",
+  "guerrillamail.net",
+  "tempmail.com",
+  "throwaway.email",
+  "temp-mail.org",
+  "10minutemail.com",
+  "trashmail.com",
+  "trashmail.net",
+  "yopmail.com",
+  "yopmail.fr",
+  "sharklasers.com",
+  "guerrillamailblock.com",
+  "grr.la",
+  "dispostable.com",
+  "mailnesia.com",
+  "tempail.com",
+  "tempr.email",
+  "discard.email",
+  "maildrop.cc",
+  "mohmal.com",
+  "burnermail.io",
+  "mailcatch.com",
+  "mintemail.com",
+  "getnada.com",
+  "emailondeck.com",
+  "spamgourmet.com",
+  "mytemp.email",
+  "fakeinbox.com",
+  "safetymail.info",
+  "tempmailaddress.com",
+  "email-fake.com",
+  "crazymailing.com",
+  "mailpoof.com",
+  "tempinbox.com",
+  "temp-mail.io",
+  "emailfake.com",
+  "tmpmail.org",
+  "tmpmail.net",
+  "harakirimail.com",
+  "33mail.com",
+  "mailforspam.com",
+  "guerrillamail.info",
+  "guerrillamail.biz",
+  "guerrillamail.de",
+  "grr.la",
+  "guerrillamailblock.com",
+  "tmail.ws",
+  "mt2015.com",
+  "thankyou2010.com",
+  "trash-mail.com",
+  "bugmenot.com",
+  "mailinator.net",
+  "mailinator.us",
+  "spamhereplease.com",
+  "thisisnotmyrealemail.com",
+  "trashymail.com",
+  "trashymail.net",
+  "mailmetrash.com",
+  "filzmail.com",
+  "sneakemail.com",
+  "mailexpire.com",
+  "tempomail.fr",
+  "jetable.fr.nf",
+  "courrieltemporaire.com",
+  "lol.ovpn.to",
+  "despammed.com",
+  "kurzepost.de",
+  "objectmail.com",
+  "proxymail.eu",
+  "rcpt.at",
+  "trash-mail.at",
+  "trashmail.at",
+  "trashmail.me",
+  "wegwerfmail.de",
+  "wegwerfmail.net",
+  "mailzilla.com",
+  "mailzilla.org",
+  "emkei.cz",
+  "anonymbox.com",
+  "rmqkr.net",
+  "emailigo.de",
+  "antichef.net",
+  "binkmail.com",
+  "chammy.info",
+  "devnullmail.com",
+  "getairmail.com",
+  "ichimail.com",
+  "killmail.com",
+  "mobi.web.id",
+  "nwldx.com",
+  "pjjkp.com",
+  "rootfest.net",
+  "shieldemail.com",
+  "sogetthis.com",
+  "spambob.net",
+  "spambog.com",
+  "spamfree24.org",
+  "teleworm.us",
+  "urhen.com",
+  "wuzup.net",
+  "za.com",
+  "zoemail.org",
+  "damnthespam.com",
+  "dayrep.com",
+  "einrot.com",
+  "flurred.com",
+  "imstations.com",
+  "mailnator.com",
+  "cuvox.de",
+  "jourrapide.com",
+  "superrito.com",
+  "armyspy.com",
+  "gustr.com",
+  "rhyta.com",
+  "teleworm.us",
+  "dayrep.com"
+]);
+function isDisposable(domain) {
+  return DISPOSABLE_DOMAINS.has(domain.toLowerCase());
+}
+var ROLE_PREFIXES = /* @__PURE__ */ new Set([
+  "abuse",
+  "admin",
+  "administrator",
+  "billing",
+  "compliance",
+  "devnull",
+  "dns",
+  "ftp",
+  "hostmaster",
+  "info",
+  "inoc",
+  "ispfeedback",
+  "ispsupport",
+  "list",
+  "list-request",
+  "maildaemon",
+  "mailerdaemon",
+  "marketing",
+  "noc",
+  "no-reply",
+  "noreply",
+  "null",
+  "office",
+  "phish",
+  "phishing",
+  "postmaster",
+  "privacy",
+  "registrar",
+  "root",
+  "sales",
+  "security",
+  "spam",
+  "support",
+  "sysadmin",
+  "tech",
+  "undisclosed-recipients",
+  "unsubscribe",
+  "usenet",
+  "uucp",
+  "webmaster",
+  "www",
+  "hello",
+  "contact",
+  "enquiry",
+  "enquiries",
+  "feedback",
+  "help",
+  "jobs",
+  "media",
+  "press",
+  "remove",
+  "request",
+  "service",
+  "subscribe",
+  "all",
+  "everyone",
+  "staff",
+  "team",
+  "general"
+]);
+function isRole(local) {
+  return ROLE_PREFIXES.has(local.toLowerCase());
+}
+var FREE_PROVIDERS = /* @__PURE__ */ new Set([
+  "gmail.com",
+  "yahoo.com",
+  "yahoo.co.uk",
+  "yahoo.co.in",
+  "yahoo.fr",
+  "yahoo.de",
+  "yahoo.it",
+  "yahoo.es",
+  "yahoo.co.jp",
+  "yahoo.com.br",
+  "yahoo.com.au",
+  "yahoo.com.ar",
+  "yahoo.com.mx",
+  "hotmail.com",
+  "hotmail.co.uk",
+  "hotmail.fr",
+  "hotmail.de",
+  "hotmail.it",
+  "hotmail.es",
+  "outlook.com",
+  "outlook.fr",
+  "outlook.de",
+  "outlook.it",
+  "outlook.es",
+  "outlook.co.uk",
+  "live.com",
+  "live.co.uk",
+  "live.fr",
+  "live.de",
+  "live.nl",
+  "live.it",
+  "msn.com",
+  "aol.com",
+  "aol.co.uk",
+  "protonmail.com",
+  "protonmail.ch",
+  "proton.me",
+  "icloud.com",
+  "me.com",
+  "mac.com",
+  "zoho.com",
+  "zohomail.com",
+  "mail.ru",
+  "bk.ru",
+  "inbox.ru",
+  "list.ru",
+  "internet.ru",
+  "yandex.ru",
+  "yandex.com",
+  "yandex.ua",
+  "yandex.by",
+  "ya.ru",
+  "rambler.ru",
+  "lenta.ru",
+  "autorambler.ru",
+  "myrambler.ru",
+  "ro.ru",
+  "gmx.com",
+  "gmx.de",
+  "gmx.net",
+  "gmx.at",
+  "gmx.ch",
+  "web.de",
+  "t-online.de",
+  "freenet.de",
+  "arcor.de",
+  "mail.com",
+  "email.com",
+  "usa.com",
+  "consultant.com",
+  "europe.com",
+  "fastmail.com",
+  "fastmail.fm",
+  "tutanota.com",
+  "tutanota.de",
+  "tuta.io",
+  "mailfence.com",
+  "disroot.org",
+  "riseup.net",
+  "qq.com",
+  "163.com",
+  "126.com",
+  "sina.com",
+  "sohu.com",
+  "aliyun.com",
+  "naver.com",
+  "daum.net",
+  "hanmail.net",
+  "wp.pl",
+  "onet.pl",
+  "interia.pl",
+  "o2.pl",
+  "poczta.fm",
+  "ukr.net",
+  "i.ua",
+  "meta.ua",
+  "bigmir.net",
+  "abv.bg",
+  "dir.bg",
+  "gbg.bg",
+  "centrum.cz",
+  "seznam.cz",
+  "email.cz",
+  "post.cz",
+  "atlas.sk",
+  "azet.sk",
+  "freemail.hu",
+  "citromail.hu",
+  "indamail.hu",
+  "libero.it",
+  "virgilio.it",
+  "tiscali.it",
+  "alice.it",
+  "tin.it",
+  "laposte.net",
+  "sfr.fr",
+  "free.fr",
+  "orange.fr",
+  "wanadoo.fr",
+  "terra.com.br",
+  "bol.com.br",
+  "uol.com.br",
+  "ig.com.br",
+  "rediffmail.com",
+  "sify.com"
+]);
+function isFreeProvider(domain) {
+  return FREE_PROVIDERS.has(domain.toLowerCase());
+}
+var COMMON_DOMAINS = [
+  "gmail.com",
+  "yahoo.com",
+  "hotmail.com",
+  "outlook.com",
+  "mail.ru",
+  "yandex.ru",
+  "icloud.com",
+  "protonmail.com",
+  "aol.com",
+  "zoho.com",
+  "live.com",
+  "msn.com",
+  "bk.ru",
+  "inbox.ru",
+  "list.ru",
+  "rambler.ru",
+  "ya.ru",
+  "gmx.com",
+  "web.de",
+  "mail.com",
+  "fastmail.com",
+  "qq.com",
+  "163.com",
+  "126.com"
+];
+function levenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+function suggestTypo(domain) {
+  const lower = domain.toLowerCase();
+  if (COMMON_DOMAINS.includes(lower)) return null;
+  let bestMatch = null;
+  let bestDist = Infinity;
+  for (const candidate of COMMON_DOMAINS) {
+    const dist = levenshtein(lower, candidate);
+    if (dist > 0 && dist <= 2 && dist < bestDist) {
+      bestDist = dist;
+      bestMatch = candidate;
+    }
+  }
+  return bestMatch;
+}
+
+// src/lib/emailValidation/validator.ts
+var dnsResolver = new dns.promises.Resolver();
+dnsResolver.setServers(["8.8.8.8", "8.8.4.4", "1.1.1.1"]);
+async function lookupMX(domain) {
+  try {
+    const records = await dnsResolver.resolveMx(domain);
+    if (records && records.length > 0) {
+      const sorted = records.sort((a, b) => a.priority - b.priority);
+      return { mxHosts: sorted.map((r) => r.exchange), found: true };
+    }
+  } catch (err) {
+    const code = err.code;
+    if (code === "ENOTFOUND" || code === "ENODATA" || code === "ESERVFAIL") {
+      try {
+        await dnsResolver.resolve4(domain);
+        return { mxHosts: [domain], found: true };
+      } catch {
+        return { mxHosts: [], found: false };
+      }
+    }
+    return { mxHosts: [], found: false };
+  }
+  return { mxHosts: [], found: false };
+}
+var SMTP_CONNECT_TIMEOUT_MS = 1e4;
+var SMTP_COMMAND_TIMEOUT_MS = 1e4;
+var SMTP_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN || "mail-check.local";
+var SMTP_FROM = process.env.EMAIL_VALIDATION_FROM || "check@mail-check.local";
+function parseSmtpResponse(data2) {
+  const match = data2.match(/^(\d{3})[\s-]/);
+  return { code: match ? parseInt(match[1], 10) : 0, text: data2.trim() };
+}
+function smtpCommand(socket, command, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`SMTP timeout waiting for response to: ${command.split("\r\n")[0]}`));
+    }, timeoutMs);
+    const onData = (data2) => {
+      clearTimeout(timer);
+      socket.removeListener("data", onData);
+      socket.removeListener("error", onError);
+      const text3 = data2.toString("utf-8");
+      if (/^\d{3} /m.test(text3)) {
+        resolve(parseSmtpResponse(text3));
+      } else {
+        let accumulated = text3;
+        const onMore = (chunk2) => {
+          accumulated += chunk2.toString("utf-8");
+          if (/^\d{3} /m.test(accumulated)) {
+            clearTimeout(timer);
+            socket.removeListener("data", onMore);
+            resolve(parseSmtpResponse(accumulated));
+          }
+        };
+        socket.on("data", onMore);
+      }
+    };
+    const onError = (err) => {
+      clearTimeout(timer);
+      socket.removeListener("data", onData);
+      reject(err);
+    };
+    socket.once("error", onError);
+    socket.on("data", onData);
+    socket.write(command + "\r\n");
+  });
+}
+function waitForGreeting(socket, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("SMTP greeting timeout"));
+    }, timeoutMs);
+    const onData = (data2) => {
+      clearTimeout(timer);
+      socket.removeListener("data", onData);
+      socket.removeListener("error", onError);
+      resolve(parseSmtpResponse(data2.toString("utf-8")));
+    };
+    const onError = (err) => {
+      clearTimeout(timer);
+      socket.removeListener("data", onData);
+      reject(err);
+    };
+    socket.once("data", onData);
+    socket.once("error", onError);
+  });
+}
+async function smtpVerify(email, mxHost, options) {
+  const timeout = options?.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
+  const result = { code: 0, exists: null, isCatchAll: null, greylist: false };
+  let socket = null;
+  try {
+    socket = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("SMTP connect timeout")), timeout);
+      const s = net.createConnection({ host: mxHost, port: 25, timeout }, () => {
+        clearTimeout(timer);
+        resolve(s);
+      });
+      s.once("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const greeting = await waitForGreeting(socket, SMTP_COMMAND_TIMEOUT_MS);
+    if (greeting.code !== 220) {
+      result.error = `Unexpected greeting: ${greeting.code}`;
+      return result;
+    }
+    const ehlo = await smtpCommand(socket, `EHLO ${SMTP_HELO_DOMAIN}`, SMTP_COMMAND_TIMEOUT_MS);
+    if (ehlo.code !== 250) {
+      const helo = await smtpCommand(socket, `HELO ${SMTP_HELO_DOMAIN}`, SMTP_COMMAND_TIMEOUT_MS);
+      if (helo.code !== 250) {
+        result.error = `EHLO/HELO rejected: ${helo.code}`;
+        return result;
+      }
+    }
+    const mailFrom = await smtpCommand(socket, `MAIL FROM:<${SMTP_FROM}>`, SMTP_COMMAND_TIMEOUT_MS);
+    if (mailFrom.code !== 250) {
+      result.error = `MAIL FROM rejected: ${mailFrom.code}`;
+      return result;
+    }
+    const rcptTo = await smtpCommand(socket, `RCPT TO:<${email}>`, SMTP_COMMAND_TIMEOUT_MS);
+    result.code = rcptTo.code;
+    if (rcptTo.code === 250) {
+      result.exists = true;
+    } else if (rcptTo.code >= 550 && rcptTo.code <= 559) {
+      result.exists = false;
+    } else if (rcptTo.code >= 450 && rcptTo.code <= 459) {
+      result.greylist = true;
+      result.exists = null;
+    } else if (rcptTo.code >= 400 && rcptTo.code < 500) {
+      result.greylist = true;
+      result.exists = null;
+    }
+    if (options?.checkCatchAll && result.exists === true) {
+      const domain = email.split("@")[1];
+      const randomLocal = `verify-check-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+      const randomEmail = `${randomLocal}@${domain}`;
+      await smtpCommand(socket, "RSET", SMTP_COMMAND_TIMEOUT_MS);
+      await smtpCommand(socket, `MAIL FROM:<${SMTP_FROM}>`, SMTP_COMMAND_TIMEOUT_MS);
+      const catchAllRcpt = await smtpCommand(socket, `RCPT TO:<${randomEmail}>`, SMTP_COMMAND_TIMEOUT_MS);
+      if (catchAllRcpt.code === 250) {
+        result.isCatchAll = true;
+      } else if (catchAllRcpt.code >= 550 && catchAllRcpt.code <= 559) {
+        result.isCatchAll = false;
+      }
+    }
+    try {
+      await smtpCommand(socket, "QUIT", 3e3);
+    } catch {
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "SMTP error";
+    result.error = msg;
+    if (msg.includes("ECONNREFUSED") || msg.includes("connect timeout")) {
+      result.exists = null;
+    }
+  } finally {
+    if (socket) {
+      try {
+        socket.destroy();
+      } catch {
+      }
+    }
+  }
+  return result;
+}
+async function validateEmail(rawEmail, domainCache) {
+  const email = rawEmail.trim().toLowerCase();
+  const details = {};
+  const syntax = checkSyntax(email);
+  if (!syntax.valid) {
+    return {
+      result: "invalid",
+      quality: "bad",
+      is_free: false,
+      is_role: false,
+      is_disposable: false,
+      is_catch_all: false,
+      did_you_mean: null,
+      mx_found: false,
+      smtp_code: 0,
+      details: { step: "syntax", error: syntax.error }
+    };
+  }
+  const atIndex = email.lastIndexOf("@");
+  const local = email.substring(0, atIndex);
+  const domain = email.substring(atIndex + 1);
+  const roleFlag = isRole(local);
+  const freeFlag = isFreeProvider(domain);
+  const disposableFlag = isDisposable(domain);
+  if (disposableFlag) {
+    return {
+      result: "disposable",
+      quality: "bad",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: true,
+      is_catch_all: false,
+      did_you_mean: null,
+      mx_found: false,
+      smtp_code: 0,
+      details: { step: "disposable" }
+    };
+  }
+  const typoSuggestion = suggestTypo(domain);
+  const didYouMean = typoSuggestion ? `${local}@${typoSuggestion}` : null;
+  let domainInfo = domainCache.get(domain);
+  if (!domainInfo) {
+    const mx = await lookupMX(domain);
+    domainInfo = {
+      domain,
+      mxHosts: mx.mxHosts,
+      mxFound: mx.found,
+      isCatchAll: null,
+      isDisposable: disposableFlag,
+      checkedAt: /* @__PURE__ */ new Date()
+    };
+    domainCache.set(domain, domainInfo);
+  }
+  if (!domainInfo.mxFound) {
+    return {
+      result: "invalid",
+      quality: "bad",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: false,
+      did_you_mean: didYouMean,
+      mx_found: false,
+      smtp_code: 0,
+      details: { step: "mx", error: "\u041D\u0435\u0442 MX-\u0437\u0430\u043F\u0438\u0441\u0435\u0439 \u0434\u043B\u044F \u0434\u043E\u043C\u0435\u043D\u0430" }
+    };
+  }
+  const needCatchAllCheck = domainInfo.isCatchAll === null;
+  let smtpResult = null;
+  for (const mxHost of domainInfo.mxHosts.slice(0, 3)) {
+    try {
+      smtpResult = await smtpVerify(email, mxHost, {
+        checkCatchAll: needCatchAllCheck,
+        timeout: SMTP_CONNECT_TIMEOUT_MS
+      });
+      if (smtpResult.isCatchAll !== null && domainInfo.isCatchAll === null) {
+        domainInfo.isCatchAll = smtpResult.isCatchAll;
+      }
+      if (smtpResult.exists !== null || smtpResult.isCatchAll !== null) break;
+      if (smtpResult.greylist) break;
+    } catch {
+      details.mxHostFailed = mxHost;
+      continue;
+    }
+  }
+  const isCatchAll = domainInfo.isCatchAll === true;
+  const mxFound = domainInfo.mxFound;
+  if (!smtpResult) {
+    return {
+      result: "unknown",
+      quality: "risky",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: isCatchAll,
+      did_you_mean: didYouMean,
+      mx_found: mxFound,
+      smtp_code: 0,
+      details: { step: "smtp", error: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F \u043D\u0438 \u043A \u043E\u0434\u043D\u043E\u043C\u0443 MX-\u0441\u0435\u0440\u0432\u0435\u0440\u0443" }
+    };
+  }
+  details.smtp_code = smtpResult.code;
+  if (smtpResult.error) details.smtp_error = smtpResult.error;
+  if (smtpResult.greylist) {
+    return {
+      result: "unknown",
+      quality: "risky",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: isCatchAll,
+      did_you_mean: didYouMean,
+      mx_found: mxFound,
+      smtp_code: smtpResult.code,
+      details: { ...details, step: "greylist" },
+      error: "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u0432\u0435\u0442\u0438\u043B \u0432\u0440\u0435\u043C\u0435\u043D\u043D\u044B\u043C \u043E\u0442\u043A\u0430\u0437\u043E\u043C (greylisting)"
+    };
+  }
+  if (isCatchAll) {
+    return {
+      result: "catch_all",
+      quality: "risky",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: true,
+      did_you_mean: didYouMean,
+      mx_found: mxFound,
+      smtp_code: smtpResult.code,
+      details: { ...details, step: "catch_all" }
+    };
+  }
+  if (smtpResult.exists === true) {
+    return {
+      result: "ok",
+      quality: "good",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: false,
+      did_you_mean: didYouMean,
+      mx_found: mxFound,
+      smtp_code: smtpResult.code,
+      details: { ...details, step: "smtp_ok" }
+    };
+  }
+  if (smtpResult.exists === false) {
+    return {
+      result: "invalid",
+      quality: "bad",
+      is_free: freeFlag,
+      is_role: roleFlag,
+      is_disposable: false,
+      is_catch_all: false,
+      did_you_mean: didYouMean,
+      mx_found: mxFound,
+      smtp_code: smtpResult.code,
+      details: { ...details, step: "smtp_invalid" }
+    };
+  }
+  return {
+    result: "unknown",
+    quality: "risky",
+    is_free: freeFlag,
+    is_role: roleFlag,
+    is_disposable: false,
+    is_catch_all: isCatchAll,
+    did_you_mean: didYouMean,
+    mx_found: mxFound,
+    smtp_code: smtpResult.code,
+    details: { ...details, step: "unknown" }
+  };
+}
+
+// src/lib/emailValidation/emailValidationWorker.ts
+function workerLog(level, msg, extra) {
+  const line = `[email-validation][${level.toUpperCase()}] ${msg}`;
+  if (extra !== void 0) console[level](line, extra);
+  else console[level](line);
+}
+var WORKER_CONCURRENCY2 = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? "8");
+var WORKER_BATCH_SIZE2 = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? "50");
+var MAX_ATTEMPTS2 = Number(process.env.EMAIL_VALIDATION_MAX_ATTEMPTS ?? "3");
+var STALE_PROCESSING_MINUTES2 = Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? "5");
+var DOMAIN_CONCURRENCY2 = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? "1");
+var DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL_MS ?? String(24 * 60 * 60 * 1e3));
+var JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? "2000");
+var SUPABASE_QUERY_TIMEOUT_MS2 = 3e4;
+var sleep7 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function withTimeout2(operation, msg) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(msg)), SUPABASE_QUERY_TIMEOUT_MS2);
+    Promise.resolve(operation).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+async function mapWithConcurrency4(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const run = async () => {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await worker(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
+  return results;
+}
+var domainActive2 = /* @__PURE__ */ new Map();
+var domainQueue2 = /* @__PURE__ */ new Map();
+async function acquireDomainSlot2(domain) {
+  if (!domain || DOMAIN_CONCURRENCY2 <= 0) return () => {
+  };
+  const current = domainActive2.get(domain) ?? 0;
+  if (current >= DOMAIN_CONCURRENCY2) {
+    await new Promise((resolve) => {
+      const q = domainQueue2.get(domain) ?? [];
+      q.push(resolve);
+      domainQueue2.set(domain, q);
+    });
+  }
+  domainActive2.set(domain, (domainActive2.get(domain) ?? 0) + 1);
+  return () => {
+    const next2 = (domainActive2.get(domain) ?? 1) - 1;
+    if (next2 <= 0) domainActive2.delete(domain);
+    else domainActive2.set(domain, next2);
+    const q = domainQueue2.get(domain);
+    const resolver = q?.shift();
+    if (resolver) resolver();
+  };
+}
+async function loadDomainCache(jobId) {
+  const cache = /* @__PURE__ */ new Map();
+  if (!supabaseAdmin) return cache;
+  try {
+    const { data: data2 } = await supabaseAdmin.from("email_validation_domain_cache").select("domain, mx_hosts, mx_found, is_catch_all, is_disposable, checked_at, expires_at").gt("expires_at", (/* @__PURE__ */ new Date()).toISOString()).limit(1e4);
+    if (data2) {
+      for (const row of data2) {
+        cache.set(row.domain, {
+          domain: row.domain,
+          mxHosts: row.mx_hosts ?? [],
+          mxFound: row.mx_found ?? false,
+          isCatchAll: row.is_catch_all,
+          isDisposable: row.is_disposable ?? false,
+          checkedAt: new Date(row.checked_at)
+        });
+      }
+    }
+  } catch (err) {
+    await logError("email.validation.worker.domain_cache_load_failed", err, { jobId });
+  }
+  return cache;
+}
+async function saveDomainCache(domainCache) {
+  if (!supabaseAdmin || domainCache.size === 0) return;
+  const rows = Array.from(domainCache.values()).map((d) => ({
+    domain: d.domain,
+    mx_hosts: d.mxHosts,
+    mx_found: d.mxFound,
+    is_catch_all: d.isCatchAll,
+    is_disposable: d.isDisposable,
+    checked_at: d.checkedAt.toISOString(),
+    expires_at: new Date(Date.now() + DOMAIN_CACHE_TTL_MS).toISOString()
+  }));
+  const batchSize = 500;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    try {
+      await supabaseAdmin.from("email_validation_domain_cache").upsert(rows.slice(i, i + batchSize), { onConflict: "domain" });
+    } catch {
+    }
+  }
+}
+async function countQueue2(jobId, status) {
+  if (!supabaseAdmin) return 0;
+  try {
+    const { count } = await withTimeout2(
+      supabaseAdmin.from("email_validation_queue").select("id", { count: "exact", head: true }).eq("job_id", jobId).eq("status", status),
+      "\u0422\u0430\u0439\u043C\u0430\u0443\u0442 countQueue"
+    );
+    return count ?? 0;
+  } catch {
+    return 0;
+  }
+}
+function shouldRetry(error, attempts) {
+  if (attempts >= MAX_ATTEMPTS2) return false;
+  if (!error) return false;
+  const retryable = [
+    "greylist",
+    "timeout",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "\u0432\u0440\u0435\u043C\u0435\u043D\u043D"
+  ];
+  const lower = error.toLowerCase();
+  return retryable.some((k) => lower.includes(k.toLowerCase()));
+}
+async function runEmailValidationJob(jobId) {
+  if (!supabaseAdmin) {
+    await logError("email.validation.worker.no_admin", new Error("supabaseAdmin is not configured"));
+    return;
+  }
+  const db = supabaseAdmin;
+  try {
+    workerLog("info", `Starting job ${jobId}`);
+    const { data: job, error: jobError } = await db.from("email_validation_jobs").select("id, user_id, status, total, processed, success_count, error_count").eq("id", jobId).single();
+    if (jobError || !job) {
+      workerLog("error", `Job not found: ${jobId}`, jobError);
+      await logError("email.validation.worker.job_not_found", jobError ?? new Error("Job not found"), { jobId });
+      return;
+    }
+    if (["failed", "cancelled"].includes(job.status)) return;
+    let processed = job.processed ?? 0;
+    let success = job.success_count ?? 0;
+    let errors2 = job.error_count ?? 0;
+    if (job.status === "completed") {
+      const [pendingCount, processingCount, completedCount2, failedCount2] = await Promise.all([
+        countQueue2(jobId, "pending"),
+        countQueue2(jobId, "processing"),
+        countQueue2(jobId, "completed"),
+        countQueue2(jobId, "failed")
+      ]);
+      if (pendingCount === 0 && processingCount === 0) return;
+      processed = completedCount2 + failedCount2;
+      success = completedCount2;
+      errors2 = failedCount2;
+      await db.from("email_validation_jobs").update({ status: "running", completed_at: null }).eq("id", jobId);
+    }
+    if (job.status === "pending") {
+      await db.from("email_validation_jobs").update({ status: "running", started_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", jobId);
+    }
+    let cancelled = false;
+    await db.rpc("reset_stale_email_validation_items", {
+      p_job_id: jobId,
+      p_minutes: STALE_PROCESSING_MINUTES2
+    });
+    const domainCache = await loadDomainCache(jobId);
+    let lastProgressFlush = Date.now();
+    const flushProgress = async () => {
+      const now = Date.now();
+      if (now - lastProgressFlush < JOB_PROGRESS_FLUSH_INTERVAL) return;
+      lastProgressFlush = now;
+      await db.from("email_validation_jobs").update({ processed, success_count: success, error_count: errors2 }).eq("id", jobId);
+    };
+    while (true) {
+      const { data: jobStatus } = await db.from("email_validation_jobs").select("status").eq("id", jobId).single();
+      if (jobStatus?.status === "cancelled") {
+        cancelled = true;
+        break;
+      }
+      const { data: items, error: claimErr } = await db.rpc("claim_email_validation_items", {
+        p_job_id: jobId,
+        p_limit: WORKER_BATCH_SIZE2
+      });
+      if (claimErr) {
+        workerLog("error", `Claim failed for job ${jobId}`, claimErr);
+        await logError("email.validation.worker.claim_failed", claimErr, { jobId });
+        await sleep7(500);
+        continue;
+      }
+      const batch = items ?? [];
+      if (batch.length === 0) {
+        const [pendingCount, processingCount] = await Promise.all([
+          countQueue2(jobId, "pending"),
+          countQueue2(jobId, "processing")
+        ]);
+        if (pendingCount === 0 && processingCount === 0) break;
+        if (processingCount > 0) {
+          await db.rpc("reset_stale_email_validation_items", {
+            p_job_id: jobId,
+            p_minutes: STALE_PROCESSING_MINUTES2
+          });
+        }
+        await sleep7(600);
+        continue;
+      }
+      await mapWithConcurrency4(
+        batch,
+        Math.max(1, Math.min(WORKER_CONCURRENCY2, batch.length)),
+        async (item) => {
+          const domain = item.email_normalized.split("@")[1] ?? "";
+          const release = await acquireDomainSlot2(domain);
+          try {
+            if (item.attempt_count > MAX_ATTEMPTS2) {
+              await updateQueueItemResult(item, null, "failed", `\u041F\u0440\u0435\u0432\u044B\u0448\u0435\u043D\u043E \u0447\u0438\u0441\u043B\u043E \u043F\u043E\u043F\u044B\u0442\u043E\u043A (${MAX_ATTEMPTS2})`);
+              errors2 += 1;
+              processed += 1;
+              return;
+            }
+            const result = await validateEmail(item.email_normalized, domainCache);
+            if (result.error && result.result === "unknown" && shouldRetry(result.error, item.attempt_count)) {
+              await requeueItem(item);
+              return;
+            }
+            await updateQueueItemResult(item, result, "completed", null);
+            if (result.quality === "bad") {
+              errors2 += 1;
+            } else {
+              success += 1;
+            }
+            processed += 1;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "\u041E\u0448\u0438\u0431\u043A\u0430 \u0432\u0430\u043B\u0438\u0434\u0430\u0446\u0438\u0438";
+            if (shouldRetry(msg, item.attempt_count)) {
+              await requeueItem(item);
+            } else {
+              await updateQueueItemResult(item, null, "failed", msg);
+              errors2 += 1;
+              processed += 1;
+            }
+            await logError("email.validation.worker.item_failed", err, {
+              jobId,
+              itemId: item.id,
+              email: item.email_raw
+            });
+          } finally {
+            release();
+          }
+        }
+      );
+      await flushProgress();
+      workerLog("info", `Job ${jobId}: processed=${processed}/${job.total} (batch=${batch.length}, success=${success}, errors=${errors2})`);
+    }
+    if (cancelled) {
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      await db.from("email_validation_queue").update({ status: "failed", last_error: "\u041E\u0442\u043C\u0435\u043D\u0435\u043D\u043E \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0435\u043C", updated_at: now, completed_at: now }).eq("job_id", jobId).in("status", ["pending", "processing"]);
+    }
+    const [completedCount, failedCount] = await Promise.all([
+      countQueue2(jobId, "completed"),
+      countQueue2(jobId, "failed")
+    ]);
+    const finalStatus = cancelled ? "cancelled" : "completed";
+    await db.from("email_validation_jobs").update({
+      status: finalStatus,
+      processed: completedCount + failedCount,
+      success_count: completedCount,
+      error_count: failedCount,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    }).eq("id", jobId);
+    await saveDomainCache(domainCache);
+    workerLog("info", `Job ${jobId} FINISHED: status=${finalStatus}, completed=${completedCount}, failed=${failedCount}`);
+    await logInfo("email.validation.worker.completed", "Email validation job completed", {
+      jobId,
+      processed: completedCount + failedCount,
+      success: completedCount,
+      errors: failedCount
+    });
+  } catch (err) {
+    workerLog("error", `Job ${jobId} CRASHED`, err);
+    await logError("email.validation.worker.failed", err, { jobId });
+    await db.from("email_validation_jobs").update({
+      status: "failed",
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      error_message: err instanceof Error ? err.message : "Worker error"
+    }).eq("id", jobId);
+  }
+}
+async function updateQueueItemResult(item, result, status, errorMsg) {
+  if (!supabaseAdmin) return;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const update2 = {
+    status,
+    updated_at: now,
+    completed_at: now
+  };
+  if (result) {
+    update2.result = result.result;
+    update2.quality = result.quality;
+    update2.is_free = result.is_free;
+    update2.is_role = result.is_role;
+    update2.is_disposable = result.is_disposable;
+    update2.is_catch_all = result.is_catch_all;
+    update2.did_you_mean = result.did_you_mean;
+    update2.mx_found = result.mx_found;
+    update2.smtp_code = result.smtp_code;
+    update2.details = result.details;
+    update2.last_error = result.error ?? null;
+  } else {
+    update2.last_error = errorMsg;
+    update2.result = "unknown";
+    update2.quality = "risky";
+  }
+  try {
+    await withTimeout2(
+      supabaseAdmin.from("email_validation_queue").update(update2).eq("id", item.id),
+      `\u0422\u0430\u0439\u043C\u0430\u0443\u0442 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F queue item (${item.id})`
+    );
+  } catch (err) {
+    await logError("email.validation.worker.queue_update_failed", err, {
+      jobId: item.job_id,
+      itemId: item.id
+    });
+  }
+}
+async function requeueItem(item) {
+  if (!supabaseAdmin) return;
+  try {
+    await supabaseAdmin.from("email_validation_queue").update({ status: "pending", updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", item.id);
+  } catch {
+  }
+}
+
 // worker/index.ts
 var POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? "3000");
 var WORKER_ID = `worker-${process.pid}-${Date.now()}`;
@@ -67002,6 +68080,9 @@ async function startupRecovery() {
   const { data: ymJobs, error: ymErr } = await db.from("yandex_maps_jobs").update({ status: "failed", error_message: "\u041F\u0440\u0435\u0440\u0432\u0430\u043D\u043E \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0443\u0441\u043A\u043E\u043C worker-\u0441\u0435\u0440\u0432\u0438\u0441\u0430" }).eq("status", "running").select("id");
   if (ymErr) log("warn", "Startup recovery: yandex_maps_jobs update failed", ymErr);
   else if (ymJobs?.length) log("info", `Startup recovery: marked ${ymJobs.length} yandex_maps_jobs as failed`);
+  const { data: evJobs, error: evErr } = await db.from("email_validation_jobs").update({ status: "pending" }).eq("status", "running").select("id");
+  if (evErr) log("warn", "Startup recovery: email_validation_jobs update failed", evErr);
+  else if (evJobs?.length) log("info", `Startup recovery: reset ${evJobs.length} email_validation_jobs to pending`);
 }
 async function claimHHJob() {
   const db = supabaseAdmin;
@@ -67029,6 +68110,12 @@ async function claimYandexMapsJob() {
   if (!pending) return null;
   const stage = pending.progress_stage === "ready_to_parse" ? "parse" : "collect";
   return { id: pending.id, stage };
+}
+async function claimEmailValidationJob() {
+  const db = supabaseAdmin;
+  const { data: pending } = await db.from("email_validation_jobs").select("id").eq("status", "pending").order("created_at", { ascending: true }).limit(1).maybeSingle();
+  if (!pending) return null;
+  return pending.id;
 }
 async function pollOnce() {
   if (!supabaseAdmin) return false;
@@ -67061,6 +68148,12 @@ async function pollOnce() {
     }
     return true;
   }
+  const evJobId = await claimEmailValidationJob();
+  if (evJobId) {
+    log("info", `Running email validation job ${evJobId}`);
+    await runEmailValidationJob(evJobId);
+    return true;
+  }
   return false;
 }
 async function pollLoop() {
@@ -67069,11 +68162,11 @@ async function pollLoop() {
     try {
       const found = await pollOnce();
       if (!found) {
-        await sleep7(POLL_INTERVAL_MS);
+        await sleep8(POLL_INTERVAL_MS);
       }
     } catch (err) {
       log("error", "Unexpected error in poll loop", err);
-      await sleep7(POLL_INTERVAL_MS);
+      await sleep8(POLL_INTERVAL_MS);
     }
   }
   log("info", "Poll loop exited (shutting down)");
@@ -67086,7 +68179,7 @@ function setupGracefulShutdown() {
   process.on("SIGTERM", () => onSignal("SIGTERM"));
   process.on("SIGINT", () => onSignal("SIGINT"));
 }
-function sleep7(ms) {
+function sleep8(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 async function main() {

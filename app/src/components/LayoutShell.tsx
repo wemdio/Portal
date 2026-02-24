@@ -80,7 +80,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
           ) : (
             <>
               <Sidebar collapsed={isSpreadsheetPage} isTma={false} />
-              <div className={`flex-shrink-0 ${isSpreadsheetPage ? 'w-3' : 'w-60'}`} />
+              <div className={`flex-shrink-0 ${isSpreadsheetPage ? 'w-3' : 'w-40'}`} />
             </>
           )}
         </>

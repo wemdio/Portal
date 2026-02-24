@@ -7,7 +7,7 @@ import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
-import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -139,6 +139,7 @@ export function ProjectList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
@@ -181,17 +182,56 @@ export function ProjectList() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('email, full_name');
+        .select('email, full_name, avatar_url');
 
       if (error) throw error;
-      setAssigneeOptions(
-        buildAssigneeOptions(
-          ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
-        ),
-      );
+      const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
+      setAssigneeOptions(buildAssigneeOptions(profiles));
+
+      const avatarMap = new Map<string, string>();
+      for (const p of profiles) {
+        const name = p.full_name?.trim() || p.email?.split('@')[0]?.trim();
+        const url = typeof p.avatar_url === 'string' ? p.avatar_url.trim() : '';
+        if (name && url) avatarMap.set(name, url);
+      }
+      setAssigneeAvatars(avatarMap);
+
+      const renameMap = buildRenameMap(profiles);
+      if (renameMap.size > 0) {
+        void syncStaleAssigneeNames(renameMap);
+      }
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
     }
+  }
+
+  async function syncStaleAssigneeNames(renameMap: Map<string, string>) {
+    setProjects((prev) => {
+      const updates: { id: string; fields: Partial<Project> }[] = [];
+
+      const next = prev.map((p) => {
+        const patch: Partial<Project> = {};
+        if (p.specialist && renameMap.has(p.specialist)) {
+          patch.specialist = renameMap.get(p.specialist)!;
+        }
+        if (p.manager && renameMap.has(p.manager)) {
+          patch.manager = renameMap.get(p.manager)!;
+        }
+        if (Object.keys(patch).length === 0) return p;
+        updates.push({ id: p.id, fields: patch });
+        return { ...p, ...patch };
+      });
+
+      if (updates.length > 0) {
+        void (async () => {
+          for (const { id, fields } of updates) {
+            await supabase.from('projects').update(fields).eq('id', id);
+          }
+        })();
+      }
+
+      return next;
+    });
   }
 
   async function fetchAllTasks() {
@@ -593,7 +633,7 @@ export function ProjectList() {
 
       {/* Cards View */}
       {!isTma && viewMode === 'cards' && filteredProjects.length > 0 && (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {sortedProjects.map((project) => (
             <ProjectCard 
               key={project.id} 
@@ -647,25 +687,25 @@ export function ProjectList() {
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="w-full divide-y divide-gray-100 text-xs table-fixed">
+            <table className="w-full divide-y divide-gray-100 text-xs min-w-[1400px]">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[11%]">Проект</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Статус</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Сумма</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Дог.</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Пер.</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Дедлайн</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">KPI План</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[5%]">KPI Факт</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">Контакты</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Специалист</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Лид (PM)</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Формат</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи/Комм.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[140px]">Проект</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Статус</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Сумма</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Дог.</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Пер.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Дедлайн</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">KPI План</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[70px]">KPI Факт</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Контакты</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Специалист</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Формат</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[160px]">Задачи/Комм.</th>
               </tr>
             </thead>
-              <tbody className="divide-y divide-gray-50 bg-white">
+              <tbody className="divide-y divide-gray-200 bg-white">
                 {sortedProjects.map((project) => {
                   const isSaving = Boolean(savingRows[project.id]);
                   const isDisabled = !canEdit || isSaving;
@@ -693,7 +733,7 @@ export function ProjectList() {
                   const readOnlySpecialist = project.specialist || '—';
                   const readOnlyManager = project.manager || '—';
                 return (
-                    <tr key={project.id} className="hover:bg-gray-50 transition-colors group">
+                    <tr key={project.id} className="even:bg-gray-50/50 hover:bg-blue-50/40 transition-colors group">
                       <td className="px-2 py-2 align-top overflow-hidden">
                         {isTableEditing ? (
                           <div className="flex items-center gap-2">
@@ -955,9 +995,14 @@ export function ProjectList() {
                         ) : (
                           readOnlySpecialist !== '—' ? (
                              <div className="flex items-center gap-1">
-                                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                  {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </span>
+                                {assigneeAvatars.get(readOnlySpecialist) ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img src={assigneeAvatars.get(readOnlySpecialist)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                                ) : (
+                                  <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
+                                    {readOnlySpecialist.charAt(0).toUpperCase()}
+                                  </span>
+                                )}
                                 <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
@@ -977,9 +1022,14 @@ export function ProjectList() {
                         ) : (
                            readOnlyManager !== '—' ? (
                              <div className="flex items-center gap-1">
-                                <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                  {readOnlyManager.charAt(0).toUpperCase()}
-                                </span>
+                                {assigneeAvatars.get(readOnlyManager) ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img src={assigneeAvatars.get(readOnlyManager)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                                ) : (
+                                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
+                                    {readOnlyManager.charAt(0).toUpperCase()}
+                                  </span>
+                                )}
                                 <span className="text-gray-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
@@ -1904,12 +1954,12 @@ function ProjectCard({
 
   return (
     <div
-      className={`bg-white rounded-2xl border ${
+      className={`bg-white rounded-2xl border shadow-sm ${
         deadlineStatus === 'overdue'
-          ? 'border-red-200 ring-2 ring-red-100'
+          ? 'border-red-200 ring-2 ring-red-100 border-l-4 border-l-red-400'
           : deadlineStatus === 'soon'
-            ? 'border-amber-200'
-            : 'border-gray-200'
+            ? 'border-amber-200 border-l-4 border-l-amber-400'
+            : 'border-gray-200 border-l-4 border-l-gray-300'
       } ${isTma ? 'p-4' : 'p-4 md:p-5'} hover:shadow-md transition-shadow`}
     >
       <div className="flex items-start justify-between gap-3">
