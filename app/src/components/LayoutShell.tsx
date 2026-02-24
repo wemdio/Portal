@@ -39,7 +39,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       {!isTma ? (
         <>
           <Sidebar collapsed={isSpreadsheetPage} isTma={false} />
-          <div className={`flex-shrink-0 hidden md:block ${isSpreadsheetPage ? 'w-3' : 'w-[120px]'}`} />
+          <div className={`flex-shrink-0 hidden md:block ${isSpreadsheetPage ? 'w-3' : 'w-40'}`} />
         </>
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
