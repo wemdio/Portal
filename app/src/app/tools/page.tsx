@@ -1,10 +1,11 @@
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines, Monitor } from 'lucide-react';
+import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines } from 'lucide-react';
+import { RdpToolCard } from './RdpToolCard';
 
 export default function ToolsPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 text-left max-w-full">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Инструменты</h1>
         <p className="text-sm text-gray-500">
@@ -12,7 +13,7 @@ export default function ToolsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 justify-items-start">
         <Link
           href={'/tools/done-for-you' as Route}
           className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300"
@@ -127,28 +128,7 @@ export default function ToolsPage() {
           </div>
         </Link>
 
-        <div
-          className="rounded-2xl border-2 border-violet-200 bg-gradient-to-br from-violet-50 to-white p-6 opacity-90"
-          aria-disabled="true"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-base font-semibold text-gray-900">Удалённый рабочий стол</p>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
-                  В разработке
-                </span>
-              </div>
-              <p className="text-sm text-gray-500">
-                Подключение к удалённому ПК через браузер с бронированием.
-              </p>
-            </div>
-            <Monitor className="h-8 w-8 text-violet-400" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-gray-400 cursor-not-allowed">
-            Открыть →
-          </div>
-        </div>
+        <RdpToolCard />
       </div>
     </div>
   );
