@@ -596,7 +596,7 @@ export function ProjectList() {
 
       {/* Cards View */}
       {!isTma && viewMode === 'cards' && filteredProjects.length > 0 && (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {sortedProjects.map((project) => (
             <ProjectCard 
               key={project.id} 
@@ -668,7 +668,7 @@ export function ProjectList() {
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи/Комм.</th>
               </tr>
             </thead>
-              <tbody className="divide-y divide-gray-50 bg-white">
+              <tbody className="divide-y divide-gray-200 bg-white">
                 {sortedProjects.map((project) => {
                   const isSaving = Boolean(savingRows[project.id]);
                   const isDisabled = !canEdit || isSaving;
@@ -699,7 +699,7 @@ export function ProjectList() {
                   const readOnlyComment = project.comments || '—';
                   
                 return (
-                    <tr key={project.id} className="hover:bg-gray-50 transition-colors group">
+                    <tr key={project.id} className="even:bg-gray-50/50 hover:bg-blue-50/40 transition-colors group">
                       <td className="px-2 py-2 align-top overflow-hidden">
                         {isTableEditing ? (
                           <div className="flex items-center gap-2">
@@ -1910,12 +1910,12 @@ function ProjectCard({
 
   return (
     <div
-      className={`bg-white rounded-2xl border ${
+      className={`bg-white rounded-2xl border shadow-sm ${
         deadlineStatus === 'overdue'
-          ? 'border-red-200 ring-2 ring-red-100'
+          ? 'border-red-200 ring-2 ring-red-100 border-l-4 border-l-red-400'
           : deadlineStatus === 'soon'
-            ? 'border-amber-200'
-            : 'border-gray-200'
+            ? 'border-amber-200 border-l-4 border-l-amber-400'
+            : 'border-gray-200 border-l-4 border-l-gray-300'
       } ${isTma ? 'p-4' : 'p-4 md:p-5'} hover:shadow-md transition-shadow`}
     >
       <div className="flex items-start justify-between gap-3">
