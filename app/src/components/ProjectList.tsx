@@ -650,7 +650,7 @@ export function ProjectList() {
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="w-full divide-y divide-gray-100 text-xs table-fixed">
+            <table className="w-full divide-y divide-gray-100 text-xs table-fixed min-w-[1100px]">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
                   <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[11%]">Проект</th>
