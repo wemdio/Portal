@@ -1,12 +1,13 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -41,6 +42,11 @@ export default function UsersPage() {
   const [newPassword, setNewPassword] = useState('');
   const [resetting, setResetting] = useState(false);
   const [revealPassword, setRevealPassword] = useState(false);
+
+  type SortColumn = 'name' | 'email' | 'role';
+  type SortDir = 'asc' | 'desc';
+  const [sortBy, setSortBy] = useState<SortColumn>('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -266,11 +272,24 @@ export default function UsersPage() {
     }
   }
 
-  const filteredUsers = users.filter(user => 
+  const filteredUsers = users.filter(user =>
     user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     user.full_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(searchQuery.toLowerCase()))
   );
+
+  const sortedUsers = useMemo(() => {
+    const list = [...filteredUsers];
+    const cmp = (a: UserProfile, b: UserProfile): number => {
+      const av = sortBy === 'name' ? (a.full_name || a.email || '').toLowerCase() : sortBy === 'email' ? (a.email || '').toLowerCase() : (a.role ? ROLE_LABELS[a.role] : '');
+      const bv = sortBy === 'name' ? (b.full_name || b.email || '').toLowerCase() : sortBy === 'email' ? (b.email || '').toLowerCase() : (b.role ? ROLE_LABELS[b.role] : '');
+      if (av < bv) return -1;
+      if (av > bv) return 1;
+      return 0;
+    };
+    list.sort((a, b) => (sortDir === 'asc' ? 1 : -1) * cmp(a, b));
+    return list;
+  }, [filteredUsers, sortBy, sortDir]);
 
   if (loading) {
     return (
@@ -350,22 +369,39 @@ export default function UsersPage() {
           <table className="w-full">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Пользователь
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Email
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Роль
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                {([
+                  { key: 'name' as SortColumn, label: 'Пользователь' },
+                  { key: 'email' as SortColumn, label: 'Email' },
+                  { key: 'role' as SortColumn, label: 'Роль' },
+                ]).map(({ key, label }) => (
+                  <th
+                    key={key}
+                    className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (sortBy === key) {
+                          setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                        } else {
+                          setSortBy(key);
+                          setSortDir('asc');
+                        }
+                      }}
+                      className="inline-flex items-center justify-center gap-1 hover:text-gray-700 focus:outline-none rounded mx-auto"
+                    >
+                      {label}
+                      {sortBy === key && (sortDir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />)}
+                    </button>
+                  </th>
+                ))}
+                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Действия
                 </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {filteredUsers.map((user) => (
+              {sortedUsers.map((user) => (
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
