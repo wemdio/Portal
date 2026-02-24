@@ -453,9 +453,6 @@ export function ProjectList() {
     'завершен': projects.filter(p => p.status?.toLowerCase().includes('заверш')).length,
   };
 
-  const overdueCount = projects.filter(p => getDeadlineStatus(p.deadline) === 'overdue').length;
-  const soonCount = projects.filter(p => getDeadlineStatus(p.deadline) === 'soon').length;
-
   const sortedProjects = filteredProjects;
 
   if (loading) {
@@ -683,7 +680,6 @@ export function ProjectList() {
                   const managerValue = getDraftValue(project, 'manager');
                   const specialistSelectOptions = ensureCurrentAssigneeOption(assigneeOptions, specialistValue);
                   const managerSelectOptions = ensureCurrentAssigneeOption(assigneeOptions, managerValue);
-                  const commentsValue = getDraftValue(project, 'comments');
                   const workFormatValue = resolveWorkFormat(getDraftValue(project, 'work_format'));
                   const contractHref = normalizeUrl(project.contract_link);
                   const handoffHref = normalizeUrl(project.handoff_link);
@@ -696,8 +692,6 @@ export function ProjectList() {
                   const readOnlyKpiFact = project.kpi_fact || '—';
                   const readOnlySpecialist = project.specialist || '—';
                   const readOnlyManager = project.manager || '—';
-                  const readOnlyComment = project.comments || '—';
-                  
                 return (
                     <tr key={project.id} className="hover:bg-gray-50 transition-colors group">
                       <td className="px-2 py-2 align-top overflow-hidden">

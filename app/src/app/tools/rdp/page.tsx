@@ -75,13 +75,6 @@ function formatDateTime(iso: string) {
   });
 }
 
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleTimeString('ru-RU', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
 function formatDuration(startIso: string) {
   const ms = Date.now() - new Date(startIso).getTime();
   const mins = Math.floor(ms / 60000);
@@ -461,6 +454,7 @@ export default function RdpPage() {
   const warnedSoonBookingIdRef = useRef<string | null>(null);
   const forceDisconnectDoneRef = useRef(false);
   const mySessionEndsAtRef = useRef<number | null>(null);
+  const [renderTime, setRenderTime] = useState(() => Date.now());
 
   const fetchStatus = useCallback(async () => {
     const { data, error: err } = await api<RdpStatus>('/status');
@@ -483,7 +477,9 @@ export default function RdpPage() {
 
   // При возврате на страницу — если у пользователя уже есть активная сессия, показываем просмотр (возврат в сессию)
   useEffect(() => {
-    if (status?.activeSession?.isOwn) setConnected(true);
+    if (status?.activeSession?.isOwn) {
+      queueMicrotask(() => setConnected(true));
+    }
   }, [status?.activeSession?.isOwn]);
 
   async function handleConnect() {
@@ -499,7 +495,7 @@ export default function RdpPage() {
     fetchStatus();
   }
 
-  async function handleDisconnect() {
+  const handleDisconnect = useCallback(async () => {
     setActionLoading(true);
     await api('/sessions', { method: 'DELETE' });
     setActionLoading(false);
@@ -509,7 +505,13 @@ export default function RdpPage() {
     forceDisconnectDoneRef.current = false;
     mySessionEndsAtRef.current = null;
     fetchStatus();
-  }
+  }, [fetchStatus]);
+
+  // Обновление времени для отображения текущего слота (без вызова Date.now в render)
+  useEffect(() => {
+    const t = setInterval(() => setRenderTime(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Запоминаем конец своей брони, пока сидим в сессии (бронь потом исчезнет из API)
   useEffect(() => {
@@ -544,7 +546,7 @@ export default function RdpPage() {
     check();
     const t = setInterval(check, 20000);
     return () => clearInterval(t);
-  }, [connected, status?.bookings]);
+  }, [connected, status?.bookings, handleDisconnect]);
 
   // Предупреждение за 5 минут до окончания своей брони и за 5 минут до начала чужой (когда сидишь без брони)
   useEffect(() => {
@@ -706,10 +708,12 @@ export default function RdpPage() {
               <p className="font-medium text-gray-900">
                 {status.activeSession.isOwn
                   ? 'Вы подключены'
-                  : `Занято: ${status.activeSession.userName ?? 'Неизвестный'}`}
+                  : 'Сессия занята пользователем'}
               </p>
               <p className="text-xs text-gray-500">
-                Подключен {formatDuration(status.activeSession.startedAt)} назад
+                {status.activeSession.isOwn
+                  ? `Подключен ${formatDuration(status.activeSession.startedAt)} назад`
+                  : `Пользователь ${status.activeSession.userName ?? 'неизвестный'} подключён ${formatDuration(status.activeSession.startedAt)} назад`}
               </p>
             </div>
             {status.activeSession.isOwn && (
@@ -724,9 +728,8 @@ export default function RdpPage() {
             )}
           </div>
         ) : (() => {
-          const now = Date.now();
           const currentBooking = status?.bookings?.find(
-            (b) => new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+            (b) => new Date(b.startsAt).getTime() <= renderTime && new Date(b.endsAt).getTime() > renderTime,
           );
           return (
           <div className="flex items-center gap-3">

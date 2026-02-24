@@ -98,7 +98,7 @@ export function RdpToolCard() {
             </div>
             <div className="px-6 pb-6 pt-2">
               <p className="text-gray-600 text-sm text-center">
-                Воспользуйтесь данным функционалом только через ваш ПК.
+                Воспользуйтесь данным функционалом через ваш ПК.
               </p>
               <button
                 type="button"
