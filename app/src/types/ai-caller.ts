@@ -30,6 +30,7 @@ export interface VapiAssistant {
   model?: VapiModel;
   voice?: VapiVoice;
   firstMessage?: string;
+  firstMessageMode?: string;
   language?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -43,6 +44,7 @@ export interface VapiAssistant {
   endCallMessage?: string;
   silenceTimeoutSeconds?: number;
   maxDurationSeconds?: number;
+  backgroundSound?: string;
   backgroundDenoisingEnabled?: boolean;
   backchannelingEnabled?: boolean;
 }
@@ -105,6 +107,8 @@ export type VoiceProvider = '11labs' | 'playht' | 'cartesia';
 
 export type VoiceScope = 'vapi' | 'elevenlabs' | 'any';
 
+// Voximplant-only provider type is no longer needed (v3 removed)
+
 export interface VoicePreset {
   id: string;
   label: string;
@@ -140,32 +144,44 @@ export interface LlmPreset {
 // ── Presets (constant data) ──
 
 export const VOICE_PRESETS: VoicePreset[] = [
-  // ── Vapi: ElevenLabs (Vapi-specific voice IDs) ──
-  {
-    id: 'kate',
-    label: 'Kate — Спокойная и дружелюбная',
-    provider: '11labs',
-    group: 'ElevenLabs',
-    scope: 'vapi',
-    voiceId: 'tOo2BJ74frmnPadsDNIi',
-    model: 'eleven_multilingual_v2',
-    stability: 0.55,
-    similarityBoost: 0.8,
-    style: 0.35,
-    speed: 0.88,
-  },
+  // ── Vapi: ElevenLabs Turbo 2.5 (рекомендован для ConvAI) ──
   {
     id: 'kate-turbo',
-    label: 'Kate Turbo — Быстрый ответ',
+    label: 'Kate Turbo — Быстрый, естественный (рекомендуется)',
     provider: '11labs',
     group: 'ElevenLabs',
     scope: 'vapi',
     voiceId: 'tOo2BJ74frmnPadsDNIi',
     model: 'eleven_turbo_v2_5',
-    stability: 0.5,
+    stability: 0.62,
     similarityBoost: 0.78,
-    style: 0.3,
-    speed: 0.92,
+    style: 0.18,
+    speed: 0.95,
+  },
+  {
+    id: 'kate-expressive',
+    label: 'Kate Expressive — Эмоциональный, живой',
+    provider: '11labs',
+    group: 'ElevenLabs',
+    scope: 'vapi',
+    voiceId: 'tOo2BJ74frmnPadsDNIi',
+    model: 'eleven_turbo_v2_5',
+    stability: 0.58,
+    similarityBoost: 0.72,
+    style: 0.25,
+    speed: 0.95,
+  },
+  {
+    id: 'kate-v2',
+    label: 'Kate Multilingual v2 — Богатая интонация (медленнее)',
+    provider: '11labs',
+    group: 'ElevenLabs',
+    scope: 'vapi',
+    voiceId: 'tOo2BJ74frmnPadsDNIi',
+    model: 'eleven_multilingual_v2',
+    stability: 0.5,
+    similarityBoost: 0.75,
+    speed: 0.95,
   },
   // ── Vapi: Cartesia ──
   {
@@ -208,103 +224,42 @@ export const VOICE_PRESETS: VoicePreset[] = [
     cartesiaModel: 'sonic-3',
     cartesiaLanguage: 'ru',
   },
-  // ── ElevenLabs ConvAI: Женские русские голоса ──
+  // ── ElevenLabs ConvAI: Turbo 2.5 рекомендован для ConvAI (3x быстрее для русского) ──
   {
-    id: 'el-kate',
-    label: 'Kate — Спокойная, естественная',
+    id: 'el-kate-turbo',
+    label: 'Kate Turbo — Стабильный, ровный (рекомендуется)',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: '7G0NvIkWRnU0Dqjgz13p',
+    model: 'eleven_turbo_v2_5',
+    stability: 0.55,
+    similarityBoost: 0.75,
+    speed: 0.95,
+  },
+  {
+    id: 'el-kate-expressive',
+    label: 'Kate Expressive — Чуть живее',
+    provider: '11labs',
+    group: 'Женские',
+    scope: 'elevenlabs',
+    voiceId: '7G0NvIkWRnU0Dqjgz13p',
+    model: 'eleven_turbo_v2_5',
+    stability: 0.5,
+    similarityBoost: 0.7,
+    speed: 0.95,
+  },
+  {
+    id: 'el-kate-v2',
+    label: 'Kate Multilingual v2 — Богатая интонация (медленнее)',
     provider: '11labs',
     group: 'Женские',
     scope: 'elevenlabs',
     voiceId: '7G0NvIkWRnU0Dqjgz13p',
     model: 'eleven_multilingual_v2',
-    stability: 0.48,
-    similarityBoost: 0.82,
-    speed: 1.0,
-  },
-  {
-    id: 'el-rina',
-    label: 'Rina — Мягкая, выразительная',
-    provider: '11labs',
-    group: 'Женские',
-    scope: 'elevenlabs',
-    voiceId: 'ycbyWsnf4hqZgdpKHqiU',
-    model: 'eleven_multilingual_v2',
     stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  {
-    id: 'el-natalia',
-    label: 'Natalia — Нежная и тёплая',
-    provider: '11labs',
-    group: 'Женские',
-    scope: 'elevenlabs',
-    voiceId: 'dHAwRJVaEPhU907QLTPW',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  {
-    id: 'el-victoria',
-    label: 'Victoria — Энергичная, деловая',
-    provider: '11labs',
-    group: 'Женские',
-    scope: 'elevenlabs',
-    voiceId: 'FZGeNF7bE3syeQOynDKC',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  {
-    id: 'el-kari',
-    label: 'Kari — Дружелюбная, тёплая',
-    provider: '11labs',
-    group: 'Женские',
-    scope: 'elevenlabs',
-    voiceId: 'Jbte7ht1CqapnZvc4KpK',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  {
-    id: 'el-alina',
-    label: 'Alina — Молодая, динамичная',
-    provider: '11labs',
-    group: 'Женские',
-    scope: 'elevenlabs',
-    voiceId: 'dVRDrbP5ULGXB94se4KZ',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  // ── ElevenLabs ConvAI: Мужские русские голоса ──
-  {
-    id: 'el-maxim',
-    label: 'Maxim — Спокойный, нейтральный',
-    provider: '11labs',
-    group: 'Мужские',
-    scope: 'elevenlabs',
-    voiceId: 'HcaxAsrhw4ByUo4CBCBN',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
-  },
-  {
-    id: 'el-dmitry',
-    label: 'Dmitry — Чёткий, энергичный',
-    provider: '11labs',
-    group: 'Мужские',
-    scope: 'elevenlabs',
-    voiceId: 'kwajW3Xh5svCeKU5ky2S',
-    model: 'eleven_multilingual_v2',
-    stability: 0.5,
-    similarityBoost: 0.8,
-    speed: 1.0,
+    similarityBoost: 0.75,
+    speed: 0.95,
   },
 ];
 
@@ -362,17 +317,19 @@ export const DEFAULT_PIPELINE_SETTINGS = {
   startSpeakingPlan: {
     transcriptionEndpointingPlan: {
       onPunctuationSeconds: 0.1,
-      onNoPunctuationSeconds: 1.5,
-      onNumberSeconds: 0.5,
+      onNoPunctuationSeconds: 1.2,
+      onNumberSeconds: 0.4,
     },
-    waitSeconds: 0.3,
+    waitSeconds: 0.25,
   },
   stopSpeakingPlan: {
     numWords: 0,
     voiceSeconds: 0.2,
-    backoffSeconds: 0.8,
+    backoffSeconds: 0.6,
   },
   language: 'ru',
+  firstMessageMode: 'assistant-speaks-first',
+  backgroundSound: 'off',
   endCallFunctionEnabled: true,
   endCallPhrases: [
     'до свидания',
@@ -383,8 +340,10 @@ export const DEFAULT_PIPELINE_SETTINGS = {
     'не интересует',
     'не интересно',
     'не звоните',
+    'не надо',
+    'отстаньте',
   ],
-  endCallMessage: 'Спасибо за время, хорошего дня!',
+  endCallMessage: 'Хорошо, спасибо за ваше время! Всего доброго!',
   silenceTimeoutSeconds: 10,
   maxDurationSeconds: 180,
   backgroundDenoisingEnabled: true,

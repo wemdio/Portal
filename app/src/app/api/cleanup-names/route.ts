@@ -20,7 +20,7 @@ function jsonError(message: string, status: number) {
 }
 
 const SYSTEM_PROMPT = `Сейчас я пришлю тебе названия компаний.
-1)Основная задача оставить только название компании, которое потом будет использоваться как автоматическая переменная для персонализации писем (поэтому название компании должно быть без лишней информации). Ты должен вернуть список очищенных названий в той же последовательности в столбик и без перечисления, сразу пиши результат. Убери всё то, что не является названием, а лишь его описанием.
+1)Основная задача оставить только название компании, которое потом будет использоваться как автоматическая переменная для персонализации писем (поэтому название компании должно быть без лишней информации). Ты должен вернуть список очищенных названий в той же последовательности с нумерацией (1. 2. 3. и т.д.). Убери всё то, что не является названием, а лишь его описанием.
 2)Это должно выглядеть так: Я заметил что "КОМПАНИЯ" имеет большое количество сотрудников.
 Вместо слова "компания" будут вставляться эти названия компаний. Они должны логично звучать.
 3)Ориентируйся также на название домена этой компании при очистке, чтобы не обрезать лишнего. Действуй в совокупности. Если в домене есть что-то полезное для правильной корректировки названия компании, то учитывай это. (но это не значит что надо писать все слова слитно и с маленькой буквы, т.е. не просто скопировать название домена, а просто понять, как сокращенно может писаться название компании). Например, название компании: IBEX IT Business Experts. А домен компании: http://www.ibexexperts.com. Тогда очищенное название компании: IBEX Experts и так далее.
@@ -55,9 +55,14 @@ const SYSTEM_PROMPT = `Сейчас я пришлю тебе названия к
 9) Самое главное, чтобы результат был не более 2-3 слов и имел красивый, логичный и читаемый вид (включая аббревиатуры) ЭТО ОЧЕНЬ ВАЖНО!!!
 
 ФОРМАТ ОТВЕТА:
-Верни ТОЛЬКО очищенные названия, каждое на новой строке, без нумерации, без пояснений, без кавычек.
-Количество строк в ответе должно ТОЧНО совпадать с количеством компаний во входных данных.
-Порядок должен быть ТОЧНО таким же, как во входных данных.`;
+Верни очищенные названия с нумерацией строго в формате:
+1. Название
+2. Название
+3. Название
+...и так далее.
+Без пояснений, без кавычек. Количество строк в ответе должно ТОЧНО совпадать с количеством компаний во входных данных.
+Порядок и нумерация должны быть ТОЧНО такими же, как во входных данных. Если не знаешь как очистить — верни оригинальное название с его номером.
+НИКОГДА не пропускай строки. Если на входе 100 компаний — в ответе должно быть ровно 100 пронумерованных строк.`;
 
 type CompanyEntry = {
   idx: number;
@@ -104,12 +109,13 @@ export async function POST(req: NextRequest) {
     return jsonError('Missing required field: companies (non-empty array)', 400);
   }
 
-  // --- Build user message ---
-  const companyLines = companies.map((c) => {
+  // --- Build user message (numbered for reliable mapping) ---
+  const companyLines = companies.map((c, i) => {
+    const num = i + 1;
     if (c.domain && c.domain.trim()) {
-      return `${c.name} Домен: ${c.domain.trim()}`;
+      return `${num}. ${c.name} Домен: ${c.domain.trim()}`;
     }
-    return c.name;
+    return `${num}. ${c.name}`;
   });
 
   const userMessage = companyLines.join('\n');
@@ -176,17 +182,36 @@ export async function POST(req: NextRequest) {
           break;
         }
 
-        // Parse the response - each line is a cleaned name
-        const cleanedNames = content
-          .split('\n')
-          .map((line: string) => line.trim())
-          .filter((line: string) => line.length > 0);
+        // Parse numbered response: "1. Name", "2. Name", etc.
+        const lines = content.split('\n').map((line: string) => line.trim());
+        const numberedMap = new Map<number, string>();
 
-        // Map cleaned names back to indices
-        const results = companies.map((c, i) => ({
-          idx: c.idx,
-          cleanedName: cleanedNames[i] ?? c.name, // fallback to original if mismatch
-        }));
+        for (const line of lines) {
+          if (!line) continue;
+          const match = line.match(/^(\d+)\.\s*(.+)/);
+          if (match) {
+            numberedMap.set(parseInt(match[1], 10), match[2].trim());
+          }
+        }
+
+        let results: { idx: number; cleanedName: string }[];
+
+        if (numberedMap.size >= companies.length * 0.8) {
+          // Numbered format detected — map by number
+          results = companies.map((c, i) => ({
+            idx: c.idx,
+            cleanedName: numberedMap.get(i + 1) || c.name,
+          }));
+        } else {
+          // Fallback: positional mapping (non-empty lines only)
+          const cleanedNames = lines.filter((l: string) => l.length > 0);
+          results = companies.map((c, i) => ({
+            idx: c.idx,
+            cleanedName: cleanedNames[i] && cleanedNames[i].length > 0
+              ? cleanedNames[i]
+              : c.name,
+          }));
+        }
 
         return NextResponse.json({ results });
       }

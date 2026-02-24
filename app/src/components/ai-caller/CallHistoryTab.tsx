@@ -23,7 +23,7 @@ interface Props {
 }
 
 const ENDED_REASON_MAP: Record<string, string> = {
-  'silence-timed-out': 'Таймаут тишины',
+  'silence-timed-out': 'Тишина / обрыв линии',
   'max-duration-reached': 'Макс. длительность',
   'customer-ended-call': 'Абонент завершил',
   'assistant-ended-call': 'AI завершил',
