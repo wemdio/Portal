@@ -27,9 +27,18 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     if (!apiKey) return NextResponse.json({ error: 'ELEVENLABS_API_KEY not set' }, { status: 500 });
 
     const url = `https://api.elevenlabs.io/v1/convai/conversations/${id}/audio`;
-    const upstream = await fetch(url, {
+    const fetchOpts: Record<string, unknown> = {
       headers: { 'xi-api-key': apiKey },
-    });
+    };
+    const proxyUrl = process.env.ELEVENLABS_PROXY_URL;
+    if (proxyUrl) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { ProxyAgent } = require('undici') as typeof import('undici');
+        fetchOpts.dispatcher = new ProxyAgent(proxyUrl);
+      } catch { /* no proxy available */ }
+    }
+    const upstream = await fetch(url, fetchOpts as RequestInit);
 
     if (!upstream.ok) {
       return NextResponse.json(

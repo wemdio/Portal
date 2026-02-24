@@ -21,6 +21,7 @@ import {
   LLM_PRESETS,
   DEFAULT_PIPELINE_SETTINGS,
 } from '@/types/ai-caller';
+import { CAMPAIGN_PRESETS } from '@/lib/ai-caller-prompts';
 
 interface Props {
   assistants: VapiAssistant[];
@@ -39,7 +40,7 @@ type FormData = {
 };
 
 function defaultVoice(provider: string): string {
-  return provider === 'elevenlabs' ? 'el-kate' : 'kate';
+  return provider === 'elevenlabs' ? 'el-kate-turbo' : 'kate-turbo';
 }
 
 export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/ai-caller', provider = 'vapi' }: Props) {
@@ -56,6 +57,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>(initialForm);
+  const [selectedPreset, setSelectedPreset] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -77,8 +79,10 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
       const token = await getToken();
       const formData = new FormData();
       formData.append('file', file);
+      if (selectedPreset) formData.append('presetId', selectedPreset);
+      const providerQuery = `?provider=${encodeURIComponent(provider)}`;
 
-      const res = await fetch(`${apiBase}/briefs/parse`, {
+      const res = await fetch(`${apiBase}/briefs/parse${providerQuery}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -136,15 +140,34 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
           : {}),
       };
     } else {
+      const isVapiElevenLabs = provider === 'vapi';
       voiceConfig = {
         provider: '11labs',
         voiceId: voice.voiceId,
-        model: voice.model ?? 'eleven_multilingual_v2',
-        stability: voice.stability ?? 0.5,
-        similarityBoost: voice.similarityBoost ?? 0.75,
-        style: voice.style ?? 0.3,
+        model: voice.model ?? 'eleven_turbo_v2_5',
+        stability: voice.stability ?? (isVapiElevenLabs ? 0.62 : 0.55),
+        similarityBoost: voice.similarityBoost ?? 0.78,
+        ...(
+          voice.style !== undefined
+            ? { style: voice.style }
+            : isVapiElevenLabs
+              ? { style: 0.18 }
+              : {}
+        ),
         useSpeakerBoost: true,
-        speed: voice.speed ?? 0.88,
+        speed: voice.speed ?? (isVapiElevenLabs ? 0.95 : 0.95),
+        ...(isVapiElevenLabs
+          ? {
+            cachingEnabled: false,
+            language: 'ru',
+            optimizeStreamingLatency: 0,
+            chunkPlan: {
+              enabled: true,
+              minCharacters: 70,
+              punctuationBoundaries: ['?', '!'],
+            },
+          }
+          : {}),
       };
     }
 
@@ -155,7 +178,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
         provider: llm.provider,
         model: llm.model,
         messages: [{ role: 'system', content: form.systemPrompt }],
-        temperature: 0.7,
+        temperature: provider === 'vapi' ? 0.35 : 0.7,
       },
       voice: voiceConfig,
       language: 'ru',
@@ -216,27 +239,40 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
     setDeleting(null);
   }
 
-  function startEdit(a: VapiAssistant) {
-    const voiceId = a.voice?.voiceId;
-    const voiceProvider = a.voice?.provider;
+  async function startEdit(a: VapiAssistant) {
+    setError('');
+    setEditingId(a.id);
+    setShowForm(true);
+
+    let full = a;
+    try {
+      const token = await getToken();
+      const res = await fetch(`${apiBase}/assistants/${a.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.assistant) full = data.assistant as VapiAssistant;
+      }
+    } catch { /* use partial data */ }
+
+    const voiceId = full.voice?.voiceId;
+    const voiceProvider = full.voice?.provider;
     const voicePreset = voicePresets.find(
       (v) => v.voiceId === voiceId && (!voiceProvider || v.provider === voiceProvider),
     )?.id ?? defaultVoice(provider);
-    const modelName = a.model?.model;
-    const llmPreset = LLM_PRESETS.find((l) => l.model === modelName)?.id ?? 'gpt41';
+    const modelName = full.model?.model;
+    const llmPreset = LLM_PRESETS.find((l) => l.model === modelName)?.id ?? 'gpt4o-mini';
     const systemPrompt =
-      a.model?.messages?.find((m) => m.role === 'system')?.content ?? '';
+      full.model?.messages?.find((m) => m.role === 'system')?.content ?? '';
 
     setForm({
-      name: a.name || '',
-      firstMessage: a.firstMessage || '',
+      name: full.name || '',
+      firstMessage: full.firstMessage || '',
       systemPrompt,
       voicePreset,
       llmPreset,
     });
-    setEditingId(a.id);
-    setShowForm(true);
-    setError('');
   }
 
   function cancelForm() {
@@ -290,30 +326,79 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
             </button>
           </div>
 
-          {/* Brief Upload */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Загрузить бриф (PDF/TXT) — AI создаст промпт
-            </label>
-            <div className="flex items-center gap-3">
-              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors">
-                <Upload className="h-4 w-4" />
-                {parsing ? 'Обработка...' : 'Выбрать файл'}
-                <input
-                  type="file"
-                  accept=".pdf,.txt,.md,.doc,.docx"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleBriefUpload(file);
-                    e.target.value = '';
-                  }}
-                  disabled={parsing}
-                />
+          {/* Preset + Brief Upload */}
+          {!editingId && (
+            <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+              <label className="block text-sm font-medium text-gray-700">
+                Сценарий звонка (опционально)
               </label>
-              {parsing && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+              <p className="text-xs text-gray-400">
+                Выберите готовый сценарий + загрузите бриф — AI автоматически создаст промпт. Или пропустите и напишите промпт вручную.
+              </p>
+              <div className="space-y-2">
+                {CAMPAIGN_PRESETS.map((p) => (
+                  <label
+                    key={p.id}
+                    className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                      selectedPreset === p.id
+                        ? 'border-blue-400 bg-blue-50'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="assistantPreset"
+                      checked={selectedPreset === p.id}
+                      onChange={() => setSelectedPreset(p.id)}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <span className="text-sm font-medium text-gray-900">{p.label}</span>
+                      <p className="text-xs text-gray-500 mt-0.5">{p.description}</p>
+                    </div>
+                  </label>
+                ))}
+                <label
+                  className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                    selectedPreset === ''
+                      ? 'border-blue-400 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="assistantPreset"
+                    checked={selectedPreset === ''}
+                    onChange={() => setSelectedPreset('')}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-900">Без сценария</span>
+                    <p className="text-xs text-gray-500 mt-0.5">Загрузить бриф для свободной генерации или написать промпт вручную</p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex items-center gap-3 pt-1">
+                <label className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors">
+                  <Upload className="h-4 w-4" />
+                  {parsing ? 'Обработка...' : 'Загрузить бриф (PDF/TXT)'}
+                  <input
+                    type="file"
+                    accept=".pdf,.txt,.md,.doc,.docx"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleBriefUpload(file);
+                      e.target.value = '';
+                    }}
+                    disabled={parsing}
+                  />
+                </label>
+                {parsing && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Name */}
           <div>

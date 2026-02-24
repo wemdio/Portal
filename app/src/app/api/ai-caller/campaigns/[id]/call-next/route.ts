@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { createCall } from '@/lib/ai-caller-provider';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
+import { normalizeRuPhoneNumber } from '@/lib/phone-normalization';
 
 export const dynamic = 'force-dynamic';
 
@@ -63,10 +64,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     .update({ status: 'calling', called_at: new Date().toISOString() })
     .eq('id', contact.id);
 
-  // Normalize phone number
-  let phone = contact.phone_number.replace(/[\s\-()]/g, '');
-  if (phone.startsWith('8') && phone.length === 11) phone = '+7' + phone.slice(1);
-  if (!phone.startsWith('+')) phone = '+' + phone;
+  const phone = normalizeRuPhoneNumber(contact.phone_number);
+  if (!phone) {
+    await supabase
+      .from('ai_campaign_contacts')
+      .update({ status: 'failed' })
+      .eq('id', contact.id);
+
+    return NextResponse.json(
+      { error: `Некорректный номер контакта: ${contact.phone_number}` },
+      { status: 400 },
+    );
+  }
 
   try {
     const call = await createCall({

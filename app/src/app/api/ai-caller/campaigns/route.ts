@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
+import { normalizeRuPhoneNumber } from '@/lib/phone-normalization';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,14 +78,35 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: campError?.message || 'Failed to create campaign' }, { status: 500 });
   }
 
+  const preparedContacts = body.contacts.map((c, index) => ({
+    original: c,
+    index,
+    normalizedPhone: normalizeRuPhoneNumber(c.phone),
+  }));
+
+  const invalidContacts = preparedContacts.filter((c) => !c.normalizedPhone);
+  if (invalidContacts.length > 0) {
+    await supabase.from('ai_campaigns').delete().eq('id', campaign.id);
+    return NextResponse.json(
+      {
+        error: `Найдены некорректные номера (${invalidContacts.length} шт). Допустим только формат +7XXXXXXXXXX.`,
+        invalidSamples: invalidContacts.slice(0, 5).map((c) => ({
+          row: c.index + 1,
+          phone: c.original.phone,
+        })),
+      },
+      { status: 400 },
+    );
+  }
+
   // Insert contacts
-  const contactRows = body.contacts.map((c) => ({
+  const contactRows = preparedContacts.map((c) => ({
     campaign_id: campaign.id,
-    phone_number: c.phone.replace(/[\s\-()]/g, ''),
-    company_name: c.company || null,
-    contact_name: c.name || null,
-    email: c.email || null,
-    extra_data: c.extra || {},
+    phone_number: c.normalizedPhone!,
+    company_name: c.original.company || null,
+    contact_name: c.original.name || null,
+    email: c.original.email || null,
+    extra_data: c.original.extra || {},
     status: 'pending',
   }));
 

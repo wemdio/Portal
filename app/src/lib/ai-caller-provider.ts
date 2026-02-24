@@ -24,7 +24,8 @@ export function parseProvider(value: string | null | undefined): AiCallerProvide
 
 function backend(provider?: AiCallerProvider) {
   const resolved = provider ?? getProvider();
-  return resolved === 'elevenlabs' ? elevenlabs : vapi;
+  if (resolved === 'elevenlabs') return elevenlabs;
+  return vapi;
 }
 
 // ── Assistants (Agents) ──
