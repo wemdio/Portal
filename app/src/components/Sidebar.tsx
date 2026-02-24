@@ -291,7 +291,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       return (
         <div
           className="fixed left-0 top-0 h-screen z-50"
-          style={{ width: hovered ? 120 : 12 }}
+          style={{ width: hovered ? 160 : 12 }}
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
         >
@@ -299,7 +299,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
           )}
           <div
-            className={`absolute left-0 top-0 h-full w-[120px] bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
+            className={`absolute left-0 top-0 h-full w-40 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
               transition-all duration-200 ease-out
               ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
           >
@@ -310,7 +310,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     }
 
     return (
-      <div className="fixed left-0 top-0 z-40 flex h-screen w-[120px] flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+      <div className="fixed left-0 top-0 z-40 flex h-screen w-40 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
         {sidebarContent}
       </div>
     );
