@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Monitor, AlertCircle, X } from 'lucide-react';
+import { Monitor, AlertCircle } from 'lucide-react';
 
 const PC_BREAKPOINT = 768; // md в Tailwind
 

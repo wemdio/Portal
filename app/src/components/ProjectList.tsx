@@ -152,6 +152,8 @@ export function ProjectList() {
     void checkPermissions();
     void fetchAssigneeOptions();
     void fetchAllTasks();
+    // Intentionally run once on mount; fetchers are stable in behavior
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function checkPermissions() {

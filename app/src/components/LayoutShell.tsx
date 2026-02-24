@@ -33,9 +33,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     };
   }, [isTma, pathname]);
 
-  useEffect(() => {
-    if (!isMobileLayout) setMobileMenuOpen(false);
-  }, [isMobileLayout]);
+  // When switching to desktop layout, treat menu as closed without setState in effect
+  const mobileMenuOpenResolved = isMobileLayout && mobileMenuOpen;
 
   const isToolsPage = pathname === '/tools';
   const contentPadding = isTma
@@ -73,7 +72,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
                 collapsed={false}
                 isTma={false}
                 mobileOnlyDrawer
-                mobileOpen={mobileMenuOpen}
+                mobileOpen={mobileMenuOpenResolved}
                 onMobileClose={() => setMobileMenuOpen(false)}
               />
             </>
