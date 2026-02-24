@@ -30,27 +30,8 @@ export async function GET(req: NextRequest) {
     .limit(1)
     .maybeSingle();
 
-  const now = new Date().toISOString();
-
-  const { data: upcomingBookings } = await admin
-    .from('rdp_bookings')
-    .select('id, user_id, starts_at, ends_at, status, notes, profiles(full_name)')
-    .in('status', ['pending', 'active'])
-    .gt('ends_at', now)
-    .order('starts_at', { ascending: true })
-    .limit(50);
-
-  type BookingRow = {
-    id: string;
-    user_id: string;
-    starts_at: string;
-    ends_at: string;
-    status: string;
-    notes: string | null;
-    profiles?: { full_name?: string }[] | { full_name?: string } | null;
-  };
-
-  const profileName = (p: BookingRow['profiles']): string | null =>
+  type SessionProfiles = { full_name?: string }[] | { full_name?: string } | null;
+  const profileName = (p: SessionProfiles): string | null =>
     p == null ? null : Array.isArray(p) ? (p[0]?.full_name ?? null) : (p.full_name ?? null);
 
   return NextResponse.json({
@@ -58,21 +39,11 @@ export async function GET(req: NextRequest) {
       ? {
           id: activeSession.id,
           userId: activeSession.user_id,
-          userName: profileName(activeSession.profiles as BookingRow['profiles']),
+          userName: profileName(activeSession.profiles as SessionProfiles),
           startedAt: activeSession.started_at,
           isOwn: activeSession.user_id === user.id,
         }
       : null,
-    bookings: (upcomingBookings ?? []).map((b: BookingRow) => ({
-      id: b.id,
-      userId: b.user_id,
-      userName: profileName(b.profiles),
-      startsAt: b.starts_at,
-      endsAt: b.ends_at,
-      status: b.status,
-      notes: b.notes,
-      isOwn: b.user_id === user.id,
-    })),
     currentUserId: user.id,
     isAdmin: isAdmin(userRole),
   });

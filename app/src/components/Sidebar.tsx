@@ -16,6 +16,8 @@ type SidebarProps = {
   isTma?: boolean;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
+  /** На мобильных (ниже md) рендерить только выезжающую панель, не фиксированный сайдбар */
+  mobileOnlyDrawer?: boolean;
 };
 
 const navActiveAliases: Record<string, string[]> = {
@@ -29,7 +31,7 @@ function normalizeTmaTheme(value: string | null | undefined): TmaTheme {
   return value === 'light' ? 'light' : 'dark';
 }
 
-export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, onMobileClose }: SidebarProps) {
+export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, onMobileClose, mobileOnlyDrawer = false }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [userRole, setUserRole] = useState<UserRole | null>(null);
@@ -287,6 +289,37 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   );
 
   if (!isTma) {
+    if (mobileOnlyDrawer) {
+      return (
+        <div className={`fixed inset-0 z-50 ${mobileOpen ? '' : 'pointer-events-none'}`}>
+          <div
+            className={`absolute inset-0 bg-black/40 transition-opacity ${mobileOpen ? 'opacity-100' : 'opacity-0'}`}
+            onClick={() => onMobileClose?.()}
+            aria-hidden="true"
+          />
+          <div
+            className={`absolute left-0 top-0 h-full w-full max-w-[min(100vw-3rem,20rem)] border-r border-gray-200 bg-white shadow-2xl transition-transform duration-200 ${
+              mobileOpen ? 'translate-x-0' : '-translate-x-full'
+            }`}
+          >
+            <div className="flex h-full flex-col">
+              <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 shrink-0">
+                <span className="text-base font-bold text-gray-900">Portal</span>
+                <button
+                  type="button"
+                  onClick={() => onMobileClose?.()}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100"
+                  aria-label="Закрыть меню"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto flex flex-col">{sidebarContent}</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
     if (collapsed) {
       return (
         <div

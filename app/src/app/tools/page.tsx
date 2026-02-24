@@ -5,7 +5,7 @@ import { RdpToolCard } from './RdpToolCard';
 
 export default function ToolsPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 text-left max-w-full">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Инструменты</h1>
         <p className="text-sm text-gray-500">
@@ -13,7 +13,7 @@ export default function ToolsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 justify-items-start">
         <Link
           href={'/tools/done-for-you' as Route}
           className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300"

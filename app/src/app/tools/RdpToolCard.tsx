@@ -19,21 +19,16 @@ export function RdpToolCard() {
     return () => mql.removeEventListener('change', update);
   }, []);
 
-  const cardContent = (
+  const cardContentPc = (
     <>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <p className="text-base font-semibold text-gray-900">Удалённый рабочий стол</p>
-            <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 rounded">
-              функционал для ПК
-            </span>
-          </div>
-          <p className="text-sm text-gray-500">
-            Подключение к удалённому ПК через браузер с бронированием.
+          <p className="text-base font-semibold text-gray-900">Удалённый рабочий стол</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Подключение к удалённому ПК через браузер.
           </p>
         </div>
-        <Monitor className="h-8 w-8 text-emerald-500 group-hover:text-emerald-600 transition-colors" />
+        <Monitor className="h-8 w-8 text-emerald-500 group-hover:text-emerald-600 transition-colors shrink-0" />
       </div>
       <div className="mt-4 text-sm font-medium text-emerald-600 group-hover:text-emerald-700">
         Открыть →
@@ -41,28 +36,44 @@ export function RdpToolCard() {
     </>
   );
 
-  const baseClass =
-    'group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition';
+  const cardContentMobile = (
+    <>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-base font-semibold text-gray-500">Удалённый рабочий стол</p>
+          <p className="text-sm text-gray-400 mt-0.5">
+            Подключение к удалённому ПК через браузер.
+          </p>
+        </div>
+        <Monitor className="h-8 w-8 text-gray-400 shrink-0" />
+      </div>
+      <div className="mt-4 text-sm font-medium text-gray-400">
+        Открыть →
+      </div>
+    </>
+  );
+
+  const baseClassPc =
+    'group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300';
+  const baseClassMobile =
+    'rounded-2xl border-2 border-gray-200 bg-gray-50 p-6 w-full text-left cursor-pointer transition';
 
   if (isPcViewport === null) {
     return (
-      <div className={`${baseClass} animate-pulse`} aria-hidden>
+      <div className={`${baseClassMobile} animate-pulse`} aria-hidden>
         <div className="flex items-start justify-between gap-4">
-          <div className="h-5 w-40 bg-emerald-100 rounded" />
-          <div className="h-8 w-8 bg-emerald-100 rounded" />
+          <div className="h-5 w-40 bg-gray-200 rounded" />
+          <div className="h-8 w-8 bg-gray-200 rounded shrink-0" />
         </div>
-        <div className="mt-4 h-4 w-20 bg-emerald-100 rounded" />
+        <div className="mt-4 h-4 w-20 bg-gray-200 rounded" />
       </div>
     );
   }
 
   if (isPcViewport) {
     return (
-      <Link
-        href={'/tools/rdp' as Route}
-        className={`${baseClass} hover:shadow-md hover:border-emerald-300`}
-      >
-        {cardContent}
+      <Link href={'/tools/rdp' as Route} className={baseClassPc}>
+        {cardContentPc}
       </Link>
     );
   }
@@ -72,9 +83,9 @@ export function RdpToolCard() {
       <button
         type="button"
         onClick={() => setShowPcOnlyModal(true)}
-        className={`${baseClass} w-full text-left cursor-pointer hover:shadow-md hover:border-emerald-300 opacity-90 hover:opacity-100`}
+        className={baseClassMobile}
       >
-        {cardContent}
+        {cardContentMobile}
       </button>
       {showPcOnlyModal && (
         <div
@@ -93,19 +104,18 @@ export function RdpToolCard() {
                 <AlertCircle className="h-6 w-6 text-amber-600" />
               </div>
               <p id="rdp-pc-only-title" className="text-amber-900 font-semibold text-center">
-                Только с ПК
+                Только с ПК/ноутбука
               </p>
             </div>
             <div className="px-6 pb-6 pt-2">
               <p className="text-gray-600 text-sm text-center">
-                Воспользуйтесь данным функционалом через ваш ПК.
+                Воспользуйтесь данным функционалом через ваш ПК или ноутбук.
               </p>
               <button
                 type="button"
                 onClick={() => setShowPcOnlyModal(false)}
                 className="mt-4 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 transition flex items-center justify-center gap-2"
               >
-                <X className="h-4 w-4" />
                 Понятно
               </button>
             </div>
