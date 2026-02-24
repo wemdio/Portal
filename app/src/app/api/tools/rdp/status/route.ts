@@ -38,17 +38,18 @@ export async function GET(req: NextRequest) {
     ends_at: string;
     status: string;
     notes: string | null;
-    profiles?: { full_name?: string } | null;
+    profiles?: { full_name?: string }[] | { full_name?: string } | null;
   };
+
+  const profileName = (p: BookingRow['profiles']): string | null =>
+    p == null ? null : Array.isArray(p) ? (p[0]?.full_name ?? null) : (p.full_name ?? null);
 
   return NextResponse.json({
     activeSession: activeSession
       ? {
           id: activeSession.id,
           userId: activeSession.user_id,
-          userName:
-            (activeSession as { profiles?: { full_name?: string } | null }).profiles?.full_name ??
-            null,
+          userName: profileName(activeSession.profiles as BookingRow['profiles']),
           startedAt: activeSession.started_at,
           isOwn: activeSession.user_id === user.id,
         }
@@ -56,7 +57,7 @@ export async function GET(req: NextRequest) {
     bookings: (upcomingBookings ?? []).map((b: BookingRow) => ({
       id: b.id,
       userId: b.user_id,
-      userName: b.profiles?.full_name ?? null,
+      userName: profileName(b.profiles),
       startsAt: b.starts_at,
       endsAt: b.ends_at,
       status: b.status,
