@@ -650,22 +650,22 @@ export function ProjectList() {
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
         <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="w-full divide-y divide-gray-100 text-xs table-fixed min-w-[1100px]">
+            <table className="w-full divide-y divide-gray-100 text-xs min-w-[1400px]">
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[11%]">Проект</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Статус</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Сумма</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Дог.</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[4%]">Пер.</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[7%]">Дедлайн</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">KPI План</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[5%]">KPI Факт</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[8%]">Контакты</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Специалист</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[10%]">Лид (PM)</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[6%]">Формат</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-[14%]">Задачи/Комм.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[140px]">Проект</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Статус</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Сумма</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Дог.</th>
+                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Пер.</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Дедлайн</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">KPI План</th>
+                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[70px]">KPI Факт</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Контакты</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Специалист</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Формат</th>
+                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[160px]">Задачи/Комм.</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-gray-200 bg-white">
