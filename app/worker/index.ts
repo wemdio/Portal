@@ -230,6 +230,31 @@ async function claimEmailValidationJob(): Promise<string | null> {
 }
 
 // --------------------------------------------------------------------------
+// RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
+// has passed without an active session being started.
+// --------------------------------------------------------------------------
+
+async function checkRdpBookingExpiry(): Promise<void> {
+  if (!supabaseAdmin) return;
+  const db = supabaseAdmin;
+
+  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+  const { data: expired, error } = await db
+    .from('rdp_bookings')
+    .update({ status: 'expired' })
+    .eq('status', 'pending')
+    .lt('starts_at', fiveMinAgo)
+    .select('id');
+
+  if (error) {
+    log('warn', 'RDP booking expiry check failed', error);
+  } else if (expired?.length) {
+    log('info', `Expired ${expired.length} RDP booking(s) (no-show after 5 min)`);
+  }
+}
+
+// --------------------------------------------------------------------------
 // Single poll tick — tries to pick up one job of any type
 // --------------------------------------------------------------------------
 
@@ -289,12 +314,12 @@ async function pollLoop(): Promise<void> {
 
   while (!shuttingDown) {
     try {
+      await checkRdpBookingExpiry();
+
       const found = await pollOnce();
       if (!found) {
-        // Nothing to do — wait before next poll
         await sleep(POLL_INTERVAL_MS);
       }
-      // If a job was found and executed, immediately poll again (more might be waiting)
     } catch (err) {
       log('error', 'Unexpected error in poll loop', err);
       await sleep(POLL_INTERVAL_MS);
