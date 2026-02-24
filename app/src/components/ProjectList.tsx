@@ -7,7 +7,7 @@ import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
-import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -139,6 +139,7 @@ export function ProjectList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
@@ -181,17 +182,56 @@ export function ProjectList() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('email, full_name');
+        .select('email, full_name, avatar_url');
 
       if (error) throw error;
-      setAssigneeOptions(
-        buildAssigneeOptions(
-          ((data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name'>>),
-        ),
-      );
+      const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
+      setAssigneeOptions(buildAssigneeOptions(profiles));
+
+      const avatarMap = new Map<string, string>();
+      for (const p of profiles) {
+        const name = p.full_name?.trim() || p.email?.split('@')[0]?.trim();
+        const url = typeof p.avatar_url === 'string' ? p.avatar_url.trim() : '';
+        if (name && url) avatarMap.set(name, url);
+      }
+      setAssigneeAvatars(avatarMap);
+
+      const renameMap = buildRenameMap(profiles);
+      if (renameMap.size > 0) {
+        void syncStaleAssigneeNames(renameMap);
+      }
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
     }
+  }
+
+  async function syncStaleAssigneeNames(renameMap: Map<string, string>) {
+    setProjects((prev) => {
+      const updates: { id: string; fields: Partial<Project> }[] = [];
+
+      const next = prev.map((p) => {
+        const patch: Partial<Project> = {};
+        if (p.specialist && renameMap.has(p.specialist)) {
+          patch.specialist = renameMap.get(p.specialist)!;
+        }
+        if (p.manager && renameMap.has(p.manager)) {
+          patch.manager = renameMap.get(p.manager)!;
+        }
+        if (Object.keys(patch).length === 0) return p;
+        updates.push({ id: p.id, fields: patch });
+        return { ...p, ...patch };
+      });
+
+      if (updates.length > 0) {
+        void (async () => {
+          for (const { id, fields } of updates) {
+            await supabase.from('projects').update(fields).eq('id', id);
+          }
+        })();
+      }
+
+      return next;
+    });
   }
 
   async function fetchAllTasks() {
@@ -961,9 +1001,14 @@ export function ProjectList() {
                         ) : (
                           readOnlySpecialist !== '—' ? (
                              <div className="flex items-center gap-1">
-                                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                  {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </span>
+                                {assigneeAvatars.get(readOnlySpecialist) ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img src={assigneeAvatars.get(readOnlySpecialist)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                                ) : (
+                                  <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
+                                    {readOnlySpecialist.charAt(0).toUpperCase()}
+                                  </span>
+                                )}
                                 <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
@@ -983,9 +1028,14 @@ export function ProjectList() {
                         ) : (
                            readOnlyManager !== '—' ? (
                              <div className="flex items-center gap-1">
-                                <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                  {readOnlyManager.charAt(0).toUpperCase()}
-                                </span>
+                                {assigneeAvatars.get(readOnlyManager) ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img src={assigneeAvatars.get(readOnlyManager)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                                ) : (
+                                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
+                                    {readOnlyManager.charAt(0).toUpperCase()}
+                                  </span>
+                                )}
                                 <span className="text-gray-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
