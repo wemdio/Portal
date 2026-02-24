@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { isAdmin } from '@/lib/roles';
+import type { UserRole } from '@/types';
 
 const admin = supabaseAdmin!;
 
@@ -10,9 +12,16 @@ async function getUser(req: NextRequest) {
   return data.user;
 }
 
+async function getUserRole(userId: string): Promise<UserRole | null> {
+  const { data } = await admin.from('profiles').select('role').eq('id', userId).maybeSingle();
+  return (data?.role as UserRole) ?? null;
+}
+
 export async function GET(req: NextRequest) {
   const user = await getUser(req);
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const userRole = await getUserRole(user.id);
 
   const { data: activeSession } = await admin
     .from('rdp_sessions')
@@ -65,5 +74,6 @@ export async function GET(req: NextRequest) {
       isOwn: b.user_id === user.id,
     })),
     currentUserId: user.id,
+    isAdmin: isAdmin(userRole),
   });
 }

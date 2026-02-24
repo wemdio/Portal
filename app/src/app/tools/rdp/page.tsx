@@ -8,12 +8,12 @@ import {
   Square,
   CalendarPlus,
   Trash2,
-  RefreshCw,
   Loader2,
   CircleDot,
   Clock,
   User,
-  Star,
+  AlertCircle,
+  LogOut,
 } from 'lucide-react';
 
 async function getToken() {
@@ -62,6 +62,7 @@ interface RdpStatus {
   activeSession: ActiveSession | null;
   bookings: Booking[];
   currentUserId: string;
+  isAdmin?: boolean;
 }
 
 function formatDateTime(iso: string) {
@@ -69,6 +70,13 @@ function formatDateTime(iso: string) {
   return d.toLocaleString('ru-RU', {
     day: '2-digit',
     month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString('ru-RU', {
     hour: '2-digit',
     minute: '2-digit',
   });
@@ -326,7 +334,7 @@ function RdpViewer({
 // Booking Form
 // ---------------------------------------------------------------------------
 
-function BookingForm({ onCreated }: { onCreated: () => void }) {
+function BookingForm({ onCreated, existingBookings = [] }: { onCreated: () => void; existingBookings?: Booking[] }) {
   const [date, setDate] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
@@ -345,6 +353,21 @@ function BookingForm({ onCreated }: { onCreated: () => void }) {
 
     const startsAt = new Date(`${date}T${timeFrom}:00`).toISOString();
     const endsAt = new Date(`${date}T${timeTo}:00`).toISOString();
+
+    const startMs = new Date(startsAt).getTime();
+    const endMs = new Date(endsAt).getTime();
+    if (endMs <= startMs) {
+      setError('Время «До» должно быть позже времени «С»');
+      return;
+    }
+
+    const overlaps = existingBookings.some(
+      (b) => startMs < new Date(b.endsAt).getTime() && endMs > new Date(b.startsAt).getTime(),
+    );
+    if (overlaps) {
+      setError('На это время уже есть бронь, перепроверьте расписание броней');
+      return;
+    }
 
     setLoading(true);
     const { error: apiError } = await api('/bookings', {
@@ -421,12 +444,9 @@ function BookingForm({ onCreated }: { onCreated: () => void }) {
 // Main Page
 // ---------------------------------------------------------------------------
 
-const REMOTE_SCALE_OPTIONS = [
-  { label: '100%', value: 1.0, hint: 'Нативное разрешение' },
-  { label: '80%', value: 0.8, hint: 'Иконки меньше (×1.25 пикселей)', recommended: true },
-  { label: '67%', value: 0.67, hint: 'Ещё мельче (×1.5 пикселей)' },
-  { label: '50%', value: 0.5, hint: 'Максимум (×2 пикселей)' },
-];
+const DEFAULT_REMOTE_SCALE = 0.8;
+
+const FIVE_MIN_MS = 5 * 60 * 1000;
 
 export default function RdpPage() {
   const [status, setStatus] = useState<RdpStatus | null>(null);
@@ -434,7 +454,13 @@ export default function RdpPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState('');
-  const [remoteScale, setRemoteScale] = useState(0.8);
+  const [showFiveMinWarning, setShowFiveMinWarning] = useState(false);
+  const fiveMinWarnedRef = useRef(false);
+  const [showSoonBookingWarning, setShowSoonBookingWarning] = useState(false);
+  const [soonBookingUserName, setSoonBookingUserName] = useState<string | null>(null);
+  const warnedSoonBookingIdRef = useRef<string | null>(null);
+  const forceDisconnectDoneRef = useRef(false);
+  const mySessionEndsAtRef = useRef<number | null>(null);
 
   const fetchStatus = useCallback(async () => {
     const { data, error: err } = await api<RdpStatus>('/status');
@@ -455,6 +481,11 @@ export default function RdpPage() {
     };
   }, [fetchStatus]);
 
+  // При возврате на страницу — если у пользователя уже есть активная сессия, показываем просмотр (возврат в сессию)
+  useEffect(() => {
+    if (status?.activeSession?.isOwn) setConnected(true);
+  }, [status?.activeSession?.isOwn]);
+
   async function handleConnect() {
     setError('');
     setActionLoading(true);
@@ -473,8 +504,78 @@ export default function RdpPage() {
     await api('/sessions', { method: 'DELETE' });
     setActionLoading(false);
     setConnected(false);
+    fiveMinWarnedRef.current = false;
+    warnedSoonBookingIdRef.current = null;
+    forceDisconnectDoneRef.current = false;
+    mySessionEndsAtRef.current = null;
     fetchStatus();
   }
+
+  // Запоминаем конец своей брони, пока сидим в сессии (бронь потом исчезнет из API)
+  useEffect(() => {
+    if (!connected || !status?.bookings) return;
+    const now = Date.now();
+    const myCurrent = status.bookings.find(
+      (b) => b.isOwn && new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+    );
+    if (myCurrent) mySessionEndsAtRef.current = new Date(myCurrent.endsAt).getTime();
+  }, [connected, status?.bookings]);
+
+  // Принудительное отключение: время своей брони вышло или начался слот другого пользователя
+  useEffect(() => {
+    if (!connected || forceDisconnectDoneRef.current) return;
+    const check = () => {
+      if (forceDisconnectDoneRef.current) return;
+      const now = Date.now();
+      const myEndsAt = mySessionEndsAtRef.current;
+      const myBookingEnded = myEndsAt != null && now >= myEndsAt;
+      const otherSlotStarted =
+        status?.bookings?.some(
+          (b) => !b.isOwn && new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+        ) ?? false;
+      const myCurrent = status?.bookings?.find(
+        (b) => b.isOwn && new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+      );
+      if (myBookingEnded || (otherSlotStarted && !myCurrent)) {
+        forceDisconnectDoneRef.current = true;
+        void handleDisconnect();
+      }
+    };
+    check();
+    const t = setInterval(check, 20000);
+    return () => clearInterval(t);
+  }, [connected, status?.bookings]);
+
+  // Предупреждение за 5 минут до окончания своей брони и за 5 минут до начала чужой (когда сидишь без брони)
+  useEffect(() => {
+    if (!connected || !status?.bookings) return;
+    const check = () => {
+      const now = Date.now();
+      const myCurrent = status.bookings.find(
+        (b) => b.isOwn && new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+      );
+      if (myCurrent && new Date(myCurrent.endsAt).getTime() - now < FIVE_MIN_MS && !fiveMinWarnedRef.current) {
+        fiveMinWarnedRef.current = true;
+        setShowFiveMinWarning(true);
+        return;
+      }
+      const nextOther = status.bookings
+        .filter((b) => !b.isOwn && new Date(b.startsAt).getTime() > now)
+        .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime())[0];
+      if (
+        nextOther &&
+        new Date(nextOther.startsAt).getTime() - now < FIVE_MIN_MS &&
+        warnedSoonBookingIdRef.current !== nextOther.id
+      ) {
+        warnedSoonBookingIdRef.current = nextOther.id;
+        setSoonBookingUserName(nextOther.userName ?? 'Пользователь');
+        setShowSoonBookingWarning(true);
+      }
+    };
+    check();
+    const t = setInterval(check, 60000);
+    return () => clearInterval(t);
+  }, [connected, status?.bookings]);
 
   async function handleCancelBooking(id: string) {
     setActionLoading(true);
@@ -515,31 +616,74 @@ export default function RdpPage() {
           className="rounded-2xl border border-gray-200 overflow-hidden bg-white shadow-sm flex-1 min-h-0 flex flex-col"
           style={{ maxHeight: 'calc(100vh - 140px)' }}
         >
-          <RdpViewer onDisconnect={handleDisconnect} remoteScale={remoteScale} />
+          <RdpViewer onDisconnect={handleDisconnect} remoteScale={DEFAULT_REMOTE_SCALE} />
         </div>
+        {showFiveMinWarning && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden border border-amber-100">
+              <div className="bg-amber-50 px-6 pt-6 pb-4 flex flex-col items-center">
+                <div className="h-12 w-12 rounded-full bg-amber-100 flex items-center justify-center mb-3">
+                  <AlertCircle className="h-6 w-6 text-amber-600" />
+                </div>
+                <p className="text-amber-900 font-semibold text-center">
+                  Осталось менее 5 минут
+                </p>
+              </div>
+              <div className="px-6 pb-6 pt-2">
+                <p className="text-gray-600 text-sm text-center">
+                  У вас осталось менее 5 минут до окончания сессии. По истечении времени подключение будет завершено автоматически.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowFiveMinWarning(false)}
+                  className="mt-4 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 transition"
+                >
+                  Понятно
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {showSoonBookingWarning && soonBookingUserName && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden border border-violet-100">
+              <div className="bg-violet-50 px-6 pt-6 pb-4 flex flex-col items-center">
+                <div className="h-12 w-12 rounded-full bg-violet-100 flex items-center justify-center mb-3">
+                  <LogOut className="h-6 w-6 text-violet-600" />
+                </div>
+                <p className="text-violet-900 font-semibold text-center">
+                  Скоро слот другого пользователя
+                </p>
+              </div>
+              <div className="px-6 pb-6 pt-2">
+                <p className="text-gray-600 text-sm text-center">
+                  Через менее 5 минут начинается бронь пользователя <span className="font-medium text-gray-900">{soonBookingUserName}</span>. Рекомендуем отключиться до начала слота. Иначе подключение будет завершено автоматически.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { setShowSoonBookingWarning(false); setSoonBookingUserName(null); }}
+                  className="mt-4 w-full rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-700 transition"
+                >
+                  Понятно
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Monitor className="h-6 w-6 text-violet-600" />
-            Удалённый рабочий стол
-          </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Подключение к удалённому ПК через браузер
-          </p>
-        </div>
-        <button
-          onClick={fetchStatus}
-          className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition"
-          title="Обновить"
-        >
-          <RefreshCw className="h-5 w-5" />
-        </button>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+          <Monitor className="h-6 w-6 text-violet-600" />
+          Удалённый рабочий стол
+        </h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Подключение к удалённому ПК через браузер
+        </p>
       </div>
 
       {error && (
@@ -553,41 +697,6 @@ export default function RdpPage() {
         <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">
           Текущий статус
         </h2>
-        {/* Remote resolution scale selector */}
-        {!status?.activeSession && (
-          <div className="mb-4 pb-4 border-b border-gray-100">
-            <p className="text-xs text-gray-500 mb-2">
-              Масштаб удалённого экрана
-              <span className="ml-1 text-gray-400">(чем меньше — тем мельче иконки)</span>
-            </p>
-            <div className="flex gap-2 flex-wrap items-center">
-              {REMOTE_SCALE_OPTIONS.map((opt) => (
-                <span key={opt.value} className="relative inline-block">
-                  <button
-                    onClick={() => setRemoteScale(opt.value)}
-                    title={opt.hint}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
-                      remoteScale === opt.value
-                        ? 'bg-violet-600 text-white border-violet-600'
-                        : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400 hover:text-violet-600'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                  {opt.recommended && (
-                    <span
-                      className="absolute -top-0.5 -right-0.5 text-amber-400 pointer-events-auto"
-                      title="Оптимальный вариант"
-                    >
-                      <Star className="h-3 w-3 fill-amber-400 drop-shadow-sm" />
-                    </span>
-                  )}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
         {status?.activeSession ? (
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-full bg-red-100 flex items-center justify-center">
@@ -614,14 +723,36 @@ export default function RdpPage() {
               </button>
             )}
           </div>
-        ) : (
+        ) : (() => {
+          const now = Date.now();
+          const currentBooking = status?.bookings?.find(
+            (b) => new Date(b.startsAt).getTime() <= now && new Date(b.endsAt).getTime() > now,
+          );
+          return (
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-full bg-green-100 flex items-center justify-center">
-              <CircleDot className="h-5 w-5 text-green-600" />
+            <div className={`h-10 w-10 rounded-full flex items-center justify-center ${currentBooking ? 'bg-amber-100' : 'bg-green-100'}`}>
+              <CircleDot className={`h-5 w-5 ${currentBooking ? 'text-amber-600' : 'text-green-600'}`} />
             </div>
             <div>
-              <p className="font-medium text-green-700">Свободно</p>
-              <p className="text-xs text-gray-500">Можно подключаться</p>
+              {currentBooking ? (
+                <>
+                  <p className="font-medium text-amber-800">
+                    {currentBooking.isOwn
+                      ? 'Ваша бронь'
+                      : `Бронь пользователем ${currentBooking.userName ?? 'Пользователь'} до ${formatDateTime(currentBooking.endsAt)}`}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {currentBooking.isOwn
+                      ? `действует до ${formatDateTime(currentBooking.endsAt)}`
+                      : 'Можно подключаться после окончания брони'}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-medium text-green-700">Свободно</p>
+                  <p className="text-xs text-gray-500">Можно подключаться</p>
+                </>
+              )}
             </div>
             <button
               onClick={handleConnect}
@@ -636,7 +767,8 @@ export default function RdpPage() {
               Подключиться
             </button>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Booking section */}
@@ -646,16 +778,16 @@ export default function RdpPage() {
           <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">
             Забронировать время
           </h2>
-          <BookingForm onCreated={fetchStatus} />
+          <BookingForm onCreated={fetchStatus} existingBookings={status?.bookings ?? []} />
         </div>
 
         {/* Upcoming bookings */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">
+        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm flex flex-col min-h-0">
+          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 shrink-0">
             Расписание
           </h2>
           {status?.bookings && status.bookings.length > 0 ? (
-            <div className="space-y-2 max-h-80 overflow-y-auto">
+            <div className="space-y-2 min-h-[8rem] max-h-[22rem] overflow-y-auto overscroll-contain pr-1">
               {status.bookings.map((b) => (
                 <div
                   key={b.id}
@@ -680,12 +812,12 @@ export default function RdpPage() {
                       </p>
                     </div>
                   </div>
-                  {b.isOwn && (
+                  {(b.isOwn || status?.isAdmin) && (
                     <button
                       onClick={() => handleCancelBooking(b.id)}
                       disabled={actionLoading}
                       className="shrink-0 rounded-lg p-1.5 text-red-400 hover:bg-red-100 hover:text-red-600 disabled:opacity-50 transition"
-                      title="Отменить бронь"
+                      title={b.isOwn ? 'Отменить бронь' : 'Удалить бронь (админ)'}
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
