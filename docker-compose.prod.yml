@@ -141,6 +141,34 @@ services:
     networks:
       - portal-network
 
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: portal-guacd
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  rdp-ws:
+    image: ${DOCKER_USERNAME}/portal-rdp-ws:prod
+    container_name: portal-rdp-ws
+    depends_on:
+      - guacd
+    env_file:
+      - .env
+    environment:
+      - RDP_WS_SECRET=${RDP_WS_SECRET}
+      - GUACD_HOST=guacd
+      - GUACD_PORT=4822
+      - RDP_HOST=${RDP_HOST}
+      - RDP_PORT=${RDP_PORT:-3389}
+      - RDP_USERNAME=${RDP_USERNAME}
+      - RDP_PASSWORD=${RDP_PASSWORD}
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    networks:
+      - portal-network
+
 networks:
   portal-network:
     driver: bridge
