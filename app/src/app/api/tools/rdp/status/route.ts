@@ -31,17 +31,29 @@ export async function GET(req: NextRequest) {
     .order('starts_at', { ascending: true })
     .limit(50);
 
+  type BookingRow = {
+    id: string;
+    user_id: string;
+    starts_at: string;
+    ends_at: string;
+    status: string;
+    notes: string | null;
+    profiles?: { full_name?: string } | null;
+  };
+
   return NextResponse.json({
     activeSession: activeSession
       ? {
           id: activeSession.id,
           userId: activeSession.user_id,
-          userName: (activeSession as any).profiles?.full_name ?? null,
+          userName:
+            (activeSession as { profiles?: { full_name?: string } | null }).profiles?.full_name ??
+            null,
           startedAt: activeSession.started_at,
           isOwn: activeSession.user_id === user.id,
         }
       : null,
-    bookings: (upcomingBookings ?? []).map((b: any) => ({
+    bookings: (upcomingBookings ?? []).map((b: BookingRow) => ({
       id: b.id,
       userId: b.user_id,
       userName: b.profiles?.full_name ?? null,

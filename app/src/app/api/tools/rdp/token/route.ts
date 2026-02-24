@@ -13,7 +13,7 @@ async function getUser(req: NextRequest) {
   return data.user;
 }
 
-function encryptToken(connectionParams: Record<string, any>, secret: string): string {
+function encryptToken(connectionParams: Record<string, unknown>, secret: string): string {
   // guacamole-lite's Crypt.decrypt() decodes the IV via .toString('ascii'), which strips the
   // high bit of bytes > 127. Using only 7-bit bytes makes the round-trip lossless.
   const iv = Buffer.from(crypto.randomBytes(16).map((b: number) => b & 0x7F));

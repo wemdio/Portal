@@ -10,11 +10,10 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
-  Maximize,
-  Minimize,
   CircleDot,
   Clock,
   User,
+  Star,
 } from 'lucide-react';
 
 async function getToken() {
@@ -22,7 +21,7 @@ async function getToken() {
   return session?.access_token ?? '';
 }
 
-async function api<T = any>(
+async function api<T = unknown>(
   path: string,
   opts: RequestInit = {},
 ): Promise<{ data?: T; error?: string }> {
@@ -95,11 +94,10 @@ function RdpViewer({
   remoteScale?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const clientRef = useRef<any>(null);
+  const clientRef = useRef<{ disconnect(): void } | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const zoomRef = useRef(1.0);
   const baseScaleRef = useRef(1.0);
   const currentScaleRef = useRef(1.0);
@@ -152,9 +150,9 @@ function RdpViewer({
           const totalScale = base * zoomRef.current;
           currentScaleRef.current = totalScale;
           guacDisplay.scale(totalScale);
-          // Иначе элемент в layout остаётся dw×dh и появляется скролл — задаём размер по масштабу
-          const scaledW = Math.floor(dw * totalScale);
-          const scaledH = Math.floor(dh * totalScale);
+          // Размер в layout = масштабированный, не больше контейнера (чтобы не было скролла/обрезки)
+          const scaledW = Math.min(cw, Math.floor(dw * totalScale));
+          const scaledH = Math.min(ch, Math.floor(dh * totalScale));
           displayEl.style.width = `${scaledW}px`;
           displayEl.style.height = `${scaledH}px`;
           displayEl.style.maxWidth = '100%';
@@ -164,11 +162,11 @@ function RdpViewer({
         roRef.current = new ResizeObserver(fitToContainer);
         if (containerRef.current) roRef.current.observe(containerRef.current);
 
-        client.onerror = (err: any) => {
+        client.onerror = (err: unknown) => {
           console.error('[rdp] Client error', err);
           if (!cancelled) {
             setStatus('error');
-            setErrorMsg(err?.message ?? 'Ошибка подключения');
+            setErrorMsg(err instanceof Error ? err.message : 'Ошибка подключения');
           }
         };
 
@@ -201,7 +199,10 @@ function RdpViewer({
         };
 
         const mouse = new Guacamole.Mouse(displayEl);
-        mouse.onEach(['mousedown', 'mousemove', 'mouseup'], (e: any) => {
+        type GuacMouseState = {
+          state: { x: number; y: number; left: boolean; middle: boolean; right: boolean; up: boolean; down: boolean };
+        };
+        mouse.onEach(['mousedown', 'mousemove', 'mouseup'], (e: GuacMouseState) => {
           // e.state.x/y are in CSS pixels relative to the scaled bounds element.
           // Divide by the current display scale to get guacamole logical coordinates.
           const s = currentScaleRef.current || 1;
@@ -256,10 +257,10 @@ function RdpViewer({
         const w = Math.max(320, Math.round(vw / rs));
         const h = Math.max(240, Math.round(vh / rs));
         client.connect(`width=${w}&height=${h}`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (!cancelled) {
           setStatus('error');
-          setErrorMsg(err?.message ?? 'Не удалось подключиться');
+          setErrorMsg(err instanceof Error ? err.message : 'Не удалось подключиться');
         }
       }
     }
@@ -279,25 +280,6 @@ function RdpViewer({
     };
   }, []);
 
-
-  const toggleFullscreen = useCallback(() => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    function onFsChange() {
-      setIsFullscreen(!!document.fullscreenElement);
-    }
-    document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
-  }, []);
 
   return (
     <div className="flex flex-col flex-1 min-h-0 w-full">
@@ -323,15 +305,6 @@ function RdpViewer({
           )}
         </div>
         <div className="flex items-center gap-3">
-          {/* Кнопка полноэкранного режима отключена
-          <button
-            onClick={toggleFullscreen}
-            className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-200 transition"
-            title={isFullscreen ? 'Выйти из полноэкранного' : 'Полноэкранный режим'}
-          >
-            {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-          </button>
-          */}
           <button
             onClick={onDisconnect}
             className="flex items-center gap-1 rounded-lg bg-red-100 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-200 transition"
@@ -450,7 +423,7 @@ function BookingForm({ onCreated }: { onCreated: () => void }) {
 
 const REMOTE_SCALE_OPTIONS = [
   { label: '100%', value: 1.0, hint: 'Нативное разрешение' },
-  { label: '80%', value: 0.8, hint: 'Иконки меньше (×1.25 пикселей)' },
+  { label: '80%', value: 0.8, hint: 'Иконки меньше (×1.25 пикселей)', recommended: true },
   { label: '67%', value: 0.67, hint: 'Ещё мельче (×1.5 пикселей)' },
   { label: '50%', value: 0.5, hint: 'Максимум (×2 пикселей)' },
 ];
@@ -461,7 +434,7 @@ export default function RdpPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState('');
-  const [remoteScale, setRemoteScale] = useState(1.0);
+  const [remoteScale, setRemoteScale] = useState(0.8);
 
   const fetchStatus = useCallback(async () => {
     const { data, error: err } = await api<RdpStatus>('/status');
@@ -474,9 +447,12 @@ export default function RdpPage() {
   }, []);
 
   useEffect(() => {
-    fetchStatus();
+    const t = setTimeout(fetchStatus, 0);
     const interval = setInterval(fetchStatus, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+    };
   }, [fetchStatus]);
 
   async function handleConnect() {
@@ -530,12 +506,15 @@ export default function RdpPage() {
 
   if (connected) {
     return (
-      <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex flex-col flex-1 min-h-0 h-full">
         <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2 shrink-0 mb-4">
           <Monitor className="h-6 w-6 text-violet-600" />
           Удалённый рабочий стол
         </h1>
-        <div className="rounded-2xl border border-gray-200 overflow-hidden bg-white shadow-sm flex-1 min-h-0 flex flex-col">
+        <div
+          className="rounded-2xl border border-gray-200 overflow-hidden bg-white shadow-sm flex-1 min-h-0 flex flex-col"
+          style={{ maxHeight: 'calc(100vh - 140px)' }}
+        >
           <RdpViewer onDisconnect={handleDisconnect} remoteScale={remoteScale} />
         </div>
       </div>
@@ -581,20 +560,29 @@ export default function RdpPage() {
               Масштаб удалённого экрана
               <span className="ml-1 text-gray-400">(чем меньше — тем мельче иконки)</span>
             </p>
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap items-center">
               {REMOTE_SCALE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => setRemoteScale(opt.value)}
-                  title={opt.hint}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
-                    remoteScale === opt.value
-                      ? 'bg-violet-600 text-white border-violet-600'
-                      : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400 hover:text-violet-600'
-                  }`}
-                >
-                  {opt.label}
-                </button>
+                <span key={opt.value} className="relative inline-block">
+                  <button
+                    onClick={() => setRemoteScale(opt.value)}
+                    title={opt.hint}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                      remoteScale === opt.value
+                        ? 'bg-violet-600 text-white border-violet-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400 hover:text-violet-600'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                  {opt.recommended && (
+                    <span
+                      className="absolute -top-0.5 -right-0.5 text-amber-400 pointer-events-auto"
+                      title="Оптимальный вариант"
+                    >
+                      <Star className="h-3 w-3 fill-amber-400 drop-shadow-sm" />
+                    </span>
+                  )}
+                </span>
               ))}
             </div>
           </div>
