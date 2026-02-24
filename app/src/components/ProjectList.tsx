@@ -8,7 +8,6 @@ import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjec
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
-import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -189,13 +188,7 @@ export function ProjectList() {
       const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles));
 
-      const avatarMap = new Map<string, string>();
-      for (const p of profiles) {
-        const name = p.full_name?.trim() || p.email?.split('@')[0]?.trim();
-        const url = normalizePublicAvatarUrl(p.avatar_url) ?? '';
-        if (name && url) avatarMap.set(name, url);
-      }
-      setAssigneeAvatars(avatarMap);
+      void fetchSignedAvatars();
 
       const renameMap = buildRenameMap(profiles);
       if (renameMap.size > 0) {
@@ -203,6 +196,28 @@ export function ProjectList() {
       }
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
+    }
+  }
+
+  async function fetchSignedAvatars() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+
+      const res = await fetch('/api/avatars/batch-signed', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+
+      const map = (await res.json()) as Record<string, string>;
+      const avatarMap = new Map<string, string>();
+      for (const [name, url] of Object.entries(map)) {
+        if (url) avatarMap.set(name, url);
+      }
+      setAssigneeAvatars(avatarMap);
+    } catch {
+      // non-critical, letter fallbacks remain
     }
   }
 
