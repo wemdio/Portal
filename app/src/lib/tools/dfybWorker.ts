@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { generateDfybPlan, type DfybPlan, type DfybParserConfig } from './dfybPlanner';
+import { generateDfybPlan, type DfybPlan } from './dfybPlanner';
 import {
   removeEmptyRowsAndCols,
   deduplicateRows,
@@ -471,7 +471,6 @@ async function stepTAScore(jobId: string, data: string[][], taBrief: string): Pr
   const body = data.slice(1);
 
   const scoreIdx = header.length;
-  const reasonIdx = header.length + 1;
   const newHeader = [...header, 'ЦА Балл', 'ЦА Причина'];
   const scored: string[][] = [];
 
@@ -635,7 +634,6 @@ async function stepPersonalize(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const persIdx = header.length;
   const newHeader = [...header, 'Персонализация'];
 
   const result: string[][] = [];

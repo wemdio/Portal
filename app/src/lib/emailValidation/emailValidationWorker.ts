@@ -11,7 +11,7 @@
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { validateEmail, normalizeEmail, type ValidationResult, type DomainInfo } from './validator';
+import { validateEmail, type ValidationResult, type DomainInfo } from './validator';
 
 function workerLog(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[email-validation][${level.toUpperCase()}] ${msg}`;

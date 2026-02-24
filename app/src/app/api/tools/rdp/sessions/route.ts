@@ -34,49 +34,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const now = new Date();
-
-  const { data: otherBooking } = await admin
-    .from('rdp_bookings')
-    .select('id, user_id')
-    .in('status', ['pending', 'active'])
-    .lte('starts_at', now.toISOString())
-    .gt('ends_at', now.toISOString())
-    .neq('user_id', user.id)
-    .limit(1)
-    .maybeSingle();
-
-  if (otherBooking) {
-    return NextResponse.json(
-      { error: 'Сейчас действует бронь другого пользователя' },
-      { status: 409 },
-    );
-  }
-
-  let bookingId: string | null = null;
-  const { data: myBooking } = await admin
-    .from('rdp_bookings')
-    .select('id')
-    .eq('user_id', user.id)
-    .in('status', ['pending', 'active'])
-    .lte('starts_at', now.toISOString())
-    .gt('ends_at', now.toISOString())
-    .limit(1)
-    .maybeSingle();
-
-  if (myBooking) {
-    bookingId = myBooking.id;
-    await admin
-      .from('rdp_bookings')
-      .update({ status: 'active' })
-      .eq('id', myBooking.id);
-  }
-
   const { data: session, error } = await admin
     .from('rdp_sessions')
     .insert({
       user_id: user.id,
-      booking_id: bookingId,
+      booking_id: null,
     })
     .select('id, user_id, booking_id, started_at, status')
     .single();
@@ -91,7 +53,7 @@ export async function DELETE(req: NextRequest) {
 
   const { data: session } = await admin
     .from('rdp_sessions')
-    .select('id, booking_id')
+    .select('id')
     .eq('user_id', user.id)
     .eq('status', 'active')
     .limit(1)
@@ -102,18 +64,10 @@ export async function DELETE(req: NextRequest) {
   }
 
   const now = new Date().toISOString();
-
   await admin
     .from('rdp_sessions')
     .update({ status: 'ended', ended_at: now })
     .eq('id', session.id);
-
-  if (session.booking_id) {
-    await admin
-      .from('rdp_bookings')
-      .update({ status: 'completed' })
-      .eq('id', session.booking_id);
-  }
 
   return NextResponse.json({ ok: true });
 }

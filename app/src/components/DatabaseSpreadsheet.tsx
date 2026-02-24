@@ -1502,7 +1502,7 @@ export function DatabaseSpreadsheet() {
     setLastAction({ message: `Нормализация применена к ${changed} строкам`, time: Date.now() });
   };
 
-  const applyRowsToNewTab = (nextRows: string[][], filename?: string) => {
+  const applyRowsToNewTab = useCallback((nextRows: string[][], filename?: string) => {
     const normalized = normalizeRows(trimTrailingEmptyRows(nextRows));
     const fallbackName = `Вкладка ${tabCounter + 1}`;
     const baseName = filename ? getBaseFilename(filename) : '';
@@ -1519,7 +1519,7 @@ export function DatabaseSpreadsheet() {
     };
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
-  };
+  }, [tabCounter]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -1574,7 +1574,7 @@ export function DatabaseSpreadsheet() {
       showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта', 'error');
       cleanUrl();
     }
-  }, [importId, isHydrated]);
+  }, [importId, isHydrated, applyRowsToNewTab, showCopyNotice]);
 
   const finalizeImport = (status: ImportStatus['status'], filename?: string, message?: string) => {
     const progress = status === 'done' ? 100 : 0;
