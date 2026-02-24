@@ -25,7 +25,9 @@ export async function POST(req: NextRequest) {
     if (activeSession.user_id === user.id) {
       return NextResponse.json({ error: 'У вас уже есть активная сессия' }, { status: 409 });
     }
-    const name = (activeSession as any).profiles?.full_name ?? 'другой пользователь';
+    const name =
+      (activeSession as { profiles?: { full_name?: string } | null })?.profiles?.full_name ??
+      'другой пользователь';
     return NextResponse.json(
       { error: `Удалённый ПК занят: ${name}` },
       { status: 409 },

@@ -242,8 +242,7 @@ export default function ReglamentPage() {
              range.setStart(foundNode, index);
              range.setEnd(foundNode, index + result.searchText.length);
              
-             const rect = range.getBoundingClientRect();
-             const scrollTarget = foundNode.parentElement;
+            const scrollTarget = foundNode.parentElement;
              
              if (scrollTarget) {
                scrollTarget.scrollIntoView({ 
