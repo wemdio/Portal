@@ -110,7 +110,7 @@ function RdpViewer({
 
     async function connect() {
       try {
-        const { data, error } = await api('/token', { method: 'POST' });
+        const { data, error } = await api<{ token: string }>('/token', { method: 'POST' });
         if (error || !data?.token) {
           setStatus('error');
           setErrorMsg(error ?? 'Не удалось получить токен');
