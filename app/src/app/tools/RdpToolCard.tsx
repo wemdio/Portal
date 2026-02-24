@@ -54,13 +54,13 @@ export function RdpToolCard() {
   );
 
   const baseClassPc =
-    'group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300';
+    'group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300 w-full min-w-0 h-full flex flex-col';
   const baseClassMobile =
-    'rounded-2xl border-2 border-gray-200 bg-gray-50 p-6 w-full text-left cursor-pointer transition';
+    'rounded-2xl border-2 border-gray-200 bg-gray-50 p-6 w-full h-full min-h-0 text-left cursor-pointer transition flex flex-col';
 
   if (isPcViewport === null) {
     return (
-      <div className={`${baseClassMobile} animate-pulse`} aria-hidden>
+      <div className={`${baseClassMobile} animate-pulse min-h-[140px]`} aria-hidden>
         <div className="flex items-start justify-between gap-4">
           <div className="h-5 w-40 bg-gray-200 rounded" />
           <div className="h-8 w-8 bg-gray-200 rounded shrink-0" />
