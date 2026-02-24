@@ -9,6 +9,7 @@ import { TmaHeader } from './TmaHeader';
 export function LayoutShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
+  const isRdpPage = pathname === '/tools/rdp';
   const isTma = useIsTma();
 
   useEffect(() => {
@@ -43,8 +44,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         {isTma && <TmaHeader />}
-        <main className={`flex-1${isTma ? ' overflow-y-auto' : ''} ${contentPadding}${isTma ? ' tma-safe-bottom' : ''}`}>
-          <div className={contentWidth}>{children}</div>
+        <main className={`flex-1 flex flex-col min-h-0${isTma ? ' overflow-y-auto' : ''} ${contentPadding}${isTma ? ' tma-safe-bottom' : ''}`}>
+          <div className={`${contentWidth}${isRdpPage ? ' flex flex-col flex-1 min-h-0' : ''}`}>{children}</div>
         </main>
       </div>
     </div>

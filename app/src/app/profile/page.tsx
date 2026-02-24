@@ -30,19 +30,58 @@ function getInitial(value: string) {
   return (trimmed[0] ?? '?').toUpperCase();
 }
 
-async function getImageSize(file: File): Promise<{ width: number; height: number }> {
+const MAX_AVATAR_BYTES = 10 * 1024 * 1024;
+const AVATAR_TARGET_PX = 512;
+
+async function loadImage(file: File): Promise<HTMLImageElement> {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
-    const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
       img.onerror = () => reject(new Error('Invalid image'));
       img.src = url;
     });
-    return size;
+    return img;
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+async function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number): Promise<Blob> {
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+  if (!blob) throw new Error('Не удалось обработать изображение');
+  return blob;
+}
+
+async function processAvatarFile(
+  file: File
+): Promise<{ file: File; contentType: string; ext: string }> {
+  if (file.type === 'image/gif') {
+    return { file, contentType: file.type, ext: 'gif' };
+  }
+
+  const img = await loadImage(file);
+  const sw = img.naturalWidth;
+  const sh = img.naturalHeight;
+  if (!sw || !sh) throw new Error('Неверные размеры изображения');
+
+  const side = Math.min(sw, sh);
+  const sx = Math.floor((sw - side) / 2);
+  const sy = Math.floor((sh - side) / 2);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = AVATAR_TARGET_PX;
+  canvas.height = AVATAR_TARGET_PX;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Не удалось обработать изображение');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, AVATAR_TARGET_PX, AVATAR_TARGET_PX);
+
+  const blob = await canvasToBlob(canvas, 'image/webp', 0.86);
+  const processed = new File([blob], 'avatar.webp', { type: 'image/webp' });
+  return { file: processed, contentType: processed.type, ext: 'webp' };
 }
 
 export default function ProfilePage() {
@@ -59,8 +98,8 @@ export default function ProfilePage() {
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [avatarRefreshKey, setAvatarRefreshKey] = useState(0);
-  const [signedAvatarUrl, setSignedAvatarUrl] = useState<string | null>(null);
-  const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
+  const [signedAvatar, setSignedAvatar] = useState<{ key: string; url: string } | null>(null);
+  const signedAttemptedKeyRef = useRef<string | null>(null);
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -87,15 +126,28 @@ export default function ProfilePage() {
 
   const avatarUrl = useMemo(() => {
     const base = normalizePublicAvatarUrl(profile?.avatar_url) ?? '';
-    if (signedAvatarUrl) return signedAvatarUrl;
+    const currentKey = base ? extractAvatarKeyFromPublicUrl(base) : null;
+    if (signedAvatar && currentKey && signedAvatar.key === currentKey) return signedAvatar.url;
     if (!base) return '';
     const join = base.includes('?') ? '&' : '?';
     return `${base}${join}v=${avatarRefreshKey}`;
-  }, [profile?.avatar_url, avatarRefreshKey, signedAvatarUrl]);
+  }, [profile?.avatar_url, avatarRefreshKey, signedAvatar]);
+
+  function extractAvatarKeyFromPublicUrl(url: string): string | null {
+    const clean = url.split(/[?#]/)[0] ?? '';
+    const m = clean.match(/\/storage\/v1\/object\/public\/[^/]+\/(.+)$/i);
+    if (!m) return null;
+    const key = decodeURIComponent(m[1] ?? '');
+    return key && key.startsWith('avatars/') ? key : null;
+  }
 
   async function fetchSignedAvatarUrl() {
-    if (avatarTriedSigned) return;
-    setAvatarTriedSigned(true);
+    const base = normalizePublicAvatarUrl(profile?.avatar_url) ?? '';
+    const currentKey = base ? extractAvatarKeyFromPublicUrl(base) : null;
+    if (!currentKey) return;
+    if (signedAttemptedKeyRef.current === currentKey) return;
+    signedAttemptedKeyRef.current = currentKey;
+
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
@@ -107,9 +159,15 @@ export default function ProfilePage() {
         },
       });
       if (!res.ok) return;
-      const data = (await res.json()) as { readUrl?: unknown };
-      if (typeof data.readUrl === 'string' && data.readUrl.trim()) {
-        setSignedAvatarUrl(data.readUrl.trim());
+      const data = (await res.json()) as { readUrl?: unknown; key?: unknown };
+      if (
+        typeof data.readUrl === 'string' &&
+        data.readUrl.trim() &&
+        typeof data.key === 'string' &&
+        data.key.trim() &&
+        data.key.trim() === currentKey
+      ) {
+        setSignedAvatar({ url: data.readUrl.trim(), key: currentKey });
       }
     } catch {
       // ignore, fallback to initials
@@ -241,8 +299,8 @@ export default function ProfilePage() {
       setError('Выберите изображение');
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setError('Файл слишком большой (максимум 5MB)');
+    if (file.size > MAX_AVATAR_BYTES) {
+      setError('Файл слишком большой (максимум 10MB)');
       return;
     }
 
@@ -251,15 +309,7 @@ export default function ProfilePage() {
     setMessage('');
 
     try {
-      const { width, height } = await getImageSize(file);
-      if (width !== 512 || height !== 512) {
-        setError(`Нужен аватар ровно 512×512 px. Сейчас: ${width}×${height}. Подрежьте/уменьшите и загрузите ещё раз.`);
-        return;
-      }
-
-      const nameParts = file.name.split('.');
-      const extRaw = nameParts.length > 1 ? (nameParts.at(-1) ?? '') : '';
-      const ext = (extRaw || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+      const processed = await processAvatarFile(file);
 
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
@@ -271,7 +321,7 @@ export default function ProfilePage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ contentType: file.type, ext }),
+        body: JSON.stringify({ contentType: processed.contentType, ext: processed.ext }),
       });
 
       if (!presignRes.ok) {
@@ -284,9 +334,9 @@ export default function ProfilePage() {
       const upload = await fetch(presigned.uploadUrl, {
         method: 'PUT',
         headers: {
-          'Content-Type': file.type,
+          'Content-Type': processed.contentType,
         },
-        body: file,
+        body: processed.file,
       });
 
       if (!upload.ok) {
@@ -305,6 +355,8 @@ export default function ProfilePage() {
       if (profileErr) throw profileErr;
 
       setProfile((updated as ProfileRow) ?? null);
+      setSignedAvatar(null);
+      signedAttemptedKeyRef.current = null;
       setAvatarRefreshKey(Date.now());
       setMessage('Аватар обновлён');
       void logAudit('profile.avatar.update.success', 'Avatar updated', { userId });
@@ -373,7 +425,7 @@ export default function ProfilePage() {
               {uploadingAvatar ? 'Загрузка...' : 'Сменить аватар'}
             </button>
             <span className="text-xs text-gray-500">
-              512×512 px (квадрат), до 5MB
+              до 10MB
             </span>
           </div>
         </div>

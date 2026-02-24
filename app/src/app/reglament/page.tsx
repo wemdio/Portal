@@ -2,6 +2,10 @@
 /* eslint-disable react/no-unescaped-entities, @next/next/no-img-element */
 
 import { useEffect, useRef, useState } from 'react';
+import { ReglamentRenderer } from '@/components/ReglamentRenderer';
+import { supabase } from '@/lib/supabaseClient';
+import { useIsTma } from '@/lib/useIsTma';
+import type { ReglamentDocument } from '@/types';
 
 
 interface SearchResult {
@@ -24,7 +28,370 @@ type DetailsItem = {
   links?: ContentLink[];
 };
 
+type ReglamentListItem = Pick<
+  ReglamentDocument,
+  'id' | 'slug' | 'title' | 'summary' | 'updated_at' | 'published_at' | 'content'
+>;
+
+const dateFormatter = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
+
+function formatDate(value?: string | null) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : dateFormatter.format(date);
+}
+
 export default function ReglamentPage() {
+  const isTma = useIsTma();
+  const [document, setDocument] = useState<ReglamentListItem | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [showResults, setShowResults] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDocuments = async () => {
+      setLoading(true);
+      setError(null);
+      const { data, error: loadError } = await supabase
+        .from('reglament_documents')
+        .select('id, slug, title, summary, updated_at, published_at, content')
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .order('updated_at', { ascending: false })
+        .limit(1);
+
+      if (!isMounted) return;
+
+      if (loadError) {
+        setError(`Не удалось загрузить документы: ${loadError.message}`);
+        setLoading(false);
+        return;
+      }
+
+      const item = (data ?? [])[0] as ReglamentListItem | undefined;
+      setDocument(item ?? null);
+      setLoading(false);
+    };
+
+    void loadDocuments();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Search logic
+  const searchInContent = (query: string): SearchResult[] => {
+    if (!query.trim() || !contentRef.current) return [];
+
+    const results: SearchResult[] = [];
+    const queryLower = query.toLowerCase();
+    
+    // Получаем все текстовые узлы
+    const walker = window.document.createTreeWalker(
+      contentRef.current,
+      NodeFilter.SHOW_TEXT,
+      null
+    );
+
+    const textNodes: Text[] = [];
+    let node;
+    while (node = walker.nextNode()) {
+      if (node.textContent && node.textContent.trim()) {
+        textNodes.push(node as Text);
+      }
+    }
+
+    textNodes.forEach((textNode, nodeIndex) => {
+      const text = textNode.textContent || '';
+      const textLower = text.toLowerCase();
+      let index = textLower.indexOf(queryLower);
+      
+      // Находим ближайший заголовок
+      let title = 'Раздел';
+      let currentElement = textNode.parentElement;
+      while (currentElement && currentElement !== contentRef.current) {
+        // Проверяем предыдущие элементы на наличие заголовков
+        let sibling = currentElement.previousElementSibling;
+        while (sibling) {
+          if (/^H[1-6]$/.test(sibling.tagName)) {
+            title = sibling.textContent || 'Раздел';
+            break;
+          }
+          // Если это section, ищем внутри него
+          if (sibling.tagName === 'SECTION') {
+             const h = sibling.querySelector('h1, h2, h3, h4, h5, h6');
+             if (h) {
+               title = h.textContent || 'Раздел';
+               break;
+             }
+          }
+          sibling = sibling.previousElementSibling;
+        }
+        if (title !== 'Раздел') break;
+        
+        // Если сам элемент заголовок
+        if (/^H[1-6]$/.test(currentElement.tagName)) {
+          title = currentElement.textContent || 'Раздел';
+          break;
+        }
+        
+        currentElement = currentElement.parentElement;
+      }
+      
+      while (index !== -1 && results.length < 20) {
+        const start = Math.max(0, index - 50);
+        const end = Math.min(text.length, index + query.length + 50);
+        let context = text.substring(start, end);
+        
+        if (start > 0) context = '...' + context;
+        if (end < text.length) context = context + '...';
+        
+        // Выделяем найденное слово в контексте для отображения (не в DOM)
+        // В SearchResult.context храним строку, выделение делаем в рендере
+        
+        results.push({
+          id: `node-${nodeIndex}-${index}`,
+          title,
+          context: context,
+          sectionId: nodeIndex.toString(), // Используем индекс узла как ID
+          searchText: query
+        });
+        
+        index = textLower.indexOf(queryLower, index + 1);
+      }
+    });
+
+    return results.slice(0, 5);
+  };
+
+  const updateSearch = (value: string) => {
+    setSearchQuery(value);
+
+    if (!value.trim()) {
+      setSearchResults([]);
+      setShowResults(false);
+      return;
+    }
+
+    const results = searchInContent(value);
+    setSearchResults(results);
+    setShowResults(true);
+  };
+
+  const scrollToResult = (result: SearchResult) => {
+    setShowResults(false);
+    updateSearch('');
+    
+    // Небольшая задержка для закрытия выпадающего меню
+    setTimeout(() => {
+      if (!contentRef.current) return;
+      
+      const nodeIndex = parseInt(result.sectionId, 10);
+      const walker = window.document.createTreeWalker(
+        contentRef.current,
+        NodeFilter.SHOW_TEXT,
+        null
+      );
+
+      let foundNode: Text | null = null;
+      let currentIndex = 0;
+      
+      while (walker.nextNode()) {
+        if (currentIndex === nodeIndex) {
+          foundNode = walker.currentNode as Text;
+          break;
+        }
+        if (walker.currentNode.textContent?.trim()) {
+            currentIndex++;
+        }
+      }
+      
+      // В searchInContent мы фильтровали пустые узлы, здесь нужно делать так же
+      // Перепишем логику поиска узла, чтобы она соответствовала searchInContent
+      
+      const textNodes: Text[] = [];
+      const walker2 = window.document.createTreeWalker(
+        contentRef.current,
+        NodeFilter.SHOW_TEXT,
+        null
+      );
+      let node;
+      while (node = walker2.nextNode()) {
+        if (node.textContent && node.textContent.trim()) {
+          textNodes.push(node as Text);
+        }
+      }
+      
+      foundNode = textNodes[nodeIndex] || null;
+
+      if (foundNode) {
+        const text = foundNode.textContent || '';
+        const query = result.searchText.toLowerCase();
+        const index = text.toLowerCase().indexOf(query);
+        
+        if (index !== -1) {
+             const range = window.document.createRange();
+             range.setStart(foundNode, index);
+             range.setEnd(foundNode, index + result.searchText.length);
+             
+            const scrollTarget = foundNode.parentElement;
+             
+             if (scrollTarget) {
+               scrollTarget.scrollIntoView({ 
+                 behavior: 'smooth', 
+                 block: 'center',
+                 inline: 'nearest'
+               });
+               
+               // Подсветка
+               try {
+                 const highlight = window.document.createElement('mark');
+                 highlight.style.backgroundColor = 'rgba(255, 255, 0, 0.6)';
+                 highlight.style.padding = '2px 0';
+                 range.surroundContents(highlight);
+                 
+                 setTimeout(() => {
+                    if (highlight.parentNode) {
+                      const parent = highlight.parentNode;
+                      const textNode = window.document.createTextNode(highlight.textContent || '');
+                      parent.replaceChild(textNode, highlight);
+                      parent.normalize();
+                    }
+                 }, 2000);
+               } catch (e) {
+                 console.error('Failed to highlight', e);
+               }
+             }
+        }
+      }
+    }, 100);
+  };
+
+
+  if (!loading && !document) {
+    return (
+      <div className={`max-w-5xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+        <div className="mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Регламент</h1>
+          <p className="text-sm text-gray-500 mt-2">
+            Актуальные инструкции и рабочие регламенты для команды
+          </p>
+        </div>
+
+        {error ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+            {error}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-gray-200 bg-white p-8 text-sm text-gray-600">
+            Регламент компании скоро будет добавлен.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`max-w-5xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>
+      <div className="mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Регламент</h1>
+        <p className="text-sm text-gray-500 mt-2">
+          Актуальные инструкции и рабочие регламенты для команды
+        </p>
+      </div>
+
+      <div className="sticky top-0 z-10 -mx-4 mb-6 bg-gray-50/95 px-4 py-2 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:p-0">
+        <div className="relative">
+          <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+            <svg
+              className="h-5 w-5 text-gray-400"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </div>
+          <input
+            ref={searchInputRef}
+            type="text"
+            className="block w-full rounded-lg border border-gray-200 bg-white py-2 pl-10 pr-3 text-sm placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            placeholder="Поиск по регламенту..."
+            value={searchQuery}
+            onChange={(e) => updateSearch(e.target.value)}
+          />
+
+          {showResults && searchResults.length > 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+              {searchResults.map((result) => (
+                <button
+                  key={result.id}
+                  onClick={() => scrollToResult(result)}
+                  className="w-full border-b border-gray-100 px-4 py-3 text-left last:border-0 hover:bg-gray-50"
+                >
+                  <div className="mb-1 text-xs font-medium text-gray-500">{result.title}</div>
+                  <div className="text-sm text-gray-900">
+                    {result.context.split(new RegExp(`(${result.searchText})`, 'gi')).map((part, i) =>
+                      part.toLowerCase() === result.searchText.toLowerCase() ? (
+                        <mark key={i} className="bg-yellow-200 text-gray-900">
+                          {part}
+                        </mark>
+                      ) : (
+                        part
+                      )
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {showResults && searchQuery && searchResults.length === 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500 shadow-lg">
+              Ничего не найдено
+            </div>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500">
+          Загрузка документов...
+        </div>
+      ) : document ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">{document.title}</h2>
+          <p className="text-xs text-gray-500 mb-6">
+            Опубликовано: {formatDate(document.published_at || document.updated_at)}
+          </p>
+          <div ref={contentRef}>
+            <ReglamentRenderer content={document.content} />
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function LegacyReglamentPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showResults, setShowResults] = useState(false);
