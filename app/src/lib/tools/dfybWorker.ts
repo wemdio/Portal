@@ -525,8 +525,12 @@ const CLEANUP_SYSTEM_PROMPT = `Ты очищаешь названия компа
 7. Если всё КАПСОМ (6+ букв) — преобразуй в Title Case
 8. Результат должен красиво звучать в предложении: "Я заметил что КОМПАНИЯ..."
 
-ФОРМАТ: Только очищенные названия, каждое на новой строке, без нумерации.
-Количество строк = количеству входных компаний. Порядок тот же.`;
+ФОРМАТ: Очищенные названия с нумерацией строго в формате:
+1. Название
+2. Название
+...и так далее.
+Без пояснений, без кавычек. Количество строк = количеству входных компаний. Порядок и нумерация те же.
+Если не знаешь как очистить — верни оригинальное название с его номером. НИКОГДА не пропускай строки.`;
 
 async function stepNameCleanup(jobId: string, data: string[][]): Promise<string[][]> {
   const header = data[0];
@@ -542,31 +546,55 @@ async function stepNameCleanup(jobId: string, data: string[][]): Promise<string[
     if (await isCancelled(jobId)) throw new Error('Отменено');
     const chunk = body.slice(batch, batch + CLEANUP_BATCH);
     const input = chunk
-      .map((row) => {
+      .map((row, i) => {
+        const num = i + 1;
         const name = row[nameIdx] || '';
         const domain = siteIdx >= 0 ? row[siteIdx] || '' : '';
-        return domain ? `${name} Домен: ${domain}` : name;
+        return domain ? `${num}. ${name} Домен: ${domain}` : `${num}. ${name}`;
       })
       .join('\n');
 
-    let cleaned: string[] | null = null;
+    let cleanedMap: Map<number, string> | null = null;
     for (const model of OPENROUTER_CLEANUP_MODELS) {
       try {
         const content = await callOpenRouter(OPENROUTER_CLEANUP_API_KEY, model, [
           { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
           { role: 'user', content: input },
         ], { temperature: 0.1, title: 'Portal - DFYB Cleanup' });
-        cleaned = content.split('\n').map((l) => l.trim()).filter(Boolean);
-        if (cleaned.length > 0) break;
+
+        const numbered = new Map<number, string>();
+        const allLines: string[] = [];
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const match = trimmed.match(/^(\d+)\.\s*(.+)/);
+          if (match) {
+            numbered.set(parseInt(match[1], 10), match[2].trim());
+          }
+          allLines.push(trimmed);
+        }
+
+        if (numbered.size >= chunk.length * 0.8) {
+          cleanedMap = numbered;
+        } else if (allLines.length > 0) {
+          // Fallback: positional mapping
+          const positional = new Map<number, string>();
+          for (let j = 0; j < allLines.length && j < chunk.length; j++) {
+            if (allLines[j]) positional.set(j + 1, allLines[j]);
+          }
+          cleanedMap = positional;
+        }
+        if (cleanedMap && cleanedMap.size > 0) break;
       } catch {
         continue;
       }
     }
 
-    if (cleaned) {
-      for (let i = 0; i < chunk.length && i < cleaned.length; i++) {
+    if (cleanedMap) {
+      for (let i = 0; i < chunk.length; i++) {
         const idx = batch + i;
-        if (cleaned[i]) body[idx][nameIdx] = cleaned[i];
+        const cleaned = cleanedMap.get(i + 1);
+        if (cleaned) body[idx][nameIdx] = cleaned;
       }
     }
 

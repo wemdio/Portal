@@ -1,13 +1,19 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-2.5-pro';
 
-import { VOICEMAIL_DETECTION_BLOCK, CAMPAIGN_PRESETS, fillTemplate } from '@/lib/ai-caller-prompts';
+import {
+  VOICEMAIL_DETECTION_BLOCK,
+  CAMPAIGN_PRESETS,
+  fillTemplate,
+  getPresetTemplatesForProvider,
+} from '@/lib/ai-caller-prompts';
 
 const META_PROMPT = `Ты — эксперт по настройке AI-ассистентов для телефонных звонков.
 
@@ -38,6 +44,61 @@ ${VOICEMAIL_DETECTION_BLOCK}
 
 Верни ТОЛЬКО валидный JSON. Никакого текста до или после.`;
 
+function sanitizeOfferSummaryForSpeech(raw: string): string {
+  const fallback = 'мы отправляли короткое предложение по сотрудничеству';
+  if (!raw || !raw.trim()) return fallback;
+
+  let text = raw;
+  const replacements: Array<[RegExp, string]> = [
+    [/\be-?mail\b/gi, 'почта'],
+    [/\bcrm\b/gi, 'система работы с клиентами'],
+    [/\bsaas\b/gi, 'онлайн сервис'],
+    [/\bapi\b/gi, 'интеграция'],
+    [/\bkpi\b/gi, 'показатели'],
+    [/\broi\b/gi, 'окупаемость'],
+    [/\berp\b/gi, 'учетная система'],
+  ];
+  for (const [pattern, value] of replacements) {
+    text = text.replace(pattern, value);
+  }
+
+  text = text
+    .replace(/[^А-Яа-яЁё\s,.-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const firstSentence = text.split(/[.!?]/)[0]?.trim() ?? '';
+  const compact = (firstSentence || text).replace(/\s+/g, ' ').trim();
+  const short = compact.slice(0, 120).trim().replace(/[,. -]+$/g, '');
+
+  return short || fallback;
+}
+
+function sanitizeCompanyForSpeech(raw: string): string {
+  if (!raw || !raw.trim()) return '';
+  const translit: Array<[RegExp, string]> = [
+    [/\bonline\b/gi, 'онлайн'],
+    [/\bagency\b/gi, 'эйдженси'],
+    [/\bgroup\b/gi, 'групп'],
+    [/\btech\b/gi, 'тех'],
+    [/\bdigital\b/gi, 'диджитал'],
+    [/\bsolutions\b/gi, 'солюшнс'],
+  ];
+
+  let text = raw;
+  for (const [pattern, value] of translit) {
+    text = text.replace(pattern, value);
+  }
+
+  text = text
+    .replace(/[._/\\-]+/g, ' ')
+    .replace(/[^A-Za-zА-Яа-яЁё0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return text;
+}
+
 export async function POST(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -52,6 +113,8 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+
+  const provider = resolveAiCallerProvider(req);
 
   // Parse multipart form data
   let briefText = '';
@@ -111,7 +174,7 @@ export async function POST(req: NextRequest) {
 {
   "persona_name": "Женское имя менеджера (придумай подходящее, типичное для менеджера по продажам)",
   "company_from": "Название компании-отправителя (от чьего имени звоним)",
-  "offer_summary": "Краткое описание предложения (2-3 предложения, суть коммерческого предложения из брифа)",
+  "offer_summary": "Одно очень короткое предложение для озвучки по телефону (до 12 слов, только русский язык, без английских слов, без цифр, без спецсимволов)",
   "companyName": "Название компании-отправителя"
 }
 
@@ -174,10 +237,14 @@ export async function POST(req: NextRequest) {
     }
 
     if (preset) {
+      const templates = getPresetTemplatesForProvider(preset, provider);
+      const offerSummary = sanitizeOfferSummaryForSpeech(parsed.offer_summary || '');
+      const companyFromRaw = parsed.company_from || parsed.companyName || '';
+      const companyFromSpeech = sanitizeCompanyForSpeech(companyFromRaw);
       const vars: Record<string, string> = {
         persona_name: parsed.persona_name || 'Евгения',
-        company_from: parsed.company_from || parsed.companyName || '',
-        offer_summary: parsed.offer_summary || '',
+        company_from: companyFromSpeech || companyFromRaw,
+        offer_summary: offerSummary,
         contact_name: '{{contact_name}}',
         company_name: '{{company_name}}',
         contact_greeting: '{{contact_greeting}}',
@@ -186,9 +253,9 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         personaName: vars.persona_name,
-        systemPrompt: fillTemplate(preset.promptTemplate, vars),
-        firstMessage: fillTemplate(preset.firstMessageTemplate, vars),
-        companyName: parsed.company_from || parsed.companyName || '',
+        systemPrompt: fillTemplate(templates.promptTemplate, vars),
+        firstMessage: fillTemplate(templates.firstMessageTemplate, vars),
+        companyName: companyFromRaw,
         briefText: briefText.slice(0, 5000),
         presetId: preset.id,
       });

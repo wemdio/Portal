@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { listCalls, createCall } from '@/lib/ai-caller-provider';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
+import { normalizeRuPhoneNumber } from '@/lib/phone-normalization';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,13 +56,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Normalize phone number
-  let normalized = customerNumber.replace(/[\s\-()]/g, '');
-  if (normalized.startsWith('8') && normalized.length === 11) {
-    normalized = '+7' + normalized.slice(1);
-  }
-  if (!normalized.startsWith('+')) {
-    normalized = '+' + normalized;
+  const normalized = normalizeRuPhoneNumber(customerNumber);
+  if (!normalized) {
+    return NextResponse.json(
+      { error: 'Некорректный номер. Используйте формат +7XXXXXXXXXX.' },
+      { status: 400 },
+    );
   }
 
   try {

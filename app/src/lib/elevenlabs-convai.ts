@@ -12,19 +12,35 @@ function getApiKey(): string {
   return key;
 }
 
+function getDispatcher(): import('undici').Dispatcher | undefined {
+  const proxyUrl = process.env.ELEVENLABS_PROXY_URL;
+  if (!proxyUrl) return undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ProxyAgent } = require('undici') as typeof import('undici');
+    return new ProxyAgent(proxyUrl);
+  } catch {
+    return undefined;
+  }
+}
+
 async function elRequest<T = unknown>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
   const url = `${EL_BASE}${path}`;
-  const res = await fetch(url, {
+  const dispatcher = getDispatcher();
+  const fetchOptions: Record<string, unknown> = {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       'xi-api-key': getApiKey(),
       ...(options.headers ?? {}),
     },
-  });
+  };
+  if (dispatcher) fetchOptions.dispatcher = dispatcher;
+
+  const res = await fetch(url, fetchOptions as RequestInit);
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -84,6 +100,7 @@ function elAgentToVapiShape(agent: R): R {
       model: tts.model_id ?? '',
       stability: tts.stability,
       similarityBoost: tts.similarity_boost,
+      style: tts.style,
       speed: tts.speed,
     },
     createdAt: unixToIso(meta.created_at_unix_secs as number),
@@ -113,13 +130,31 @@ function vapiPayloadToElAgent(data: R): R {
   if (model.temperature !== undefined) promptConfig.temperature = model.temperature;
   if (Object.keys(promptConfig).length > 0) agentConfig.prompt = promptConfig;
 
+  agentConfig.tools = [
+    {
+      type: 'end_call',
+      description: 'Заверши звонок. Вызывай ВСЕГДА когда: 1) ты попрощалась ("Всего доброго", "До свидания" и т.д.), 2) собеседник попрощался, 3) собеседник молчит после прощания, 4) обнаружен автоответчик.',
+    },
+  ];
+
   if (Object.keys(agentConfig).length > 0) conversationConfig.agent = agentConfig;
+
+  conversationConfig.turn = {
+    turn_timeout: 8,
+    silence_end_call_timeout: 25,
+    mode: 'turn',
+  };
+
+  conversationConfig.conversation = {
+    max_duration_seconds: 180,
+  };
 
   const ttsConfig: R = {};
   if (voice.voiceId) ttsConfig.voice_id = voice.voiceId;
   if (voice.model) ttsConfig.model_id = voice.model;
   if (voice.stability !== undefined) ttsConfig.stability = voice.stability;
   if (voice.similarityBoost !== undefined) ttsConfig.similarity_boost = voice.similarityBoost;
+  if (voice.style !== undefined) ttsConfig.style = voice.style;
   if (voice.speed !== undefined) ttsConfig.speed = voice.speed;
   if (Object.keys(ttsConfig).length > 0) conversationConfig.tts = ttsConfig;
 
