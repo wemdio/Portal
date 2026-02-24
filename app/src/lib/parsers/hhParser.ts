@@ -149,8 +149,31 @@ const EMPLOYER_REQUEST_TIMEOUT_MS = (() => {
   const raw = Number(process.env.HH_EMPLOYER_REQUEST_TIMEOUT_MS ?? '14000');
   return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 14000;
 })();
-const PROXY_URL = process.env.HH_PROXY_URL?.trim();
-const PROXY_DISPATCHER: Dispatcher | undefined = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
+const PROXY_URLS = (() => {
+  const urls: string[] = [];
+  if (process.env.HH_PROXY_URLS) {
+    try {
+      const parsed = JSON.parse(process.env.HH_PROXY_URLS);
+      if (Array.isArray(parsed)) {
+        urls.push(...parsed.filter((u) => typeof u === 'string'));
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (urls.length === 0 && process.env.HH_PROXY_URL) {
+    urls.push(process.env.HH_PROXY_URL.trim());
+  }
+  return urls;
+})();
+
+const PROXY_DISPATCHERS: Dispatcher[] = PROXY_URLS.map((url) => new ProxyAgent(url));
+
+function getProxyDispatcher(): Dispatcher | undefined {
+  if (PROXY_DISPATCHERS.length === 0) return undefined;
+  const index = Math.floor(Math.random() * PROXY_DISPATCHERS.length);
+  return PROXY_DISPATCHERS[index];
+}
 
 let lastRequestAt = 0;
 let activeSlots = 0;
@@ -497,7 +520,7 @@ export async function fetchWithRetry<T>(
         },
         cache: 'no-store',
         signal: controller.signal,
-        ...(PROXY_DISPATCHER ? { dispatcher: PROXY_DISPATCHER } : {}),
+        ...(PROXY_DISPATCHERS.length > 0 ? { dispatcher: getProxyDispatcher() } : {}),
       };
       const res = await fetch(url, fetchInit);
 
