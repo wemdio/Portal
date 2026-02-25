@@ -20,16 +20,11 @@ function getErrorMessage(err: unknown): string {
 }
 
 function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string | null }) {
-  const [imgFailed, setImgFailed] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const publicUrl = normalizePublicAvatarUrl(user.avatar_url);
   const avatarUrl = signedUrl ?? publicUrl;
   const initial = (user.full_name || user.email || '?').charAt(0).toUpperCase();
-  const showImage = avatarUrl && !imgFailed;
-
-  // Когда подписанный URL приходит после публичного, даём второй шанс показать картинку
-  useEffect(() => {
-    if (signedUrl) setImgFailed(false);
-  }, [signedUrl]);
+  const showImage = avatarUrl && failedUrl !== avatarUrl;
 
   return (
     <div className="h-10 w-10 rounded-full flex items-center justify-center overflow-hidden bg-blue-600 flex-shrink-0">
@@ -40,7 +35,7 @@ function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string
           src={avatarUrl}
           alt=""
           className="h-full w-full object-cover"
-          onError={() => setImgFailed(true)}
+          onError={() => setFailedUrl(avatarUrl)}
         />
       ) : (
         <span className="text-white font-medium">{initial}</span>
