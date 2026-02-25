@@ -1,0 +1,490 @@
+/**
+ * Auto-report builder for Instantly email campaigns.
+ * Port of n8n pipeline: fetch analytics + steps, normalize (Code3), aggregate (Code1).
+ */
+
+const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
+
+const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
+
+export function extractCampaignIdsFromText(text: string): string[] {
+  const matches = text.match(UUID_PATTERN);
+  if (!matches?.length) return [];
+  return [...new Set(matches)];
+}
+
+export async function fetchInstantlyCampaignData(
+  campaignId: string,
+  apiKey: string
+): Promise<{ analytics: unknown; steps: unknown }> {
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${apiKey}`,
+  };
+
+  const [analyticsRes, stepsRes] = await Promise.all([
+    fetch(
+      `${INSTANTLY_BASE}/campaigns/analytics?id=${encodeURIComponent(campaignId)}&expand_crm_events=true`,
+      { headers }
+    ),
+    fetch(
+      `${INSTANTLY_BASE}/campaigns/analytics/steps?campaign_id=${encodeURIComponent(campaignId)}`,
+      { headers }
+    ),
+  ]);
+
+  if (!analyticsRes.ok) {
+    throw new Error(`Instantly analytics failed: ${analyticsRes.status} ${await analyticsRes.text()}`);
+  }
+  if (!stepsRes.ok) {
+    throw new Error(`Instantly steps failed: ${stepsRes.status} ${await stepsRes.text()}`);
+  }
+
+  const analytics = (await analyticsRes.json()) as unknown;
+  const steps = (await stepsRes.json()) as unknown;
+  return { analytics, steps };
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function variantToLetter(variantIndex: unknown): string {
+  return String.fromCharCode(65 + (parseInt(String(variantIndex), 10) || 0));
+}
+
+// ---------- Code3: normalize body ----------
+function unwrapBody(body: unknown): unknown {
+  if (Array.isArray(body)) return body;
+  if (body && typeof body === 'object') return body;
+  return null;
+}
+
+function isDetailsArray(arr: unknown): arr is Record<string, unknown>[] {
+  if (!Array.isArray(arr)) return false;
+  const first = arr[0] as Record<string, unknown> | undefined;
+  if (!first) return false;
+  return (
+    typeof first.step !== 'undefined' ||
+    typeof first.variant !== 'undefined' ||
+    typeof first.sent !== 'undefined' ||
+    typeof first.unique_opened !== 'undefined' ||
+    typeof first.unique_replies !== 'undefined' ||
+    typeof first.opened !== 'undefined' ||
+    typeof first.replies !== 'undefined'
+  );
+}
+
+function isSummaryObject(obj: unknown): obj is Record<string, unknown> {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    typeof o.campaign_id !== 'undefined' ||
+    typeof o.campaign_name !== 'undefined' ||
+    typeof o.emails_sent_count !== 'undefined' ||
+    typeof o.open_count !== 'undefined' ||
+    typeof o.reply_count !== 'undefined' ||
+    typeof o.open_count_unique !== 'undefined' ||
+    typeof o.contacted_count !== 'undefined' ||
+    typeof o.new_leads_contacted_count !== 'undefined' ||
+    typeof o.leads_count !== 'undefined'
+  );
+}
+
+function detectType(body: unknown): 'details' | 'summary-array' | 'summary-object' | 'unknown-array' | 'unknown' {
+  if (Array.isArray(body)) {
+    if (isDetailsArray(body)) return 'details';
+    const first = (body as unknown[])[0] as Record<string, unknown> | undefined;
+    if (first && isSummaryObject(first)) return 'summary-array';
+    return 'unknown-array';
+  }
+  if (isSummaryObject(body)) return 'summary-object';
+  return 'unknown';
+}
+
+interface NormalizedItem {
+  body: unknown;
+  _meta: { type: string; sourceIndex: number };
+}
+
+function normalizeMergeItems(items: { body?: unknown; [k: string]: unknown }[]): NormalizedItem[] {
+  return items.map((item, idx) => {
+    const j = item as Record<string, unknown>;
+    const bodyCandidate = typeof j.body !== 'undefined' ? j.body : j;
+    const body = unwrapBody(bodyCandidate);
+    const t = detectType(body);
+
+    if (t === 'summary-array') {
+      const arr = body as unknown[];
+      const first = arr?.[0] ?? {};
+      return { body: first, _meta: { type: 'summary', sourceIndex: idx } };
+    }
+    if (t === 'summary-object') {
+      return { body, _meta: { type: 'summary', sourceIndex: idx } };
+    }
+    if (t === 'details') {
+      return { body, _meta: { type: 'details', sourceIndex: idx } };
+    }
+    return {
+      body: body ?? (j.body ?? j),
+      _meta: { type: 'unknown', sourceIndex: idx },
+    };
+  });
+}
+
+// ---------- Code1: campaign data models ----------
+interface CampaignStep {
+  stepName: string;
+  totalSent: number;
+  totalOpened: number;
+  totalReplied: number;
+  totalClicked: number;
+  totalOpportunities: number;
+  variants: Record<
+    string,
+    { letter: string; sent: number; opened: number; replied: number; clicked: number; opportunities: number }
+  >;
+}
+
+interface CampaignRecord {
+  name: string;
+  contacts: number;
+  opened: number;
+  replies: number;
+  leads: number;
+  bounced: number;
+  totalEmailsSent: number;
+  steps: Record<number, CampaignStep>;
+}
+
+interface TotalStats {
+  contacts: number;
+  opened: number;
+  replies: number;
+  leads: number;
+  sent: number;
+  bounced: number;
+}
+
+function buildReportFromNormalized(normalized: NormalizedItem[]): {
+  tableText: string;
+  csvText: string;
+  rows: (string | number)[][];
+  summary: {
+    totalCampaigns: number;
+    totalContacts: number;
+    totalEmailsSent: number;
+    totalOpened: number;
+    totalReplies: number;
+    totalLeads: number;
+    totalBounced: number;
+    conversion: { openPctAllEmails: string; replyPctByLeads: string };
+  };
+  campaignData: Record<string, CampaignRecord>;
+} {
+  const detailsData: { index: number; data: unknown[] }[] = [];
+  const newSummaryData: { index: number; data: Record<string, unknown> }[] = [];
+
+  normalized.forEach((item, index) => {
+    const b = item.body;
+    if (Array.isArray(b)) {
+      const first = b[0] as Record<string, unknown> | undefined;
+      const looksLikeDetails =
+        first &&
+        (typeof first.step !== 'undefined' ||
+          typeof first.variant !== 'undefined' ||
+          typeof first.sent !== 'undefined' ||
+          typeof first.unique_opened !== 'undefined' ||
+          typeof first.unique_replies !== 'undefined');
+      const looksLikeSummary =
+        first &&
+        (typeof first.campaign_id !== 'undefined' ||
+          typeof first.campaign_name !== 'undefined' ||
+          typeof first.emails_sent_count !== 'undefined' ||
+          typeof first.open_count !== 'undefined' ||
+          typeof first.reply_count !== 'undefined' ||
+          typeof first.new_leads_contacted_count !== 'undefined');
+      if (looksLikeSummary && !looksLikeDetails) {
+        newSummaryData.push({ index, data: first });
+      } else {
+        detailsData.push({ index, data: b as unknown[] });
+      }
+      return;
+    }
+    if (b && typeof b === 'object' && !Array.isArray(b)) {
+      const o = b as Record<string, unknown>;
+      if (
+        typeof o.campaign_id !== 'undefined' ||
+        typeof o.campaign_name !== 'undefined' ||
+        typeof o.emails_sent_count !== 'undefined' ||
+        typeof o.open_count !== 'undefined' ||
+        typeof o.reply_count !== 'undefined' ||
+        typeof o.new_leads_contacted_count !== 'undefined'
+      ) {
+        newSummaryData.push({ index, data: o });
+      }
+      return;
+    }
+  });
+
+  const campaignData: Record<string, CampaignRecord> = {};
+  const totalStats: TotalStats = {
+    contacts: 0,
+    opened: 0,
+    replies: 0,
+    leads: 0,
+    sent: 0,
+    bounced: 0,
+  };
+
+  newSummaryData.forEach((wrap, idx) => {
+    const s = wrap.data;
+    const campaignName = (s.campaign_name as string) || `Campaign ${idx + 1}`;
+    const contacts = num(s.new_leads_contacted_count);
+    const opened = num(s.open_count);
+    const replies = num(s.reply_count);
+    const sent = num(s.emails_sent_count);
+    const leads = num(s.leads_count);
+    const bounced = num(s.bounced_count);
+    const campaignKey = `campaign_${Object.keys(campaignData).length + 1}`;
+    campaignData[campaignKey] = {
+      name: campaignName,
+      contacts,
+      opened,
+      replies,
+      leads,
+      bounced,
+      totalEmailsSent: sent,
+      steps: {},
+    };
+  });
+
+  detailsData.forEach((detailItem, idx) => {
+    const campaignKey = `campaign_${idx + 1}`;
+    if (!campaignData[campaignKey]) {
+      campaignData[campaignKey] = {
+        name: `Campaign ${idx + 1}`,
+        contacts: 0,
+        opened: 0,
+        replies: 0,
+        leads: 0,
+        bounced: 0,
+        totalEmailsSent: 0,
+        steps: {},
+      };
+    }
+    const dataArr = detailItem.data as Record<string, unknown>[];
+    dataArr.forEach((dataItem) => {
+      const stepNumber = (parseInt(String(dataItem.step), 10) || 0) + 1;
+      const variantLetter = variantToLetter(dataItem.variant);
+      if (!campaignData[campaignKey].steps[stepNumber]) {
+        campaignData[campaignKey].steps[stepNumber] = {
+          stepName: `Step ${stepNumber}`,
+          totalSent: 0,
+          totalOpened: 0,
+          totalReplied: 0,
+          totalClicked: 0,
+          totalOpportunities: 0,
+          variants: {},
+        };
+      }
+      const variantData = {
+        letter: variantLetter,
+        sent: num(dataItem.sent),
+        opened: num(dataItem.unique_opened ?? dataItem.opened),
+        replied: num(dataItem.unique_replies ?? dataItem.replies),
+        clicked: num(dataItem.unique_clicks ?? dataItem.clicks),
+        opportunities: num(dataItem.opportunities),
+      };
+      campaignData[campaignKey].steps[stepNumber].variants[variantLetter] = variantData;
+      const step = campaignData[campaignKey].steps[stepNumber];
+      step.totalSent += variantData.sent;
+      step.totalOpened += variantData.opened;
+      step.totalReplied += variantData.replied;
+      step.totalClicked += variantData.clicked;
+      step.totalOpportunities += variantData.opportunities;
+    });
+  });
+
+  Object.values(campaignData).forEach((c) => {
+    totalStats.contacts += num(c.contacts);
+    totalStats.opened += num(c.opened);
+    totalStats.replies += num(c.replies);
+    totalStats.leads += num(c.leads);
+    totalStats.sent += num(c.totalEmailsSent);
+    totalStats.bounced += num(c.bounced);
+  });
+
+  const currentDate = new Date().toLocaleDateString('ru-RU');
+  const period = `с ${currentDate} по ${currentDate}`;
+
+  let tableText = `Отчёт по email-кампании\n`;
+  tableText += `Период: ${period}\n\n`;
+  tableText += `Статистика по кампаниям:\n`;
+  tableText += `Название кампании\tКонтактов\tОтправлено писем\tОткрытий\t% открытий всех писем\tОтветов\t% ответов\tЛидов\tОстаток базы\n`;
+
+  Object.values(campaignData).forEach((c) => {
+    const contacts = num(c.contacts);
+    const sent = num(c.totalEmailsSent);
+    const opened = num(c.opened);
+    const replies = num(c.replies);
+    const leads = num(c.leads);
+    const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+    const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
+    const remainingBase = Math.max(0, leads - contacts);
+    tableText += `${c.name}\t${contacts}\t${sent}\t${opened}\t${openRate}%\t${replies}\t${replyRate}%\t${leads}\t${remainingBase}\n`;
+  });
+
+  const totalOpenPct =
+    totalStats.sent > 0 ? (totalStats.opened / totalStats.sent * 100).toFixed(1) : '0.0';
+  const totalReplyPct =
+    totalStats.contacts > 0 ? (totalStats.replies / totalStats.contacts * 100).toFixed(1) : '0.0';
+
+  tableText += `\nОбщая статистика:\n`;
+  tableText += `Показатель\tЗначение\tПроцент\n`;
+  tableText += `Общее количество контактов\t${totalStats.contacts}\t\n`;
+  tableText += `Общее количество отправленных писем\t${totalStats.sent}\t\n`;
+  tableText += `Общее количество открытий\t${totalStats.opened}\t${totalOpenPct}%\n`;
+  tableText += `Общее количество ответов\t${totalStats.replies}\t${totalReplyPct}%\n`;
+  tableText += `Общее количество лидов\t${totalStats.leads}\t\n`;
+  tableText += `Общее количество бракованных\t${totalStats.bounced}\t\n`;
+
+  tableText += `\nДетализация по письмам:\n\n`;
+  Object.values(campaignData).forEach((c) => {
+    tableText += `${c.name}\n`;
+    tableText += `STEP\tSENT\tOPENED\tREPLIED\tCLICKED\tOPPORTUNITIES\n`;
+    if (Object.keys(c.steps).length === 0) {
+      const openRate =
+        c.totalEmailsSent > 0 ? (num(c.opened) / num(c.totalEmailsSent) * 100).toFixed(1) : '0.0';
+      const replyRate = num(c.contacts) > 0 ? (num(c.replies) / num(c.contacts) * 100).toFixed(1) : '0.0';
+      tableText += `Общая статистика\t${num(c.totalEmailsSent)}\t${num(c.opened)}|${openRate}%\t${num(c.replies)}|${replyRate}%\t0\t0\n\n`;
+      return;
+    }
+    const sortedSteps = Object.keys(c.steps).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+    sortedSteps.forEach((stepNumber) => {
+      const step = c.steps[Number(stepNumber)];
+      const stepOpenRate =
+        step.totalSent > 0 ? (step.totalOpened / step.totalSent * 100).toFixed(1) : '0.0';
+      const stepReplyRate =
+        step.totalSent > 0 ? (step.totalReplied / step.totalSent * 100).toFixed(1) : '0.0';
+      tableText += `${step.stepName}\t${step.totalSent}\t${step.totalOpened}|${stepOpenRate}%\t${step.totalReplied}|${stepReplyRate}%\t${step.totalClicked}\t${step.totalOpportunities}\n`;
+      const sortedVariants = Object.keys(step.variants).sort();
+      sortedVariants.forEach((letter) => {
+        const v = step.variants[letter];
+        const vOpen = v.sent > 0 ? (v.opened / v.sent * 100).toFixed(0) : '0';
+        const vReply = v.sent > 0 ? (v.replied / v.sent * 100).toFixed(0) : '0';
+        tableText += `${letter}\t${v.sent}\t${v.opened}|${vOpen}%\t${v.replied}|${vReply}%\t${v.clicked}\t${v.opportunities}\n`;
+      });
+      tableText += `\n`;
+    });
+  });
+
+  const csvText = tableText.replace(/\t/g, ';');
+
+  const rows: (string | number)[][] = [];
+  rows.push([
+    'Дата',
+    'Кампания',
+    'Контактов',
+    'Отправлено писем',
+    'Открытий',
+    '% открытий всех писем',
+    'Ответов',
+    '% ответов',
+    'Браков',
+  ]);
+  Object.values(campaignData).forEach((c) => {
+    const contacts = num(c.contacts);
+    const sent = num(c.totalEmailsSent);
+    const opened = num(c.opened);
+    const replies = num(c.replies);
+    const bounced = num(c.bounced);
+    const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+    const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
+    rows.push([
+      currentDate,
+      c.name,
+      contacts,
+      sent,
+      opened,
+      `${openRate}%`,
+      replies,
+      `${replyRate}%`,
+      bounced,
+    ]);
+  });
+  rows.push([
+    currentDate,
+    'ИТОГО',
+    totalStats.contacts,
+    totalStats.sent,
+    totalStats.opened,
+    `${totalOpenPct}%`,
+    totalStats.replies,
+    `${totalReplyPct}%`,
+    totalStats.bounced,
+  ]);
+
+  return {
+    tableText,
+    csvText,
+    rows,
+    summary: {
+      totalCampaigns: Object.keys(campaignData).length,
+      totalContacts: totalStats.contacts,
+      totalEmailsSent: totalStats.sent,
+      totalOpened: totalStats.opened,
+      totalReplies: totalStats.replies,
+      totalLeads: totalStats.leads,
+      totalBounced: totalStats.bounced,
+      conversion: {
+        openPctAllEmails: totalOpenPct,
+        replyPctByLeads: totalReplyPct,
+      },
+    },
+    campaignData,
+  };
+}
+
+/**
+ * Fetch data for each campaign from Instantly, then build the report.
+ */
+export async function buildAutoReport(
+  campaignIds: string[],
+  apiKey: string
+): Promise<{
+  tableText: string;
+  csvText: string;
+  rows: (string | number)[][];
+  summary: {
+    totalCampaigns: number;
+    totalContacts: number;
+    totalEmailsSent: number;
+    totalOpened: number;
+    totalReplies: number;
+    totalLeads: number;
+    totalBounced: number;
+    conversion: { openPctAllEmails: string; replyPctByLeads: string };
+  };
+  campaignData: Record<string, CampaignRecord>;
+}> {
+  if (!campaignIds.length) {
+    throw new Error('Не указаны ID кампаний');
+  }
+  if (!apiKey.trim()) {
+    throw new Error('Не настроен INSTANTLY_API_KEY');
+  }
+
+  const mergeItems: { body?: unknown }[] = [];
+  for (const id of campaignIds) {
+    const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
+    // Same order as n8n Merge: summary first (analytics), then details (steps)
+    const analyticsBody = (analytics as { body?: unknown }).body ?? analytics;
+    const stepsBody = (steps as { body?: unknown }).body ?? steps;
+    mergeItems.push({ body: analyticsBody });
+    mergeItems.push({ body: stepsBody });
+  }
+
+  const normalized = normalizeMergeItems(mergeItems as { body?: unknown; [k: string]: unknown }[]);
+  return buildReportFromNormalized(normalized);
+}
