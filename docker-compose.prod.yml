@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
