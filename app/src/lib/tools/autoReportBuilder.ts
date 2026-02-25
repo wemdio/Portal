@@ -7,6 +7,60 @@ const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
+export interface InstantlyCampaignItem {
+  id: string;
+  name: string;
+  status?: number;
+  timestamp_created?: string;
+  timestamp_updated?: string;
+}
+
+function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {
+  if (Array.isArray(data)) return data as InstantlyCampaignItem[];
+  if (!data || typeof data !== 'object') return null;
+  const o = data as Record<string, unknown>;
+  // Официальный формат List campaign: { items: Campaign[], next_starting_after?: string }
+  if (Array.isArray(o.items)) return o.items as InstantlyCampaignItem[];
+  if (Array.isArray(o.campaigns)) return o.campaigns as InstantlyCampaignItem[];
+  if (Array.isArray(o.body)) return o.body as InstantlyCampaignItem[];
+  if (o.body && typeof o.body === 'object' && Array.isArray((o.body as Record<string, unknown>).campaigns)) {
+    return (o.body as { campaigns: InstantlyCampaignItem[] }).campaigns;
+  }
+  if (Array.isArray(o.data)) return o.data as InstantlyCampaignItem[];
+  return null;
+}
+
+/**
+ * Список кампаний Instantly (API v2).
+ * GET /api/v2/campaigns — ответ: { items: Campaign[], next_starting_after?: string }.
+ * Авторизация: Bearer {{api_key}} в заголовке Authorization.
+ * Поддержана пагинация (limit=100, starting_after).
+ */
+export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+  const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
+  const all: InstantlyCampaignItem[] = [];
+  let startingAfter: string | null = null;
+
+  do {
+    const url = new URL(`${INSTANTLY_BASE}/campaigns`);
+    url.searchParams.set('limit', '100');
+    if (startingAfter) url.searchParams.set('starting_after', startingAfter);
+
+    const res = await fetch(url.toString(), { headers });
+    if (!res.ok) {
+      throw new Error(`Instantly list campaigns failed: ${res.status} ${await res.text()}`);
+    }
+    const data = (await res.json()) as unknown;
+    const arr = extractCampaignsArray(data);
+    if (arr?.length) all.push(...arr);
+
+    const next = data && typeof data === 'object' && (data as Record<string, unknown>).next_starting_after;
+    startingAfter = typeof next === 'string' && next ? next : null;
+  } while (startingAfter);
+
+  return all;
+}
+
 export function extractCampaignIdsFromText(text: string): string[] {
   const matches = text.match(UUID_PATTERN);
   if (!matches?.length) return [];
@@ -472,7 +526,7 @@ export async function buildAutoReport(
     throw new Error('Не указаны ID кампаний');
   }
   if (!apiKey.trim()) {
-    throw new Error('Не настроен INSTANTLY_API_KEY');
+    throw new Error('Не настроен INSTANTLY_API_KEY или INSTANTLY_PORTAL_API_KEY');
   }
 
   const mergeItems: { body?: unknown }[] = [];
