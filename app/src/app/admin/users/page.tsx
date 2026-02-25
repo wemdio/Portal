@@ -7,6 +7,7 @@ import { UserRole, UserProfile } from '@/types';
 import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
+import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 
 function getErrorMessage(err: unknown): string {
@@ -16,6 +17,31 @@ function getErrorMessage(err: unknown): string {
     return (err as { message: string }).message;
   }
   return 'Неизвестная ошибка';
+}
+
+function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string | null }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const publicUrl = normalizePublicAvatarUrl(user.avatar_url);
+  const avatarUrl = signedUrl ?? publicUrl;
+  const initial = (user.full_name || user.email || '?').charAt(0).toUpperCase();
+  const showImage = avatarUrl && failedUrl !== avatarUrl;
+
+  return (
+    <div className="h-10 w-10 rounded-full flex items-center justify-center overflow-hidden bg-blue-600 flex-shrink-0">
+      {showImage ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={avatarUrl}
+          src={avatarUrl}
+          alt=""
+          className="h-full w-full object-cover"
+          onError={() => setFailedUrl(avatarUrl)}
+        />
+      ) : (
+        <span className="text-white font-medium">{initial}</span>
+      )}
+    </div>
+  );
 }
 
 export default function UsersPage() {
@@ -47,6 +73,8 @@ export default function UsersPage() {
   type SortDir = 'asc' | 'desc';
   const [sortBy, setSortBy] = useState<SortColumn>('name');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+
+  const [avatarSignedUrls, setAvatarSignedUrls] = useState<Record<string, string>>({});
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -164,6 +192,39 @@ export default function UsersPage() {
   useEffect(() => {
     void checkAccess();
   }, [checkAccess]);
+
+  useEffect(() => {
+    if (users.length === 0) return;
+    const idsWithAvatar = users
+      .filter((u) => typeof u.avatar_url === 'string' && u.avatar_url.trim().length > 0)
+      .map((u) => u.id);
+    if (idsWithAvatar.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token || cancelled) return;
+        const res = await fetch('/api/admin/avatars/signed', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ userIds: idsWithAvatar }),
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { urls?: Record<string, string> };
+        if (cancelled || !data.urls || typeof data.urls !== 'object') return;
+        setAvatarSignedUrls(data.urls);
+      } catch {
+        // ignore: fallback to public URL or initial
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [users, getAccessToken]);
 
   async function handleCreateUser() {
     if (!newUser.email || !newUser.password || !newUser.role) {
@@ -405,9 +466,7 @@ export default function UsersPage() {
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
-                      <div className="h-10 w-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-medium">
-                        {(user.full_name || user.email || '?').charAt(0).toUpperCase()}
-                      </div>
+                      <UserAvatar user={user} signedUrl={avatarSignedUrls[user.id]} />
                       <div className="ml-4">
                         <p className="text-sm font-medium text-gray-900">
                           {user.full_name || 'Без имени'}
