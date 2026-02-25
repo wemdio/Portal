@@ -5,7 +5,8 @@ import { buildAutoReport, extractCampaignIdsFromText } from '@/lib/tools/autoRep
 
 export const dynamic = 'force-dynamic';
 
-const INSTANTLY_API_KEY = process.env.INSTANTLY_API_KEY ?? '';
+const INSTANTLY_API_KEY =
+  (process.env.INSTANTLY_API_KEY ?? process.env.INSTANTLY_PORTAL_API_KEY ?? '').trim();
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -21,8 +22,8 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return jsonError('Необходима авторизация', 401);
 
-  if (!INSTANTLY_API_KEY.trim()) {
-    return jsonError('Сервис отчётов не настроен (INSTANTLY_API_KEY)', 503);
+  if (!INSTANTLY_API_KEY) {
+    return jsonError('Сервис отчётов не настроен (INSTANTLY_API_KEY или INSTANTLY_PORTAL_API_KEY)', 503);
   }
 
   let body: { campaignIds?: string[]; urlsOrText?: string };
