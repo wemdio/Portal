@@ -114,7 +114,7 @@ function tableTextToRows(tableText: string): string[][] {
 
 function getColumnWidths(rows: (string | number)[][]): { wch: number }[] {
   if (!rows.length) return [];
-  const numCols = Math.max(...rows.map((r) => r.length));
+  const numCols = rows.reduce((max, r) => (r.length > max ? r.length : max), 0);
   const widths: number[] = Array.from({ length: numCols }, () => 10);
   for (const row of rows) {
     row.forEach((cell, c) => {

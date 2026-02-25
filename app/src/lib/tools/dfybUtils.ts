@@ -27,14 +27,14 @@ export function detectEmailColumns(data: string[][]): number[] {
     .filter((idx) => idx >= 0);
   if (headerMatches.length > 0) return headerMatches;
 
-  const colCount = Math.max(...data.map((row) => row.length));
+  const colCount = data.reduce((max, row) => (row.length > max ? row.length : max), 0);
   const emailCounts = Array.from({ length: colCount }, () => 0);
   for (let r = 0; r < data.length; r++) {
     for (let c = 0; c < colCount; c++) {
       if (EMAIL_REGEX.test(data[r][c] ?? '')) emailCounts[c]++;
     }
   }
-  const maxCount = Math.max(0, ...emailCounts);
+  const maxCount = emailCounts.reduce((max, c) => (c > max ? c : max), 0);
   if (maxCount === 0) return [];
   return emailCounts.map((count, idx) => (count === maxCount ? idx : -1)).filter((idx) => idx >= 0);
 }
