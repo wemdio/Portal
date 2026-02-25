@@ -190,13 +190,7 @@ export function ProjectList() {
       const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles));
 
-      const avatarMap = new Map<string, string>();
-      for (const p of profiles) {
-        const name = p.full_name?.trim() || p.email?.split('@')[0]?.trim();
-        const url = typeof p.avatar_url === 'string' ? p.avatar_url.trim() : '';
-        if (name && url) avatarMap.set(name, url);
-      }
-      setAssigneeAvatars(avatarMap);
+      void fetchSignedAvatars();
 
       const renameMap = buildRenameMap(profiles);
       if (renameMap.size > 0) {
@@ -204,6 +198,28 @@ export function ProjectList() {
       }
     } catch (error) {
       void logError('projects.assignees.fetch.failed', error);
+    }
+  }
+
+  async function fetchSignedAvatars() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+
+      const res = await fetch('/api/avatars/batch-signed', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+
+      const map = (await res.json()) as Record<string, string>;
+      const avatarMap = new Map<string, string>();
+      for (const [name, url] of Object.entries(map)) {
+        if (url) avatarMap.set(name, url);
+      }
+      setAssigneeAvatars(avatarMap);
+    } catch {
+      // non-critical, letter fallbacks remain
     }
   }
 
@@ -999,12 +1015,24 @@ export function ProjectList() {
                              <div className="flex items-center gap-1">
                                 {assigneeAvatars.get(readOnlySpecialist) ? (
                                   // eslint-disable-next-line @next/next/no-img-element
-                                  <img src={assigneeAvatars.get(readOnlySpecialist)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
-                                ) : (
-                                  <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                    {readOnlySpecialist.charAt(0).toUpperCase()}
-                                  </span>
-                                )}
+                                  <img
+                                    src={assigneeAvatars.get(readOnlySpecialist)}
+                                    alt=""
+                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
+                                    onError={(e) => {
+                                      const target = e.currentTarget;
+                                      target.style.display = 'none';
+                                      const fallback = target.nextElementSibling;
+                                      if (fallback) (fallback as HTMLElement).style.display = '';
+                                    }}
+                                  />
+                                ) : null}
+                                <span
+                                  className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
+                                  style={assigneeAvatars.get(readOnlySpecialist) ? { display: 'none' } : undefined}
+                                >
+                                  {readOnlySpecialist.charAt(0).toUpperCase()}
+                                </span>
                                 <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>
@@ -1026,12 +1054,24 @@ export function ProjectList() {
                              <div className="flex items-center gap-1">
                                 {assigneeAvatars.get(readOnlyManager) ? (
                                   // eslint-disable-next-line @next/next/no-img-element
-                                  <img src={assigneeAvatars.get(readOnlyManager)} alt="" className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
-                                ) : (
-                                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0">
-                                    {readOnlyManager.charAt(0).toUpperCase()}
-                                  </span>
-                                )}
+                                  <img
+                                    src={assigneeAvatars.get(readOnlyManager)}
+                                    alt=""
+                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
+                                    onError={(e) => {
+                                      const target = e.currentTarget;
+                                      target.style.display = 'none';
+                                      const fallback = target.nextElementSibling;
+                                      if (fallback) (fallback as HTMLElement).style.display = '';
+                                    }}
+                                  />
+                                ) : null}
+                                <span
+                                  className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
+                                  style={assigneeAvatars.get(readOnlyManager) ? { display: 'none' } : undefined}
+                                >
+                                  {readOnlyManager.charAt(0).toUpperCase()}
+                                </span>
                                 <span className="text-gray-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-gray-300">—</span>

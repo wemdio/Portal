@@ -745,6 +745,11 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const siteAvailabilityAbortRef = useRef<AbortController | null>(null);
+  const [dedupModal, setDedupModal] = useState<{ isOpen: boolean; mode: 'email' | 'company'; col: number }>({
+    isOpen: false,
+    mode: 'email',
+    col: 0,
+  });
   const [emailSplit, setEmailSplit] = useState<EmailSplitState>({
     isOpen: false,
     sourceCol: 0,
@@ -1869,12 +1874,12 @@ export function DatabaseSpreadsheet() {
     );
   };
 
-  const handleRemoveDuplicatesByEmail = () => {
+  const handleRemoveDuplicatesByEmail = (selectedCol?: number) => {
     if (!activeTab) return;
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
-    const emailColumns = detectEmailColumns(data);
+    const emailColumns = selectedCol !== undefined ? [selectedCol] : detectEmailColumns(data);
 
     const emailMap = new Map<string, { row: string[]; score: number }>();
     const rowsWithoutEmail: string[][] = [];
@@ -1929,6 +1934,50 @@ export function DatabaseSpreadsheet() {
         applyRows(header ? [header, ...nextRows] : nextRows);
         setLastAction({
           message: `Удалено строк по почте: ${removed} (было ${body.length}, стало ${nextRows.length})`,
+          time: Date.now(),
+        });
+      },
+      'Удалить',
+    );
+  };
+
+  const handleRemoveDuplicatesByCompanyName = (selectedCol: number) => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const header = hasHeaderRow(data) ? data[0] : null;
+    const body = header ? data.slice(1) : data;
+
+    const nameMap = new Map<string, { row: string[]; score: number }>();
+    const rowsWithoutName: string[][] = [];
+
+    for (const row of body) {
+      const raw = (row[selectedCol] ?? '').trim().toLowerCase();
+      if (!raw) {
+        rowsWithoutName.push(row);
+        continue;
+      }
+      const score = countFilledCells(row);
+      const existing = nameMap.get(raw);
+      if (!existing || score > existing.score) {
+        nameMap.set(raw, { row, score });
+      }
+    }
+
+    const nextRows = [...nameMap.values().map((item) => item.row), ...rowsWithoutName];
+    const removed = body.length - nextRows.length;
+    if (removed === 0) {
+      setLastAction({ message: 'Дубликатов по названию компании не найдено', time: Date.now() });
+      return;
+    }
+
+    requestConfirm(
+      'Удалить дубликаты по названию компании?',
+      `Будет удалено строк: ${removed} (было ${body.length}, станет ${nextRows.length}). Для каждой компании останется строка с наибольшим количеством заполненных ячеек.`,
+      () => {
+        setUndoSnapshot(`Удаление дублей по компании (${removed})`);
+        applyRows(header ? [header, ...nextRows] : nextRows);
+        setLastAction({
+          message: `Удалено строк по компании: ${removed} (было ${body.length}, стало ${nextRows.length})`,
           time: Date.now(),
         });
       },
@@ -5809,10 +5858,17 @@ export function DatabaseSpreadsheet() {
                   </button>
                   <button
                     type="button"
-                    onClick={handleRemoveDuplicatesByEmail}
+                    onClick={() => setDedupModal({ isOpen: true, mode: 'email', col: 0 })}
                     className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
                   >
                     Убрать дубликаты по Email
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDedupModal({ isOpen: true, mode: 'company', col: 0 })}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:bg-gray-50 hover:border-gray-300"
+                  >
+                    Убрать дубликаты по компании
                   </button>
                 </div>
               </div>
@@ -7079,6 +7135,51 @@ export function DatabaseSpreadsheet() {
                 Разделить
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Dedup Column Selector Modal ──────────────────────── */}
+      {dedupModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="relative w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+            <button
+              type="button"
+              onClick={() => setDedupModal((prev) => ({ ...prev, isOpen: false }))}
+              className="absolute right-4 top-4 text-gray-400 hover:text-gray-600 transition"
+              aria-label="Закрыть"
+            >✕</button>
+            <h3 className="text-base font-bold text-gray-900 mb-4">
+              {dedupModal.mode === 'email' ? 'Убрать дубликаты по Email' : 'Убрать дубликаты по компании'}
+            </h3>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              {dedupModal.mode === 'email' ? 'Столбец с Email' : 'Столбец с названиями компаний'}
+            </label>
+            <select
+              value={dedupModal.col}
+              onChange={(e) => setDedupModal((prev) => ({ ...prev, col: Number(e.target.value) }))}
+              className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 focus:outline-none"
+            >
+              {headerLabels.map((label, i) => (
+                <option key={i} value={i}>
+                  {label || toColumnLabel(i)}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                setDedupModal((prev) => ({ ...prev, isOpen: false }));
+                if (dedupModal.mode === 'email') {
+                  handleRemoveDuplicatesByEmail(dedupModal.col);
+                } else {
+                  handleRemoveDuplicatesByCompanyName(dedupModal.col);
+                }
+              }}
+              className="mt-4 w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:ring-2 focus:ring-blue-300"
+            >
+              Найти и удалить дубликаты
+            </button>
           </div>
         </div>
       )}
