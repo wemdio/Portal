@@ -65,15 +65,11 @@ function TeamMemberAvatar({
   signedUrl?: string | null;
   variant: 'manager' | 'specialist';
 }) {
-  const [imgFailed, setImgFailed] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const publicUrl = normalizePublicAvatarUrl(avatarUrl);
   const url = signedUrl ?? publicUrl;
   const initial = displayName.charAt(0).toUpperCase();
-  const showImage = url && !imgFailed;
-
-  useEffect(() => {
-    if (signedUrl) setImgFailed(false);
-  }, [signedUrl]);
+  const showImage = Boolean(url && failedUrl !== url);
 
   const bgClass = variant === 'manager' ? 'bg-blue-50 border-blue-100 text-blue-600' : 'bg-gray-100 border-gray-200 text-gray-600';
 
@@ -86,7 +82,7 @@ function TeamMemberAvatar({
           src={url}
           alt=""
           className="h-full w-full object-cover"
-          onError={() => setImgFailed(true)}
+          onError={() => setFailedUrl(url)}
         />
       ) : (
         <span className="text-sm font-bold">{initial}</span>
