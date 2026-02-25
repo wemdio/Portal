@@ -1,10 +1,38 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
+/**
+ * Для продакшена используйте Session pooler Supabase в SUPABASE_DB_URL:
+ * дашборд → Project Settings → Database → Connection string → "Session pooler" (порт 5432).
+ * Session pooler проксируется по IPv4 — подходит для серверов без IPv6 (нет ENETUNREACH).
+ * Альтернатива: Transaction pooler (порт 6543) — меньше лимит "max clients reached".
+ */
 const path = require('path');
 const fs = require('fs/promises');
+const dns = require('dns').promises;
 const dotenv = require('dotenv');
 const { Client } = require('pg');
 
 const MIGRATION_TABLE = 'portal_migrations';
+
+const MAX_RETRIES = 4;
+const RETRY_DELAY_MS = 3000;
+
+function isRetryableDbError(err) {
+  const msg = (err && err.message) ? String(err.message) : '';
+  const code = err && err.code;
+  return (
+    code === 'ECONNREFUSED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ENOTFOUND' ||
+    code === 'ENETUNREACH' ||
+    msg.includes('Connection terminated') ||
+    msg.includes('MaxClientsInSessionMode') ||
+    msg.includes('max clients reached')
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function loadEnvFiles() {
   const candidates = [
@@ -55,6 +83,42 @@ function resolveMigrationsDirCandidates() {
   ];
 }
 
+/**
+ * Преобразует hostname в IPv4, чтобы избежать ENETUNREACH на серверах без IPv6
+ * (Supabase pooler по умолчанию может отдавать AAAA).
+ */
+async function connectionConfigWithIPv4(dbUrl, ssl) {
+  try {
+    const parsed = new URL(dbUrl);
+    const hostname = parsed.hostname;
+    const port = parsed.port || '5432';
+    const database = (parsed.pathname || '/postgres').slice(1) || 'postgres';
+    const user = decodeURIComponent(parsed.username || '');
+    const password = decodeURIComponent(parsed.password || '');
+
+    let host = hostname;
+    try {
+      const ips = await dns.resolve4(hostname);
+      if (ips && ips[0]) {
+        host = ips[0];
+      }
+    } catch {
+      // оставляем hostname, пусть pg резолвит сам
+    }
+
+    return {
+      host,
+      port: Number(port),
+      user,
+      password,
+      database,
+      ssl,
+    };
+  } catch {
+    return { connectionString: dbUrl, ssl };
+  }
+}
+
 async function ensureDatabase() {
   loadEnvFiles();
 
@@ -80,49 +144,66 @@ async function ensureDatabase() {
     return;
   }
   const ssl = shouldUseSsl(dbUrl) ? { rejectUnauthorized: false } : undefined;
-  const client = new Client({ connectionString: dbUrl, ssl });
+  const clientConfig = await connectionConfigWithIPv4(dbUrl, ssl);
 
-  await client.connect();
-  await client.query('select 1');
-
-  await client.query(
-    `create table if not exists public.${MIGRATION_TABLE} (
-      name text primary key,
-      applied_at timestamptz not null default now()
-    );`,
-  );
-
-  const { rows } = await client.query(
-    `select name from public.${MIGRATION_TABLE}`,
-  );
-  const applied = new Set(rows.map((row) => row.name));
-
-  let files = await fs.readdir(migrationsDir);
-  files = files.filter((file) => file.endsWith('.sql')).sort();
-
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
-    const trimmed = sql.trim();
-
-    console.log(`[db] Применяем миграцию: ${file}`);
-    await client.query('begin');
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const client = new Client(clientConfig);
     try {
-      if (trimmed) {
-        await client.query(sql);
-      }
+      await client.connect();
+      await client.query('select 1');
+
       await client.query(
-        `insert into public.${MIGRATION_TABLE} (name) values ($1)`,
-        [file],
+        `create table if not exists public.${MIGRATION_TABLE} (
+          name text primary key,
+          applied_at timestamptz not null default now()
+        );`,
       );
-      await client.query('commit');
+
+      const { rows } = await client.query(
+        `select name from public.${MIGRATION_TABLE}`,
+      );
+      const applied = new Set(rows.map((row) => row.name));
+
+      let files = await fs.readdir(migrationsDir);
+      files = files.filter((file) => file.endsWith('.sql')).sort();
+
+      for (const file of files) {
+        if (applied.has(file)) continue;
+        const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
+        const trimmed = sql.trim();
+
+        console.log(`[db] Применяем миграцию: ${file}`);
+        await client.query('begin');
+        try {
+          if (trimmed) {
+            await client.query(sql);
+          }
+          await client.query(
+            `insert into public.${MIGRATION_TABLE} (name) values ($1)`,
+            [file],
+          );
+          await client.query('commit');
+        } catch (err) {
+          await client.query('rollback');
+          throw err;
+        }
+      }
+
+      await client.end();
+      return;
     } catch (err) {
-      await client.query('rollback');
-      throw err;
+      await client.end().catch(() => {});
+      lastError = err;
+      if (attempt < MAX_RETRIES && isRetryableDbError(err)) {
+        console.warn(`[db] Подключение не удалось (попытка ${attempt}/${MAX_RETRIES}), повтор через ${RETRY_DELAY_MS} мс:`, err.message);
+        await sleep(RETRY_DELAY_MS);
+      } else {
+        throw err;
+      }
     }
   }
-
-  await client.end();
+  throw lastError;
 }
 
 if (require.main === module) {

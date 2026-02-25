@@ -45,8 +45,9 @@ blocks:
           commands:
             - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
             - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --platform linux/amd64 -f Dockerfile .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
   - name: Deploy to production
     dependencies:
@@ -93,11 +94,13 @@ blocks:
               echo '--- Step 2: pull new images ---';
               sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
               sudo -n docker compose -p portal -f docker-compose.prod.yml pull;
-              echo '--- Step 3: restart portal + yandexmaps ---';
-              sudo -n docker ps -a --filter 'label=com.docker.compose.service=portal' -q | xargs -r sudo -n docker rm -f;
-              sudo -n docker ps -a --filter 'label=com.docker.compose.service=yandexmaps' -q | xargs -r sudo -n docker rm -f;
-              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps;
+              echo '--- Step 3: restart portal + yandexmaps + guacd + rdp-ws ---';
+              for svc in portal yandexmaps guacd rdp-ws; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
+              sudo -n docker rm -f portal-guacd portal-yandexmaps portal-rdp-ws 2>/dev/null || true;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws;
               echo '--- Step 4: restart workers with new code ---';
+              for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
+              sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation 2>/dev/null || true;
               sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
               sudo -n docker image prune -f;
               sudo -n docker volume prune -f;

@@ -1,10 +1,11 @@
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines, Monitor } from 'lucide-react';
+import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines, FileText } from 'lucide-react';
+import { RdpToolCard } from './RdpToolCard';
 
 export default function ToolsPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 text-left max-w-full">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Инструменты</h1>
         <p className="text-sm text-gray-500">
@@ -12,10 +13,10 @@ export default function ToolsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
         <Link
           href={'/tools/done-for-you' as Route}
-          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300"
+          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300 min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -37,7 +38,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href={'/tools/ai-caller' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -54,7 +55,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href={'/tools/ai-caller-v2' as Route}
-          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300"
+          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300 min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -76,7 +77,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href="/tools/databases"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -93,7 +94,7 @@ export default function ToolsPage() {
         </Link>
         <Link
           href="/parsers"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -111,7 +112,7 @@ export default function ToolsPage() {
 
         <Link
           href={'/tools/email-sequence' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md"
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -127,27 +128,26 @@ export default function ToolsPage() {
           </div>
         </Link>
 
-        <div
-          className="rounded-2xl border-2 border-violet-200 bg-gradient-to-br from-violet-50 to-white p-6 opacity-90"
-          aria-disabled="true"
+        <Link
+          href={'/tools/auto-report' as Route}
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
         >
           <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-base font-semibold text-gray-900">Удалённый рабочий стол</p>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
-                  В разработке
-                </span>
-              </div>
+            <div className="min-w-0">
+              <p className="text-base font-semibold text-gray-900">Автоотчёты</p>
               <p className="text-sm text-gray-500">
-                Подключение к удалённому ПК через браузер с бронированием.
+                Отчёт по кампаниям Instantly: подгрузка кампаний, выбор проектов, статистика и детализация по письмам.
               </p>
             </div>
-            <Monitor className="h-8 w-8 text-violet-400" />
+            <FileText className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
           </div>
-          <div className="mt-4 text-sm font-medium text-gray-400 cursor-not-allowed">
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
             Открыть →
           </div>
+        </Link>
+
+        <div className="min-w-0 flex flex-col h-full">
+          <RdpToolCard />
         </div>
       </div>
     </div>

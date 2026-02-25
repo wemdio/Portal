@@ -6,6 +6,7 @@ import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { UserProfile, UserRole } from '@/types';
 import { getAssigneeDisplayName } from '@/lib/projectAssignees';
+import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 interface ProjectData {
   id: string;
@@ -15,7 +16,7 @@ interface ProjectData {
   specialist: string | null;
 }
 
-type ProfileData = Pick<UserProfile, 'email' | 'full_name' | 'role'>;
+type ProfileData = Pick<UserProfile, 'id' | 'email' | 'full_name' | 'role' | 'avatar_url'>;
 
 interface SpecialistStats {
   name: string;
@@ -53,19 +54,89 @@ function nextSort<K extends string>(prev: SortState<K>, key: K, defaultDir: Sort
   return { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
 }
 
+function TeamMemberAvatar({
+  displayName,
+  avatarUrl,
+  signedUrl,
+  variant,
+}: {
+  displayName: string;
+  avatarUrl: string | null | undefined;
+  signedUrl?: string | null;
+  variant: 'manager' | 'specialist';
+}) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const publicUrl = normalizePublicAvatarUrl(avatarUrl);
+  const url = signedUrl ?? publicUrl;
+  const initial = displayName.charAt(0).toUpperCase();
+  const showImage = Boolean(url && failedUrl !== url);
+
+  const bgClass = variant === 'manager' ? 'bg-blue-50 border-blue-100 text-blue-600' : 'bg-gray-100 border-gray-200 text-gray-600';
+
+  return (
+    <div className={`h-9 w-9 rounded-full flex items-center justify-center overflow-hidden border flex-shrink-0 mr-3 ${showImage ? '' : bgClass}`}>
+      {showImage && url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={url}
+          src={url}
+          alt=""
+          className="h-full w-full object-cover"
+          onError={() => setFailedUrl(url)}
+        />
+      ) : (
+        <span className="text-sm font-bold">{initial}</span>
+      )}
+    </div>
+  );
+}
+
 export default function TeamPage() {
   const isTma = useIsTma();
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
   const [capacities, setCapacities] = useState<Record<string, number>>({});
+  const [avatarSignedUrls, setAvatarSignedUrls] = useState<Record<string, string>>({});
   const [specialistSort, setSpecialistSort] = useState<SortState<SpecialistSortKey>>({ key: 'fact', dir: 'desc' });
   const [managerSort, setManagerSort] = useState<SortState<ManagerSortKey>>({ key: 'fact', dir: 'desc' });
+
+  const nameToAvatarUrl = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of profiles) {
+      const name = normalizeAssigneeName(getAssigneeDisplayName(p));
+      const url = typeof p.avatar_url === 'string' ? p.avatar_url.trim() : '';
+      if (name && url) map.set(name, url);
+    }
+    return map;
+  }, [profiles]);
 
   useEffect(() => {
     void fetchData();
     loadCapacities();
   }, []);
+
+  useEffect(() => {
+    if (profiles.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token || cancelled) return;
+        const res = await fetch('/api/avatars/batch-signed', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as Record<string, string>;
+        if (cancelled || typeof data !== 'object') return;
+        setAvatarSignedUrls(data);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profiles.length]);
 
   const loadCapacities = () => {
     try {
@@ -92,7 +163,7 @@ export default function TeamPage() {
           .select('id, name, status, manager, specialist'),
         supabase
           .from('profiles')
-          .select('email, full_name, role'),
+          .select('id, email, full_name, role, avatar_url'),
       ]);
 
       if (projectsResult.error) throw projectsResult.error;
@@ -443,9 +514,12 @@ export default function TeamPage() {
                   <tr key={stat.name} className="hover:bg-gray-50 transition-colors">
                     <td className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'}`}>
                       <div className="flex items-center">
-                        <div className="h-9 w-9 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 text-sm font-bold mr-3 border border-blue-100">
-                          {stat.name.charAt(0).toUpperCase()}
-                        </div>
+                        <TeamMemberAvatar
+                          displayName={stat.name}
+                          avatarUrl={nameToAvatarUrl.get(stat.name)}
+                          signedUrl={avatarSignedUrls[stat.name]}
+                          variant="manager"
+                        />
                         <div>
                           <p className="text-sm font-semibold text-gray-900">{stat.name}</p>
                           <p className="text-xs text-gray-500">{stat.activeProjects.length} активных</p>
@@ -594,9 +668,12 @@ export default function TeamPage() {
                   <tr key={stat.name} className="hover:bg-gray-50 transition-colors">
                     <td className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'}`}>
                       <div className="flex items-center">
-                        <div className="h-9 w-9 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 text-sm font-bold mr-3 border border-gray-200">
-                          {stat.name.charAt(0).toUpperCase()}
-                        </div>
+                        <TeamMemberAvatar
+                          displayName={stat.name}
+                          avatarUrl={nameToAvatarUrl.get(stat.name)}
+                          signedUrl={avatarSignedUrls[stat.name]}
+                          variant="specialist"
+                        />
                         <div>
                           <p className="text-sm font-semibold text-gray-900">{stat.name}</p>
                           <p className="text-xs text-gray-500">{stat.activeProjects.length} активных</p>

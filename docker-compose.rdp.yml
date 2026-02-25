@@ -1,0 +1,38 @@
+# Только RDP: guacd + rdp-ws. Для проверки RDP без portal/worker (порт 3000 не трогаем).
+# Запуск: docker compose -f docker-compose.rdp.yml up --build
+# Или из app: npm run docker:rdp
+
+version: '3.8'
+
+services:
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: portal-guacd
+    restart: unless-stopped
+    networks:
+      - rdp-network
+
+  rdp-ws:
+    build:
+      context: ./services/rdp-ws
+      dockerfile: Dockerfile
+    container_name: portal-rdp-ws
+    depends_on:
+      - guacd
+    ports:
+      - "8082:8080"
+    environment:
+      - RDP_WS_SECRET=${RDP_WS_SECRET}
+      - GUACD_HOST=guacd
+      - GUACD_PORT=4822
+      - RDP_HOST=${RDP_HOST}
+      - RDP_PORT=${RDP_PORT:-3389}
+      - RDP_USERNAME=${RDP_USERNAME}
+      - RDP_PASSWORD=${RDP_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - rdp-network
+
+networks:
+  rdp-network:
+    driver: bridge
