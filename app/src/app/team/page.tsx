@@ -75,7 +75,7 @@ function TeamMemberAvatar({
 
   return (
     <div className={`h-9 w-9 rounded-full flex items-center justify-center overflow-hidden border flex-shrink-0 mr-3 ${showImage ? '' : bgClass}`}>
-      {showImage ? (
+      {showImage && url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           key={url}
