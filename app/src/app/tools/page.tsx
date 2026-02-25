@@ -128,25 +128,23 @@ export default function ToolsPage() {
           </div>
         </Link>
 
-        <div className="rounded-2xl border border-gray-200 bg-gray-50/50 p-6 min-w-0 flex flex-col h-full cursor-not-allowed select-none">
+        <Link
+          href={'/tools/auto-report' as Route}
+          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
+        >
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <p className="text-base font-semibold text-gray-900">Автоотчёты</p>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 rounded shrink-0">
-                  В разработке
-                </span>
-              </div>
+              <p className="text-base font-semibold text-gray-900">Автоотчёты</p>
               <p className="text-sm text-gray-500">
-                Отчёт по кампаниям Instantly: статистика и детализация по письмам по ссылке из Telegram.
+                Отчёт по кампаниям Instantly: подгрузка кампаний, выбор проектов, статистика и детализация по письмам.
               </p>
             </div>
-            <FileText className="h-8 w-8 text-gray-400 shrink-0" />
+            <FileText className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
           </div>
-          <div className="mt-4 text-sm font-medium text-gray-400">
+          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
             Открыть →
           </div>
-        </div>
+        </Link>
 
         <div className="min-w-0 flex flex-col h-full">
           <RdpToolCard />
