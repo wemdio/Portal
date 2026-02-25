@@ -264,8 +264,11 @@ const toColumnLabel = (index: number) => {
   return label;
 };
 
+const safeMaxCols = (rows: string[][]) =>
+  rows.reduce((max, row) => (row.length > max ? row.length : max), 1);
+
 const normalizeRows = (rows: string[][]) => {
-  const maxCols = Math.max(1, ...rows.map((row) => row.length));
+  const maxCols = safeMaxCols(rows);
   return rows.map((row) => {
     if (row.length >= maxCols) return row;
     return [...row, ...Array.from({ length: maxCols - row.length }, () => '')];
@@ -297,6 +300,34 @@ const parseClipboardTsv = (text: string) => {
   }
 
   return values;
+};
+
+const parseClipboardHtml = (html: string): string[][] | null => {
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const table = doc.querySelector('table');
+    if (!table) return null;
+    const rows = Array.from(table.querySelectorAll('tr'));
+    if (rows.length === 0) return null;
+    const result = rows.map((tr) =>
+      Array.from(tr.querySelectorAll('td, th')).map((cell) =>
+        (cell.textContent ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n'),
+      ),
+    );
+    while (result.length > 0 && result[result.length - 1].every((c) => c.trim().length === 0)) {
+      result.pop();
+    }
+    return result.length > 0 ? result : null;
+  } catch {
+    return null;
+  }
+};
+
+const parseBestClipboard = (plain: string, html: string): string[][] => {
+  const fromTsv = parseClipboardTsv(plain);
+  const fromHtml = parseClipboardHtml(html);
+  if (fromHtml && fromHtml.length > fromTsv.length) return fromHtml;
+  return fromTsv;
 };
 
 const writeTextToClipboard = async (text: string) => {
@@ -578,7 +609,7 @@ const detectEmailColumns = (data: string[][]) => {
     .filter((index) => index >= 0);
   if (headerMatches.length > 0) return headerMatches;
 
-  const colCount = Math.max(...data.map((row) => row.length));
+  const colCount = data.reduce((max, row) => (row.length > max ? row.length : max), 0);
   const emailCounts = Array.from({ length: colCount }, () => 0);
   const rowCount = data.length;
   for (let r = 0; r < rowCount; r += 1) {
@@ -589,7 +620,7 @@ const detectEmailColumns = (data: string[][]) => {
       }
     }
   }
-  const maxCount = Math.max(0, ...emailCounts);
+  const maxCount = emailCounts.reduce((max, c) => (c > max ? c : max), 0);
   if (maxCount === 0) return [] as number[];
   return emailCounts
     .map((count, index) => (count === maxCount ? index : -1))
@@ -1485,11 +1516,9 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const applyPaste = (text: string) => {
-    if (!activeTab) return;
-    const values = parseClipboardTsv(text);
-    if (values.length === 0) return;
-    const maxCols = Math.max(1, ...values.map((row) => row.length));
+  const applyPaste = (values: string[][]) => {
+    if (!activeTab || values.length === 0) return;
+    const maxCols = safeMaxCols(values);
 
     const { startRow, startCol } = normalizedSelection;
 
@@ -2051,7 +2080,7 @@ export function DatabaseSpreadsheet() {
   const handleRemoveEmptyColumns = () => {
     if (!activeTab) return;
     const data = activeTab.data;
-    const maxCols = Math.max(1, ...data.map((row) => row.length));
+    const maxCols = safeMaxCols(data);
     const hasValue = Array.from({ length: maxCols }, () => false);
 
     for (const row of data) {
@@ -2308,11 +2337,13 @@ export function DatabaseSpreadsheet() {
     }
   };
 
-  const handlePaste = (event: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const text = event.clipboardData.getData('text');
-    if (!text) return;
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement | HTMLDivElement>) => {
+    const plain = event.clipboardData.getData('text/plain') || event.clipboardData.getData('text');
+    const html = event.clipboardData.getData('text/html');
+    if (!plain && !html) return;
     event.preventDefault();
-    applyPaste(text);
+    const values = parseBestClipboard(plain ?? '', html ?? '');
+    applyPaste(values);
   };
 
   const rowCount = activeTab?.data.length ?? 0;
@@ -5491,7 +5522,9 @@ export function DatabaseSpreadsheet() {
           <div
             ref={tableWrapperRef}
             className="overflow-auto h-full"
+            tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
+            onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
             onScroll={handleTableScroll}
             onContextMenu={(event) => {
               event.preventDefault();
