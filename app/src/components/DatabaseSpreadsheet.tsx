@@ -203,7 +203,7 @@ const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
 const BRIEF_SCORING_BATCH_SIZE = 10;
-const BRIEF_SCORING_MAX_RETRIES = 2;
+const BRIEF_SCORING_MAX_RETRIES = 3;
 const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_STORAGE_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
@@ -683,6 +683,40 @@ export function DatabaseSpreadsheet() {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushSave = () => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    if (!storageKey || !isHydrated || tabs.length === 0) return;
+    const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
+    const payload: PersistedSpreadsheetState = {
+      version: STORAGE_VERSION,
+      tabs,
+      activeTabId: safeActiveTabId,
+      tabCounter: deriveTabCounter(tabs, tabCounter),
+      columnWidths,
+    };
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch (error) {
+      void logError('spreadsheet.state.local_save.failed', error);
+    }
+    if (userId) {
+      void supabase
+        .from('database_spreadsheet_states')
+        .upsert({
+          user_id: userId,
+          state: payload,
+          updated_at: new Date().toISOString(),
+        })
+        .then(({ error }) => {
+          if (error) void logError('spreadsheet.state.remote_save.failed', error);
+        });
+    }
+  };
+
   const [personalization, setPersonalization] = useState<PersonalizationState>({
     isOpen: false,
     sourceCol: 0,
@@ -1840,6 +1874,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicates = () => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1876,6 +1911,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicatesByEmail = (selectedCol?: number) => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1943,6 +1979,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicatesByCompanyName = (selectedCol: number) => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1987,6 +2024,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveEmptyRows = () => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = data[0] ?? [];
     const body = data.slice(1);
@@ -3489,6 +3527,7 @@ export function DatabaseSpreadsheet() {
 
   const handleStartBriefScoring = async () => {
     if (!activeTab || briefScoring.isScoring) return;
+    flushSave();
 
     const effectiveBriefText = briefScoring.inputMode === 'text'
       ? briefScoring.manualText.trim()
@@ -3510,9 +3549,34 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
-    if (!token) {
+    let currentToken = '';
+    let tokenExpiresAt = 0;
+    const TOKEN_SAFETY_MS = 2 * 60 * 1000;
+
+    const loadToken = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return null;
+      currentToken = session.access_token;
+      tokenExpiresAt = session.expires_at ? session.expires_at * 1000 : 0;
+      return currentToken;
+    };
+
+    const refreshToken = async () => {
+      const { data: refreshed, error } = await supabase.auth.refreshSession();
+      if (error || !refreshed.session?.access_token) return null;
+      currentToken = refreshed.session.access_token;
+      tokenExpiresAt = refreshed.session.expires_at ? refreshed.session.expires_at * 1000 : 0;
+      return currentToken;
+    };
+
+    const ensureToken = async () => {
+      if (!currentToken) return loadToken();
+      if (tokenExpiresAt && Date.now() > tokenExpiresAt - TOKEN_SAFETY_MS) return refreshToken();
+      return currentToken;
+    };
+
+    const initialToken = await loadToken();
+    if (!initialToken) {
       setBriefScoring((prev) => ({ ...prev, error: 'Необходима авторизация' }));
       return;
     }
@@ -3589,11 +3653,14 @@ export function DatabaseSpreadsheet() {
               throw new Error('Отменено пользователем');
             }
 
+            const validToken = await ensureToken();
+            if (!validToken) throw new Error('Необходима авторизация');
+
             let res: Response;
             try {
               res = await fetch('/api/brief-scoring/score', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${validToken}` },
                 body: JSON.stringify({ briefText: effectiveBriefText, companies }),
                 signal: briefScoringAbortRef.current?.signal,
               });
@@ -3609,6 +3676,27 @@ export function DatabaseSpreadsheet() {
                 continue;
               }
               throw new Error('Не удалось отправить запрос к AI');
+            }
+
+            if (res.status === 401) {
+              const newToken = await refreshToken();
+              if (newToken) {
+                const retryRes = await fetch('/api/brief-scoring/score', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${newToken}` },
+                  body: JSON.stringify({ briefText: effectiveBriefText, companies }),
+                  signal: briefScoringAbortRef.current?.signal,
+                });
+                if (retryRes.ok) {
+                  const retryParsed = (await retryRes.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
+                  if (retryParsed && !retryParsed.error) {
+                    resData = retryParsed;
+                    break;
+                  }
+                }
+              }
+              resData = { error: 'Необходима авторизация' };
+              break;
             }
 
             let parsed: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
@@ -3774,6 +3862,7 @@ export function DatabaseSpreadsheet() {
 
   const handleStartSiteAvailability = async () => {
     if (!activeTab || siteAvailability.isChecking) return;
+    flushSave();
 
     const rowsToProcess: { rowIndex: number; url: string }[] = [];
     for (let i = 1; i < activeTab.data.length; i++) {
@@ -4593,6 +4682,7 @@ export function DatabaseSpreadsheet() {
 
   const handleStartNameCleanup = async () => {
     if (!activeTab || nameCleanup.isProcessing) return;
+    flushSave();
 
     let token = '';
     let tokenExpiresAt = 0;
