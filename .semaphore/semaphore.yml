@@ -99,6 +99,8 @@ blocks:
               sudo -n docker rm -f portal-guacd portal-yandexmaps portal-rdp-ws 2>/dev/null || true;
               sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws;
               echo '--- Step 4: restart workers with new code ---';
+              for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
+              sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation 2>/dev/null || true;
               sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
               sudo -n docker image prune -f;
               sudo -n docker volume prune -f;
