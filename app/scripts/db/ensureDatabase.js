@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
- * Для продакшена используйте connection pooler Supabase (Transaction mode, порт 6543)
- * в SUPABASE_DB_URL, чтобы избежать ошибки "MaxClientsInSessionMode: max clients reached".
- * В дашборде: Project Settings → Database → Connection string → "Transaction" (port 6543).
+ * Для продакшена используйте Session pooler Supabase в SUPABASE_DB_URL:
+ * дашборд → Project Settings → Database → Connection string → "Session pooler" (порт 5432).
+ * Session pooler проксируется по IPv4 — подходит для серверов без IPv6 (нет ENETUNREACH).
+ * Альтернатива: Transaction pooler (порт 6543) — меньше лимит "max clients reached".
  */
 const path = require('path');
 const fs = require('fs/promises');
