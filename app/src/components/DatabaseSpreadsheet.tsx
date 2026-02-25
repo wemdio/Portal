@@ -683,6 +683,40 @@ export function DatabaseSpreadsheet() {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushSave = () => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    if (!storageKey || !isHydrated || tabs.length === 0) return;
+    const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
+    const payload: PersistedSpreadsheetState = {
+      version: STORAGE_VERSION,
+      tabs,
+      activeTabId: safeActiveTabId,
+      tabCounter: deriveTabCounter(tabs, tabCounter),
+      columnWidths,
+    };
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch (error) {
+      void logError('spreadsheet.state.local_save.failed', error);
+    }
+    if (userId) {
+      void supabase
+        .from('database_spreadsheet_states')
+        .upsert({
+          user_id: userId,
+          state: payload,
+          updated_at: new Date().toISOString(),
+        })
+        .then(({ error }) => {
+          if (error) void logError('spreadsheet.state.remote_save.failed', error);
+        });
+    }
+  };
+
   const [personalization, setPersonalization] = useState<PersonalizationState>({
     isOpen: false,
     sourceCol: 0,
@@ -1840,6 +1874,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicates = () => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1876,6 +1911,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicatesByEmail = (selectedCol?: number) => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1943,6 +1979,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveDuplicatesByCompanyName = (selectedCol: number) => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = hasHeaderRow(data) ? data[0] : null;
     const body = header ? data.slice(1) : data;
@@ -1987,6 +2024,7 @@ export function DatabaseSpreadsheet() {
 
   const handleRemoveEmptyRows = () => {
     if (!activeTab) return;
+    flushSave();
     const data = activeTab.data;
     const header = data[0] ?? [];
     const body = data.slice(1);
@@ -3774,6 +3812,7 @@ export function DatabaseSpreadsheet() {
 
   const handleStartSiteAvailability = async () => {
     if (!activeTab || siteAvailability.isChecking) return;
+    flushSave();
 
     const rowsToProcess: { rowIndex: number; url: string }[] = [];
     for (let i = 1; i < activeTab.data.length; i++) {
@@ -4593,6 +4632,7 @@ export function DatabaseSpreadsheet() {
 
   const handleStartNameCleanup = async () => {
     if (!activeTab || nameCleanup.isProcessing) return;
+    flushSave();
 
     let token = '';
     let tokenExpiresAt = 0;
