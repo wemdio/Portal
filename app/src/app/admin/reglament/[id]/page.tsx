@@ -150,7 +150,7 @@ export default function AdminReglamentEditPage() {
   }, []);
 
   const handleSave = async (nextStatus?: ReglamentStatus) => {
-    if (!docId) return;
+    if (!docId || !metadata) return;
     setSaving(true);
     setError(null);
     setSaveMessage(null);
@@ -185,7 +185,7 @@ export default function AdminReglamentEditPage() {
       .from('reglament_documents')
       .update({
         title: 'Регламент',
-        slug: 'reglament',
+        slug: metadata.slug,
         status: finalStatus,
         content,
         updated_at: now,
@@ -203,7 +203,7 @@ export default function AdminReglamentEditPage() {
     const updated: ReglamentDocState = {
       id: docId,
       title: 'Регламент',
-      slug: 'reglament',
+      slug: metadata?.slug ?? 'reglament',
       status: finalStatus,
       content,
       created_at: metadata?.created_at ?? now,
@@ -270,14 +270,7 @@ export default function AdminReglamentEditPage() {
       ref={scaleContainerRef}
       className={`w-full max-w-none px-3 sm:px-4 overflow-x-hidden ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}
     >
-      <div
-        style={{
-          transform: scale < 1 ? `scale(${scale})` : undefined,
-          transformOrigin: 'top left',
-          width: scale < 1 ? '1400px' : '100%',
-        }}
-      >
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-6">
         <div>
           <div className="flex items-center gap-3 text-sm text-gray-500">
             <Link href="/admin/reglament" className="text-blue-600 hover:text-blue-700">
@@ -341,7 +334,12 @@ export default function AdminReglamentEditPage() {
         </div>
 
         <div>
-          <ReglamentEditor content={content} onChange={setContent} onUploadImage={handleUploadImage} />
+          <ReglamentEditor
+            content={content}
+            onChange={setContent}
+            onUploadImage={handleUploadImage}
+            scale={scale}
+          />
         </div>
       </div>
 
@@ -351,7 +349,6 @@ export default function AdminReglamentEditPage() {
         aria-hidden="true"
       >
         <LegacyReglamentPage />
-      </div>
       </div>
     </div>
   );
