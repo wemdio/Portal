@@ -80,7 +80,9 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   // Running campaign
   const [runningCampaignId, setRunningCampaignId] = useState<string | null>(null);
   const [currentContact, setCurrentContact] = useState<string | null>(null);
+  const [nextCallIn, setNextCallIn] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const campaignsLoaded = useRef<boolean | null>(null);
 
   // Audio playback
@@ -243,7 +245,9 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     });
     setRunningCampaignId(null);
     setCurrentContact(null);
+    setNextCallIn(null);
     if (pollRef.current) clearTimeout(pollRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
     fetchCampaigns();
   }
 
@@ -261,6 +265,35 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     } catch (err) {
       console.error('[Campaign] Auto-analysis failed:', err);
     }
+  }
+
+  const CALL_DELAY_MIN_MS = 5000;
+  const CALL_DELAY_MAX_MS = 15000;
+
+  function randomDelay() {
+    return Math.floor(Math.random() * (CALL_DELAY_MAX_MS - CALL_DELAY_MIN_MS + 1)) + CALL_DELAY_MIN_MS;
+  }
+
+  function scheduleNextCall(campaignId: string) {
+    const delay = randomDelay();
+    const endTime = Date.now() + delay;
+
+    setNextCallIn(Math.ceil(delay / 1000));
+
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    countdownRef.current = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+      setNextCallIn(remaining);
+      if (remaining <= 0 && countdownRef.current) {
+        clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
+    }, 1000);
+
+    pollRef.current = setTimeout(() => {
+      setNextCallIn(null);
+      callNext(campaignId);
+    }, delay);
   }
 
   async function callNext(campaignId: string) {
@@ -344,12 +377,12 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         });
         const campData = await campRes.json();
         if (campData.campaign?.status === 'running') {
-          setTimeout(() => callNext(campaignId), 3000);
+          scheduleNextCall(campaignId);
         } else {
           setRunningCampaignId(null);
         }
       } catch {
-        setTimeout(() => callNext(campaignId), 3000);
+        scheduleNextCall(campaignId);
       }
     }
 
@@ -536,6 +569,11 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
             {currentContact && (
               <p className="text-xs text-green-600 mt-0.5">
                 Звоним: {currentContact}
+              </p>
+            )}
+            {!currentContact && nextCallIn !== null && nextCallIn > 0 && (
+              <p className="text-xs text-green-600 mt-0.5">
+                Следующий звонок через {nextCallIn} сек.
               </p>
             )}
           </div>
