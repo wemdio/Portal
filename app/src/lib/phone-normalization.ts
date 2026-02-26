@@ -9,7 +9,12 @@ export function normalizeRuPhoneNumber(raw: string): string | null {
   let digits = value.replace(/[^\d]/g, '');
   if (!digits) return null;
 
-  // Local mobile format: 8XXXXXXXXXX -> 7XXXXXXXXXX
+  // 10-digit mobile without country code: 9XXXXXXXXX -> 79XXXXXXXXX
+  if (digits.length === 10 && digits.startsWith('9')) {
+    digits = '7' + digits;
+  }
+
+  // Local format: 8XXXXXXXXXX -> 7XXXXXXXXXX
   if (digits.length === 11 && digits.startsWith('8')) {
     digits = '7' + digits.slice(1);
   }
