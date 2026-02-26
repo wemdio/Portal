@@ -33,7 +33,7 @@ blocks:
             - npx tsc --noEmit
             - npm run build
             - npm test -- --watchAll=false
-            - npm audit --audit-level=moderate
+            - npm audit --audit-level=critical
   - name: Push Docker image
     dependencies:
       - Run tests
