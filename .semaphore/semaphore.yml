@@ -89,7 +89,7 @@ blocks:
               else
                 echo '[deps] Docker + Compose already installed — skipping';
               fi;
-              echo '--- Step 1: drain worker (wait for current job to finish) ---';
+              echo '--- Step 1: drain worker (force stop, no wait) ---';
               sudo -n bash drain-worker.sh;
               echo '--- Step 2: pull new images ---';
               sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
