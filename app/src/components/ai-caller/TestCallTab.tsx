@@ -12,6 +12,7 @@ import {
   Square,
   Send,
   Clock,
+  Mic,
 } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber, VapiCall } from '@/types/ai-caller';
 
@@ -78,6 +79,8 @@ export function TestCallTab({
   const tgLoadedRef = useRef(false);
   const [sendingTg, setSendingTg] = useState<string | null>(null);
   const [tgSuccess, setTgSuccess] = useState<string | null>(null);
+  const [sendingTgRec, setSendingTgRec] = useState<string | null>(null);
+  const [tgRecSuccess, setTgRecSuccess] = useState<string | null>(null);
 
   const effectiveAssistant = selectedAssistant || (assistants.length ? assistants[0].id : '');
   const effectivePhone = selectedPhone || (phoneNumbers.length ? phoneNumbers[0].id : '');
@@ -293,6 +296,45 @@ export function TestCallTab({
     setSendingTg(null);
   }
 
+  async function sendRecordingToTelegram(callId: string, call: VapiCall, chatId: number) {
+    setSendingTgRec(callId);
+    setTgRecSuccess(null);
+    try {
+      const token = await getToken();
+
+      const res = await fetch(`${apiBase}/calls/${callId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      const fullCall = data.call as Record<string, unknown> | undefined;
+      let recordingUrl =
+        (fullCall?.recordingUrl as string) ||
+        ((fullCall?.artifact as Record<string, unknown>)?.recordingUrl as string) ||
+        '';
+
+      if (recordingUrl.startsWith('/api/')) {
+        recordingUrl = `${window.location.origin}${recordingUrl}`;
+      }
+
+      const tgRes = await fetch('/api/ai-caller/telegram/send-recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          chatId,
+          vapiCallId: callId,
+          recordingUrl,
+          phone: call.customer?.number || '',
+        }),
+      });
+
+      if (tgRes.ok) {
+        setTgRecSuccess(callId);
+        setTimeout(() => setTgRecSuccess(null), 3000);
+      }
+    } catch { /* ignore */ }
+    setSendingTgRec(null);
+  }
+
   // ── Helpers ──
 
   function getSelectedAssistantName() {
@@ -373,6 +415,27 @@ export function TestCallTab({
                 <CheckCircle className="h-4 w-4 text-green-500" />
               ) : (
                 <Send className="h-4 w-4" />
+              )}
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (tgChats.length === 0) {
+                  alert('Бот не видит чатов. Напишите боту /start в Telegram, затем обновите страницу.');
+                  return;
+                }
+                sendRecordingToTelegram(call.id, call, tgChats[0].id);
+              }}
+              disabled={sendingTgRec === call.id}
+              className="p-1.5 rounded-md text-gray-400 hover:text-purple-600 hover:bg-purple-50 transition-colors disabled:opacity-50"
+              title={tgChats.length > 0 ? `Отправить запись в Telegram (${tgChats[0].title})` : 'Отправить запись в Telegram'}
+            >
+              {sendingTgRec === call.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : tgRecSuccess === call.id ? (
+                <CheckCircle className="h-4 w-4 text-green-500" />
+              ) : (
+                <Mic className="h-4 w-4" />
               )}
             </button>
           </div>
