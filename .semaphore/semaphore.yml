@@ -1,5 +1,6 @@
+# При пуше в main только тесты. Сборка и деплой — по расписанию (Task: .semaphore/scheduled-deploy.yml).
 version: v1.0
-name: Auto (push main)
+name: Auto (push main) — tests only
 execution_time_limit:
   hours: 3
 agent:
@@ -29,80 +30,4 @@ blocks:
             - cd $APP_PATH
             - npm run lint
             - npm test -- --watchAll=false
-  - name: Push Docker image
-    dependencies:
-      - Run tests
-    run:
-      when: "branch = 'main'"
-    task:
-      secrets:
-        - name: portal-secrets
-      prologue:
-        commands:
-          - checkout
-      jobs:
-        - name: Build and Push
-          commands:
-            - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
-            - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --platform linux/amd64 -f Dockerfile .'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
-  - name: Deploy to production
-    dependencies:
-      - Push Docker image
-    run:
-      when: "branch = 'main'"
-    task:
-      secrets:
-        - name: portal-secrets
-      prologue:
-        commands:
-          - checkout
-      jobs:
-        - name: SSH Deploy
-          execution_time_limit:
-            minutes: 120
-          commands:
-            - sudo apt-get update && sudo apt-get install -y sshpass
-            - >-
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
-              "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
-            - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml drain-worker.sh ${USER}@${HOST}:/home/Portal/prod/'
-            - >-
-              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
-              "set -e;
-              cd /home/Portal/prod;
-              chmod +x drain-worker.sh;
-              echo '--- Step 0: ensure deps (skip if already present) ---';
-              if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found; cannot auto-install deps' && exit 1; fi;
-              if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-                sudo -n apt-get update;
-                sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 ca-certificates;
-              fi;
-              if ! command -v docker >/dev/null 2>&1 || ! sudo -n docker compose version >/dev/null 2>&1; then
-                echo '[deps] Installing Docker + Compose plugin (get.docker.com)...';
-                sudo -n curl -fsSL https://get.docker.com -o /tmp/get-docker.sh;
-                sudo -n sh /tmp/get-docker.sh;
-                sudo -n systemctl enable --now docker >/dev/null 2>&1 || true;
-              else
-                echo '[deps] Docker + Compose already installed — skipping';
-              fi;
-              echo '--- Step 1: drain worker (force stop, no wait) ---';
-              sudo -n bash drain-worker.sh;
-              echo '--- Step 2: pull new images ---';
-              sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
-              sudo -n docker compose -p portal -f docker-compose.prod.yml pull;
-              echo '--- Step 3: restart portal + yandexmaps + guacd + rdp-ws ---';
-              for svc in portal yandexmaps guacd rdp-ws; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
-              sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-rdp-ws 2>/dev/null || true;
-              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws;
-              echo '--- Step 4: restart workers with new code ---';
-              for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
-              sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation 2>/dev/null || true;
-              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
-              sudo -n docker image prune -f;
-              sudo -n docker volume prune -f;
-              echo '--- Deploy complete ---'"
 

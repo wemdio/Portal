@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # drain-worker.sh
 #
-# При деплое принудительно завершает текущие задачи (помечает running как failed)
-# и сразу останавливает воркеры. Ожидания завершения задач нет.
+# При деплое принудительно завершает текущие задачи:
+#   - trace_spans: running → cancelled (в Трассировках задач не висят как «Выполняется»);
+#   - parser_jobs и др.: running → failed.
+# Затем останавливает воркеры. Ожидания завершения задач нет.
 #
 # Переменные (берутся из .env):
 #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -20,6 +22,25 @@ SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-}"
 KEY="${SUPABASE_SERVICE_ROLE_KEY:-}"
 
 if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+  echo "[drain] Marking running trace spans as cancelled (so Трассировки задач show correct status)..."
+  ENDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  if [ -z "$ENDED_AT" ]; then
+    PATCH_BODY='{"status":"cancelled"}'
+  else
+    PATCH_BODY="{\"status\":\"cancelled\",\"ended_at\":\"$ENDED_AT\"}"
+  fi
+  n=$(curl -s -X PATCH \
+    "${SUPABASE_URL}/rest/v1/trace_spans?status=eq.running" \
+    -H "apikey: ${KEY}" \
+    -H "Authorization: Bearer ${KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=minimal" \
+    -d "$PATCH_BODY" \
+    --write-out '%{http_code}' -o /dev/null 2>/dev/null || echo "000")
+  if [[ "$n" =~ ^(200|204)$ ]]; then
+    echo "[drain] trace_spans: running spans marked as cancelled"
+  fi
+
   echo "[drain] Marking running jobs as failed and stopping workers..."
   for table in parser_jobs search_parser_jobs website_enrichment_jobs yandex_maps_jobs email_validation_jobs; do
     n=$(curl -s -X PATCH \
