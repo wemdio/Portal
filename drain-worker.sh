@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 # drain-worker.sh
 #
-# Ждёт пока воркер закончит текущую задачу, затем останавливает его.
-# Используется в деплое: запускается перед обновлением образов.
+# При деплое принудительно завершает текущие задачи:
+#   - trace_spans: running → cancelled (в Трассировках задач не висят как «Выполняется»);
+#   - parser_jobs и др.: running → failed.
+# Затем останавливает воркеры. Ожидания завершения задач нет.
 #
 # Переменные (берутся из .env):
 #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-#   WORKER_DRAIN_TIMEOUT_MINUTES (default: 15)
 
 set -euo pipefail
-
-TIMEOUT_MIN="${WORKER_DRAIN_TIMEOUT_MINUTES:-15}"
-POLL_INTERVAL=15  # секунд между проверками
 
 # Загружаем env если не пришли снаружи
 if [ -f .env ]; then
   set -o allexport
-  # На сервере .env может быть с CRLF (Windows), тогда `source` падает на $'\r'.
-  # Нормализуем окончания строк на лету.
   source <(tr -d '\r' < .env)
   set +o allexport
 fi
@@ -25,75 +21,46 @@ fi
 SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-}"
 KEY="${SUPABASE_SERVICE_ROLE_KEY:-}"
 
-if [ -z "$SUPABASE_URL" ] || [ -z "$KEY" ]; then
-  echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping drain wait"
-  exit 0
-fi
+if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+  echo "[drain] Marking running trace spans as cancelled (so Трассировки задач show correct status)..."
+  ENDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  if [ -z "$ENDED_AT" ]; then
+    PATCH_BODY='{"status":"cancelled"}'
+  else
+    PATCH_BODY="{\"status\":\"cancelled\",\"ended_at\":\"$ENDED_AT\"}"
+  fi
+  n=$(curl -s -X PATCH \
+    "${SUPABASE_URL}/rest/v1/trace_spans?status=eq.running" \
+    -H "apikey: ${KEY}" \
+    -H "Authorization: Bearer ${KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=minimal" \
+    -d "$PATCH_BODY" \
+    --write-out '%{http_code}' -o /dev/null 2>/dev/null || echo "000")
+  if [[ "$n" =~ ^(200|204)$ ]]; then
+    echo "[drain] trace_spans: running spans marked as cancelled"
+  fi
 
-count_running() {
-  local tables=(
-    "parser_jobs:parser"
-    "search_parser_jobs:search_parser"
-    "website_enrichment_jobs:website_enrichment"
-    "yandex_maps_jobs:yandex_maps"
-    "email_validation_jobs:email_validation"
-  )
-  local total=0
-  local parts=()
-  for item in "${tables[@]}"; do
-    local table="${item%%:*}"
-    local label="${item#*:}"
-    local n
-    n=$(curl -s \
-      "${SUPABASE_URL}/rest/v1/${table}?status=eq.running&select=id" \
+  echo "[drain] Marking running jobs as failed and stopping workers..."
+  for table in parser_jobs search_parser_jobs website_enrichment_jobs yandex_maps_jobs email_validation_jobs; do
+    n=$(curl -s -X PATCH \
+      "${SUPABASE_URL}/rest/v1/${table}?status=eq.running" \
       -H "apikey: ${KEY}" \
       -H "Authorization: Bearer ${KEY}" \
-      -H "Prefer: count=exact" \
-      --write-out '%{header_json}' -o /dev/null 2>/dev/null \
-      | python3 -c "import sys,json; h=json.load(sys.stdin); print(h.get('content-range',['0'])[0].split('/')[-1])" 2>/dev/null || echo 0)
-    n="${n:-0}"
-    case "$n" in
-      ''|*[!0-9]*) n=0 ;;
-    esac
-    total=$((total + n))
-    if [ "$n" -gt 0 ]; then
-      parts+=("${label}=${n}")
+      -H "Content-Type: application/json" \
+      -H "Prefer: return=minimal" \
+      -d '{"status":"failed"}' \
+      --write-out '%{http_code}' -o /dev/null 2>/dev/null || echo "000")
+    # PATCH returns 204 or 200; we don't need count
+    if [[ "$n" =~ ^(200|204)$ ]]; then
+      echo "[drain] ${table}: running jobs marked as failed"
     fi
   done
-  # Важно: эту функцию вызываем через process substitution (см. ниже),
-  # потому что $(count_running) выполнит её в subshell и "потеряет" детали.
-  printf '%s\t%s\n' "$total" "${parts[*]:-}"
-}
+else
+  echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping mark-as-failed"
+fi
 
-elapsed=0
-max_seconds=$((TIMEOUT_MIN * 60))
-
-echo "[drain] Waiting for worker to finish current jobs (timeout: ${TIMEOUT_MIN}m)..."
-
-while true; do
-  running_detail=""
-  IFS=$'\t' read -r running running_detail < <(count_running)
-
-  if [ "$running" -eq 0 ]; then
-    echo "[drain] No running jobs — proceeding with worker restart"
-    break
-  fi
-
-  if [ "$elapsed" -ge "$max_seconds" ]; then
-    echo "[drain] Timeout reached (${TIMEOUT_MIN}m) — forcing worker restart anyway (${running} jobs still running)"
-    break
-  fi
-
-  if [ -n "${running_detail:-}" ]; then
-    echo "[drain] ${running} job(s) still running (${running_detail})... (${elapsed}s elapsed, timeout ${max_seconds}s)"
-  else
-    echo "[drain] ${running} job(s) still running... (${elapsed}s elapsed, timeout ${max_seconds}s)"
-  fi
-  sleep "$POLL_INTERVAL"
-  elapsed=$((elapsed + POLL_INTERVAL))
-done
-
-# Останавливаем воркеры (SIGTERM → процесс должен уже выйти сам, docker stop просто убирает контейнер)
+# Останавливаем воркеры (SIGTERM → контейнеры останавливаются сразу)
 # Поддерживаем старое имя `portal-worker` и новые раздельные воркеры.
 containers=(
   "portal-worker"
