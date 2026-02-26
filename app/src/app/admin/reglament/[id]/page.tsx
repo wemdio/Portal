@@ -185,7 +185,7 @@ export default function AdminReglamentEditPage() {
       .from('reglament_documents')
       .update({
         title: 'Регламент',
-        slug: 'reglament',
+        slug: metadata.slug,
         status: finalStatus,
         content,
         updated_at: now,
@@ -203,7 +203,7 @@ export default function AdminReglamentEditPage() {
     const updated: ReglamentDocState = {
       id: docId,
       title: 'Регламент',
-      slug: 'reglament',
+      slug: metadata?.slug ?? 'reglament',
       status: finalStatus,
       content,
       created_at: metadata?.created_at ?? now,

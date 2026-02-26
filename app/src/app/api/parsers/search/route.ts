@@ -20,7 +20,8 @@ export async function GET(req: NextRequest) {
   const { data: jobs, error } = await supabase
     .from('search_parser_jobs')
     .select('*')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(20);
 
   if (error) {
     return jsonError(error.message, 500);
@@ -42,6 +43,7 @@ export async function POST(req: NextRequest) {
     const queries =
       Array.isArray(payload?.queries) ? payload.queries.filter((q: unknown) => typeof q === 'string' && q.trim()) : [];
     const brief = typeof payload?.brief === 'string' ? payload.brief.trim() : '';
+    const user_query = typeof payload?.user_query === 'string' ? payload.user_query.trim() : brief;
     const hasQueries = queries.length > 0;
 
     if (!hasQueries && !brief) {
@@ -51,6 +53,7 @@ export async function POST(req: NextRequest) {
     const config = {
       ...(brief ? { brief } : {}),
       ...(hasQueries ? { queries } : {}),
+      ...(user_query ? { user_query } : {}),
     };
 
     const { data: job, error } = await supabase

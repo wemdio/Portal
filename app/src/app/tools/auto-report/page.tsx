@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useCallback, useMemo, useRef, useEffect, memo } from 'react';
+import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { FileText, ExternalLink, Loader2, Download, ListFilter, Search, FileSpreadsheet, Check } from 'lucide-react';
+import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { supabase } from '@/lib/supabaseClient';
 
 const ROW_HEIGHT = 44;
@@ -93,6 +94,473 @@ interface ReportResponse {
   campaignData: Record<string, unknown>;
 }
 
+const REPORT_HISTORY_KEY = 'portal:auto-report:history';
+const REPORT_HISTORY_MAX = 20;
+
+interface SavedReport {
+  id: string;
+  createdAt: string;
+  report: ReportResponse;
+}
+
+function loadReportHistory(): SavedReport[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(REPORT_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as SavedReport[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveReportHistory(items: SavedReport[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(REPORT_HISTORY_KEY, JSON.stringify(items.slice(0, REPORT_HISTORY_MAX)));
+  } catch {
+    // ignore
+  }
+}
+
+/** Типы для отображения отчёта (совпадают со структурой из autoReportBuilder). */
+interface CampaignStepView {
+  stepName: string;
+  totalSent: number;
+  totalOpened: number;
+  totalReplied: number;
+  totalClicked: number;
+  totalOpportunities: number;
+  variants: Record<
+    string,
+    { letter: string; sent: number; opened: number; replied: number; clicked: number; opportunities: number }
+  >;
+}
+
+interface CampaignRecordView {
+  name: string;
+  contacts: number;
+  opened: number;
+  replies: number;
+  leads: number;
+  bounced: number;
+  totalEmailsSent: number;
+  steps: Record<number, CampaignStepView>;
+}
+
+const REPORT_COLORS = {
+  titleBg: '#1E4E79',
+  headerBg: '#5B9BD5',
+  sectionSubheaderBg: '#D9E1F2',
+  stepRowBg: '#E2EFDA', // оттенок зелёного для строк Step в детализации
+  border: '#d1d5db',
+} as const;
+
+/** Цвета для выгрузки в Excel (как на образце: зелёный заголовок, светлая полоса периода). */
+const EXCEL_COLORS = {
+  titleBg: 'FF006400' as const,       // тёмно-зелёный
+  periodBg: 'FFD9EAD3' as const,      // светло-зелёный
+  tableHeaderBg: 'FFB6D7A8' as const,  // зелёный для заголовков таблиц и названий столбцов
+  stepRowBg: 'FFE2EFDA' as const,      // оттенок зелёного для строк Step
+  border: 'FFD1D5DB' as const,        // серый
+  white: 'FFFFFFFF' as const,
+  black: 'FF000000' as const,
+};
+
+const thinGrayBorder = {
+  top: { style: 'thin' as const, color: { argb: EXCEL_COLORS.border } },
+  left: { style: 'thin' as const, color: { argb: EXCEL_COLORS.border } },
+  bottom: { style: 'thin' as const, color: { argb: EXCEL_COLORS.border } },
+  right: { style: 'thin' as const, color: { argb: EXCEL_COLORS.border } },
+};
+
+function setCellStyle(
+  cell: ExcelJS.Cell,
+  opts: { fill?: string; fontBold?: boolean; fontColor?: string; border?: boolean }
+) {
+  if (opts.fill) {
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: opts.fill },
+    };
+  }
+  if (opts.fontBold !== undefined || opts.fontColor !== undefined) {
+    const current = (cell.font || {}) as { bold?: boolean; color?: { argb: string } };
+    cell.font = {
+      bold: opts.fontBold ?? current.bold,
+      color: opts.fontColor ? { argb: opts.fontColor } : current.color,
+    };
+  }
+  if (opts.border !== false) {
+    cell.border = thinGrayBorder;
+  }
+}
+
+function num(n: unknown): number {
+  const v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+
+function StyledReportView({
+  summary,
+  campaignData,
+  periodText,
+}: {
+  summary: ReportSummary;
+  campaignData: Record<string, CampaignRecordView>;
+  periodText: string;
+}) {
+  const campaigns = Object.values(campaignData);
+  const totalOpenPct =
+    summary.totalEmailsSent > 0
+      ? ((summary.totalOpened / summary.totalEmailsSent) * 100).toFixed(1)
+      : '0.0';
+  const totalReplyPct =
+    summary.totalContacts > 0
+      ? ((summary.totalReplies / summary.totalContacts) * 100).toFixed(1)
+      : '0.0';
+
+  const cell = 'px-3 py-2 text-sm border border-gray-300';
+  const headerCell = `${cell} font-semibold text-white`;
+  const sectionSubheaderCell = `${cell} font-semibold text-gray-900`;
+
+  return (
+    <div className="rounded-lg overflow-hidden border border-gray-300">
+      {/* Заголовок отчёта — тёмно-синий фон, белый текст */}
+      <div
+        className="px-4 py-3"
+        style={{ backgroundColor: REPORT_COLORS.titleBg }}
+      >
+        <h2 className="text-xl font-bold text-white">Отчёт по email-кампании</h2>
+        <p className="text-sm text-white/90 mt-0.5">{periodText}</p>
+      </div>
+
+      <div className="bg-white">
+        {/* Статистика по кампаниям */}
+        <div className="px-4 pt-4 pb-2">
+          <p className="text-sm font-bold text-gray-900 mb-0">Статистика по кампаниям:</p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                <th
+                  className={`${headerCell} text-left`}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Название кампании
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Контактов
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Уник. открытий
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  % открываемости
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Ответов
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  % ответов
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Лидов
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Отправлено писем
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Остаток базы
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map((c) => {
+                const openPct =
+                  c.totalEmailsSent > 0
+                    ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1)
+                    : '0.0';
+                const replyPct =
+                  c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
+                const remainingBase = Math.max(0, c.leads - c.contacts);
+                return (
+                  <tr key={c.name} className="bg-white">
+                    <td className={`${cell} text-gray-900`}>{c.name}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{c.contacts}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{c.opened}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{openPct}%</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{c.replies}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{replyPct}%</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{c.leads}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{c.totalEmailsSent}</td>
+                    <td className={`${cell} text-gray-900 text-right`}>{remainingBase}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Общая статистика */}
+        <div className="px-4 pt-6 pb-2">
+          <p className="text-sm font-bold text-gray-900 mb-0">Общая статистика:</p>
+        </div>
+        <div className="overflow-x-auto px-4 pb-4">
+          <table className="w-full border-collapse max-w-xl">
+            <thead>
+              <tr>
+                <th
+                  className={`${headerCell} text-left`}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Показатель
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Значение
+                </th>
+                <th
+                  className={headerCell}
+                  style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                >
+                  Конверсия в следующий этап
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>Общее количество контактов</td>
+                <td className={`${cell} text-gray-900`}>{summary.totalContacts}</td>
+                <td className={cell} />
+              </tr>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>
+                  Общее количество отправленных писем
+                </td>
+                <td className={`${cell} text-gray-900`}>{summary.totalEmailsSent}</td>
+                <td className={cell} />
+              </tr>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>
+                  Общее количество открытий
+                </td>
+                <td className={`${cell} text-gray-900`}>{summary.totalOpened}</td>
+                <td className={`${cell} text-gray-900`}>{summary.conversion.openPctAllEmails}%</td>
+              </tr>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>
+                  Общее количество ответов
+                </td>
+                <td className={`${cell} text-gray-900`}>{summary.totalReplies}</td>
+                <td className={`${cell} text-gray-900`}>{summary.conversion.replyPctByLeads}%</td>
+              </tr>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>Общее количество лидов</td>
+                <td className={`${cell} text-gray-900`}>{summary.totalLeads}</td>
+                <td className={cell} />
+              </tr>
+              <tr className="bg-white">
+                <td className={`${cell} font-medium text-gray-900`}>
+                  Общее количество бракованных
+                </td>
+                <td className={`${cell} text-gray-900`}>{summary.totalBounced}</td>
+                <td className={cell} />
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* Детализация по письмам */}
+        <div className="px-4 pt-2 pb-2">
+          <p className="text-sm font-bold text-gray-900 mb-0">Детализация по письмам:</p>
+        </div>
+        <div className="overflow-x-auto pb-4">
+          {campaigns.map((c) => (
+            <div key={c.name} className="mb-4">
+              <table className="w-full border-collapse">
+                <tbody>
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className={`${sectionSubheaderCell} border-gray-300`}
+                      style={{ backgroundColor: REPORT_COLORS.sectionSubheaderBg }}
+                    >
+                      {c.name}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th
+                      className={`${headerCell} text-left`}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      STEP
+                    </th>
+                    <th
+                      className={headerCell}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      SENT
+                    </th>
+                    <th
+                      className={headerCell}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      OPENED
+                    </th>
+                    <th
+                      className={headerCell}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      REPLIED
+                    </th>
+                    <th
+                      className={headerCell}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      CLICKED
+                    </th>
+                    <th
+                      className={headerCell}
+                      style={{ backgroundColor: REPORT_COLORS.headerBg }}
+                    >
+                      OPPORTUNITIES
+                    </th>
+                  </tr>
+                  {Object.keys(c.steps)
+                    .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
+                    .map((stepKey) => {
+                      const step = c.steps[Number(stepKey)];
+                      const stepOpenPct =
+                        step.totalSent > 0
+                          ? ((step.totalOpened / step.totalSent) * 100).toFixed(1)
+                          : '0.0';
+                      const stepReplyPct =
+                        step.totalSent > 0
+                          ? ((step.totalReplied / step.totalSent) * 100).toFixed(1)
+                          : '0.0';
+                      return (
+                        <React.Fragment key={`${c.name}-${stepKey}`}>
+                          <tr style={{ backgroundColor: REPORT_COLORS.stepRowBg }}>
+                            <td className={`${cell} font-semibold text-gray-900`}>
+                              {step.stepName}
+                            </td>
+                            <td className={`${cell} text-gray-900 text-right`}>
+                              {step.totalSent}
+                            </td>
+                            <td className={`${cell} text-gray-900 text-right`}>
+                              {step.totalOpened}|{stepOpenPct}%
+                            </td>
+                            <td className={`${cell} text-gray-900 text-right`}>
+                              {step.totalReplied}|{stepReplyPct}%
+                            </td>
+                            <td className={`${cell} text-gray-900 text-right`}>
+                              {step.totalClicked}
+                            </td>
+                            <td className={`${cell} text-gray-900 text-right`}>
+                              {step.totalOpportunities}
+                            </td>
+                          </tr>
+                          {Object.keys(step.variants)
+                            .sort()
+                            .map((letter) => {
+                              const v = step.variants[letter];
+                              const vOpen =
+                                v.sent > 0 ? ((v.opened / v.sent) * 100).toFixed(0) : '0';
+                              const vReply =
+                                v.sent > 0 ? ((v.replied / v.sent) * 100).toFixed(0) : '0';
+                              return (
+                                <tr
+                                  key={`${c.name}-${stepKey}-${letter}`}
+                                  className="bg-white"
+                                >
+                                  <td className={`${cell} text-gray-900`}>{v.letter}</td>
+                                  <td className={`${cell} text-gray-900 text-right`}>
+                                    {v.sent}
+                                  </td>
+                                  <td className={`${cell} text-gray-900 text-right`}>
+                                    {v.opened}|{vOpen}%
+                                  </td>
+                                  <td className={`${cell} text-gray-900 text-right`}>
+                                    {v.replied}|{vReply}%
+                                  </td>
+                                  <td className={`${cell} text-gray-900 text-right`}>
+                                    {v.clicked}
+                                  </td>
+                                  <td className={`${cell} text-gray-900 text-right`}>
+                                    {v.opportunities}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </React.Fragment>
+                      );
+                    })}
+                  {Object.keys(c.steps).length === 0 && (
+                    <tr className="bg-white">
+                      <td className={`${cell} font-semibold text-gray-900`}>
+                        Общая статистика
+                      </td>
+                      <td className={`${cell} text-gray-900 text-right`}>
+                        {c.totalEmailsSent}
+                      </td>
+                      <td className={`${cell} text-gray-900 text-right`}>
+                        {num(c.opened)}|
+                        {c.totalEmailsSent > 0
+                          ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1)
+                          : '0.0'}
+                        %
+                      </td>
+                      <td className={`${cell} text-gray-900 text-right`}>
+                        {c.replies}|
+                        {c.contacts > 0
+                          ? ((c.replies / c.contacts) * 100).toFixed(1)
+                          : '0.0'}
+                        %
+                      </td>
+                      <td className={`${cell} text-gray-900 text-right`}>0</td>
+                      <td className={`${cell} text-gray-900 text-right`}>0</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 async function getToken(): Promise<string> {
   const { data } = await supabase.auth.getSession();
   return data.session?.access_token ?? '';
@@ -151,6 +619,207 @@ function downloadExcel(tableText: string, summaryRows: (string | number)[][], fi
   URL.revokeObjectURL(url);
 }
 
+async function downloadExcelFormatted(
+  summary: ReportSummary,
+  campaignData: Record<string, CampaignRecordView>,
+  periodText: string,
+  filename: string
+) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Отчёт', { views: [{ rightToLeft: false }] });
+
+  const colCount = 9;
+  ws.columns = [
+    { width: 42 },
+    { width: 12 },
+    { width: 28 },
+    { width: 14 },
+    { width: 26 },  
+    { width: 15 },
+    { width: 10 },
+    { width: 16 },
+    { width: 15 },
+  ];
+
+  let row = 1;
+
+  const mergeAndStyle = (r: number, _from: string, _to: string, value: string, fill: string, fontColor: string) => {
+    ws.mergeCells(`A${r}:I${r}`);
+    const cell = ws.getCell(r, 1);
+    cell.value = value;
+    setCellStyle(cell, { fill, fontBold: true, fontColor, border: true });
+  };
+
+  mergeAndStyle(row, 'A', 'I', 'Отчёт по email-кампании', EXCEL_COLORS.titleBg, EXCEL_COLORS.white);
+  row += 1;
+  mergeAndStyle(row, 'A', 'I', periodText, EXCEL_COLORS.periodBg, EXCEL_COLORS.black);
+  row += 2;
+
+  ws.getCell(row, 1).value = 'Статистика по кампаниям:';
+  setCellStyle(ws.getCell(row, 1), { fontBold: true });
+  row += 1;
+
+  const campaignHeaders = [
+    'Название кампании',
+    'Контактов',
+    'Отправлено писем',
+    'Открытий',
+    '% открытий всех писем',
+    'Ответов',
+    '% ответов',
+    'Лидов',
+    'Остаток базы',
+  ];
+  campaignHeaders.forEach((h, c) => {
+    const cell = ws.getCell(row, c + 1);
+    cell.value = h;
+    setCellStyle(cell, { fontBold: true, fill: EXCEL_COLORS.tableHeaderBg });
+  });
+  row += 1;
+
+  const campaigns = Object.values(campaignData);
+  campaigns.forEach((c) => {
+    const openPct =
+      c.totalEmailsSent > 0 ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1) : '0.0';
+    const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
+    const remainingBase = Math.max(0, c.leads - c.contacts);
+    const values = [
+      c.name,
+      c.contacts,
+      c.totalEmailsSent,
+      c.opened,
+      `${openPct}%`,
+      c.replies,
+      `${replyPct}%`,
+      c.leads,
+      remainingBase,
+    ];
+    values.forEach((v, col) => {
+      const cell = ws.getCell(row, col + 1);
+      cell.value = v;
+      setCellStyle(cell, {});
+    });
+    row += 1;
+  });
+
+  row += 1;
+  ws.getCell(row, 1).value = 'Общая статистика:';
+  setCellStyle(ws.getCell(row, 1), { fontBold: true });
+  row += 1;
+
+  const overallHeaders = ['Показатель', 'Значение', 'Конверсия в следующий этап'];
+  overallHeaders.forEach((h, c) => {
+    const cell = ws.getCell(row, c + 1);
+    cell.value = h;
+    setCellStyle(cell, { fontBold: true, fill: EXCEL_COLORS.tableHeaderBg });
+  });
+  row += 1;
+
+  const totalOpenPct =
+    summary.totalEmailsSent > 0
+      ? ((summary.totalOpened / summary.totalEmailsSent) * 100).toFixed(1)
+      : '0.0';
+  const totalReplyPct =
+    summary.totalContacts > 0
+      ? ((summary.totalReplies / summary.totalContacts) * 100).toFixed(1)
+      : '0.0';
+  const overallRows: (string | number)[][] = [
+    ['Общее количество контактов', summary.totalContacts, ''],
+    ['Общее количество отправленных писем', summary.totalEmailsSent, ''],
+    ['Общее количество открытий', summary.totalOpened, `${totalOpenPct}%`],
+    ['Общее количество ответов', summary.totalReplies, `${totalReplyPct}%`],
+    ['Общее количество лидов', summary.totalLeads, ''],
+    ['Общее количество бракованных', summary.totalBounced, ''],
+  ];
+  overallRows.forEach((rValues) => {
+    rValues.forEach((v, col) => {
+      const cell = ws.getCell(row, col + 1);
+      cell.value = v;
+      setCellStyle(cell, {});
+    });
+    row += 1;
+  });
+
+  row += 1;
+  ws.getCell(row, 1).value = 'Детализация по письмам:';
+  setCellStyle(ws.getCell(row, 1), { fontBold: true });
+  row += 2;
+
+  const detailHeaders = ['STEP', 'SENT', 'OPENED', 'REPLIED', 'CLICKED', 'OPPORTUNITIES'];
+  campaigns.forEach((c) => {
+    ws.getCell(row, 1).value = c.name;
+    setCellStyle(ws.getCell(row, 1), { fontBold: true });
+    row += 1;
+    detailHeaders.forEach((h, col) => {
+      const cell = ws.getCell(row, col + 1);
+      cell.value = h;
+      setCellStyle(cell, { fontBold: true, fill: EXCEL_COLORS.tableHeaderBg });
+    });
+    row += 1;
+
+    const stepKeys = Object.keys(c.steps).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+    if (stepKeys.length === 0) {
+      const openPct =
+        c.totalEmailsSent > 0 ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1) : '0.0';
+      const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
+      ws.getCell(row, 1).value = 'Общая статистика';
+      setCellStyle(ws.getCell(row, 1), { fontBold: true });
+      ws.getCell(row, 2).value = c.totalEmailsSent;
+      ws.getCell(row, 3).value = `${num(c.opened)}|${openPct}%`;
+      ws.getCell(row, 4).value = `${c.replies}|${replyPct}%`;
+      ws.getCell(row, 5).value = 0;
+      ws.getCell(row, 6).value = 0;
+      for (let col = 1; col <= 6; col++) setCellStyle(ws.getCell(row, col), {});
+      row += 1;
+    } else {
+      stepKeys.forEach((stepKey) => {
+        const step = c.steps[Number(stepKey)];
+        const stepOpenPct =
+          step.totalSent > 0 ? ((step.totalOpened / step.totalSent) * 100).toFixed(1) : '0.0';
+        const stepReplyPct =
+          step.totalSent > 0 ? ((step.totalReplied / step.totalSent) * 100).toFixed(1) : '0.0';
+        ws.getCell(row, 1).value = step.stepName;
+        setCellStyle(ws.getCell(row, 1), { fontBold: true, fill: EXCEL_COLORS.stepRowBg });
+        ws.getCell(row, 2).value = step.totalSent;
+        ws.getCell(row, 3).value = `${step.totalOpened}|${stepOpenPct}%`;
+        ws.getCell(row, 4).value = `${step.totalReplied}|${stepReplyPct}%`;
+        ws.getCell(row, 5).value = step.totalClicked;
+        ws.getCell(row, 6).value = step.totalOpportunities;
+        for (let col = 1; col <= 6; col++)
+          setCellStyle(ws.getCell(row, col), { fill: EXCEL_COLORS.stepRowBg });
+        row += 1;
+        Object.keys(step.variants)
+          .sort()
+          .forEach((letter) => {
+            const v = step.variants[letter];
+            const vOpen = v.sent > 0 ? ((v.opened / v.sent) * 100).toFixed(0) : '0';
+            const vReply = v.sent > 0 ? ((v.replied / v.sent) * 100).toFixed(0) : '0';
+            ws.getCell(row, 1).value = v.letter;
+            ws.getCell(row, 2).value = v.sent;
+            ws.getCell(row, 3).value = `${v.opened}|${vOpen}%`;
+            ws.getCell(row, 4).value = `${v.replied}|${vReply}%`;
+            ws.getCell(row, 5).value = v.clicked;
+            ws.getCell(row, 6).value = v.opportunities;
+            for (let col = 1; col <= 6; col++) setCellStyle(ws.getCell(row, col), {});
+            row += 1;
+          });
+      });
+    }
+    row += 1;
+  });
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function normalizeForSearch(s: string): string {
   return s
     .toLowerCase()
@@ -162,37 +831,14 @@ export default function AutoReportPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState<ReportResponse | null>(null);
+  const [reportCreatedAt, setReportCreatedAt] = useState<string | null>(null);
+  const [reportHistory, setReportHistory] = useState<SavedReport[]>([]);
+
+  useEffect(() => {
+    setReportHistory(loadReportHistory());
+  }, []);
 
   const [campaignsList, setCampaignsList] = useState<InstantlyCampaignItem[]>([]);
-  const [campaignsLoading, setCampaignsLoading] = useState(false);
-  const [campaignsFetched, setCampaignsFetched] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
-  const listContainerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-
-  const filteredCampaigns = useMemo(() => {
-    const q = normalizeForSearch(searchQuery);
-    if (!q) return campaignsList;
-    return campaignsList.filter((c) => normalizeForSearch(c.name || '').includes(q));
-  }, [campaignsList, searchQuery]);
-
-  const { startIndex, endIndex, totalHeight, visibleCampaigns } = useMemo(() => {
-    const list = filteredCampaigns;
-    const total = list.length;
-    if (total === 0) return { startIndex: 0, endIndex: 0, totalHeight: 0, visibleCampaigns: [] };
-    const containerHeight = 28 * 16;
-    const rowCount = Math.ceil(containerHeight / ROW_HEIGHT) + OVERSCAN * 2;
-    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
-    const end = Math.min(total, start + rowCount);
-    return {
-      startIndex: start,
-      endIndex: end,
-      totalHeight: total * ROW_HEIGHT,
-      visibleCampaigns: list.slice(start, end),
-    };
-  }, [filteredCampaigns, scrollTop]);
-
   const loadCampaigns = useCallback(async () => {
     setCampaignsLoading(true);
     setError('');
@@ -221,6 +867,38 @@ export default function AutoReportPage() {
       setCampaignsLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    loadCampaigns();
+  }, [loadCampaigns]);
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsFetched, setCampaignsFetched] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState('');
+  const listContainerRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+
+  const filteredCampaigns = useMemo(() => {
+    const q = normalizeForSearch(searchQuery);
+    if (!q) return campaignsList;
+    return campaignsList.filter((c) => normalizeForSearch(c.name || '').includes(q));
+  }, [campaignsList, searchQuery]);
+
+  const { startIndex, endIndex, totalHeight, visibleCampaigns } = useMemo(() => {
+    const list = filteredCampaigns;
+    const total = list.length;
+    if (total === 0) return { startIndex: 0, endIndex: 0, totalHeight: 0, visibleCampaigns: [] };
+    const containerHeight = 28 * 16;
+    const rowCount = Math.ceil(containerHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const end = Math.min(total, start + rowCount);
+    return {
+      startIndex: start,
+      endIndex: end,
+      totalHeight: total * ROW_HEIGHT,
+      visibleCampaigns: list.slice(start, end),
+    };
+  }, [filteredCampaigns, scrollTop]);
 
   const toggleCampaign = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -269,7 +947,20 @@ export default function AutoReportPage() {
         setLoading(false);
         return;
       }
-      setReport(data as ReportResponse);
+      const reportData = data as ReportResponse;
+      const now = new Date().toISOString();
+      setReport(reportData);
+      setReportCreatedAt(now);
+      const saved: SavedReport = {
+        id: crypto.randomUUID?.() ?? `report-${Date.now()}`,
+        createdAt: now,
+        report: reportData,
+      };
+      setReportHistory((prev) => {
+        const next = [saved, ...prev].slice(0, REPORT_HISTORY_MAX);
+        saveReportHistory(next);
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка запроса');
     } finally {
@@ -278,33 +969,47 @@ export default function AutoReportPage() {
   };
 
   const getReportFilenamePrefix = () => {
-    const d = new Date();
+    const d = reportCreatedAt ? new Date(reportCreatedAt) : new Date();
     const date = d.toISOString().slice(0, 10);
     const time = `${String(d.getHours()).padStart(2, '0')}-${String(d.getMinutes()).padStart(2, '0')}`;
     return `instantly-report-${date}-${time}`;
   };
+
+  const selectReportFromHistory = useCallback((item: SavedReport) => {
+    setReport(item.report);
+    setReportCreatedAt(item.createdAt);
+    setError('');
+  }, []);
 
   const handleDownloadCsv = () => {
     if (!report?.csvText) return;
     downloadCsv(report.csvText, `${getReportFilenamePrefix()}.csv`);
   };
 
-  const handleDownloadExcel = () => {
-    if (!report?.tableText) return;
-    downloadExcel(report.tableText, report.rows ?? [], `${getReportFilenamePrefix()}.xlsx`);
+  const handleDownloadExcel = async () => {
+    if (!report) return;
+    const filename = `${getReportFilenamePrefix()}.xlsx`;
+    const periodText = `Период: с ${new Date().toLocaleDateString('ru-RU')} по ${new Date().toLocaleDateString('ru-RU')}`;
+    const data = report.campaignData as Record<string, CampaignRecordView>;
+    if (data && Object.keys(data).length > 0) {
+      await downloadExcelFormatted(report.summary, data, periodText, filename);
+    } else {
+      downloadExcel(report.tableText, report.rows ?? [], filename);
+    }
   };
 
   return (
-    <div className="space-y-6 text-left max-w-full">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Автоотчёт по email-кампаниям</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Сформируйте отчёт по кампаниям Instantly: статистика по кампаниям, общая сводка и
-          детализация по письмам. Подгрузите кампании, найдите по названию и выберите для отчёта.
-        </p>
-      </div>
+    <div className="flex gap-6 text-left max-w-full">
+      <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Автоотчёты</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Сформируйте отчёт по кампаниям Instantly: статистика по кампаниям, общая сводка и
+            детализация по письмам. Подгрузите кампании, найдите по названию и выберите для отчёта.
+          </p>
+        </div>
 
-      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3 mb-4">
           <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center">
             <FileText className="h-5 w-5 text-indigo-600" />
@@ -320,19 +1025,12 @@ export default function AutoReportPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={loadCampaigns}
-                disabled={campaignsLoading || loading}
-                className="inline-flex items-center gap-2 px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-700 text-sm font-medium rounded-lg hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50"
-              >
-                {campaignsLoading ? (
+              {campaignsLoading && campaignsList.length === 0 ? (
+                <span className="inline-flex items-center gap-2 text-sm text-gray-500">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ListFilter className="h-4 w-4" />
-                )}
-                {campaignsLoading ? 'Загрузка…' : 'Подгрузить кампании'}
-              </button>
+                  Загрузка кампаний…
+                </span>
+              ) : null}
               {campaignsList.length > 0 && (
                 <div className="inline-flex items-center gap-2">
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
@@ -487,19 +1185,77 @@ export default function AutoReportPage() {
                 Скачать Excel
               </button>
             </div>
-            <details className="mt-2">
-              <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-900">
-                Показать таблицу
+            <details className="mt-2" open>
+              <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
+                Показать таблицу отчёта
               </summary>
-              <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
-                <pre className="p-3 text-xs text-gray-700 whitespace-pre-wrap font-sans">
-                  {report.tableText}
-                </pre>
+              <div className="mt-3">
+                <StyledReportView
+                  summary={report.summary}
+                  campaignData={report.campaignData as Record<string, CampaignRecordView>}
+                  periodText={
+                    reportCreatedAt
+                      ? `Период: с ${new Date(reportCreatedAt).toLocaleDateString('ru-RU')} по ${new Date(reportCreatedAt).toLocaleDateString('ru-RU')}`
+                      : `Период: с ${new Date().toLocaleDateString('ru-RU')} по ${new Date().toLocaleDateString('ru-RU')}`
+                  }
+                />
               </div>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                  Исходный текст (для копирования)
+                </summary>
+                <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
+                  <pre className="p-3 text-xs text-gray-600 whitespace-pre-wrap font-sans bg-gray-50">
+                    {report.tableText}
+                  </pre>
+                </div>
+              </details>
             </details>
           </div>
         )}
+        </div>
       </div>
+
+      <aside className="w-80 shrink-0 pt-20">
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sticky top-4">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-3">
+            <History className="h-4 w-4 text-indigo-600" />
+            История отчётов
+          </h2>
+          {reportHistory.length === 0 ? (
+            <p className="text-xs text-gray-500">Здесь появятся последние 20 отчётов</p>
+          ) : (
+            <ul className="space-y-1.5 max-h-[calc(100vh-12rem)] overflow-y-auto">
+              {reportHistory.map((item) => {
+                const date = new Date(item.createdAt);
+                const label = `${item.report.summary.totalCampaigns} кампаний · ${date.toLocaleDateString('ru-RU')} ${date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
+                const isSelected =
+                  report?.summary.totalCampaigns === item.report.summary.totalCampaigns &&
+                  report?.summary.totalContacts === item.report.summary.totalContacts &&
+                  reportCreatedAt === item.createdAt;
+                return (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => selectReportFromHistory(item)}
+                      className={`w-full text-left rounded-lg px-3 py-2.5 text-sm transition-colors ${
+                        isSelected
+                          ? 'bg-indigo-50 border border-indigo-200 text-indigo-900'
+                          : 'bg-gray-50/80 border border-transparent hover:bg-gray-100 text-gray-800'
+                      }`}
+                    >
+                      <span className="block font-medium truncate">{label}</span>
+                      <span className="block text-xs text-gray-500 mt-0.5 truncate">
+                        {item.report.summary.totalContacts} контактов, {item.report.summary.totalEmailsSent} писем
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }

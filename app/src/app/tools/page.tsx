@@ -1,9 +1,110 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Database, Sparkles, Mail, Search, PhoneCall, AudioLines, FileText } from 'lucide-react';
+import {
+  Database,
+  Sparkles,
+  Mail,
+  Search,
+  PhoneCall,
+  AudioLines,
+  FileText,
+  type LucideIcon,
+} from 'lucide-react';
+import { supabase } from '@/lib/supabaseClient';
+import { ALL_TOOL_IDS, TOOLS_CONFIG, type ToolId } from '@/lib/toolsRegistry';
 import { RdpToolCard } from './RdpToolCard';
 
+const TOOL_ICONS: Record<ToolId, LucideIcon> = {
+  'done-for-you': Sparkles,
+  'ai-caller': PhoneCall,
+  'ai-caller-v2': AudioLines,
+  databases: Database,
+  parsers: Search,
+  'email-sequence': Mail,
+  'auto-report': FileText,
+  rdp: FileText, // not used, RdpToolCard has its own icon
+};
+
+function ToolLinkCard({ toolId }: { toolId: ToolId }) {
+  const config = TOOLS_CONFIG[toolId];
+  const Icon = TOOL_ICONS[toolId];
+  const isEmerald = config.accentColor === 'emerald';
+  const borderClass = config.badge
+    ? isEmerald
+      ? 'border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white hover:border-emerald-300'
+      : 'border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white hover:border-blue-300'
+    : 'border border-gray-200 bg-white';
+  const badgeClass = config.badgeVariant === 'emerald'
+    ? 'bg-emerald-100 text-emerald-700'
+    : 'bg-amber-100 text-amber-700';
+  const linkClass = isEmerald ? 'text-emerald-600 group-hover:text-emerald-700' : 'text-blue-600 group-hover:text-blue-700';
+  const iconClass = isEmerald
+    ? 'text-emerald-500 group-hover:text-emerald-600'
+    : 'text-gray-400 group-hover:text-blue-600';
+
+  return (
+    <Link
+      href={config.href as Route}
+      className={`group rounded-2xl p-6 transition hover:shadow-md min-w-0 flex flex-col h-full ${borderClass}`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className={toolId === 'auto-report' ? 'min-w-0' : undefined}>
+          <div className="flex items-center gap-2">
+            <p className="text-base font-semibold text-gray-900">{config.title}</p>
+            {config.badge && (
+              <span
+                className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
+              >
+                {config.badge}
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-gray-500">{config.description}</p>
+        </div>
+        <Icon className={`h-8 w-8 shrink-0 transition-colors ${iconClass}`} />
+      </div>
+      <div className={`mt-4 text-sm font-medium ${linkClass}`}>Открыть →</div>
+    </Link>
+  );
+}
+
 export default function ToolsPage() {
+  const [toolIds, setToolIds] = useState<string[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token ?? null;
+        if (!token) {
+          if (!cancelled) setToolIds([]);
+          return;
+        }
+        const res = await fetch('/api/user/tools', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { toolIds?: string[] };
+        if (!cancelled) setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);
+      } catch {
+        if (!cancelled) setToolIds([...ALL_TOOL_IDS]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const visibleIds = toolIds ?? [];
+  const orderedVisible = ALL_TOOL_IDS.filter((id) => visibleIds.includes(id));
+
   return (
     <div className="space-y-6 text-left max-w-full">
       <div>
@@ -13,143 +114,40 @@ export default function ToolsPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
-        <Link
-          href={'/tools/done-for-you' as Route}
-          className="group rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-6 transition hover:shadow-md hover:border-blue-300 min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-base font-semibold text-gray-900">Done For You База</p>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
-                  В разработке
-                </span>
-              </div>
-              <p className="text-sm text-gray-500">
-                AI соберет, очистит и персонализирует базу автоматически по брифу.
-              </p>
+      {loading ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
+          {[1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="rounded-2xl border border-gray-200 bg-gray-50 p-6 animate-pulse min-h-[140px]"
+              aria-hidden
+            >
+              <div className="h-5 w-40 bg-gray-200 rounded mb-2" />
+              <div className="h-4 w-24 bg-gray-200 rounded mb-4" />
+              <div className="h-4 w-20 bg-gray-200 rounded" />
             </div>
-            <Sparkles className="h-8 w-8 text-blue-500 group-hover:text-blue-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-        <Link
-          href={'/tools/ai-caller' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-base font-semibold text-gray-900">AI Звонилка</p>
-              <p className="text-sm text-gray-500">
-                AI-ассистенты для обзвона: тестовые звонки, управление промптами и история.
-              </p>
-            </div>
-            <PhoneCall className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-        <Link
-          href={'/tools/ai-caller-v2' as Route}
-          className="group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300 min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <p className="text-base font-semibold text-gray-900">AI Звонилка v2</p>
-                <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 rounded">
-                  ElevenLabs
-                </span>
-              </div>
-              <p className="text-sm text-gray-500">
-                Естественный голос через ElevenLabs Conversational AI.
-              </p>
-            </div>
-            <AudioLines className="h-8 w-8 text-emerald-500 group-hover:text-emerald-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-emerald-600 group-hover:text-emerald-700">
-            Открыть →
-          </div>
-        </Link>
-        <Link
-          href="/tools/databases"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-base font-semibold text-gray-900">Работа с базами</p>
-              <p className="text-sm text-gray-500">
-                Табличный редактор с вкладками и копированием.
-              </p>
-            </div>
-            <Database className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-        <Link
-          href="/parsers"
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-base font-semibold text-gray-900">Парсеры</p>
-              <p className="text-sm text-gray-500">
-                Набор парсеров для сбора данных, запусков и выгрузки результатов.
-              </p>
-            </div>
-            <Search className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-
-        <Link
-          href={'/tools/email-sequence' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-base font-semibold text-gray-900">Цепочки писем</p>
-              <p className="text-sm text-gray-500">
-                Генерация ресёрча по сегменту и цепочки холодных писем.
-              </p>
-            </div>
-            <Mail className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-
-        <Link
-          href={'/tools/auto-report' as Route}
-          className="group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md min-w-0 flex flex-col h-full"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-base font-semibold text-gray-900">Автоотчёты</p>
-              <p className="text-sm text-gray-500">
-                Отчёт по кампаниям Instantly: подгрузка кампаний, выбор проектов, статистика и детализация по письмам.
-              </p>
-            </div>
-            <FileText className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
-          </div>
-          <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-            Открыть →
-          </div>
-        </Link>
-
-        <div className="min-w-0 flex flex-col h-full">
-          <RdpToolCard />
+          ))}
         </div>
-      </div>
+      ) : orderedVisible.length === 0 ? (
+        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-10 text-center">
+          <p className="text-gray-600">Доступных инструментов пока нет.</p>
+          <p className="text-sm text-gray-500 mt-1">
+            Пожалуйста, обратитесь к администратору.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
+          {orderedVisible.map((toolId) =>
+            toolId === 'rdp' ? (
+              <div key="rdp" className="min-w-0 flex flex-col h-full">
+                <RdpToolCard />
+              </div>
+            ) : (
+              <ToolLinkCard key={toolId} toolId={toolId} />
+            )
+          )}
+        </div>
+      )}
     </div>
   );
 }

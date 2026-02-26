@@ -222,9 +222,13 @@ function getSearchProgress(job: SearchParserJob) {
   };
 }
 
-function getUserSearchQuery(job: SearchParserJob) {
+/** Возвращает текст запроса для отображения: то, что ввёл пользователь (user_query или brief), без сгенерированных запросов. */
+function getUserSearchQuery(job: SearchParserJob): string {
+  const userQuery = typeof job.config?.user_query === 'string' ? job.config.user_query.trim() : '';
+  if (userQuery) return userQuery;
   const brief = typeof job.config?.brief === 'string' ? job.config.brief.trim() : '';
-  return brief || '';
+  if (brief) return brief;
+  return '';
 }
 
 function truncateUiText(value: string, maxLen: number) {
@@ -378,7 +382,11 @@ export function SearchParserView() {
 
   const refreshJobs = useCallback(async () => {
     try {
-      const { data } = await supabase.from('search_parser_jobs').select('*').order('created_at', { ascending: false });
+      const { data } = await supabase
+        .from('search_parser_jobs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(20);
       if (data) setJobs(data);
     } catch (err) {
       console.error(err);
@@ -443,14 +451,13 @@ export function SearchParserView() {
     }
   }, [activeJob, activeJobId, refreshJobs, loadResults]);
 
-  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[] }) => {
+  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; user_query?: string }) => {
     setBusy(true);
     setError(null);
     try {
       const normalized = { ...payload };
-      if (typeof normalized.brief === 'string') {
-        normalized.brief = normalized.brief.trim();
-      }
+      if (typeof normalized.brief === 'string') normalized.brief = normalized.brief.trim();
+      if (typeof normalized.user_query === 'string') normalized.user_query = normalized.user_query.trim();
       const data = await apiFetch<{ job: SearchParserJob }>('/api/parsers/search', {
         method: 'POST',
         body: JSON.stringify(normalized),
@@ -552,14 +559,17 @@ export function SearchParserView() {
 
   const handleRepeat = useCallback(async () => {
     if (!activeJob) return;
-    const brief = typeof activeJob.config?.brief === 'string' ? activeJob.config.brief.trim() : '';
-    if (brief) {
-      await handleStart({ brief });
+    const displayQuery = getUserSearchQuery(activeJob);
+    const savedQueries = (activeJob.config?.queries ?? []).map((q) => String(q).trim()).filter(Boolean);
+    if (savedQueries.length > 0) {
+      await handleStart({ queries: savedQueries, user_query: displayQuery });
       return;
     }
-    const queries = (activeJob.config?.queries ?? []).map((q) => q.trim()).filter(Boolean);
-    if (queries.length === 0) return;
-    await handleStart({ queries });
+    const brief = typeof activeJob.config?.brief === 'string' ? activeJob.config.brief.trim() : '';
+    if (brief) {
+      await handleStart({ brief, user_query: displayQuery || brief });
+      return;
+    }
   }, [activeJob, handleStart]);
 
   const totalCompanies = companyLeads.length;
@@ -637,7 +647,7 @@ export function SearchParserView() {
         </div>
       ) : null}
 
-      <SearchParserForm onStart={(brief) => void handleStart({ brief })} busy={busy} />
+      <SearchParserForm onStart={(payload) => void handleStart(payload)} busy={busy} />
 
       <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         {/* Jobs List */}
