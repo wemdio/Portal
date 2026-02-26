@@ -1,6 +1,7 @@
-# При пуше в main только тесты. Сборка и деплой — по расписанию (Task: .semaphore/scheduled-deploy.yml).
+# При пуше в main: тесты (в т.ч. типопроверка, сборка, аудит) + сборка и пуш образов в Docker Hub.
+# Деплой только по расписанию (Task: .semaphore/scheduled-deploy.yml) — ночью только pull и рестарт.
 version: v1.0
-name: Auto (push main) — tests only
+name: Auto (push main) — test and build
 execution_time_limit:
   hours: 3
 agent:
@@ -24,10 +25,33 @@ blocks:
           - npm ci
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       jobs:
-        - name: Lint and Test
+        - name: Lint, typecheck, build, test, audit
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - npm run lint
+            - npx tsc --noEmit
+            - npm run build
             - npm test -- --watchAll=false
+            - npm audit --audit-level=moderate
+  - name: Push Docker image
+    dependencies:
+      - Run tests
+    run:
+      when: "branch = 'main'"
+    task:
+      secrets:
+        - name: portal-secrets
+      prologue:
+        commands:
+          - checkout
+      jobs:
+        - name: Build and Push
+          commands:
+            - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
+            - docker buildx create --use
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --platform linux/amd64 -f Dockerfile .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
 

@@ -1,11 +1,9 @@
 # Pipeline для запуска по расписанию (Task в 3:00).
-# Проверяет, есть ли новые коммиты на main с момента последнего деплоя.
-# Если нет — завершается без деплоя. Если да — собирает образы, пушит и деплоит.
+# Образы уже собраны при пуше в main. Здесь только: проверка SHA → при изменениях pull образов и деплой.
 #
-# В Semaphore: Tasks → New Task → branch: main, pipeline: .semaphore/scheduled-deploy.yml,
-# Scheduled: 0 3 * * * (3:00 UTC; для Москвы 00:00 или настройте свой часовой пояс в UI).
+# В Semaphore: Tasks → New Task → branch: main, pipeline: .semaphore/scheduled-deploy.yml
 version: v1.0
-name: Scheduled Deploy (3 AM, main)
+name: Scheduled Deploy (3 AM) — pull and deploy
 execution_time_limit:
   hours: 3
 agent:
@@ -24,9 +22,9 @@ blocks:
           - git fetch origin main 2>/dev/null || true
           - sudo apt-get update && sudo apt-get install -y sshpass
       jobs:
-        - name: Build, push and deploy
+        - name: Pull and deploy
           execution_time_limit:
-            minutes: 120
+            minutes: 30
           commands:
             - COMMIT_SHA=$(git rev-parse HEAD)
             - echo "Current main SHA: $COMMIT_SHA"
@@ -38,13 +36,7 @@ blocks:
                 echo "[scheduled] No new commits on main since last deploy — skipping.";
                 exit 0;
               fi;
-              echo "[scheduled] New commits detected — running build and deploy."
-            - 'echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin'
-            - docker buildx create --use
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal:prod --build-arg NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} --build-arg NEXT_PUBLIC_RDP_WS_URL=${NEXT_PUBLIC_RDP_WS_URL} --platform linux/amd64 -f Dockerfile .'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
-            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
+              echo "[scheduled] New commits detected — pulling images and deploying."
             - >-
               sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
               "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
