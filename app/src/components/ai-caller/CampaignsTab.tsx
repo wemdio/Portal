@@ -17,6 +17,7 @@ import {
   X,
   Volume2,
   Square,
+  Mic,
 } from 'lucide-react';
 import type { VapiAssistant, VapiPhoneNumber } from '@/types/ai-caller';
 
@@ -90,6 +91,12 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const [loadingAudio, setLoadingAudio] = useState<string | null>(null);
   const [recordingUrls, setRecordingUrls] = useState<Record<string, string>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Telegram recording
+  const [tgChats, setTgChats] = useState<{ id: number; title: string }[]>([]);
+  const tgLoadedRef = useRef(false);
+  const [sendingTgRec, setSendingTgRec] = useState<string | null>(null);
+  const [tgRecSuccess, setTgRecSuccess] = useState<string | null>(null);
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -210,7 +217,16 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         }),
       });
       const data = await res.json();
-      if (!res.ok) { setError(data.error || 'Ошибка'); setCreating(false); return; }
+      if (!res.ok) {
+        let msg = data.error || 'Ошибка';
+        if (data.invalidSamples?.length) {
+          const samples = data.invalidSamples.map((s: { row: number; phone: string }) => `строка ${s.row}: "${s.phone}"`).join(', ');
+          msg += ` Примеры: ${samples}`;
+        }
+        setError(msg);
+        setCreating(false);
+        return;
+      }
 
       setShowCreate(false);
       setFormName('');
@@ -529,6 +545,38 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setPlayingCallId(null);
   }
 
+  // ── Telegram recording ──
+
+  if (!tgLoadedRef.current) {
+    tgLoadedRef.current = true;
+    getToken().then((token) =>
+      fetch('/api/ai-caller/telegram/chats', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((r) => r.json())
+        .then((data) => setTgChats(data.chats ?? []))
+        .catch(() => {})
+    );
+  }
+
+  async function sendRecordingToTelegram(vapiCallId: string, phone: string, chatId: number) {
+    setSendingTgRec(vapiCallId);
+    setTgRecSuccess(null);
+    try {
+      const token = await getToken();
+      const tgRes = await fetch('/api/ai-caller/telegram/send-recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ chatId, vapiCallId, phone }),
+      });
+      if (tgRes.ok) {
+        setTgRecSuccess(vapiCallId);
+        setTimeout(() => setTgRecSuccess(null), 3000);
+      }
+    } catch { /* ignore */ }
+    setSendingTgRec(null);
+  }
+
   // ── Helpers ──
 
   function getAssistantName(id: string) {
@@ -798,7 +846,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                               <th className="text-left py-1 pr-4">Компания</th>
                               <th className="text-left py-1 pr-4">Статус</th>
                               <th className="text-right py-1 pr-4">Длит.</th>
-                              <th className="text-center py-1 w-10">Запись</th>
+                              <th className="text-center py-1 w-20">Запись</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
@@ -832,21 +880,40 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                                 </td>
                                 <td className="py-1.5 text-center">
                                   {canPlay ? (
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); playRecording(c.vapi_call_id!); }}
-                                      className={`p-1 rounded-md transition-colors ${
-                                        isPlaying
-                                          ? 'text-blue-600 bg-blue-100 hover:bg-blue-200'
-                                          : 'text-gray-400 hover:text-blue-600 hover:bg-blue-50'
-                                      }`}
-                                      title={isPlaying ? 'Остановить' : 'Прослушать запись'}
-                                    >
-                                      {isLoadingRec
-                                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        : isPlaying
-                                          ? <Square className="h-3.5 w-3.5" />
-                                          : <Volume2 className="h-3.5 w-3.5" />}
-                                    </button>
+                                    <div className="inline-flex items-center gap-0.5">
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); playRecording(c.vapi_call_id!); }}
+                                        className={`p-1 rounded-md transition-colors ${
+                                          isPlaying
+                                            ? 'text-blue-600 bg-blue-100 hover:bg-blue-200'
+                                            : 'text-gray-400 hover:text-blue-600 hover:bg-blue-50'
+                                        }`}
+                                        title={isPlaying ? 'Остановить' : 'Прослушать запись'}
+                                      >
+                                        {isLoadingRec
+                                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                          : isPlaying
+                                            ? <Square className="h-3.5 w-3.5" />
+                                            : <Volume2 className="h-3.5 w-3.5" />}
+                                      </button>
+                                      {tgChats.length > 0 && (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            sendRecordingToTelegram(c.vapi_call_id!, c.phone_number, tgChats[0].id);
+                                          }}
+                                          disabled={sendingTgRec === c.vapi_call_id}
+                                          className="p-1 rounded-md text-gray-400 hover:text-purple-600 hover:bg-purple-50 transition-colors disabled:opacity-50"
+                                          title={`Отправить запись в Telegram (${tgChats[0].title})`}
+                                        >
+                                          {sendingTgRec === c.vapi_call_id
+                                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            : tgRecSuccess === c.vapi_call_id
+                                              ? <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+                                              : <Mic className="h-3.5 w-3.5" />}
+                                        </button>
+                                      )}
+                                    </div>
                                   ) : (
                                     <span className="text-gray-300">—</span>
                                   )}
