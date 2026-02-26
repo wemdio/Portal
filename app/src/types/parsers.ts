@@ -36,7 +36,7 @@ export interface SearchParserJob {
   id: string;
   user_id: string;
   status: ParserJobStatus;
-  config: { queries?: string[]; brief?: string };
+  config: { queries?: string[]; brief?: string; user_query?: string };
   total_queries: number;
   processed_queries: number;
   total_results: number;
