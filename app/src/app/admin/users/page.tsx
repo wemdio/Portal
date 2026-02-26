@@ -8,7 +8,8 @@ import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, MoreVertical } from 'lucide-react';
+import { ALL_TOOL_IDS, TOOLS_CONFIG } from '@/lib/toolsRegistry';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -57,8 +58,6 @@ export default function UsersPage() {
   const [creating, setCreating] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'technician' as UserRole, full_name: '' });
   
-  const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [editingRole, setEditingRole] = useState<UserRole | null>(null);
   const [saving, setSaving] = useState(false);
   
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
@@ -68,6 +67,16 @@ export default function UsersPage() {
   const [newPassword, setNewPassword] = useState('');
   const [resetting, setResetting] = useState(false);
   const [revealPassword, setRevealPassword] = useState(false);
+
+  const [actionModalUserId, setActionModalUserId] = useState<string | null>(null);
+  const [actionModalOrigin, setActionModalOrigin] = useState<{ x: number; y: number } | null>(null);
+  const [actionModalLoadingUserId, setActionModalLoadingUserId] = useState<string | null>(null);
+  const [modalFlyIn, setModalFlyIn] = useState(false);
+  const [modalRole, setModalRole] = useState<UserRole | null>(null);
+  const [toolVisibility, setToolVisibility] = useState<Record<string, boolean>>({});
+  const [toolVisibilitySaving, setToolVisibilitySaving] = useState(false);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  const [saveSuccessShown, setSaveSuccessShown] = useState(false);
 
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
@@ -194,6 +203,44 @@ export default function UsersPage() {
   }, [checkAccess]);
 
   useEffect(() => {
+    if (!actionModalUserId) {
+      setActionModalOrigin(null);
+      setSaveSuccessMessage(null);
+    }
+  }, [actionModalUserId]);
+
+  useEffect(() => {
+    if (!saveSuccessMessage) return;
+    const t = setTimeout(() => setSaveSuccessMessage(null), 3500);
+    return () => clearTimeout(t);
+  }, [saveSuccessMessage]);
+
+  async function openActionModal(user: UserProfile, origin: { x: number; y: number }) {
+    setActionModalLoadingUserId(user.id);
+    setError('');
+    try {
+      const res = await apiFetch<{ visibility: Record<string, boolean> }>(
+        `/api/admin/users/${user.id}/tools`
+      );
+      setToolVisibility(res.visibility ?? {});
+      setModalRole(user.role ?? null);
+      setActionModalOrigin(origin);
+      setActionModalUserId(user.id);
+      setModalFlyIn(false);
+      setActionModalLoadingUserId(null);
+      setTimeout(() => setModalFlyIn(true), 20);
+    } catch {
+      setToolVisibility({});
+      setModalRole(user.role ?? null);
+      setActionModalOrigin(origin);
+      setActionModalUserId(user.id);
+      setModalFlyIn(false);
+      setActionModalLoadingUserId(null);
+      setTimeout(() => setModalFlyIn(true), 20);
+    }
+  }
+
+  useEffect(() => {
     if (users.length === 0) return;
     const idsWithAvatar = users
       .filter((u) => typeof u.avatar_url === 'string' && u.avatar_url.trim().length > 0)
@@ -288,8 +335,7 @@ export default function UsersPage() {
       });
 
       setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
-      setEditingUserId(null);
-      setEditingRole(null);
+      if (userId === actionModalUserId) setModalRole(newRole);
       void logAudit('admin.users.role.updated', 'User role updated', {
         targetUserId: userId,
         role: newRole,
@@ -297,6 +343,53 @@ export default function UsersPage() {
     } catch (err: unknown) {
       void logError('admin.users.role.update.failed', err, { targetUserId: userId, role: newRole });
       setError(getErrorMessage(err) || 'Ошибка обновления роли');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveToolVisibility() {
+    if (!actionModalUserId) return;
+    setToolVisibilitySaving(true);
+    setError('');
+    try {
+      await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tools`, {
+        method: 'POST',
+        body: JSON.stringify({ visibility: toolVisibility }),
+      });
+    } catch (err: unknown) {
+      void logError('admin.users.tools.save.failed', err, { targetUserId: actionModalUserId });
+      setError(getErrorMessage(err) || 'Ошибка сохранения настроек инструментов');
+    } finally {
+      setToolVisibilitySaving(false);
+    }
+  }
+
+  async function handleSaveAllChanges() {
+    if (!actionModalUserId || !modalRole) return;
+    setSaving(true);
+    setError('');
+    setSaveSuccessMessage(null);
+    try {
+      await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/role`, {
+        method: 'POST',
+        body: JSON.stringify({ role: modalRole }),
+      });
+      setUsers(users.map(u => (u.id === actionModalUserId ? { ...u, role: modalRole } : u)));
+      void logAudit('admin.users.role.updated', 'User role updated', {
+        targetUserId: actionModalUserId,
+        role: modalRole,
+      });
+
+      await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tools`, {
+        method: 'POST',
+        body: JSON.stringify({ visibility: toolVisibility }),
+      });
+
+      setSaveSuccessMessage('Изменения сохранены');
+    } catch (err: unknown) {
+      void logError('admin.users.save.all.failed', err, { targetUserId: actionModalUserId });
+      setError(getErrorMessage(err) || 'Ошибка сохранения изменений');
     } finally {
       setSaving(false);
     }
@@ -456,17 +549,17 @@ export default function UsersPage() {
                     </button>
                   </th>
                 ))}
-                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Действия
-                </th>
+                <th className="px-6 py-3 w-12" aria-label="Действия" />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {sortedUsers.map((user) => (
                 <tr key={user.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  <td className="pl-10 pr-6 py-4 whitespace-nowrap text-left">
                     <div className="flex items-center">
-                      <UserAvatar user={user} signedUrl={avatarSignedUrls[user.id]} />
+                      <div className="w-10 flex justify-center flex-shrink-0">
+                        <UserAvatar user={user} signedUrl={avatarSignedUrls[user.id]} />
+                      </div>
                       <div className="ml-4">
                         <p className="text-sm font-medium text-gray-900">
                           {user.full_name || 'Без имени'}
@@ -474,24 +567,11 @@ export default function UsersPage() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  <td className="px-6 py-4 whitespace-nowrap text-center">
                     <p className="text-sm text-gray-600">{user.email || '—'}</p>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {editingUserId === user.id ? (
-                      <select
-                        value={editingRole || user.role || ''}
-                        onChange={(e) => setEditingRole(e.target.value as UserRole)}
-                        className="px-3 py-1 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500"
-                      >
-                        {ALL_ROLES.map((role) => (
-                          <option key={role} value={role}>
-                            {ROLE_LABELS[role]}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${
+                  <td className="px-6 py-4 whitespace-nowrap text-center">
+                    <span className={`inline-flex px-3 py-1 rounded-full text-xs font-medium ${
                         user.role === 'admin' ? 'bg-purple-100 text-purple-800' :
                         user.role === 'manager' ? 'bg-blue-100 text-blue-800' :
                         user.role === 'director' ? 'bg-indigo-100 text-indigo-800' :
@@ -500,59 +580,32 @@ export default function UsersPage() {
                         user.role === 'marketer' ? 'bg-pink-100 text-pink-800' :
                         'bg-gray-100 text-gray-800'
                       }`}>
-                        {user.role ? ROLE_LABELS[user.role] : 'Нет роли'}
-                      </span>
-                    )}
+                      {user.role ? ROLE_LABELS[user.role] : 'Нет роли'}
+                    </span>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {editingUserId === user.id ? (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => editingRole && handleUpdateRole(user.id, editingRole)}
-                          disabled={saving || !editingRole}
-                          className="p-1 text-green-600 hover:bg-green-50 rounded disabled:opacity-50"
-                        >
-                          {saving ? '...' : '✓'}
-                        </button>
-                        <button
-                          onClick={() => { setEditingUserId(null); setEditingRole(null); }}
-                          className="p-1 text-gray-600 hover:bg-gray-100 rounded"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => { setEditingUserId(user.id); setEditingRole(user.role); }}
-                          className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                          title="Изменить роль"
-                        >
-                          ✎
-                        </button>
-                        <button
-                          onClick={() => {
-                            setError('');
-                            setResettingUserId(user.id);
-                            setNewPassword('');
-                            setRevealPassword(false);
-                          }}
-                          className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                          title="Сменить пароль"
-                        >
-                          🔑
-                        </button>
-                        {user.id !== currentUserId && (
-                          <button
-                            onClick={() => setDeletingUserId(user.id)}
-                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                            title="Удалить пользователя"
-                          >
-                            🗑
-                          </button>
-                        )}
-                      </div>
-                    )}
+                  <td className="px-6 py-4 whitespace-nowrap text-center">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        const target = e.currentTarget as HTMLElement;
+                        const rect = target.getBoundingClientRect();
+                        const origin = {
+                          x: rect.left + rect.width / 2,
+                          y: rect.top + rect.height / 2,
+                        };
+                        void openActionModal(user, origin);
+                      }}
+                      disabled={actionModalLoadingUserId === user.id}
+                      className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors inline-flex items-center justify-center disabled:opacity-70"
+                      title="Действия"
+                      aria-label="Открыть действия"
+                    >
+                      {actionModalLoadingUserId === user.id ? (
+                        <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" aria-hidden />
+                      ) : (
+                        <MoreVertical className="h-5 w-5" />
+                      )}
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -579,7 +632,8 @@ export default function UsersPage() {
                   setError(''); 
                   setSearchQuery(''); 
                 }}
-                className="p-1 hover:bg-gray-100 rounded"
+                className="size-8 inline-flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                aria-label="Закрыть"
               >
                 ✕
               </button>
@@ -663,6 +717,150 @@ export default function UsersPage() {
         </div>
       )}
 
+      {actionModalUserId && actionModalOrigin && (() => {
+        const userForModal = users.find((u) => u.id === actionModalUserId);
+        if (!userForModal) return null;
+        const origin = actionModalOrigin;
+        return (
+          <div
+            className="fixed inset-0 z-50 p-4 flex items-center justify-center"
+            style={{
+              backgroundColor: modalFlyIn ? 'rgba(0,0,0,0.2)' : 'transparent',
+              backdropFilter: modalFlyIn ? 'blur(4px)' : 'none',
+              transition: 'background-color 1s ease-out, backdrop-filter 1s ease-out',
+            }}
+          >
+            <div
+              className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+              style={{
+                position: 'fixed',
+                left: modalFlyIn ? '50%' : `${origin.x}px`,
+                top: modalFlyIn ? '50%' : `${origin.y}px`,
+                transform: `translate(-50%, -50%) scale(${modalFlyIn ? 1 : 0})`,
+                transformOrigin: 'center center',
+                opacity: modalFlyIn ? 1 : 0.95,
+                transition: 'left 1s cubic-bezier(0.34, 1.56, 0.64, 1), top 1s cubic-bezier(0.34, 1.56, 0.64, 1), transform 1s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 1s ease-out',
+              }}
+            >
+              <div className="px-6 py-4 border-b border-gray-200 shrink-0 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {userForModal.full_name || userForModal.email || 'Пользователь'}
+                  </h3>
+                  <button
+                  type="button"
+                  onClick={() => {
+                    setActionModalUserId(null);
+                    setModalFlyIn(false);
+                  }}
+                  className="size-8 inline-flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                  aria-label="Закрыть"
+                >
+                  ✕
+                </button>
+                </div>
+                {saveSuccessMessage && (
+                  <div
+                    className="flex items-center gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-800 border border-green-200"
+                    role="status"
+                  >
+                    <span className="shrink-0 size-5 rounded-full bg-green-500 flex items-center justify-center text-white" aria-hidden>
+                      <Check className="size-3 stroke-[3]" />
+                    </span>
+                    {saveSuccessMessage}
+                  </div>
+                )}
+              </div>
+              <div className="p-6 overflow-y-auto space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Роль</label>
+                  <select
+                    value={modalRole ?? ''}
+                    onChange={(e) => setModalRole(e.target.value as UserRole)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  >
+                    {ALL_ROLES.map((role) => (
+                      <option key={role} value={role}>
+                        {ROLE_LABELS[role]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActionModalUserId(null);
+                      setModalFlyIn(false);
+                      setError('');
+                      setResettingUserId(actionModalUserId);
+                      setNewPassword('');
+                      setRevealPassword(false);
+                    }}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Сменить пароль
+                  </button>
+                  {actionModalUserId !== currentUserId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                        setDeletingUserId(actionModalUserId);
+                      }}
+                      className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
+                    >
+                      Удалить пользователя
+                    </button>
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-sm font-medium text-gray-900 mb-3">Отображение инструментов</h4>
+                  <ul className="space-y-2">
+                    {ALL_TOOL_IDS.map((toolId) => (
+                      <li key={toolId} className="flex items-center justify-between gap-4">
+                        <span className="text-sm text-gray-700">{TOOLS_CONFIG[toolId].title}</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={toolVisibility[toolId] !== false}
+                          onClick={() =>
+                            setToolVisibility((prev) => ({
+                              ...prev,
+                              [toolId]: prev[toolId] === false,
+                            }))
+                          }
+                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                            toolVisibility[toolId] !== false ? 'bg-blue-600' : 'bg-gray-200'
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition ${
+                              toolVisibility[toolId] !== false ? 'translate-x-5' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleSaveAllChanges}
+                  disabled={saving || !modalRole}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+                >
+                  {saving ? 'Сохранение...' : 'Сохранить изменения'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {deletingUserId && (
         <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
@@ -718,7 +916,7 @@ export default function UsersPage() {
                   setRevealPassword(false);
                   setError('');
                 }}
-                className="p-1 hover:bg-gray-100 rounded"
+                className="size-8 inline-flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
                 aria-label="Закрыть"
               >
                 ✕

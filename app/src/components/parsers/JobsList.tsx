@@ -37,6 +37,9 @@ type Props = {
   refreshing?: boolean;
 };
 
+const MAX_JOBS = 20;
+const LIST_MAX_HEIGHT = '420px'; // ~5 видимых элементов
+
 function formatDate(dateStr: string) {
   try {
     return new Date(dateStr).toLocaleString('ru-RU', {
@@ -60,12 +63,13 @@ export function JobsList({
   busy,
   refreshing,
 }: Props) {
+  const displayJobs = jobs.slice(-MAX_JOBS);
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-nowrap">
         <div>
           <h3 className="text-lg font-semibold text-gray-900 whitespace-nowrap">
-            История запусков ({jobs.length})
+            История запусков ({displayJobs.length})
           </h3>
         </div>
         <button
@@ -78,11 +82,14 @@ export function JobsList({
         </button>
       </div>
 
-      {jobs.length === 0 ? (
+      {displayJobs.length === 0 ? (
         <div className="px-6 py-10 text-center text-gray-500">Запусков пока нет</div>
       ) : (
-        <div className="divide-y divide-gray-100 max-h-[560px] overflow-y-auto md:max-h-none md:overflow-visible">
-          {jobs.map((job) => {
+        <div
+          className="divide-y divide-gray-100 overflow-y-auto"
+          style={{ maxHeight: LIST_MAX_HEIGHT }}
+        >
+          {displayJobs.map((job) => {
             const isActive = activeJobId === job.id;
             const stoppedByUser = isStoppedByUser(job.status, job.error_message);
             const totalFound = typeof job.total_found === 'number' ? job.total_found : null;

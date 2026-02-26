@@ -87,7 +87,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       <div className="flex min-w-0 flex-1 flex-col">
         {isTma && <TmaHeader />}
         <main
-          className={`flex-1 flex flex-col min-h-0${isTma ? ' overflow-y-auto' : ''} ${contentPadding}${isTma ? ' tma-safe-bottom' : ''} ${!isTma && isMobileLayout ? 'pt-12' : ''}`}
+          className={`flex-1 flex flex-col min-h-0 overflow-y-auto ${contentPadding}${isTma ? ' tma-safe-bottom' : ''} ${!isTma && isMobileLayout ? 'pt-12' : ''}`}
         >
           <div className={`${contentWidth}${isRdpPage ? ' flex flex-col flex-1 min-h-0' : ''}`}>{children}</div>
         </main>
