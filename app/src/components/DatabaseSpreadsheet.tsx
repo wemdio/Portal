@@ -695,6 +695,8 @@ export function DatabaseSpreadsheet() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const tableWrapperRef = useRef<HTMLDivElement | null>(null);
+  const filterMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
   const confirmActionRef = useRef<(() => void) | null>(null);
@@ -1101,12 +1103,21 @@ export function DatabaseSpreadsheet() {
       setContextMenu(null);
       setFilterMenu(null);
     };
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node) {
+        if (filterMenuRef.current?.contains(target) || contextMenuRef.current?.contains(target)) {
+          return;
+        }
+      }
+      handleClose();
+    };
     window.addEventListener('click', handleClose);
-    window.addEventListener('scroll', handleClose, true);
+    window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', handleClose);
     return () => {
       window.removeEventListener('click', handleClose);
-      window.removeEventListener('scroll', handleClose, true);
+      window.removeEventListener('scroll', handleScroll, true);
       window.removeEventListener('resize', handleClose);
     };
   }, []);
@@ -6087,6 +6098,7 @@ export function DatabaseSpreadsheet() {
       </div>
       {filterMenu && (
         <div
+          ref={filterMenuRef}
           className="fixed z-50 w-72 rounded-lg border border-gray-200 bg-white shadow-xl"
           style={{ top: filterMenu.y, left: filterMenu.x }}
           onClick={(event) => event.stopPropagation()}
@@ -6180,6 +6192,7 @@ export function DatabaseSpreadsheet() {
       )}
       {contextMenu && (
         <div
+          ref={contextMenuRef}
           className="fixed z-50 w-44 rounded border border-gray-200 bg-white py-0.5 shadow-xl"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(event) => event.stopPropagation()}
