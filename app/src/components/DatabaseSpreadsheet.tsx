@@ -2674,7 +2674,11 @@ export function DatabaseSpreadsheet() {
     }
 
     const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
+    let token = session?.access_token ?? null;
+    if (!token) {
+      const refreshedToken = await getFreshToken();
+      token = refreshedToken;
+    }
     if (!token) {
       setPersonalization((prev) => ({
         ...prev,
