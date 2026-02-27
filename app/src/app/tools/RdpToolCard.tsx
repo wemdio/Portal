@@ -28,9 +28,9 @@ export function RdpToolCard() {
             Подключение к удалённому ПК через браузер.
           </p>
         </div>
-        <Monitor className="h-8 w-8 text-emerald-500 group-hover:text-emerald-600 transition-colors shrink-0" />
+        <Monitor className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
       </div>
-      <div className="mt-4 text-sm font-medium text-emerald-600 group-hover:text-emerald-700">
+      <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
         Открыть →
       </div>
     </>
@@ -54,7 +54,7 @@ export function RdpToolCard() {
   );
 
   const baseClassPc =
-    'group rounded-2xl border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6 transition hover:shadow-md hover:border-emerald-300 w-full min-w-0 h-full flex flex-col';
+    'group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md hover:border-gray-300 w-full min-w-0 h-full flex flex-col';
   const baseClassMobile =
     'rounded-2xl border-2 border-gray-200 bg-gray-50 p-6 w-full h-full min-h-0 text-left cursor-pointer transition flex flex-col';
 

@@ -18,7 +18,11 @@ import {
   isMojeekBlockedError,
   mojeekSearchDetailed,
 } from './searchScraper';
+import { serperSearchDetailed } from './serperSearch';
 import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
+
+/** Использовать Serper API для поисковой выдачи (когда задан SERPER_API_KEY). Иначе — старый парсинг Google/DDG/Bing/Mojeek. */
+const USE_SERPER = Boolean((process.env.SERPER_API_KEY ?? '').trim());
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -49,10 +53,10 @@ const SOURCE_EXPAND_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.SOURCE_EXPAND.CONC
 const QUERY_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.QUERY_CONCURRENCY, 1);
 
 const GOOGLE_RESULTS_PER_QUERY = 100;
-const BING_MAX_PAGES = 8;
-const BING_MAX_RESULTS = 200;
+const BING_MAX_PAGES = 16;
+const BING_MAX_RESULTS = 400;
 const MULTI_PROVIDER_ENABLED = true;
-const MAX_UNIQUE_SITES_PER_QUERY = 500;
+const MAX_UNIQUE_SITES_PER_QUERY = 1000;
 
 function randInt(min: number, max: number) {
   return Math.floor(min + Math.random() * (max - min + 1));
@@ -637,7 +641,8 @@ export async function runSearchParserJob(jobId: string) {
           return await mojeekSearchDetailed(q);
         };
 
-        let results: Array<(SearchResultItem & { _provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' })> = [];
+        type ProviderTag = 'google' | 'duckduckgo' | 'bing' | 'mojeek' | 'serper';
+        let results: Array<(SearchResultItem & { _provider: ProviderTag })> = [];
         let debugPrimary: unknown = null;
         let usedFallback = false;
         let debugFallback: unknown = null;
@@ -645,7 +650,34 @@ export async function runSearchParserJob(jobId: string) {
         let provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' = 'google';
         const simplifiedQuery = simplifySearchQuery(query);
 
-        const tryProviders = async (q: string) => {
+        // —— Новый подход: Serper API (поисковая выдача без парсинга HTML) ——
+        if (USE_SERPER) {
+          try {
+            const out = await serperSearchDetailed(query, { num: GOOGLE_RESULTS_PER_QUERY });
+            results = out.results.map((r) => ({ ...r, _provider: 'serper' as const }));
+            debugPrimary = out.debug;
+          } catch (e) {
+            debugPrimary = { error: e instanceof Error ? e.message : String(e) };
+            void logWarn(
+              'parser.search.serper.failed',
+              e instanceof Error ? e.message : String(e),
+              { jobId, query },
+              logMeta,
+            );
+          }
+          if (results.length === 0 && simplifiedQuery && simplifiedQuery !== query) {
+            usedFallback = true;
+            try {
+              const outFallback = await serperSearchDetailed(simplifiedQuery, { num: GOOGLE_RESULTS_PER_QUERY });
+              results = outFallback.results.map((r) => ({ ...r, query, _provider: 'serper' as const }));
+              debugFallback = outFallback.debug;
+            } catch (e) {
+              debugFallback = { error: e instanceof Error ? e.message : String(e) };
+            }
+          }
+        } else {
+          // —— Старый подход: парсинг Google / DuckDuckGo / Bing / Mojeek (используется когда SERPER_API_KEY не задан) ——
+          const tryProviders = async (q: string) => {
           const order: Array<'google' | 'duckduckgo' | 'bing' | 'mojeek'> = googleBlockedForJob
             ? ['duckduckgo', 'bing', 'mojeek']
             : ['google', 'duckduckgo', 'bing', 'mojeek'];
@@ -797,6 +829,7 @@ export async function runSearchParserJob(jobId: string) {
             }
           }
         }
+        } // конец блока «старый подход» (Google/DDG/Bing/Mojeek)
 
         // Build rows (local dedupe only)
         const rows = results

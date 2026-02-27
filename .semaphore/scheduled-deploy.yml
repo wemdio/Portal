@@ -1,0 +1,77 @@
+# Pipeline для запуска по расписанию (Task в 3:00).
+# Образы уже собраны при пуше в main. Здесь только: проверка SHA → при изменениях pull образов и деплой.
+#
+# В Semaphore: Tasks → New Task → branch: main, pipeline: .semaphore/scheduled-deploy.yml
+version: v1.0
+name: Scheduled Deploy (3 AM) — pull and deploy
+execution_time_limit:
+  hours: 3
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2004
+blocks:
+  - name: Deploy if main changed
+    dependencies: []
+    task:
+      secrets:
+        - name: portal-secrets
+      prologue:
+        commands:
+          - checkout
+          - git fetch origin main 2>/dev/null || true
+          - sudo apt-get update && sudo apt-get install -y sshpass
+      jobs:
+        - name: Pull and deploy
+          execution_time_limit:
+            minutes: 30
+          commands:
+            - COMMIT_SHA=$(git rev-parse HEAD)
+            - echo "Current main SHA: $COMMIT_SHA"
+            - >
+              LAST=$(sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
+              "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true");
+              echo "Last deployed SHA: ${LAST:-<none>}";
+              if [ "$COMMIT_SHA" = "$LAST" ]; then
+                echo "[scheduled] No new commits on main since last deploy — skipping.";
+                exit 0;
+              fi;
+              echo "[scheduled] New commits detected — pulling images and deploying."
+            - >-
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
+              "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
+            - 'sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no docker-compose.prod.yml drain-worker.sh ${USER}@${HOST}:/home/Portal/prod/'
+            - >-
+              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
+              "set -e;
+              cd /home/Portal/prod;
+              chmod +x drain-worker.sh;
+              echo '--- Step 0: ensure deps (skip if already present) ---';
+              if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found' && exit 1; fi;
+              if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+                sudo -n apt-get update;
+                sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y curl python3 ca-certificates;
+              fi;
+              if ! command -v docker >/dev/null 2>&1 || ! sudo -n docker compose version >/dev/null 2>&1; then
+                sudo -n curl -fsSL https://get.docker.com -o /tmp/get-docker.sh;
+                sudo -n sh /tmp/get-docker.sh;
+                sudo -n systemctl enable --now docker >/dev/null 2>&1 || true;
+              fi;
+              echo '--- Step 1: drain worker ---';
+              sudo -n bash drain-worker.sh;
+              echo '--- Step 2: pull new images ---';
+              sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml pull;
+              echo '--- Step 3: restart portal + yandexmaps + guacd + rdp-ws ---';
+              for svc in portal yandexmaps guacd rdp-ws; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
+              sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-rdp-ws 2>/dev/null || true;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws;
+              echo '--- Step 4: restart workers ---';
+              for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=$svc\" -q | xargs -r sudo -n docker rm -f; done;
+              sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation 2>/dev/null || true;
+              sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
+              sudo -n docker image prune -f;
+              sudo -n docker volume prune -f;
+              echo '--- Deploy complete ---'"
+            - 'sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"'
+            - echo "[scheduled] Saved last_deploy_sha on server."
