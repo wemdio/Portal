@@ -27,7 +27,7 @@ blocks:
             minutes: 30
           commands:
             - COMMIT_SHA=$(git rev-parse HEAD)
-            - echo "Current main SHA: $COMMIT_SHA"
+            - 'echo "Current main SHA: $COMMIT_SHA"'
             - >
               LAST=$(sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST}
               "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true");
