@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -248,7 +249,12 @@ export default function DoneForYouPage() {
       });
       state.activeTabId = tabId;
       localStorage.setItem('database-spreadsheet-state', JSON.stringify(state));
-      window.open('/tools/databases', '_blank');
+      const { id } = writePendingDbImport({
+        title: `DFY ${new Date().toLocaleDateString('ru-RU')}`,
+        rows: jobData,
+      });
+      const importUrl = buildDatabasesImportUrl(id);
+      window.open(importUrl, '_blank');
     } catch (err) {
       console.error('Failed to load to spreadsheet:', err);
     }
