@@ -187,6 +187,19 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+/** Extract network cause from fetch/undici errors for clearer logs and user-facing messages */
+function getFetchFailureReason(err: unknown): string {
+  if (err instanceof Error && err.cause instanceof Error) {
+    const c = err.cause as Error & { code?: string };
+    const code = c.code ?? '';
+    const msg = c.message ?? '';
+    if (code) return `${code}: ${msg}`.trim();
+    return msg || err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 export async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<never>((_, reject) => {
@@ -569,7 +582,14 @@ export async function fetchWithRetry<T>(
       if (err instanceof Error && err.name === 'AbortError') {
         lastError = new Error('HH API request timed out');
       } else {
-        lastError = err;
+        const reason = getFetchFailureReason(err);
+        const isGenericFetchFailed = err instanceof Error && err.message === 'fetch failed';
+        if (isGenericFetchFailed && reason) {
+          lastError = new Error(`fetch failed: ${reason}`);
+          logError('hh.fetch_failed', err as Error, { url, reason, attempt: attempt + 1, maxRetries });
+        } else {
+          lastError = err;
+        }
       }
       if (attempt === maxRetries) break;
       const base = Math.min(maxDelayMs, minDelayMs * 2 ** attempt);

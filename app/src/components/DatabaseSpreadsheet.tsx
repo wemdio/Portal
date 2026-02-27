@@ -1110,7 +1110,7 @@ export function DatabaseSpreadsheet() {
       setContextMenu(null);
       setFilterMenu(null);
     };
-    const handleWindowClick = (event: MouseEvent) => {
+    const handleWindowClick = (event: Event) => {
       if (isMenuEventTarget(event.target)) return;
       handleClose();
     };
