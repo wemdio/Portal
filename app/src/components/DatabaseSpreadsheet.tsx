@@ -1099,25 +1099,34 @@ export function DatabaseSpreadsheet() {
   }, []);
 
   useEffect(() => {
+    const isMenuEventTarget = (target: EventTarget | null) => (
+      target instanceof Node
+      && (
+        filterMenuRef.current?.contains(target)
+        || contextMenuRef.current?.contains(target)
+      )
+    );
     const handleClose = () => {
       setContextMenu(null);
       setFilterMenu(null);
     };
-    const handleScroll = (event: Event) => {
-      const target = event.target;
-      if (target instanceof Node) {
-        if (filterMenuRef.current?.contains(target) || contextMenuRef.current?.contains(target)) {
-          return;
-        }
-      }
+    const handleWindowClick = (event: MouseEvent) => {
+      if (isMenuEventTarget(event.target)) return;
       handleClose();
     };
-    window.addEventListener('click', handleClose);
-    window.addEventListener('scroll', handleScroll, true);
+    const handleScrollableClose = (event: Event) => {
+      if (isMenuEventTarget(event.target)) return;
+      handleClose();
+    };
+    const tableEl = tableWrapperRef.current;
+    window.addEventListener('click', handleWindowClick);
+    window.addEventListener('scroll', handleScrollableClose);
+    tableEl?.addEventListener('scroll', handleScrollableClose);
     window.addEventListener('resize', handleClose);
     return () => {
-      window.removeEventListener('click', handleClose);
-      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('click', handleWindowClick);
+      window.removeEventListener('scroll', handleScrollableClose);
+      tableEl?.removeEventListener('scroll', handleScrollableClose);
       window.removeEventListener('resize', handleClose);
     };
   }, []);
@@ -5214,6 +5223,11 @@ export function DatabaseSpreadsheet() {
     websiteEnrichment.isGenerating,
   ]);
 
+  const toolbarMonochromeButtonClass =
+    'inline-flex items-center rounded border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
+  const toolbarMonochromeButtonCompactClass =
+    'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
+
   return (
     <div className="space-y-0.5 h-[calc(100vh-0.75rem)] flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
@@ -5223,7 +5237,7 @@ export function DatabaseSpreadsheet() {
           <button
             type="button"
             onClick={confirmRemoveSelectedRows}
-            className="inline-flex items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 transition hover:bg-red-100"
+            className={toolbarMonochromeButtonCompactClass}
           >
             Удалить ({selectedRows.size})
           </button>
@@ -5290,7 +5304,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openPersonalizationModal}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-gray-900 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-gray-800 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           Персонализация
         </button>
@@ -5299,7 +5313,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openWebsiteEnrichmentModal}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-blue-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           Обогатить
         </button>
@@ -5308,7 +5322,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openEmailScrapingModal}
           disabled={colCount === 0 || emailScraping.isGenerating}
-          className="inline-flex items-center rounded bg-rose-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-rose-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           {emailScraping.isGenerating ? `Почты... ${emailScraping.progress}%` : 'Найти почты'}
         </button>
@@ -5317,7 +5331,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openEmailValidationModal}
           disabled={colCount === 0 || emailValidation.isValidating}
-          className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-emerald-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           {emailValidation.isValidating ? `Валидация... ${emailValidation.progress}%` : 'Валидация почт'}
         </button>
@@ -5326,7 +5340,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openSiteAvailabilityModal}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           Проверка сайтов
         </button>
@@ -5335,7 +5349,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openBriefScoringModal}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-emerald-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           Оценка ЦА
         </button>
@@ -5344,7 +5358,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={openNameCleanupModal}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-amber-700 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
         >
           Чистка названий
         </button>
@@ -5353,7 +5367,7 @@ export function DatabaseSpreadsheet() {
           type="button"
           onClick={handleCleanInvisibleWhitespace}
           disabled={colCount === 0}
-          className="inline-flex items-center rounded bg-cyan-700 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-cyan-800 disabled:bg-gray-300"
+          className={toolbarMonochromeButtonClass}
           title="Очистка невидимых символов и проблемных пробелов для экспорта в Instantly"
         >
           Whitespace Fix
@@ -5385,7 +5399,7 @@ export function DatabaseSpreadsheet() {
             <button
               type="button"
               onClick={handleStopWebsiteEnrichment}
-              className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600 hover:bg-red-100"
+              className="rounded border border-gray-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-900 transition hover:bg-gray-100"
             >
               Стоп
             </button>

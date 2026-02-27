@@ -134,20 +134,28 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
         >
           {!isTma && isSpreadsheetPage && (
             <div className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-              <div className="flex items-center gap-1 overflow-x-auto px-2 py-1.5 no-scrollbar">
-                {compactNavItems.map((item) => (
-                  <Link
-                    key={item.name}
-                    href={item.href as Route}
-                    className={`whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                      isNavItemActive(item.href)
-                        ? 'bg-gray-900 text-white'
-                        : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-                    }`}
-                  >
-                    {item.name}
-                  </Link>
-                ))}
+              <div className="mx-auto flex w-full max-w-7xl flex-col items-center gap-1 px-2 py-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-400">
+                  Навигация по разделам портала
+                </span>
+                <nav
+                  aria-label="Навигация портала"
+                  className="flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-gray-200 bg-gray-50 p-1 no-scrollbar"
+                >
+                  {compactNavItems.map((item) => (
+                    <Link
+                      key={item.name}
+                      href={item.href as Route}
+                      className={`whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                        isNavItemActive(item.href)
+                          ? 'bg-gray-900 text-white'
+                          : 'text-gray-600 hover:bg-white hover:text-gray-900'
+                      }`}
+                    >
+                      {item.name}
+                    </Link>
+                  ))}
+                </nav>
               </div>
             </div>
           )}
