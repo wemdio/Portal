@@ -9,6 +9,36 @@ export const dynamic = 'force-dynamic';
 
 type Ctx = { params: Promise<{ id: string }> };
 
+async function triggerAutoAnalysis(
+  baseUrl: string,
+  token: string,
+  campaignId: string,
+  provider: string,
+) {
+  try {
+    const res = await fetch(`${baseUrl}/api/ai-caller/analytics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'x-ai-caller-provider': provider,
+      },
+      body: JSON.stringify({ campaignId }),
+    });
+
+    if (!res.ok) {
+      console.warn(`[Campaign] auto-analysis request failed for ${campaignId}: HTTP ${res.status}`);
+      return;
+    }
+
+    const data = await res.json();
+    console.log(`[Campaign] auto-analysis completed for ${campaignId}: ${data.newlyAnalyzed ?? 0} new`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[Campaign] auto-analysis error for ${campaignId}: ${msg}`);
+  }
+}
+
 /** POST — позвонить следующему контакту в кампании */
 export async function POST(req: NextRequest, ctx: Ctx) {
   const token = getBearerToken(req.headers.get('authorization'));
@@ -54,6 +84,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       .update({ status: 'completed', updated_at: new Date().toISOString() })
       .eq('id', campaignId)
       .eq('provider', provider);
+
+    // Trigger call analysis automatically when campaign is fully completed.
+    // Fire-and-forget: do not block campaign completion response.
+    void triggerAutoAnalysis(req.nextUrl.origin, token, campaignId, provider);
 
     return NextResponse.json({ done: true, message: 'Все контакты обзвонены' });
   }

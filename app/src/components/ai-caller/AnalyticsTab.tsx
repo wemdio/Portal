@@ -146,24 +146,26 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     fetchAnalyses(campaignId);
   }
 
+  const [analyzeStatus, setAnalyzeStatus] = useState<string | null>(null);
+
   async function analyzeNewCalls() {
     setAnalyzing(true);
+    setAnalyzeStatus('Подготовка...');
     try {
       const token = await getToken();
       const payload: { callIds?: string[]; campaignId?: string } = {};
 
       if (selectedCampaign !== 'all') {
-        // Analyze by campaign — API will auto-collect call IDs from contacts
         payload.campaignId = selectedCampaign;
       } else {
-        // Analyze from loaded calls
         const callIds = calls
           .filter((c) => c.status === 'ended')
           .map((c) => c.id);
-        if (callIds.length === 0) { setAnalyzing(false); return; }
+        if (callIds.length === 0) { setAnalyzing(false); setAnalyzeStatus(null); return; }
         payload.callIds = callIds;
       }
 
+      setAnalyzeStatus('Анализирую звонки...');
       const res = await fetch('/api/ai-caller/analytics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -171,7 +173,17 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
       });
       const data = await res.json();
       if (data.analyses) setAnalyses(data.analyses);
-    } catch { /* ignore */ }
+      const newCount = data.newlyAnalyzed ?? 0;
+      if (newCount > 0) {
+        setAnalyzeStatus(`Готово! Проанализировано ${newCount} новых звонков`);
+      } else {
+        setAnalyzeStatus('Все звонки уже проанализированы');
+      }
+      setTimeout(() => setAnalyzeStatus(null), 4000);
+    } catch {
+      setAnalyzeStatus('Ошибка анализа');
+      setTimeout(() => setAnalyzeStatus(null), 3000);
+    }
     setAnalyzing(false);
   }
 
@@ -476,7 +488,13 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
             {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             {analyzing ? 'Анализирую...' : 'Анализировать звонки'}
           </button>
-          {unanalyzedCount > 0 && (
+          {analyzing && analyzeStatus && (
+            <span className="text-xs text-purple-500 font-medium">{analyzeStatus}</span>
+          )}
+          {!analyzing && analyzeStatus && (
+            <span className="text-xs text-green-600 font-medium">{analyzeStatus}</span>
+          )}
+          {!analyzing && !analyzeStatus && unanalyzedCount > 0 && (
             <span className="text-xs text-gray-400">
               {unanalyzedCount} новых для анализа
             </span>
