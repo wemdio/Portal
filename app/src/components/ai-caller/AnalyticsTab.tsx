@@ -26,6 +26,7 @@ import {
   Download,
   Send,
   Check,
+  Mic,
 } from 'lucide-react';
 import type { VapiCall } from '@/types/ai-caller';
 
@@ -99,6 +100,8 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [tgDropdownId, setTgDropdownId] = useState<string | null>(null);
   const [tgSending, setTgSending] = useState<string | null>(null);
   const [tgSent, setTgSent] = useState<Set<string>>(new Set());
+  const [tgRecSending, setTgRecSending] = useState<string | null>(null);
+  const [tgRecSent, setTgRecSent] = useState<Set<string>>(new Set());
 
   const getToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -389,6 +392,45 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     } finally {
       setTgSending(null);
       setTimeout(() => setTgDropdownId(null), 1200);
+    }
+  }
+
+  async function sendRecordingToTelegram(chatId: number, analysis: Analysis) {
+    const key = `rec-${analysis.id}-${chatId}`;
+    setTgRecSending(key);
+    try {
+      const token = await getToken();
+      let url = recordingUrls[analysis.vapi_call_id] || '';
+      if (!url) {
+        const res = await fetch(`/api/ai-caller/calls/${analysis.vapi_call_id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        const call = data.call as Record<string, unknown> | undefined;
+        url = (call?.recordingUrl as string)
+          || ((call?.artifact as Record<string, unknown>)?.recordingUrl as string)
+          || '';
+        if (url?.startsWith('/api/')) {
+          url = `${window.location.origin}${url}`;
+        }
+      }
+
+      const res = await fetch('/api/ai-caller/telegram/send-recording', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          chatId,
+          vapiCallId: analysis.vapi_call_id,
+          recordingUrl: url,
+          phone: analysis.customer_number || '',
+        }),
+      });
+      if (res.ok) {
+        setTgRecSent((prev) => new Set(prev).add(key));
+      }
+    } catch { /* ignore */ }
+    finally {
+      setTgRecSending(null);
     }
   }
 
@@ -719,35 +761,51 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
                                 const sentKey = `${a.id}-${chat.id}`;
                                 const isSending = tgSending === sentKey;
                                 const wasSent = tgSent.has(sentKey);
+                                const recKey = `rec-${a.id}-${chat.id}`;
+                                const isRecSending = tgRecSending === recKey;
+                                const wasRecSent = tgRecSent.has(recKey);
 
                                 return (
-                                  <button
-                                    key={chat.id}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (!isSending && !wasSent) sendToTelegram(chat.id, a);
-                                    }}
-                                    disabled={isSending || wasSent}
-                                    className={`w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 transition-colors ${
-                                      wasSent
-                                        ? 'bg-green-50 text-green-700'
-                                        : 'hover:bg-gray-50 text-gray-700'
-                                    }`}
-                                  >
-                                    <span className="flex-1 truncate">
+                                  <div key={chat.id} className="px-3 py-2 hover:bg-gray-50 transition-colors">
+                                    <div className="text-sm text-gray-700 truncate mb-1.5">
                                       {chat.title}
                                       <span className="text-xs text-gray-400 ml-1">
                                         ({chat.type === 'private' ? 'ЛС' : chat.type === 'group' ? 'группа' : chat.type === 'supergroup' ? 'группа' : 'канал'})
                                       </span>
-                                    </span>
-                                    {isSending ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin flex-shrink-0 text-gray-400" />
-                                    ) : wasSent ? (
-                                      <Check className="h-3.5 w-3.5 flex-shrink-0 text-green-600" />
-                                    ) : (
-                                      <Send className="h-3 w-3 flex-shrink-0 text-gray-400" />
-                                    )}
-                                  </button>
+                                    </div>
+                                    <div className="flex gap-1.5">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (!isSending && !wasSent) sendToTelegram(chat.id, a);
+                                        }}
+                                        disabled={isSending || wasSent}
+                                        className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                                          wasSent ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        }`}
+                                      >
+                                        {isSending ? <Loader2 className="h-3 w-3 animate-spin" />
+                                          : wasSent ? <Check className="h-3 w-3" />
+                                          : <Send className="h-3 w-3" />}
+                                        Текст
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (!isRecSending && !wasRecSent) sendRecordingToTelegram(chat.id, a);
+                                        }}
+                                        disabled={isRecSending || wasRecSent}
+                                        className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                                          wasRecSent ? 'bg-green-100 text-green-700' : 'bg-purple-50 text-purple-600 hover:bg-purple-100'
+                                        }`}
+                                      >
+                                        {isRecSending ? <Loader2 className="h-3 w-3 animate-spin" />
+                                          : wasRecSent ? <Check className="h-3 w-3" />
+                                          : <Mic className="h-3 w-3" />}
+                                        Запись
+                                      </button>
+                                    </div>
+                                  </div>
                                 );
                               })
                             )}
