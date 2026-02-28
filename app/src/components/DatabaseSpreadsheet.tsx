@@ -105,6 +105,20 @@ type PersistedEnrichmentState = {
   runs: PersistedEnrichmentRun[];
 };
 
+type PersistedBriefScoringRun = {
+  jobId: string;
+  tabId: string;
+  scoreCol: number;
+  reasonCol: number;
+  totalRows: number;
+  startedAt: string;
+};
+
+type PersistedBriefScoringState = {
+  version: number;
+  runs: PersistedBriefScoringRun[];
+};
+
 type PersonalizationState = {
   isOpen: boolean;
   sourceCol: number;
@@ -249,6 +263,8 @@ const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 700;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
+const BRIEF_SCORING_STORAGE_KEY_PREFIX = 'portal:brief-scoring';
+const BRIEF_SCORING_STORAGE_VERSION = 1;
 
 const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -376,6 +392,9 @@ const buildStorageKey = (userId: string | null) =>
 const buildEnrichmentStorageKey = (userId: string | null) =>
   `${ENRICHMENT_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
+const buildBriefScoringStorageKey = (userId: string | null) =>
+  `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
+
 const coerceRows = (rows: unknown) => {
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => {
@@ -486,6 +505,41 @@ const readPersistedEnrichment = (raw: unknown): PersistedEnrichmentState => {
     })
     .filter((run): run is PersistedEnrichmentRun => run !== null);
   return { version: ENRICHMENT_STORAGE_VERSION, runs };
+};
+
+const readPersistedBriefScoring = (raw: unknown): PersistedBriefScoringState => {
+  if (!raw) return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  const candidate = parsed as Partial<PersistedBriefScoringState>;
+  if (candidate.version !== BRIEF_SCORING_STORAGE_VERSION || !Array.isArray(candidate.runs)) {
+    return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  }
+  const runs = candidate.runs
+    .map((run) => {
+      if (!run || typeof run !== 'object') return null;
+      const value = run as Partial<PersistedBriefScoringRun>;
+      if (!value.jobId || !value.tabId) return null;
+      const scoreCol = Number(value.scoreCol ?? 0);
+      const reasonCol = Number(value.reasonCol ?? 1);
+      return {
+        jobId: String(value.jobId),
+        tabId: String(value.tabId),
+        scoreCol: Number.isFinite(scoreCol) ? scoreCol : 0,
+        reasonCol: Number.isFinite(reasonCol) ? reasonCol : 1,
+        totalRows: typeof value.totalRows === 'number' && Number.isFinite(value.totalRows) ? value.totalRows : 0,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : new Date().toISOString(),
+      } satisfies PersistedBriefScoringRun;
+    })
+    .filter((run): run is PersistedBriefScoringRun => run !== null);
+  return { version: BRIEF_SCORING_STORAGE_VERSION, runs };
 };
 
 const trimTrailingEmptyRows = (rows: string[][]) => {
@@ -659,6 +713,7 @@ export function DatabaseSpreadsheet() {
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const enrichmentStorageKey = useMemo(() => buildEnrichmentStorageKey(userId), [userId]);
+  const briefScoringStorageKey = useMemo(() => buildBriefScoringStorageKey(userId), [userId]);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('cell');
@@ -779,6 +834,7 @@ export function DatabaseSpreadsheet() {
   const [enrichmentTargetOverride, setEnrichmentTargetOverride] = useState<number | null>(null);
   const enrichmentAbortRef = useRef<AbortController | null>(null);
   const resumeEnrichmentRef = useRef<string | null>(null);
+  const resumeBriefScoringRef = useRef<string | null>(null);
   const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
     isOpen: false,
     inputMode: 'pdf',
@@ -886,6 +942,43 @@ export function DatabaseSpreadsheet() {
     const current = readEnrichmentStorage();
     return current.runs.find((run) => run.tabId === tabId) ?? null;
   }, [readEnrichmentStorage]);
+
+  const readBriefScoringStorage = useCallback(() => {
+    try {
+      return readPersistedBriefScoring(window.localStorage.getItem(briefScoringStorageKey));
+    } catch (error) {
+      void logError('spreadsheet.brief_scoring.state.read_failed', error);
+      return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+    }
+  }, [briefScoringStorageKey]);
+
+  const writeBriefScoringStorage = useCallback((state: PersistedBriefScoringState) => {
+    try {
+      window.localStorage.setItem(briefScoringStorageKey, JSON.stringify(state));
+    } catch (error) {
+      void logError('spreadsheet.brief_scoring.state.write_failed', error);
+    }
+  }, [briefScoringStorageKey]);
+
+  const upsertBriefScoringRun = useCallback((run: PersistedBriefScoringRun) => {
+    const current = readBriefScoringStorage();
+    const nextRuns = current.runs.filter(
+      (existing) => existing.jobId !== run.jobId && existing.tabId !== run.tabId,
+    );
+    nextRuns.push(run);
+    writeBriefScoringStorage({ version: BRIEF_SCORING_STORAGE_VERSION, runs: nextRuns });
+  }, [readBriefScoringStorage, writeBriefScoringStorage]);
+
+  const removeBriefScoringRun = useCallback((jobId: string) => {
+    const current = readBriefScoringStorage();
+    const nextRuns = current.runs.filter((run) => run.jobId !== jobId);
+    writeBriefScoringStorage({ version: BRIEF_SCORING_STORAGE_VERSION, runs: nextRuns });
+  }, [readBriefScoringStorage, writeBriefScoringStorage]);
+
+  const getBriefScoringRunForTab = useCallback((tabId: string) => {
+    const current = readBriefScoringStorage();
+    return current.runs.find((run) => run.tabId === tabId) ?? null;
+  }, [readBriefScoringStorage]);
 
   const getFreshToken = useCallback(async (): Promise<string | null> => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -3581,6 +3674,26 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const ensureBriefScoringColumns = useCallback((tabId: string, scoreColIndex: number, reasonColIndex: number) => {
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const nextData = tab.data.map((row, rowIndex) => {
+          const nextRow = [...row];
+          while (nextRow.length <= reasonColIndex) {
+            nextRow.push('');
+          }
+          if (rowIndex === 0) {
+            if (!String(nextRow[scoreColIndex] ?? '').trim()) nextRow[scoreColIndex] = 'ЦА Балл';
+            if (!String(nextRow[reasonColIndex] ?? '').trim()) nextRow[reasonColIndex] = 'ЦА Причина';
+          }
+          return nextRow;
+        });
+        return { ...tab, data: nextData };
+      }),
+    );
+  }, [setTabs]);
+
   const runBriefScoringPolling = useCallback(async (params: {
     jobId: string;
     tabId: string;
@@ -3606,6 +3719,7 @@ export function DatabaseSpreadsheet() {
         error: 'Необходима авторизация',
         jobId: null,
       }));
+      removeBriefScoringRun(jobId);
       return;
     }
 
@@ -3615,9 +3729,11 @@ export function DatabaseSpreadsheet() {
 
     if (signal.aborted) {
       setBriefScoring((prev) => ({ ...prev, isScoring: false, jobId: null }));
+      removeBriefScoringRun(jobId);
       return;
     }
 
+    ensureBriefScoringColumns(tabId, scoreColIndex, reasonColIndex);
     setBriefScoring((prev) => ({
       ...prev,
       isScoring: true,
@@ -3783,13 +3899,14 @@ export function DatabaseSpreadsheet() {
           setBriefScoring((prev) => ({
             ...prev,
             isScoring: false,
-            isOpen: status === 'failed' ? prev.isOpen : false,
+            isOpen: status === 'failed',
             totalRows: total,
             currentRow: safeProcessed,
             progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
             error: status === 'failed' ? data.job?.error_message ?? 'Произошла ошибка' : null,
             jobId: null,
           }));
+          removeBriefScoringRun(jobId);
           break;
         }
 
@@ -3808,6 +3925,7 @@ export function DatabaseSpreadsheet() {
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false, jobId: null }));
+        removeBriefScoringRun(jobId);
       } else {
         setBriefScoring((prev) => ({
           ...prev,
@@ -3816,15 +3934,23 @@ export function DatabaseSpreadsheet() {
           error: err instanceof Error ? err.message : 'Произошла ошибка',
           jobId: null,
         }));
+        removeBriefScoringRun(jobId);
       }
     } finally {
       flushUpdates();
       briefScoringAbortRef.current = null;
     }
-  }, [getFreshToken, setLastAction, setTabs]);
+  }, [
+    ensureBriefScoringColumns,
+    getFreshToken,
+    removeBriefScoringRun,
+    setLastAction,
+    setTabs,
+  ]);
 
   const handleStopBriefScoring = async () => {
-    if (!briefScoring.isScoring || !briefScoring.jobId) return;
+    const jobId = briefScoring.jobId;
+    if (!briefScoring.isScoring || !jobId) return;
     if (!window.confirm('Остановить оценку ЦА? Уже полученные результаты сохранятся.')) return;
 
     const token = await getFreshToken();
@@ -3837,7 +3963,7 @@ export function DatabaseSpreadsheet() {
     }
 
     try {
-      const response = await fetch(`/api/brief-scoring/jobs/${briefScoring.jobId}`, {
+      const response = await fetch(`/api/brief-scoring/jobs/${jobId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ action: 'cancel' }),
@@ -3854,6 +3980,7 @@ export function DatabaseSpreadsheet() {
         message: 'Остановка оценки ЦА отправлена',
         time: Date.now(),
       });
+      removeBriefScoringRun(jobId);
     } catch (err) {
       setLastAction({
         message: `Отмена не подтверждена сервером: ${err instanceof Error ? err.message : 'network error'}`,
@@ -3944,6 +4071,7 @@ export function DatabaseSpreadsheet() {
     try {
       setBriefScoring((prev) => ({
         ...prev,
+        isOpen: false,
         isScoring: true,
         totalRows: rowsToProcess.length,
         currentRow: 0,
@@ -3977,6 +4105,11 @@ export function DatabaseSpreadsheet() {
         throw new Error(startData.error ?? 'Не удалось создать задачу');
       }
       stagedJobId = startData.job_id;
+      setBriefScoring((prev) => ({
+        ...prev,
+        isOpen: false,
+        jobId: stagedJobId,
+      }));
 
       let uploaded = 0;
       for (let i = 0; i < rowsToProcess.length; i += BRIEF_SCORING_ENQUEUE_CHUNK_SIZE) {
@@ -4074,6 +4207,14 @@ export function DatabaseSpreadsheet() {
         error: null,
         jobId,
       }));
+      upsertBriefScoringRun({
+        jobId,
+        tabId: activeTabId,
+        scoreCol: scoreColIndex,
+        reasonCol: reasonColIndex,
+        totalRows: total,
+        startedAt: new Date().toISOString(),
+      });
 
       await runBriefScoringPolling({
         jobId,
@@ -4097,6 +4238,9 @@ export function DatabaseSpreadsheet() {
         } catch {
           // best-effort cleanup
         }
+      }
+      if (stagedJobId) {
+        removeBriefScoringRun(stagedJobId);
       }
       setBriefScoring((prev) => ({
         ...prev,
@@ -5443,6 +5587,56 @@ export function DatabaseSpreadsheet() {
     websiteEnrichment.isGenerating,
   ]);
 
+  useEffect(() => {
+    if (!isHydrated || !activeTab || briefScoring.isScoring) return;
+    const run = getBriefScoringRunForTab(activeTabId);
+    if (!run) return;
+    if (resumeBriefScoringRef.current === run.jobId) return;
+
+    const tabExists = tabs.some((tab) => tab.id === run.tabId);
+    if (!tabExists) {
+      removeBriefScoringRun(run.jobId);
+      return;
+    }
+
+    const totalFallback = run.totalRows > 0 ? run.totalRows : Math.max(0, activeTab.data.length - 1);
+    resumeBriefScoringRef.current = run.jobId;
+    ensureBriefScoringColumns(run.tabId, run.scoreCol, run.reasonCol);
+    setBriefScoring((prev) => ({
+      ...prev,
+      isOpen: false,
+      isScoring: true,
+      error: null,
+      jobId: run.jobId,
+      totalRows: totalFallback,
+      currentRow: Math.min(prev.currentRow, totalFallback),
+      progress:
+        totalFallback > 0
+          ? Math.round((Math.min(prev.currentRow, totalFallback) / totalFallback) * 100)
+          : 0,
+    }));
+
+    void runBriefScoringPolling({
+      jobId: run.jobId,
+      tabId: run.tabId,
+      scoreColIndex: run.scoreCol,
+      reasonColIndex: run.reasonCol,
+      totalRowsFallback: totalFallback,
+    }).finally(() => {
+      resumeBriefScoringRef.current = null;
+    });
+  }, [
+    activeTab,
+    activeTabId,
+    briefScoring.isScoring,
+    ensureBriefScoringColumns,
+    getBriefScoringRunForTab,
+    isHydrated,
+    removeBriefScoringRun,
+    runBriefScoringPolling,
+    tabs,
+  ]);
+
   const toolbarMonochromeButtonClass =
     'inline-flex items-center rounded border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
   const toolbarMonochromeButtonCompactClass =
@@ -5571,7 +5765,9 @@ export function DatabaseSpreadsheet() {
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
-          {briefScoring.isScoring ? `Оценка ЦА (${briefScoring.progress}%)` : 'Оценка ЦА'}
+          {briefScoring.isScoring
+            ? `Оценка ЦА: ${briefScoring.progress}% (${briefScoring.currentRow}/${briefScoring.totalRows})`
+            : 'Оценка ЦА'}
         </button>
 
         <button
