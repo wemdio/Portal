@@ -5,6 +5,13 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 
 export const dynamic = 'force-dynamic';
 
+type SearchJobPayload = {
+  brief?: unknown;
+  user_query?: unknown;
+  queries?: unknown;
+  queries_text?: unknown;
+};
+
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
@@ -39,7 +46,7 @@ export async function POST(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
 
   try {
-    const payload = await req.json();
+    const payload = (await req.json()) as SearchJobPayload;
     const brief = typeof payload?.brief === 'string' ? payload.brief.trim() : '';
     const user_query = typeof payload?.user_query === 'string' ? payload.user_query.trim() : brief;
 
