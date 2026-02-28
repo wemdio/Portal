@@ -59,13 +59,17 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
   const [toolbarTick, setToolbarTick] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [showButtonModal, setShowButtonModal] = useState(false);
+  const [buttonForm, setButtonForm] = useState({ label: 'Кнопка', href: 'https://', style: 'primary' });
+  const [showPopoverModal, setShowPopoverModal] = useState(false);
+  const [popoverForm, setPopoverForm] = useState({ triggerText: 'Подсказка', popoverContent: '' });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastContentRef = useRef<string>(JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT));
   const stickyToolbarRef = useRef<HTMLDivElement>(null);
   const toolbarColumnRef = useRef<HTMLDivElement>(null);
   const fixedToolbarRef = useRef<HTMLDivElement>(null);
-  const [fixedLeft, setFixedLeft] = useState(0);
-  const [toolbarHeight, setToolbarHeight] = useState(0);
+  const editorContentBlockRef = useRef<HTMLDivElement>(null);
+  const [panelPosition, setPanelPosition] = useState({ left: 0, top: 100, scale: 1 });
 
   const editor = useEditor({
     extensions: REGLAMENT_EXTENSIONS,
@@ -112,30 +116,42 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
     editor.setEditable(!disabled);
   }, [editor, disabled]);
 
+  const MIN_TOP = 80;
+
   useLayoutEffect(() => {
     const col = toolbarColumnRef.current;
-    const fixedEl = fixedToolbarRef.current;
-    const updateLeft = () => {
-      if (col) setFixedLeft(col.getBoundingClientRect().left);
+    const panel = fixedToolbarRef.current;
+    const updatePosition = () => {
+      if (!col) return;
+      const colRect = col.getBoundingClientRect();
+      const left = colRect.left;
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      const padding = 24;
+      const scale = Math.min(1, Math.max(0.7, vw / 1280));
+      const editorTop = editorContentBlockRef.current?.getBoundingClientRect().top ?? colRect.top;
+      const minTop = Math.max(MIN_TOP, editorTop);
+      let top = minTop;
+      if (panel) {
+        const panelHeight = Math.min(panel.getBoundingClientRect().height, vh - minTop - padding);
+        const centerY = vh / 2;
+        top = Math.max(minTop, Math.min(vh - panelHeight - padding, centerY - panelHeight / 2));
+      }
+      setPanelPosition((prev) =>
+        prev.left === left && prev.top === top && prev.scale === scale ? prev : { left, top, scale }
+      );
     };
-    const updateHeight = () => {
-      if (fixedEl) setToolbarHeight(fixedEl.getBoundingClientRect().height);
-    };
-    updateLeft();
-    updateHeight();
-    window.addEventListener('scroll', updateLeft, true);
-    window.addEventListener('resize', () => {
-      updateLeft();
-      updateHeight();
-    });
+    updatePosition();
+    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
     const main = typeof document !== 'undefined' ? document.querySelector('main') : null;
-    if (main) main.addEventListener('scroll', updateLeft, true);
-    const ro = fixedEl ? new ResizeObserver(() => updateHeight()) : null;
-    if (fixedEl && ro) ro.observe(fixedEl);
+    if (main) main.addEventListener('scroll', updatePosition, true);
+    const ro = panel ? new ResizeObserver(updatePosition) : null;
+    if (panel && ro) ro.observe(panel);
     return () => {
-      window.removeEventListener('scroll', updateLeft, true);
-      window.removeEventListener('resize', updateHeight);
-      if (main) main.removeEventListener('scroll', updateLeft, true);
+      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', updatePosition);
+      if (main) main.removeEventListener('scroll', updatePosition, true);
       ro?.disconnect();
     };
   }, [editor]);
@@ -189,6 +205,18 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
   }, [editor, scale]);
   // #endregion
 
+  useEffect(() => {
+    if (!showButtonModal && !showPopoverModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowButtonModal(false);
+        setShowPopoverModal(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [showButtonModal, showPopoverModal]);
+
   const currentFont = editor?.getAttributes('textStyle')?.fontFamily ?? '';
   const currentTextColor = editor?.getAttributes('textStyle')?.color ?? '';
   const currentHighlight = editor?.getAttributes('highlight')?.color ?? '';
@@ -196,6 +224,8 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
   const currentCallout = calloutAttributes.variant ?? '';
   const currentCalloutBackground = calloutAttributes.background ?? '';
   const currentCalloutBorder = calloutAttributes.border ?? '';
+  const buttonAttrs = editor?.getAttributes('reglamentButton') ?? {};
+  const popoverAttrs = editor?.getAttributes('reglamentPopover') ?? {};
 
   async function handleImageUpload(event: React.ChangeEvent<HTMLInputElement>) {
     if (!onUploadImage || !editor) return;
@@ -237,10 +267,40 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
     </div>
   );
 
+  const handleInsertButton = () => {
+    const { label, href, style } = buttonForm;
+    const attrs = { label: label.trim() || 'Кнопка', href: href.trim() || '#', style };
+    if (editor.schema.nodes.reglamentButton) {
+      editor.chain().focus().splitBlock().setNode('reglamentButton', attrs).run();
+    } else {
+      const pos = editor.state.selection.$from.after();
+      editor.chain().focus().insertContentAt(pos, [{ type: 'reglamentButton', attrs }, { type: 'paragraph', content: [] }]).run();
+    }
+    setShowButtonModal(false);
+  };
+
+  const handleInsertPopover = () => {
+    const trigger = popoverForm.triggerText.trim() || 'Подсказка';
+    const content = popoverForm.popoverContent.trim();
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: 'reglamentPopover',
+        attrs: { popoverContent: content },
+        content: [{ type: 'text', text: trigger }],
+      })
+      .run();
+    setShowPopoverModal(false);
+    setPopoverForm({ triggerText: 'Подсказка', popoverContent: '' });
+  };
+
   return (
+    <>
     <div className="flex w-full max-w-full items-start gap-4">
       {useScale ? (
         <div
+          ref={editorContentBlockRef}
           className="shrink-0 overflow-hidden rounded-xl"
           style={{ width: EDITOR_BASE_WIDTH * scale }}
         >
@@ -255,21 +315,33 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
           </div>
         </div>
       ) : (
-        editorColumn
+        <div ref={editorContentBlockRef} className="min-w-0 flex-[5] self-stretch rounded-xl border border-gray-200 bg-white shadow-sm">
+          {uploadError && (
+            <div className="border-b border-gray-100 px-4 py-2 text-xs text-red-600">
+              {uploadError}
+            </div>
+          )}
+          <div className={`px-4 py-5 ${disabled ? 'opacity-70' : ''}`}>
+            <EditorContent editor={editor} />
+          </div>
+        </div>
       )}
       <div
         ref={toolbarColumnRef}
-        className="flex-[1] min-w-[200px] shrink-0 self-start"
-        style={{ minHeight: toolbarHeight || 1 }}
+        className="flex-[1] min-w-[200px] shrink-0 self-stretch"
       >
-        <div style={{ height: toolbarHeight || 0 }} aria-hidden />
         <div
           ref={(el) => {
             fixedToolbarRef.current = el;
             stickyToolbarRef.current = el;
           }}
-          className="min-w-[200px] rounded-xl border border-gray-200 bg-gray-50/50 shadow-sm"
-          style={{ position: 'fixed', top: 255, left: fixedLeft, zIndex: 10 }}
+          className="z-10 min-w-[200px] origin-top-right rounded-xl border border-gray-200 bg-gray-50/50 shadow-sm max-h-[calc(100vh-3rem)] overflow-y-auto w-fit transition-[top,left,transform] duration-150 ease-out"
+          style={{
+            position: 'fixed',
+            left: panelPosition.left,
+            top: panelPosition.top,
+            transform: `scale(${panelPosition.scale})`,
+          }}
         >
           <div className="grid grid-cols-2 gap-x-2 gap-y-3 p-4 content-start">
         <ToolbarButton
@@ -340,6 +412,27 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
           title="Нумерованный список"
         >
           1.
+        </ToolbarButton>
+
+        <div className="col-span-2 h-px bg-gray-200" aria-hidden />
+
+        <ToolbarButton
+          onClick={() => {
+            setButtonForm({ label: 'Кнопка', href: 'https://', style: 'primary' });
+            setShowButtonModal(true);
+          }}
+          title="Вставить кнопку"
+        >
+          Кнопка
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => {
+            setPopoverForm({ triggerText: 'Подсказка', popoverContent: '' });
+            setShowPopoverModal(true);
+          }}
+          title="Вставить всплывающую подсказку"
+        >
+          Подсказка
         </ToolbarButton>
 
         <div className="col-span-2 h-px bg-gray-200" aria-hidden />
@@ -492,6 +585,58 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
           />
         </div>
 
+        {editor.isActive('reglamentButton') && (
+          <>
+            <div className="col-span-2 h-px bg-gray-200" aria-hidden />
+            <div className="col-span-2 text-xs font-medium text-gray-600">Кнопка</div>
+            <div className="col-span-2 flex flex-col gap-2">
+              <input
+                key={`btn-label-${toolbarTick}`}
+                type="text"
+                value={buttonAttrs.label ?? ''}
+                onChange={(e) => editor.chain().focus().updateAttributes('reglamentButton', { label: e.target.value }).run()}
+                placeholder="Текст кнопки"
+                className={toolbarInputBase}
+              />
+              <input
+                key={`btn-href-${toolbarTick}`}
+                type="text"
+                value={buttonAttrs.href ?? ''}
+                onChange={(e) => editor.chain().focus().updateAttributes('reglamentButton', { href: e.target.value }).run()}
+                placeholder="https://..."
+                className={toolbarInputBase}
+              />
+              <select
+                key={`btn-style-${toolbarTick}`}
+                value={buttonAttrs.style ?? 'primary'}
+                onChange={(e) => editor.chain().focus().updateAttributes('reglamentButton', { style: e.target.value }).run()}
+                className={toolbarInputBase}
+              >
+                <option value="primary">Основная</option>
+                <option value="secondary">Вторичная</option>
+                <option value="outline">Рамка</option>
+              </select>
+            </div>
+          </>
+        )}
+
+        {editor.isActive('reglamentPopover') && (
+          <>
+            <div className="col-span-2 h-px bg-gray-200" aria-hidden />
+            <div className="col-span-2 text-xs font-medium text-gray-600">Текст подсказки</div>
+            <div className="col-span-2">
+              <textarea
+                key={`popover-${toolbarTick}`}
+                value={popoverAttrs.popoverContent ?? ''}
+                onChange={(e) => editor.chain().focus().updateAttributes('reglamentPopover', { popoverContent: e.target.value }).run()}
+                placeholder="Инструкция при клике..."
+                rows={3}
+                className={`${toolbarInputBase} w-full resize-y`}
+              />
+            </div>
+          </>
+        )}
+
         <div className="col-span-2 h-px bg-gray-200" aria-hidden />
 
         <ToolbarButton
@@ -544,5 +689,133 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
         </div>
       </div>
     </div>
+
+    {showButtonModal && (
+      <div
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+        onClick={() => setShowButtonModal(false)}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="button-modal-title"
+      >
+        <div
+          className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 id="button-modal-title" className="text-lg font-semibold text-gray-900 mb-4">
+            Вставить кнопку
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Текст кнопки</label>
+              <input
+                type="text"
+                value={buttonForm.label}
+                onChange={(e) => setButtonForm((f) => ({ ...f, label: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="Кнопка"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Ссылка (URL)</label>
+              <input
+                type="url"
+                value={buttonForm.href}
+                onChange={(e) => setButtonForm((f) => ({ ...f, href: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="https://"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Стиль</label>
+              <select
+                value={buttonForm.style}
+                onChange={(e) => setButtonForm((f) => ({ ...f, style: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              >
+                <option value="primary">Основная (синяя)</option>
+                <option value="secondary">Вторичная (серая)</option>
+                <option value="outline">Рамка</option>
+              </select>
+            </div>
+          </div>
+          <div className="mt-6 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowButtonModal(false)}
+              className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={handleInsertButton}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Вставить
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {showPopoverModal && (
+      <div
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+        onClick={() => setShowPopoverModal(false)}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="popover-modal-title"
+      >
+        <div
+          className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h2 id="popover-modal-title" className="text-lg font-semibold text-gray-900 mb-4">
+            Вставить подсказку
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Текст ссылки (что видно в документе)</label>
+              <input
+                type="text"
+                value={popoverForm.triggerText}
+                onChange={(e) => setPopoverForm((f) => ({ ...f, triggerText: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="Подсказка"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Текст подсказки (всплывает по клику)</label>
+              <textarea
+                value={popoverForm.popoverContent}
+                onChange={(e) => setPopoverForm((f) => ({ ...f, popoverContent: e.target.value }))}
+                className="w-full min-h-[100px] resize-y rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                placeholder="Инструкция при клике..."
+              />
+            </div>
+          </div>
+          <div className="mt-6 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowPopoverModal(false)}
+              className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={handleInsertPopover}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Вставить
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

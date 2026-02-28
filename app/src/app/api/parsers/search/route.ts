@@ -40,10 +40,20 @@ export async function POST(req: NextRequest) {
 
   try {
     const payload = await req.json();
-    const queries =
-      Array.isArray(payload?.queries) ? payload.queries.filter((q: unknown) => typeof q === 'string' && q.trim()) : [];
     const brief = typeof payload?.brief === 'string' ? payload.brief.trim() : '';
     const user_query = typeof payload?.user_query === 'string' ? payload.user_query.trim() : brief;
+
+    let queries: string[] =
+      Array.isArray(payload?.queries) ? payload.queries.filter((q: unknown) => typeof q === 'string' && String(q).trim()) : [];
+
+    const queriesText = typeof payload?.queries_text === 'string' ? payload.queries_text.trim() : '';
+    if (queriesText) {
+      queries = queriesText
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+
     const hasQueries = queries.length > 0;
 
     if (!hasQueries && !brief) {
