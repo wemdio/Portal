@@ -207,6 +207,9 @@ const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
 const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
 const BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES = 10;
+const BRIEF_SCORING_ENQUEUE_CHUNK_SIZE = 50;
+const BRIEF_SCORING_MAX_FIELDS_PER_ROW = 20;
+const BRIEF_SCORING_MAX_CELL_CHARS = 280;
 const BRIEF_STORAGE_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
 const BRIEF_STORAGE_PREFIX = 'brief-scoring';
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
@@ -3882,12 +3885,38 @@ export function DatabaseSpreadsheet() {
     for (let i = 1; i < tabSnapshot.data.length; i += 1) {
       const row = tabSnapshot.data[i];
       if (isRowEmpty(row)) continue;
+
       const rowData: Record<string, string> = {};
+      let fieldsAdded = 0;
+      const addField = (header: string, rawValue: string) => {
+        if (fieldsAdded >= BRIEF_SCORING_MAX_FIELDS_PER_ROW) return;
+        const value = rawValue.trim();
+        if (!value) return;
+        if (rowData[header]) return;
+        rowData[header] = value.length > BRIEF_SCORING_MAX_CELL_CHARS
+          ? value.slice(0, BRIEF_SCORING_MAX_CELL_CHARS)
+          : value;
+        fieldsAdded += 1;
+      };
+
       for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
-        const header = headerLabels[c] || toColumnLabel(c);
-        const value = row[c]?.trim() ?? '';
-        if (value.length > 0) rowData[header] = value;
+        const header = (headerLabels[c] || toColumnLabel(c)).trim();
+        if (!header) continue;
+        const headerLower = header.toLowerCase();
+        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower) || COMPANY_HEADER_REGEX.test(headerLower);
+        if (!isHinted) continue;
+        addField(header, row[c] ?? '');
       }
+
+      if (Object.keys(rowData).length === 0) {
+        for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
+          const header = (headerLabels[c] || toColumnLabel(c)).trim();
+          if (!header) continue;
+          addField(header, row[c] ?? '');
+        }
+      }
+
+      if (Object.keys(rowData).length === 0) continue;
       rowsToProcess.push({ rowIndex: i, data: rowData });
     }
 
@@ -3904,8 +3933,25 @@ export function DatabaseSpreadsheet() {
 
     const scoreColIndex = tabSnapshot.data[0].length;
     const reasonColIndex = scoreColIndex + 1;
+    const throwIfPayloadTooLarge = (status: number, stage: string) => {
+      if (status !== 413) return;
+      throw new Error(
+        `Слишком большой объем данных при ${stage}. Попробуйте уменьшить число столбцов/длину текста и повторить.`,
+      );
+    };
 
+    let stagedJobId: string | null = null;
     try {
+      setBriefScoring((prev) => ({
+        ...prev,
+        isScoring: true,
+        totalRows: rowsToProcess.length,
+        currentRow: 0,
+        progress: 0,
+        error: null,
+        jobId: null,
+      }));
+
       const startRes = await fetch('/api/brief-scoring/jobs', {
         method: 'POST',
         headers: {
@@ -3914,9 +3960,11 @@ export function DatabaseSpreadsheet() {
         },
         body: JSON.stringify({
           briefText: effectiveBriefText,
-          companies: rowsToProcess.map((row) => ({ idx: row.rowIndex, data: row.data })),
+          total: rowsToProcess.length,
+          mode: 'staged',
         }),
       });
+      throwIfPayloadTooLarge(startRes.status, 'создании задачи');
 
       const startData = await parseJsonResponse<{
         job_id?: string;
@@ -3928,10 +3976,64 @@ export function DatabaseSpreadsheet() {
       if (!startRes.ok || !startData.job_id) {
         throw new Error(startData.error ?? 'Не удалось создать задачу');
       }
+      stagedJobId = startData.job_id;
 
-      const jobId = startData.job_id;
-      const total = startData.total ?? rowsToProcess.length;
-      const processed = startData.processed ?? 0;
+      let uploaded = 0;
+      for (let i = 0; i < rowsToProcess.length; i += BRIEF_SCORING_ENQUEUE_CHUNK_SIZE) {
+        const chunk = rowsToProcess.slice(i, i + BRIEF_SCORING_ENQUEUE_CHUNK_SIZE);
+        const appendRes = await fetch('/api/brief-scoring/jobs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${currentToken}`,
+          },
+          body: JSON.stringify({
+            job_id: stagedJobId,
+            companies: chunk.map((row) => ({ idx: row.rowIndex, data: row.data })),
+          }),
+        });
+        throwIfPayloadTooLarge(appendRes.status, 'загрузке данных');
+        const appendData = await parseJsonResponse<{ error?: string }>(appendRes, 'brief_scoring.enqueue');
+        if (!appendRes.ok) {
+          throw new Error(appendData.error ?? 'Не удалось загрузить часть данных для оценки');
+        }
+
+        uploaded += chunk.length;
+        setBriefScoring((prev) => ({
+          ...prev,
+          currentRow: uploaded,
+          totalRows: rowsToProcess.length,
+          progress: rowsToProcess.length > 0 ? Math.round((uploaded / rowsToProcess.length) * 100) : 0,
+        }));
+      }
+
+      const finalizeRes = await fetch('/api/brief-scoring/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          job_id: stagedJobId,
+          finalize: true,
+          total: rowsToProcess.length,
+        }),
+      });
+      throwIfPayloadTooLarge(finalizeRes.status, 'финализации задачи');
+
+      const finalizeData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error?: string;
+      }>(finalizeRes, 'brief_scoring.finalize');
+      if (!finalizeRes.ok || !finalizeData.job_id) {
+        throw new Error(finalizeData.error ?? 'Не удалось подготовить задачу к запуску');
+      }
+
+      const jobId = finalizeData.job_id;
+      const total = finalizeData.total ?? rowsToProcess.length;
+      const processed = finalizeData.processed ?? 0;
       const safeProcessed = Math.min(processed, total);
 
       setUndoSnapshot('Оценка ЦА');
@@ -3982,6 +4084,20 @@ export function DatabaseSpreadsheet() {
         initialToken: currentToken,
       });
     } catch (err) {
+      if (stagedJobId) {
+        try {
+          await fetch(`/api/brief-scoring/jobs/${stagedJobId}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${currentToken}`,
+            },
+            body: JSON.stringify({ action: 'cancel' }),
+          });
+        } catch {
+          // best-effort cleanup
+        }
+      }
       setBriefScoring((prev) => ({
         ...prev,
         error: err instanceof Error ? err.message : 'Произошла ошибка',
