@@ -5,8 +5,10 @@ import { Loader2, Play, Sparkles, Trash2 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
 export type SearchParserStartPayload = {
-  brief: string;
+  brief?: string;
   queries?: string[];
+  /** Запросы текстом через запятую (или с новой строки) — на бэке разбиваются в массив. */
+  queries_text?: string;
   /** Текст для отображения в истории (то, что ввёл пользователь). */
   user_query?: string;
 };
@@ -19,6 +21,7 @@ interface Props {
 export function SearchParserForm({ onStart, busy }: Props) {
   const [brief, setBrief] = useState('');
   const [queries, setQueries] = useState<string[]>([]);
+  const [queriesText, setQueriesText] = useState('');
   const [generatingQueries, setGeneratingQueries] = useState(false);
   const [pdfUploading, setPdfUploading] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
@@ -113,40 +116,62 @@ export function SearchParserForm({ onStart, busy }: Props) {
   };
 
   const handleStart = () => {
-    if (!brief.trim()) {
-      setError('Введите бриф или описание задачи.');
+    const hasBrief = brief.trim().length > 0;
+    const hasQueriesList = queries.length > 0 && queries.some((q) => q.trim().length > 0);
+    const hasQueriesText = queriesText.trim().length > 0;
+
+    if (!hasBrief && !hasQueriesList && !hasQueriesText) {
+      setError('Введите бриф, сгенерируйте запросы или введите запросы вручную (через запятую).');
       return;
     }
     setError(null);
-    const userInput = brief.trim();
-    const payload: SearchParserStartPayload = { brief: userInput, user_query: userInput };
-    if (queries.length > 0) {
-      payload.queries = queries.map((q) => q.trim()).filter(Boolean);
-    }
+
+    const payload: SearchParserStartPayload = {};
+    if (hasBrief) payload.brief = brief.trim();
+    if (hasQueriesText) payload.queries_text = queriesText.trim();
+    if (hasQueriesList && !hasQueriesText) payload.queries = queries.map((q) => q.trim()).filter(Boolean);
+    payload.user_query = payload.brief ?? payload.queries_text ?? (payload.queries?.slice(0, 3).join(', ') ?? 'Запросы');
     onStart(payload);
   };
 
-  const canStart = brief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0));
+  const canStart =
+    (brief.trim().length > 0 && (queries.length === 0 || queries.some((q) => q.trim().length > 0))) ||
+    queriesText.trim().length > 0;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
       <div>
         <h2 className="text-lg font-semibold text-gray-900">Поиск Google/Yandex</h2>
         <p className="text-sm text-gray-500 mt-1">
-          Сгенерируйте 30 поисковых запросов по брифу, при необходимости отредактируйте их, затем запустите парсинг.
+          Сгенерируйте запросы по брифу или вставьте свой список (один запрос на строку), затем запустите парсинг.
         </p>
       </div>
 
       <div className="space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            Бриф / Описание целевой аудитории
+            Запросы вручную (один на строку или через запятую)
+          </label>
+          <textarea
+            value={queriesText}
+            onChange={(e) => setQueriesText(e.target.value)}
+            placeholder={'веб-студия B2B портфолио site:ru\ndigital агентство корпоративные сайты B2B\nагентство разработки сайтов для производственных компаний'}
+            className="w-full min-h-[12rem] resize-y rounded-lg border border-gray-300 py-2 px-3 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none font-mono placeholder:font-sans"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Вставьте список запросов: каждый с новой строки или через запятую. Пустые строки игнорируются.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Бриф / Описание целевой аудитории (для генерации запросов)
           </label>
           <textarea
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
             className="w-full min-h-[8rem] resize-y rounded-lg border border-gray-300 py-3 px-3 pb-4 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-500 focus:outline-none focus-visible:outline-none"
-            placeholder="Вставьте описание компании, продукта или ЦА из брифа..."
+            placeholder="Вставьте описание компании..."
           />
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <input

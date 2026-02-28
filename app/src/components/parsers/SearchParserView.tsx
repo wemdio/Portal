@@ -451,7 +451,7 @@ export function SearchParserView() {
     }
   }, [activeJob, activeJobId, refreshJobs, loadResults]);
 
-  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; user_query?: string }) => {
+  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; queries_text?: string; user_query?: string }) => {
     setBusy(true);
     setError(null);
     try {

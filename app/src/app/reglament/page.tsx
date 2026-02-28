@@ -308,7 +308,7 @@ export default function ReglamentPage() {
         </p>
       </div>
 
-      <div className="sticky top-0 z-10 -mx-4 mb-6 bg-gray-50/95 px-4 py-2 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:p-0">
+      <div className="relative z-30 -mx-4 mb-6 bg-gray-50/95 px-4 py-2 backdrop-blur sm:mx-0 sm:bg-transparent sm:p-0">
         <div className="relative">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
             <svg
@@ -334,7 +334,7 @@ export default function ReglamentPage() {
           />
 
           {showResults && searchResults.length > 0 && (
-            <div className="absolute left-0 right-0 top-full mt-1 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+            <div className="absolute left-0 right-0 top-full z-[100] mt-1 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
               {searchResults.map((result) => (
                 <button
                   key={result.id}
@@ -359,7 +359,7 @@ export default function ReglamentPage() {
           )}
 
           {showResults && searchQuery && searchResults.length === 0 && (
-            <div className="absolute left-0 right-0 top-full mt-1 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500 shadow-lg">
+            <div className="absolute left-0 right-0 top-full z-[100] mt-1 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500 shadow-lg">
               Ничего не найдено
             </div>
           )}
@@ -377,7 +377,7 @@ export default function ReglamentPage() {
           Загрузка документов...
         </div>
       ) : document ? (
-        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <div className="relative z-0 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">{document.title}</h2>
           <p className="text-xs text-gray-500 mb-6">
             Опубликовано: {formatDate(document.published_at || document.updated_at)}
@@ -631,10 +631,9 @@ export function LegacyReglamentPage() {
         <h1 className="text-2xl sm:text-4xl font-bold mb-2 text-gray-900">Регламент работы</h1>
         <p className="text-sm text-gray-600">Руководство по работе для специалистов Polza Agency</p>
         
-        {/* Поиск */}
-        <div className="mt-6 relative" ref={searchInputRef}>
+        {/* Поиск — поверх контента регламента */}
+        <div className="relative z-30 mt-6" ref={searchInputRef}>
           <div className="relative">
-            
             <input
               type="text"
               value={searchQuery}
@@ -647,7 +646,7 @@ export function LegacyReglamentPage() {
           
           {/* Результаты поиска */}
           {showResults && searchResults.length > 0 && (
-            <div className="absolute z-50 w-full mt-2 bg-white border border-gray-200 rounded-lg shadow-lg max-h-80 overflow-y-auto">
+            <div className="absolute left-0 right-0 top-full z-[100] mt-2 w-full rounded-lg border border-gray-200 bg-white shadow-lg max-h-80 overflow-y-auto">
               {searchResults.map((result) => (
                 <button
                   key={result.id}
@@ -675,14 +674,14 @@ export function LegacyReglamentPage() {
           )}
           
           {showResults && searchQuery && searchResults.length === 0 && (
-            <div className="absolute z-50 w-full mt-2 bg-white border border-gray-200 rounded-lg shadow-lg p-4">
+            <div className="absolute left-0 right-0 top-full z-[100] mt-2 w-full rounded-lg border border-gray-200 bg-white p-4 shadow-lg">
               <p className="text-gray-500 text-center">Ничего не найдено</p>
             </div>
           )}
         </div>
       </div>
       
-      <div ref={contentRef} className="reglament-content space-y-5 sm:space-y-6">
+      <div ref={contentRef} className="relative z-0 reglament-content space-y-5 sm:space-y-6">
         {/* Этапы работы */}
         <section id="etapy-raboty" className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow-md border border-blue-200 p-8">
           <div className="flex items-center gap-3 mb-6">
@@ -3817,6 +3816,17 @@ Here&apos;s the profile of the person you want to compliment:
                   <div className="flex flex-wrap gap-2">
                     <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">ChatGPT </a>
                     <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Google AI Studio </a>
+                    <a href="https://claude.ai/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg text-purple-700 hover:from-purple-100 hover:to-indigo-100 hover:border-purple-300 transition-all font-medium text-sm shadow-sm">Claude</a>
+                  </div>
+                  <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                    <p className="text-sm text-amber-900 font-medium mb-2">Claude</p>
+                    <p className="text-sm text-amber-900 mb-2">
+                      Рекомендуем попробовать в работе нейросеть Claude (<a href="https://claude.ai/" target="_blank" rel="noopener noreferrer" className="text-amber-800 underline font-medium">claude.ai</a>). Для входа используйте почту: <span className="font-mono font-medium">btxprjkt@gmail.com</span>
+                    </p>
+                    <p className="text-sm text-amber-900 font-semibold mb-1">ВХОДИТЬ ОБЯЗАТЕЛЬНО ЧЕРЕЗ АНОНИМНЫЙ БРАУЗЕР</p>
+                    <p className="text-sm text-amber-900">
+                      При входе запросит ссылку — напишите @sorichev об этом. Ссылку обязательно скопировать и открыть в том же браузере, что и сам Claude.
+                    </p>
                   </div>
                 </div>
               </div>
