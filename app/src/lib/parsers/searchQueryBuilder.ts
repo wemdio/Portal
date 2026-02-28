@@ -88,11 +88,26 @@ function parseJsonQueries(content: string) {
   }
 }
 
+/** Строки, похожие на фрагменты JSON (ключи, скобки, запятые), не считаем поисковыми запросами. */
+function looksLikeJsonFragment(line: string): boolean {
+  const s = line.trim();
+  if (!s) return true;
+  // фрагменты вроде "queries": [ или {"queries": [
+  if (/["']?\w+["']?\s*:\s*\[?/.test(s) && /^[{\[\s]*["']?\w+["']?\s*:\s*\[?\]?\s*,?\s*$/.test(s)) return true;
+  if (/^[\[\]{},:\s]+$/.test(s)) return true;
+  if (/^["'][^"]*["']\s*,?\s*$/.test(s) && !/[\p{L}\p{N}\s]{4,}/u.test(s)) return true;
+  if (s === '[' || s === ']' || s === '{' || s === '}' || s === '},' || s === '],') return true;
+  if (/^\.\.\./.test(s)) return true;
+  // фрагмент начала JSON-массива запросов: "queries": [ или queries": [
+  if (/^\s*[{\[]?\s*["']?\w+["']?\s*:\s*\[\s*$/.test(s)) return true;
+  return false;
+}
+
 function parseLineQueries(content: string) {
   return content
     .split(/\r?\n/)
     .map((line) => cleanQuery(line))
-    .filter((line) => line.length > 2);
+    .filter((line) => line.length > 2 && !looksLikeJsonFragment(line));
 }
 
 function applyTemplate(template: string, topic: string) {

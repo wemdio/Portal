@@ -67,10 +67,31 @@ export interface Task {
   project_id: string;
   title: string;
   result?: string;
+  description?: string | null;
+  image_url?: string | null;
   status: TaskStatus;
   specialist?: string;
   created_by?: string;
   created_at?: string;
   updated_at?: string;
   project?: Project;
+  board_id?: string | null;
+  column_id?: string | null;
+}
+
+export interface TaskBoard {
+  id: string;
+  name: string;
+  is_default: boolean;
+  position: number;
+  created_at?: string;
+}
+
+export interface TaskBoardColumn {
+  id: string;
+  board_id: string;
+  title: string;
+  position: number;
+  status: string | null;
+  created_at?: string;
 }
