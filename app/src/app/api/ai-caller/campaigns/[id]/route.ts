@@ -7,6 +7,31 @@ export const dynamic = 'force-dynamic';
 
 type Ctx = { params: Promise<{ id: string }> };
 
+async function triggerAutoAnalysis(
+  baseUrl: string,
+  token: string,
+  campaignId: string,
+  provider: string,
+) {
+  try {
+    const res = await fetch(`${baseUrl}/api/ai-caller/analytics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'x-ai-caller-provider': provider,
+      },
+      body: JSON.stringify({ campaignId }),
+    });
+
+    if (!res.ok) {
+      return;
+    }
+  } catch {
+    // best-effort trigger, ignore errors
+  }
+}
+
 /** GET — кампания + контакты */
 export async function GET(req: NextRequest, ctx: Ctx) {
   const token = getBearerToken(req.headers.get('authorization'));
@@ -74,6 +99,12 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
     .eq('provider', provider);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  if (body.status === 'completed') {
+    // Best-effort backend auto-analysis when campaign is explicitly completed.
+    void triggerAutoAnalysis(req.nextUrl.origin, token, id, provider);
+  }
+
   return NextResponse.json({ ok: true });
 }
 
