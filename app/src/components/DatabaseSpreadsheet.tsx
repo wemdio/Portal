@@ -140,6 +140,7 @@ type BriefScoringState = {
   totalRows: number;
   currentRow: number;
   error: string | null;
+  jobId: string | null;
 };
 
 type NameCleanupState = {
@@ -202,10 +203,10 @@ const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
-const BRIEF_SCORING_BATCH_SIZE = 10;
-const BRIEF_SCORING_MAX_RETRIES = 3;
-const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
+const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
+const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
+const BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES = 10;
 const BRIEF_STORAGE_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
 const BRIEF_STORAGE_PREFIX = 'brief-scoring';
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
@@ -787,6 +788,7 @@ export function DatabaseSpreadsheet() {
     totalRows: 0,
     currentRow: 0,
     error: null,
+    jobId: null,
   });
   const briefScoringAbortRef = useRef<AbortController | null>(null);
   const briefFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -3448,33 +3450,29 @@ export function DatabaseSpreadsheet() {
 
   // ── Brief Scoring (ЦА по брифу) ──────────────────────────────
   const openBriefScoringModal = () => {
-    setBriefScoring({
-      isOpen: true,
-      inputMode: 'pdf',
-      briefText: '',
-      briefFileName: '',
-      manualText: '',
-      isUploading: false,
-      isScoring: false,
-      progress: 0,
-      totalRows: 0,
-      currentRow: 0,
-      error: null,
+    setBriefScoring((prev) => {
+      if (prev.isScoring) {
+        return { ...prev, isOpen: true, error: null };
+      }
+      return {
+        isOpen: true,
+        inputMode: 'pdf',
+        briefText: '',
+        briefFileName: '',
+        manualText: '',
+        isUploading: false,
+        isScoring: false,
+        progress: 0,
+        totalRows: 0,
+        currentRow: 0,
+        error: null,
+        jobId: null,
+      };
     });
   };
 
   const closeBriefScoringModal = () => {
-    if (briefScoringAbortRef.current) {
-      briefScoringAbortRef.current.abort();
-      briefScoringAbortRef.current = null;
-    }
-    setBriefScoring((prev) => ({
-      ...prev,
-      isOpen: false,
-      isScoring: false,
-      isUploading: false,
-      error: null,
-    }));
+    setBriefScoring((prev) => ({ ...prev, isOpen: false, error: null }));
   };
 
   const handleBriefFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -3580,6 +3578,287 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const runBriefScoringPolling = useCallback(async (params: {
+    jobId: string;
+    tabId: string;
+    scoreColIndex: number;
+    reasonColIndex: number;
+    totalRowsFallback: number;
+    initialToken?: string | null;
+  }) => {
+    const {
+      jobId,
+      tabId,
+      scoreColIndex,
+      reasonColIndex,
+      totalRowsFallback,
+      initialToken,
+    } = params;
+
+    const token = initialToken ?? (await getFreshToken());
+    if (!token) {
+      setBriefScoring((prev) => ({
+        ...prev,
+        isScoring: false,
+        error: 'Необходима авторизация',
+        jobId: null,
+      }));
+      return;
+    }
+
+    const controller = briefScoringAbortRef.current ?? new AbortController();
+    briefScoringAbortRef.current = controller;
+    const signal = controller.signal;
+
+    if (signal.aborted) {
+      setBriefScoring((prev) => ({ ...prev, isScoring: false, jobId: null }));
+      return;
+    }
+
+    setBriefScoring((prev) => ({
+      ...prev,
+      isScoring: true,
+      totalRows: totalRowsFallback,
+      currentRow: Math.min(prev.currentRow, totalRowsFallback),
+      progress:
+        totalRowsFallback > 0
+          ? Math.round((Math.min(prev.currentRow, totalRowsFallback) / totalRowsFallback) * 100)
+          : 0,
+      error: null,
+      jobId,
+    }));
+
+    let cursor: string | null = null;
+    let pollDelayMs = BRIEF_SCORING_POLL_INTERVAL_MS;
+    let processedCount = 0;
+    let errorCount = 0;
+    let consecutivePollingErrors = 0;
+    let currentToken = token;
+    const pendingUpdates = new Map<number, { score: string; reason: string }>();
+
+    const flushUpdates = () => {
+      if (pendingUpdates.size === 0) return;
+      const updates = new Map(pendingUpdates);
+      pendingUpdates.clear();
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== tabId) return tab;
+          const nextData = [...tab.data];
+          updates.forEach((update, rowIndex) => {
+            const existingRow = nextData[rowIndex];
+            if (!existingRow) return;
+            const newRow = [...existingRow];
+            while (newRow.length <= reasonColIndex) {
+              newRow.push('');
+            }
+            newRow[scoreColIndex] = update.score;
+            newRow[reasonColIndex] = update.reason;
+            nextData[rowIndex] = newRow;
+          });
+          return { ...tab, data: nextData };
+        }),
+      );
+    };
+
+    try {
+      while (!signal.aborted) {
+        const fetchResults = async (tkn: string) =>
+          fetch(
+            `/api/brief-scoring/jobs/${jobId}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+            {
+              headers: { Authorization: `Bearer ${tkn}` },
+              signal,
+            },
+          );
+
+        const reqStartedAt = Date.now();
+        let res = await fetchResults(currentToken);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) {
+            currentToken = refreshed;
+            res = await fetchResults(currentToken);
+          } else {
+            throw new Error('Сессия истекла во время оценки ЦА. Войдите заново и перезапустите процесс.');
+          }
+        }
+
+        if (!res.ok) {
+          consecutivePollingErrors += 1;
+          let responseError = `Ошибка API (${res.status})`;
+          try {
+            const errorData = await parseJsonResponse<{ error?: string }>(res, 'brief_scoring.poll.error');
+            if (errorData.error) responseError = errorData.error;
+          } catch {
+            // ignore parse error
+          }
+          if (consecutivePollingErrors >= BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES) {
+            throw new Error(`Оценка ЦА остановлена: ${responseError}`);
+          }
+          await sleep(1000);
+          continue;
+        }
+        consecutivePollingErrors = 0;
+
+        const data = await parseJsonResponse<{
+          job?: {
+            status?: string;
+            total?: number;
+            processed?: number;
+            success_count?: number;
+            error_count?: number;
+            error_message?: string | null;
+          };
+          results?: Array<{
+            id: string;
+            row_index: number;
+            score: number | null;
+            reason: string | null;
+            status: string;
+            last_error: string | null;
+            updated_at: string;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'brief_scoring.results');
+
+        const resultsCount = data.results?.length ?? 0;
+        if (data.results && data.results.length > 0) {
+          for (const result of data.results) {
+            if (result.status === 'completed') {
+              pendingUpdates.set(result.row_index, {
+                score: result.score == null ? '?' : String(result.score),
+                reason: result.reason ?? '',
+              });
+            } else if (result.status === 'failed') {
+              pendingUpdates.set(result.row_index, {
+                score: '⚠',
+                reason: result.last_error ?? 'Ошибка AI',
+              });
+            }
+          }
+          if (pendingUpdates.size >= 50) {
+            flushUpdates();
+          }
+        }
+
+        if (data.next_cursor) {
+          cursor = data.next_cursor;
+        }
+
+        if (data.job) {
+          const total = data.job.total ?? totalRowsFallback;
+          processedCount = data.job.processed ?? processedCount;
+          errorCount = data.job.error_count ?? errorCount;
+          const safeProcessed = Math.min(processedCount, total);
+          setBriefScoring((prev) => ({
+            ...prev,
+            totalRows: total,
+            currentRow: safeProcessed,
+            progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+          }));
+        }
+
+        const status = data.job?.status;
+        if (status && ['completed', 'failed', 'cancelled'].includes(status)) {
+          flushUpdates();
+          const total = data.job?.total ?? totalRowsFallback;
+          const safeProcessed = Math.min(processedCount, total);
+          const finalErrorCount = data.job?.error_count ?? errorCount;
+          const successCount =
+            data.job?.success_count ?? Math.max(0, safeProcessed - finalErrorCount);
+
+          setLastAction({
+            message:
+              status === 'cancelled'
+                ? `Оценка ЦА отменена (обработано: ${safeProcessed})`
+                : finalErrorCount > 0
+                  ? `Оценка ЦА: ${successCount} успешно, ${finalErrorCount} с ошибками`
+                  : `Оценка ЦА завершена: ${safeProcessed} строк`,
+            time: Date.now(),
+          });
+
+          setBriefScoring((prev) => ({
+            ...prev,
+            isScoring: false,
+            isOpen: status === 'failed' ? prev.isOpen : false,
+            totalRows: total,
+            currentRow: safeProcessed,
+            progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+            error: status === 'failed' ? data.job?.error_message ?? 'Произошла ошибка' : null,
+            jobId: null,
+          }));
+          break;
+        }
+
+        if (resultsCount === 0 && status === 'running') {
+          const elapsed = Date.now() - reqStartedAt;
+          pollDelayMs = Math.min(
+            BRIEF_SCORING_MAX_POLL_DELAY_MS,
+            Math.max(Math.floor(pollDelayMs * 1.5), elapsed),
+          );
+        } else {
+          pollDelayMs = BRIEF_SCORING_POLL_INTERVAL_MS;
+        }
+
+        await sleep(pollDelayMs);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false, jobId: null }));
+      } else {
+        setBriefScoring((prev) => ({
+          ...prev,
+          isScoring: false,
+          isOpen: true,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          jobId: null,
+        }));
+      }
+    } finally {
+      flushUpdates();
+      briefScoringAbortRef.current = null;
+    }
+  }, [getFreshToken, setLastAction, setTabs]);
+
+  const handleStopBriefScoring = async () => {
+    if (!briefScoring.isScoring || !briefScoring.jobId) return;
+    if (!window.confirm('Остановить оценку ЦА? Уже полученные результаты сохранятся.')) return;
+
+    const token = await getFreshToken();
+    if (!token) {
+      setLastAction({
+        message: 'Не удалось отправить остановку: нужна авторизация',
+        time: Date.now(),
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/brief-scoring/jobs/${briefScoring.jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      if (!response.ok) {
+        const data = await parseJsonResponse<{ error?: string }>(response, 'brief_scoring.cancel');
+        setLastAction({
+          message: data.error ?? `Отмена не подтверждена сервером (HTTP ${response.status})`,
+          time: Date.now(),
+        });
+        return;
+      }
+      setLastAction({
+        message: 'Остановка оценки ЦА отправлена',
+        time: Date.now(),
+      });
+    } catch (err) {
+      setLastAction({
+        message: `Отмена не подтверждена сервером: ${err instanceof Error ? err.message : 'network error'}`,
+        time: Date.now(),
+      });
+    }
+  };
+
   const handleStartBriefScoring = async () => {
     if (!activeTab || briefScoring.isScoring) return;
     flushSave();
@@ -3598,91 +3877,13 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    const dataRows = activeTab.data.slice(1).filter((row) => !isRowEmpty(row));
-    if (dataRows.length === 0) {
-      setBriefScoring((prev) => ({ ...prev, error: 'Нет данных для оценки' }));
-      return;
-    }
-
-    let currentToken = '';
-    let tokenExpiresAt = 0;
-    const TOKEN_SAFETY_MS = 2 * 60 * 1000;
-
-    const loadToken = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) return null;
-      currentToken = session.access_token;
-      tokenExpiresAt = session.expires_at ? session.expires_at * 1000 : 0;
-      return currentToken;
-    };
-
-    const refreshToken = async () => {
-      const { data: refreshed, error } = await supabase.auth.refreshSession();
-      if (error || !refreshed.session?.access_token) return null;
-      currentToken = refreshed.session.access_token;
-      tokenExpiresAt = refreshed.session.expires_at ? refreshed.session.expires_at * 1000 : 0;
-      return currentToken;
-    };
-
-    const ensureToken = async () => {
-      if (!currentToken) return loadToken();
-      if (tokenExpiresAt && Date.now() > tokenExpiresAt - TOKEN_SAFETY_MS) return refreshToken();
-      return currentToken;
-    };
-
-    const initialToken = await loadToken();
-    if (!initialToken) {
-      setBriefScoring((prev) => ({ ...prev, error: 'Необходима авторизация' }));
-      return;
-    }
-
-    briefScoringAbortRef.current = new AbortController();
-
-    setBriefScoring((prev) => ({
-      ...prev,
-      isScoring: true,
-      progress: 0,
-      totalRows: dataRows.length,
-      currentRow: 0,
-      error: null,
-    }));
-
-    setUndoSnapshot('Оценка ЦА');
-
-    // Add two new columns: Score and Reason
-    const scoreColIndex = activeTab.data[0].length;
-    const reasonColIndex = scoreColIndex + 1;
-
-    const baseData = activeTab.data.map((row, rowIndex) => {
-      const nextRow = [...row];
-      while (nextRow.length <= reasonColIndex) nextRow.push('');
-      if (rowIndex === 0) {
-        nextRow[scoreColIndex] = 'ЦА Балл';
-        nextRow[reasonColIndex] = 'ЦА Причина';
-      }
-      return nextRow;
-    });
-
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
-    );
-
-    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
-    setHighlightedCol(scoreColIndex);
-    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), BRIEF_SCORING_HIGHLIGHT_DURATION);
-
-    if (tableWrapperRef.current) {
-      const wrapper = tableWrapperRef.current;
-      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
-    }
-
-    // Build list of rows to process with all their column data
+    const tabSnapshot = activeTab;
     const rowsToProcess: { rowIndex: number; data: Record<string, string> }[] = [];
-    for (let i = 1; i < activeTab.data.length; i++) {
-      const row = activeTab.data[i];
+    for (let i = 1; i < tabSnapshot.data.length; i += 1) {
+      const row = tabSnapshot.data[i];
       if (isRowEmpty(row)) continue;
       const rowData: Record<string, string> = {};
-      for (let c = 0; c < activeTab.data[0].length; c++) {
+      for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
         const header = headerLabels[c] || toColumnLabel(c);
         const value = row[c]?.trim() ?? '';
         if (value.length > 0) rowData[header] = value;
@@ -3690,201 +3891,104 @@ export function DatabaseSpreadsheet() {
       rowsToProcess.push({ rowIndex: i, data: rowData });
     }
 
-    let processedCount = 0;
-    let errorCount = 0;
+    if (rowsToProcess.length === 0) {
+      setBriefScoring((prev) => ({ ...prev, error: 'Нет данных для оценки' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setBriefScoring((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    const scoreColIndex = tabSnapshot.data[0].length;
+    const reasonColIndex = scoreColIndex + 1;
 
     try {
-      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += BRIEF_SCORING_BATCH_SIZE) {
-        if (briefScoringAbortRef.current?.signal.aborted) throw new Error('Отменено пользователем');
-
-        const batch = rowsToProcess.slice(batchStart, batchStart + BRIEF_SCORING_BATCH_SIZE);
-        const companies = batch.map((item) => ({ idx: item.rowIndex, data: item.data }));
-
-        try {
-          let resData: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
-
-          for (let attempt = 0; attempt <= BRIEF_SCORING_MAX_RETRIES; attempt += 1) {
-            if (briefScoringAbortRef.current?.signal.aborted) {
-              throw new Error('Отменено пользователем');
-            }
-
-            const validToken = await ensureToken();
-            if (!validToken) throw new Error('Необходима авторизация');
-
-            let res: Response;
-            try {
-              res = await fetch('/api/brief-scoring/score', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${validToken}` },
-                body: JSON.stringify({ briefText: effectiveBriefText, companies }),
-                signal: briefScoringAbortRef.current?.signal,
-              });
-            } catch (error) {
-              if (error instanceof Error && error.name === 'AbortError') {
-                throw error;
-              }
-              if (attempt < BRIEF_SCORING_MAX_RETRIES) {
-                const retryDelay =
-                  BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
-                  Math.floor(Math.random() * 300);
-                await sleep(retryDelay);
-                continue;
-              }
-              throw new Error('Не удалось отправить запрос к AI');
-            }
-
-            if (res.status === 401) {
-              const newToken = await refreshToken();
-              if (newToken) {
-                const retryRes = await fetch('/api/brief-scoring/score', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${newToken}` },
-                  body: JSON.stringify({ briefText: effectiveBriefText, companies }),
-                  signal: briefScoringAbortRef.current?.signal,
-                });
-                if (retryRes.ok) {
-                  const retryParsed = (await retryRes.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
-                  if (retryParsed && !retryParsed.error) {
-                    resData = retryParsed;
-                    break;
-                  }
-                }
-              }
-              resData = { error: 'Необходима авторизация' };
-              break;
-            }
-
-            let parsed: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
-            try {
-              parsed = (await res.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
-            } catch {
-              parsed = null;
-            }
-
-            if (res.ok && parsed && !parsed.error) {
-              resData = parsed;
-              break;
-            }
-
-            const shouldRetry = [429, 500, 502, 503, 504].includes(res.status);
-            const errorMessage = parsed?.error || `Ошибка AI (${res.status})`;
-
-            if (shouldRetry && attempt < BRIEF_SCORING_MAX_RETRIES) {
-              const retryDelay =
-                BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
-                Math.floor(Math.random() * 300);
-              await sleep(retryDelay);
-              continue;
-            }
-
-            resData = { error: errorMessage };
-            break;
-          }
-
-          if (!resData) {
-            throw new Error('Не удалось получить ответ от AI');
-          }
-
-          if (resData.error) {
-            errorCount += batch.length;
-            setTabs((prev) =>
-              prev.map((tab) => {
-                if (tab.id !== activeTabId) return tab;
-                const nextData = tab.data.map((row, idx) => {
-                  if (!batch.find((b) => b.rowIndex === idx)) return row;
-                  const newRow = [...row];
-                  while (newRow.length <= reasonColIndex) newRow.push('');
-                  newRow[scoreColIndex] = '⚠';
-                  newRow[reasonColIndex] = resData.error || 'Ошибка AI';
-                  return newRow;
-                });
-                return { ...tab, data: nextData };
-              }),
-            );
-          } else if (resData.scores) {
-            const scoresMap = new Map<number, { score: number; reason: string }>();
-            for (const s of resData.scores) scoresMap.set(s.idx, { score: s.score, reason: s.reason });
-
-            // Count missing scores
-            for (const item of batch) {
-              if (!scoresMap.has(item.rowIndex)) errorCount++;
-            }
-
-            setTabs((prev) =>
-              prev.map((tab) => {
-                if (tab.id !== activeTabId) return tab;
-                const nextData = tab.data.map((row, idx) => {
-                  const score = scoresMap.get(idx);
-                  if (!score) {
-                    if (batch.find((b) => b.rowIndex === idx)) {
-                      const newRow = [...row];
-                      while (newRow.length <= reasonColIndex) newRow.push('');
-                      newRow[scoreColIndex] = '?';
-                      newRow[reasonColIndex] = 'Нет оценки от AI';
-                      return newRow;
-                    }
-                    return row;
-                  }
-                  const newRow = [...row];
-                  while (newRow.length <= reasonColIndex) newRow.push('');
-                  newRow[scoreColIndex] = String(score.score);
-                  newRow[reasonColIndex] = score.reason;
-                  return newRow;
-                });
-                return { ...tab, data: nextData };
-              }),
-            );
-          }
-        } catch (err) {
-          if (err instanceof Error && err.name === 'AbortError') throw err;
-          errorCount += batch.length;
-          setTabs((prev) =>
-            prev.map((tab) => {
-              if (tab.id !== activeTabId) return tab;
-              const nextData = tab.data.map((row, idx) => {
-                if (!batch.find((b) => b.rowIndex === idx)) return row;
-                const newRow = [...row];
-                while (newRow.length <= reasonColIndex) newRow.push('');
-                newRow[scoreColIndex] = '⚠';
-                newRow[reasonColIndex] = err instanceof Error ? err.message : 'Ошибка';
-                return newRow;
-              });
-              return { ...tab, data: nextData };
-            }),
-          );
-        }
-
-        processedCount += batch.length;
-        setBriefScoring((prev) => ({
-          ...prev,
-          currentRow: processedCount,
-          progress: Math.round((processedCount / rowsToProcess.length) * 100),
-        }));
-
-        if (batchStart + BRIEF_SCORING_BATCH_SIZE < rowsToProcess.length) await sleep(500);
-      }
-
-      const successCount = processedCount - errorCount;
-      setLastAction({
-        message: errorCount > 0
-          ? `Оценка ЦА: ${successCount} успешно, ${errorCount} с ошибками`
-          : `Оценка ЦА завершено: ${processedCount} строк`,
-        time: Date.now(),
+      const startRes = await fetch('/api/brief-scoring/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          briefText: effectiveBriefText,
+          companies: rowsToProcess.map((row) => ({ idx: row.rowIndex, data: row.data })),
+        }),
       });
-      setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
-    } catch (err) {
-      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
-        setLastAction({ message: `Оценка ЦА отменено (обработано: ${processedCount})`, time: Date.now() });
-        setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
-      } else {
-        setBriefScoring((prev) => ({
-          ...prev,
-          error: err instanceof Error ? err.message : 'Произошла ошибка',
-          isScoring: false,
-        }));
+
+      const startData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error?: string;
+      }>(startRes, 'brief_scoring.start');
+
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
       }
-    } finally {
-      briefScoringAbortRef.current = null;
+
+      const jobId = startData.job_id;
+      const total = startData.total ?? rowsToProcess.length;
+      const processed = startData.processed ?? 0;
+      const safeProcessed = Math.min(processed, total);
+
+      setUndoSnapshot('Оценка ЦА');
+
+      const baseData = tabSnapshot.data.map((row, rowIndex) => {
+        const nextRow = [...row];
+        while (nextRow.length <= reasonColIndex) nextRow.push('');
+        if (rowIndex === 0) {
+          nextRow[scoreColIndex] = 'ЦА Балл';
+          nextRow[reasonColIndex] = 'ЦА Причина';
+        }
+        return nextRow;
+      });
+
+      setTabs((prev) =>
+        prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+      );
+
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      setHighlightedCol(scoreColIndex);
+      highlightTimeoutRef.current = setTimeout(
+        () => setHighlightedCol(null),
+        BRIEF_SCORING_HIGHLIGHT_DURATION,
+      );
+
+      if (tableWrapperRef.current) {
+        const wrapper = tableWrapperRef.current;
+        requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+      }
+
+      setBriefScoring((prev) => ({
+        ...prev,
+        isScoring: true,
+        isOpen: false,
+        totalRows: total,
+        currentRow: safeProcessed,
+        progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+        error: null,
+        jobId,
+      }));
+
+      await runBriefScoringPolling({
+        jobId,
+        tabId: activeTabId,
+        scoreColIndex,
+        reasonColIndex,
+        totalRowsFallback: total,
+        initialToken: currentToken,
+      });
+    } catch (err) {
+      setBriefScoring((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : 'Произошла ошибка',
+        isScoring: false,
+        isOpen: true,
+        jobId: null,
+      }));
     }
   };
 
@@ -5351,7 +5455,7 @@ export function DatabaseSpreadsheet() {
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
-          Оценка ЦА
+          {briefScoring.isScoring ? `Оценка ЦА (${briefScoring.progress}%)` : 'Оценка ЦА'}
         </button>
 
         <button
@@ -6896,8 +7000,7 @@ export function DatabaseSpreadsheet() {
               <button
                 type="button"
                 onClick={closeBriefScoringModal}
-                disabled={briefScoring.isScoring}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
               >
                 &times;
               </button>
@@ -7044,38 +7147,37 @@ export function DatabaseSpreadsheet() {
 
             <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
               <div className="text-xs text-gray-500">
-                Batch: {BRIEF_SCORING_BATCH_SIZE} строк
+                {briefScoring.isScoring
+                  ? `Задача выполняется на сервере${briefScoring.jobId ? ` • ${briefScoring.jobId.slice(0, 8)}` : ''}`
+                  : 'Режим: серверная очередь (можно свернуть окно)'}
               </div>
               <div className="flex gap-3">
                 <button
                   type="button"
                   onClick={closeBriefScoringModal}
-                  disabled={briefScoring.isScoring}
-                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
                 >
-                  {briefScoring.isScoring ? 'Отменить' : 'Закрыть'}
+                  {briefScoring.isScoring ? 'Свернуть' : 'Закрыть'}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleStartBriefScoring()}
-                  disabled={
-                    briefScoring.isScoring ||
-                    (briefScoring.inputMode === 'pdf' ? !briefScoring.briefText : !briefScoring.manualText.trim())
-                  }
-                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
-                >
-                  {briefScoring.isScoring ? (
-                    <>
-                      <span className="animate-spin">⟳</span>
-                      Оценка...
-                    </>
-                  ) : (
-                    <>
-                      <span>🎯</span>
-                      Запустить оценку
-                    </>
-                  )}
-                </button>
+                {briefScoring.isScoring ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopBriefScoring()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartBriefScoring()}
+                    disabled={briefScoring.inputMode === 'pdf' ? !briefScoring.briefText : !briefScoring.manualText.trim()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                  >
+                    <span>🎯</span>
+                    Запустить оценку
+                  </button>
+                )}
               </div>
             </div>
           </div>
