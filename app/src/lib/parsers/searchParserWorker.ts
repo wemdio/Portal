@@ -412,6 +412,146 @@ function isLikelySourceSite(site: string): boolean {
   return false;
 }
 
+/** Домены, которые сразу пропускаем при парсинге выдачи (порталы, соцсети, маркетплейсы, госуслуги и т.д.). */
+const BLOCKED_DOMAINS = new Set(
+  [
+    '2gis.ru',
+    '2gis.com',
+    'yandex.ru',
+    'yandex.com',
+    'google.com',
+    'bing.com',
+    'mail.ru',
+    'rambler.ru',
+    'avito.ru',
+    'ozon.ru',
+    'wildberries.ru',
+    'aliexpress.ru',
+    'gosuslugi.ru',
+    'nalog.ru',
+    'kad.arbitr.ru',
+    'egrul.nalog.ru',
+    'spark-interfax.ru',
+    'kontur.ru',
+    'sbis.ru',
+    'rusprofile.ru',
+    'list-org.com',
+    'organizations.ru',
+    'orgbase.ru',
+    'firmika.ru',
+    'nomer.org',
+    'probusiness.io',
+    'sostav.ru',
+    'executive.ru',
+    'cossa.ru',
+    'adindex.ru',
+    'e-xecutive.ru',
+    'slideshare.net',
+    'scribd.com',
+    'issuu.com',
+    'academia.edu',
+    'researchgate.net',
+    'web.archive.org',
+    'archive.org',
+    'zoon.ru',
+    'flamp.ru',
+    'irecommend.ru',
+    'otzovik.com',
+    'facebook.com',
+    'fb.com',
+    'instagram.com',
+    'linkedin.com',
+    'lnkd.in',
+    'twitter.com',
+    'x.com',
+    't.me',
+    'telegram.me',
+    'youtube.com',
+    'youtu.be',
+    'tiktok.com',
+    'vk.com',
+    'ok.ru',
+    'pinterest.com',
+    'reddit.com',
+    'quora.com',
+    'medium.com',
+    'substack.com',
+    'threads.net',
+    'crunchbase.com',
+    'angel.co',
+    'wellfound.com',
+    'cbinsights.com',
+    'clutch.co',
+    'g2.com',
+    'capterra.com',
+    'trustpilot.com',
+    'yelp.com',
+    'yellowpages.com',
+    'yellowpages.ru',
+    'zoominfo.com',
+    'apollo.io',
+    'rocketreach.co',
+    'similarweb.com',
+    'indeed.com',
+    'hh.ru',
+    'glassdoor.com',
+    'builtwith.com',
+    'behance.net',
+    'dribbble.com',
+    'upwork.com',
+    'fiverr.com',
+    'freelancer.com',
+    'wikipedia.org',
+    'wikidata.org',
+    'britannica.com',
+    'investopedia.com',
+    'vc.ru',
+    'habr.com',
+    'rb.ru',
+    'forbes.com',
+    'rbc.ru',
+    'kommersant.ru',
+    'theverge.com',
+    'techcrunch.com',
+    'notion.so',
+    'airtable.com',
+    'hubspot.com',
+    'mailchimp.com',
+    'salesforce.com',
+    'zoho.com',
+    'intercom.com',
+    'stripe.com',
+    'shopify.com',
+    'wix.com',
+    'tilda.cc',
+    'wordpress.com',
+  ].map((d) => d.toLowerCase()),
+);
+
+function getHostFromLinkOrSite(linkOrSite: string): string | null {
+  try {
+    const s = linkOrSite.trim();
+    if (!s) return null;
+    const url = s.startsWith('http://') || s.startsWith('https://') ? new URL(s) : new URL(`https://${s}`);
+    const host = url.hostname.replace(/^www\./i, '').toLowerCase();
+    return host || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Исключаем из выдачи: -porn и домены из списка BLOCKED_DOMAINS. */
+function isBlockedSite(linkOrSite: string): boolean {
+  if (linkOrSite.toLowerCase().includes('-porn')) return true;
+  const host = getHostFromLinkOrSite(linkOrSite);
+  if (!host) return false;
+  if (BLOCKED_DOMAINS.has(host)) return true;
+  for (const domain of BLOCKED_DOMAINS) {
+    if (host === domain || host.endsWith(`.${domain}`)) return true;
+  }
+  return false;
+}
+
 function toLeadRow(
   r: SearchResultItem,
   jobId: string,
@@ -431,6 +571,7 @@ function toLeadRow(
 } | null {
   const site = normalizeSite(r.link);
   if (!site) return null;
+  if (isBlockedSite(r.link) || isBlockedSite(site)) return null;
   if (!isLeadCandidateSite(site)) return null;
   const derived = deriveCompanyName(r.title, site) ?? deriveCompanyNameFromSite(site) ?? site;
   const companyName =
@@ -654,7 +795,9 @@ export async function runSearchParserJob(jobId: string) {
         if (USE_SERPER) {
           try {
             const out = await serperSearchDetailed(query, { num: GOOGLE_RESULTS_PER_QUERY });
-            results = out.results.map((r) => ({ ...r, _provider: 'serper' as const }));
+            results = out.results
+              .filter((r) => !isBlockedSite(r.link))
+              .map((r) => ({ ...r, _provider: 'serper' as const }));
             debugPrimary = out.debug;
           } catch (e) {
             debugPrimary = { error: e instanceof Error ? e.message : String(e) };
@@ -669,7 +812,9 @@ export async function runSearchParserJob(jobId: string) {
             usedFallback = true;
             try {
               const outFallback = await serperSearchDetailed(simplifiedQuery, { num: GOOGLE_RESULTS_PER_QUERY });
-              results = outFallback.results.map((r) => ({ ...r, query, _provider: 'serper' as const }));
+              results = outFallback.results
+                .filter((r) => !isBlockedSite(r.link))
+                .map((r) => ({ ...r, query, _provider: 'serper' as const }));
               debugFallback = outFallback.debug;
             } catch (e) {
               debugFallback = { error: e instanceof Error ? e.message : String(e) };
@@ -740,6 +885,7 @@ export async function runSearchParserJob(jobId: string) {
               for (const item of out.results) {
                 const site = normalizeSite(item.link);
                 if (!site) continue;
+                if (isBlockedSite(item.link) || isBlockedSite(site)) continue;
                 if (!isLeadCandidateSite(site)) continue;
                 const key = site.toLowerCase();
                 if (seen.has(key)) continue;

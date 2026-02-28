@@ -16,6 +16,14 @@ describe('searchQueryBuilder', () => {
       const content = '- query one\n- query two';
       expect(parseSearchQueries(content)).toEqual(['query one', 'query two']);
     });
+
+    it('drops JSON fragment lines when falling back to line parsing', () => {
+      // Невалидный JSON (без ]}) — парсер переходит к построчному разбору
+      const content = '{"queries": [\n  "каталог подарков",\n  "магазины подарков"';
+      const parsed = parseSearchQueries(content);
+      expect(parsed.every((q) => !/queries\s*":\s*\[/.test(q))).toBe(true);
+      expect(parsed.some((q) => q.includes('каталог подарков') || q.includes('магазины подарков'))).toBe(true);
+    });
   });
 
   describe('buildSearchQueries', () => {

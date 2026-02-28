@@ -110,6 +110,33 @@ export async function createAvatarUploadUrl(params: {
   return { uploadUrl, publicUrl, key };
 }
 
+export type PresignedTaskImageUpload = {
+  uploadUrl: string;
+  publicUrl: string;
+  key: string;
+};
+
+export async function createTaskImageUploadUrl(params: {
+  contentType: string;
+  ext: string;
+}): Promise<PresignedTaskImageUpload> {
+  const { s3, bucket } = getConfig();
+  const safeExt = params.ext.toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+  const key = `task-images/${crypto.randomUUID()}.${safeExt}`;
+
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ContentType: params.contentType,
+    CacheControl: 'public, max-age=31536000',
+  });
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 60 });
+  const publicUrl = getPublicObjectUrl(key);
+
+  return { uploadUrl, publicUrl, key };
+}
+
 export async function createAvatarReadUrl(params: { key: string }): Promise<PresignedAvatarRead> {
   const { s3, bucket } = getConfig();
   const command = new GetObjectCommand({

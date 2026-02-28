@@ -17,6 +17,8 @@ import { Callout } from '@/components/ReglamentCallout';
 import { SectionBlock } from '@/components/ReglamentSectionBlock';
 import { DivBlock } from '@/components/ReglamentDivBlock';
 import { SpanClass } from '@/components/ReglamentSpanClass';
+import { ReglamentButton } from '@/lib/ReglamentButton';
+import { ReglamentPopover } from '@/lib/ReglamentPopover';
 
 export const DEFAULT_REGLAMENT_CONTENT: JSONContent = {
   type: 'doc',
@@ -155,6 +157,8 @@ export const REGLAMENT_EXTENSIONS = [
   Callout,
   SectionBlock,
   DivBlock,
+  ReglamentButton,
+  ReglamentPopover,
 ];
 
 export const REGLAMENT_FONT_OPTIONS = [
