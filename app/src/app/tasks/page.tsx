@@ -23,7 +23,7 @@ const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
 
 const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; className: string }> = {
-  pending: { label: 'Ожидает', className: 'bg-zinc-100 text-zinc-600 border-zinc-200' },
+  pending: { label: 'Ожидает', className: 'bg-gray-100 text-gray-600 border-gray-200' },
   in_progress: { label: 'В работе', className: 'bg-blue-50 text-blue-700 border-blue-200' },
   done: { label: 'Завершено', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
 };
@@ -105,6 +105,7 @@ export default function TasksPage() {
   const [newTitle, setNewTitle] = useState('');
   const [newProjectId, setNewProjectId] = useState('');
   const [newSpecialist, setNewSpecialist] = useState('');
+  const [newSpecialists, setNewSpecialists] = useState<string[]>([]);
   const [addingSaving, setAddingSaving] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeColumnId, setActiveColumnId] = useState<string | null>(null);
@@ -116,6 +117,7 @@ export default function TasksPage() {
   const [editingColumnTitle, setEditingColumnTitle] = useState('');
   const [editingColumnStatus, setEditingColumnStatus] = useState<string>('');
   const [newTaskColumnId, setNewTaskColumnId] = useState<string | null>(null);
+  const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [newDescription, setNewDescription] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
   const [editingDescriptionId, setEditingDescriptionId] = useState<string | null>(null);
@@ -130,6 +132,9 @@ export default function TasksPage() {
   const [isModalInEditMode, setIsModalInEditMode] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState('');
   const [editingSpecialistValue, setEditingSpecialistValue] = useState('');
+  const [editingProjectId, setEditingProjectId] = useState('');
+  const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
+  const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
 
   const userIsLead = checkIsLead(currentUserRole);
 
@@ -225,9 +230,14 @@ export default function TasksPage() {
   }, []);
 
   const updateTaskSpecialist = useCallback(async (taskId: string, specialist: string) => {
-    const value = specialist.trim() || undefined;
-    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, specialist: value } : t)));
-    await supabase.from('tasks').update({ specialist: value ?? null, updated_at: new Date().toISOString() }).eq('id', taskId);
+    const value = specialist.trim() || null;
+    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, specialist: value ?? undefined } : t)));
+    await supabase.from('tasks').update({ specialist: value, updated_at: new Date().toISOString() }).eq('id', taskId);
+  }, []);
+
+  const updateTaskProject = useCallback(async (taskId: string, projectId: string | null) => {
+    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, project_id: projectId } : t)));
+    await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
   }, []);
 
   const uploadTaskImage = useCallback(async (file: File): Promise<string> => {
@@ -287,11 +297,13 @@ export default function TasksPage() {
   }, [projects]);
 
   const promoteLegacyTask = useCallback(async (legacyTask: EnrichedTask, newStatus: TaskStatus) => {
-    const p = projectMap.get(legacyTask.project_id);
+    const projectId = legacyTask.project_id;
+    if (!projectId) return;
+    const p = projectMap.get(projectId);
     const { data, error } = await supabase
       .from('tasks')
       .insert({
-        project_id: legacyTask.project_id,
+        project_id: projectId,
         title: legacyTask.title,
         status: newStatus,
         specialist: p?.specialist || null,
@@ -309,17 +321,18 @@ export default function TasksPage() {
     let tasks = dbTasks;
     if (shouldFilterByUser) {
       tasks = tasks.filter((t) => {
-        if (t.specialist && t.specialist === currentUserName) return true;
-        const p = projectMap.get(t.project_id);
+        const assignees = (t.specialist || '').split(',').map((s) => s.trim()).filter(Boolean);
+        if (assignees.includes(currentUserName!)) return true;
+        const p = t.project_id ? projectMap.get(t.project_id) : undefined;
         return p?.specialist === currentUserName;
       });
     }
     return tasks.map((t) => {
-      const p = projectMap.get(t.project_id);
+      const p = t.project_id != null ? projectMap.get(t.project_id) : undefined;
       return {
         ...t,
         projectName: p?.client || 'Без проекта',
-        specialistName: t.specialist || p?.specialist || 'Без специалиста',
+        specialistName: t.specialist?.trim() || p?.specialist || 'Без специалиста',
       };
     });
   }, [dbTasks, projectMap, shouldFilterByUser, currentUserName]);
@@ -367,10 +380,11 @@ export default function TasksPage() {
   }, [currentTasks]);
 
   const tasksByProject = useMemo(() => {
-    const map = new Map<string, { projectName: string; tasks: EnrichedTask[] }>();
+    const map = new Map<string | null, { projectName: string; tasks: EnrichedTask[] }>();
     currentTasks.forEach((t) => {
-      if (!map.has(t.project_id)) map.set(t.project_id, { projectName: t.projectName, tasks: [] });
-      map.get(t.project_id)!.tasks.push(t);
+      const key = t.project_id;
+      if (!map.has(key)) map.set(key, { projectName: t.projectName, tasks: [] });
+      map.get(key)!.tasks.push(t);
     });
     return Array.from(map.values()).filter((e) => e.tasks.length > 0);
   }, [currentTasks]);
@@ -489,13 +503,18 @@ export default function TasksPage() {
     [selectedBoardId, selectedBoardColumns, updateTaskColumn, reorderColumnsInDb]
   );
 
+  function getNewTaskSpecialist(): string {
+    return newSpecialists.join(', ').trim();
+  }
+
   async function handleAddTask() {
-    if (!newTitle.trim() || !newSpecialist) return;
+    const specialistValue = getNewTaskSpecialist();
+    if (!newTitle.trim() || !specialistValue) return;
     setAddingSaving(true);
     try {
       const payload: Record<string, string | null> = {
         title: newTitle.trim(),
-        specialist: newSpecialist,
+        specialist: specialistValue,
         project_id: newProjectId || null,
         status: 'pending',
         description: newDescription.trim() || null,
@@ -508,25 +527,13 @@ export default function TasksPage() {
         payload.column_id = targetColId;
         if (targetCol?.status) payload.status = targetCol.status;
       }
-      if (!newProjectId) {
-        const { data: fallback } = await supabase
-          .from('projects')
-          .select('id')
-          .eq('specialist', newSpecialist)
-          .limit(1)
-          .single();
-        if (fallback) payload.project_id = fallback.id;
-        else {
-          setAddingSaving(false);
-          return;
-        }
-      }
       const { data, error } = await supabase.from('tasks').insert(payload).select().single();
       if (error) throw error;
       setDbTasks((prev) => [data as Task, ...prev]);
       setNewTitle('');
       setNewProjectId('');
       setNewSpecialist('');
+      setNewSpecialists([]);
       setNewDescription('');
       setNewImageUrl('');
       setShowAddForm(false);
@@ -622,15 +629,15 @@ export default function TasksPage() {
     const selectValue = statusOptions.includes(task.status as TaskStatus) ? task.status : 'pending';
 
     return (
-      <div key={task.id} className={`rounded-xl border p-2.5 transition-all hover:shadow-[0_2px_8px_rgba(0,0,0,0.03)] ${task.status === 'done' ? 'bg-zinc-50/50 border-zinc-200/50' : 'bg-white border-zinc-200/80'}`}>
+      <div key={task.id} className={`rounded-lg border p-3 transition-colors ${task.status === 'done' ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
-            {task.projectName && <p className="text-[11px] font-medium text-zinc-500 mb-0.5">{task.projectName}</p>}
-            <p className={`break-words text-[14px] font-medium leading-snug ${task.status === 'done' ? 'text-zinc-400 line-through' : 'text-zinc-900'}`}>
+            <p className="text-xs text-gray-500">{task.projectName}</p>
+            <p className={`break-words text-sm font-medium mt-0.5 ${task.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
               {task.title}
             </p>
           </div>
-          <div className="flex items-center flex-shrink-0">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             <select
               value={selectValue}
               onChange={(e) => {
@@ -641,8 +648,7 @@ export default function TasksPage() {
                   void updateTaskStatus(task.id, newStatus);
                 }
               }}
-              className={`appearance-none cursor-pointer rounded-[4px] border px-1.5 py-0 h-[18px] text-[10px] font-medium outline-none transition-colors ${statusCfg.className}`}
-              style={{ lineHeight: '16px' }}
+              className={`appearance-none cursor-pointer rounded-full border px-2.5 py-0.5 text-[10px] font-semibold outline-none ${statusCfg.className}`}
             >
               {statusOptions.map((s) => (
                 <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>
@@ -652,13 +658,13 @@ export default function TasksPage() {
         </div>
 
         {!task.isLegacy && ((task.description != null && task.description !== '') || (task.image_url != null && task.image_url !== '')) && (
-          <div className="mt-2 pt-2 border-t border-zinc-100/80">
-            {task.description && <p className="text-[12px] leading-relaxed text-zinc-600 line-clamp-2">{task.description}</p>}
-            {task.image_url && <img src={task.image_url} alt="" className="mt-1.5 h-12 w-full rounded-md object-cover" />}
+          <div className="mt-2 pt-2 border-t border-gray-100">
+            {task.description && <p className="text-xs text-gray-600 line-clamp-2">{task.description}</p>}
+            {task.image_url && <img src={task.image_url} alt="" className="mt-1 h-16 w-full rounded object-cover" />}
           </div>
         )}
         {!task.isLegacy && (
-          <div className="mt-2 pt-2 border-t border-zinc-100/80">
+          <div className="mt-2 pt-2 border-t border-gray-100">
             {isEditingResult ? (
               <div className="flex gap-1.5">
                 <input
@@ -670,29 +676,29 @@ export default function TasksPage() {
                     if (e.key === 'Enter') void updateTaskResult(task.id, editingResultValue);
                     if (e.key === 'Escape') setEditingResultId(null);
                   }}
-                  className="flex-1 text-[12px] border border-zinc-200 rounded-md px-2 py-1 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400/20"
-                  placeholder="Результат..."
+                  className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1 outline-none focus:border-blue-400"
+                  placeholder="Результат задачи..."
                 />
                 <button
                   type="button"
                   onClick={() => void updateTaskResult(task.id, editingResultValue)}
-                  className="text-[12px] bg-zinc-800 text-white px-2 py-1 rounded-md hover:bg-zinc-900 transition-colors"
+                  className="text-xs bg-blue-600 text-white px-2 py-1 rounded-lg hover:bg-blue-700"
                 >
                   ✓
                 </button>
               </div>
             ) : (
               <div
-                className="cursor-pointer hover:bg-zinc-50 rounded-md px-1.5 py-0.5 -mx-1.5 transition-colors"
+                className="cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5 -mx-1 transition-colors"
                 onClick={() => {
                   setEditingResultId(task.id);
                   setEditingResultValue(task.result || '');
                 }}
               >
                 {task.result ? (
-                  <p className="text-[12px] text-zinc-700"><span className="font-medium text-zinc-500">Результат:</span> {task.result}</p>
+                  <p className="text-xs text-gray-700"><span className="font-medium text-gray-500">Результат:</span> {task.result}</p>
                 ) : (
-                  <p className="text-[12px] font-medium text-zinc-400">+ Добавить результат</p>
+                  <p className="text-xs text-gray-400">+ Добавить результат</p>
                 )}
               </div>
             )}
@@ -705,63 +711,51 @@ export default function TasksPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-zinc-500">Загрузка...</div>
+        <div className="text-gray-500">Загрузка...</div>
       </div>
     );
   }
 
   return (
     <div className={isTma ? 'space-y-4' : 'space-y-6'}>
-      <div className={`flex flex-col sm:flex-row sm:items-start sm:justify-between pb-3 ${isTma ? 'gap-3' : 'gap-4'}`}>
-        <div className="flex flex-col gap-3">
-          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight text-zinc-900`}>Задачи</h1>
-          {userIsLead && view !== 'board' && (
-            <button
-              type="button"
-              onClick={() => setShowAddForm((v) => !v)}
-              className="inline-flex items-center justify-center rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 transition-all duration-200 w-fit"
-            >
-              <span className="mr-1.5 text-sm leading-none">+</span> Добавить задачу
-            </button>
-          )}
+      <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center justify-between gap-4'}>
+        <div>
+          <p className="text-sm text-gray-400">Главная / задачи</p>
+          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold text-gray-900`}>Задачи</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            {shouldFilterByUser ? 'Ваши задачи.' : 'Задачи специалистов и проектов в одном месте.'}
+          </p>
         </div>
-        <div className={isTma ? 'flex w-full flex-col gap-2' : 'flex flex-wrap items-center gap-2'}>
-          {/* Right side header actions if any */}
-        </div>
+        {userIsLead && view !== 'board' && (
+          <button
+            type="button"
+            onClick={() => setShowAddForm((v) => !v)}
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+          >
+            + Добавить задачу
+          </button>
+        )}
       </div>
 
       {showAddForm && userIsLead && (
-        <div className="rounded-[16px] border border-zinc-200/80 bg-white p-5 shadow-sm space-y-4">
-          <h3 className="text-[15px] font-semibold text-zinc-900">Новая задача</h3>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/30 space-y-4">
+          <h3 className="text-base font-semibold text-slate-800">Новая задача</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs font-medium text-zinc-500 mb-1.5">Специалист *</label>
-              <select
-                value={newSpecialist}
-                onChange={(e) => setNewSpecialist(e.target.value)}
-                className="w-full text-[13px] border border-zinc-200 rounded-lg px-3 py-2 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400/20"
-              >
-                <option value="">Выберите специалиста</option>
-                {specialistOptions.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-zinc-500 mb-1.5">Проект</label>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
               <select
                 value={newProjectId}
                 onChange={(e) => setNewProjectId(e.target.value)}
-                className="w-full text-[13px] border border-zinc-200 rounded-lg px-3 py-2 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400/20"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               >
                 <option value="">Без проекта</option>
                 {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.client || 'Без названия'}</option>
+                  <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-zinc-500 mb-1.5">Задача *</label>
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Задача *</label>
               <input
                 type="text"
                 value={newTitle}
@@ -770,22 +764,51 @@ export default function TasksPage() {
                   if (e.key === 'Enter') void handleAddTask();
                 }}
                 placeholder="Название задачи"
-                className="w-full text-[13px] border border-zinc-200 rounded-lg px-3 py-2 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400/20"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               />
             </div>
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
+              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
+                {specialistOptions.map((s) => (
+                  <label
+                    key={s}
+                    className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={newSpecialists.includes(s)}
+                      onChange={(e) => {
+                        setNewSpecialists((prev) =>
+                          e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                        );
+                      }}
+                      className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                    />
+                    <span className="text-sm font-medium text-slate-700 truncate">{s}</span>
+                  </label>
+                ))}
+                {specialistOptions.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-slate-500">Нет специалистов</p>
+                )}
+              </div>
+            </div>
           </div>
-          <div className="space-y-2">
-            <label className="block text-xs font-medium text-zinc-500 mb-1.5">Описание</label>
-            <textarea
-              value={newDescription}
-              onChange={(e) => setNewDescription(e.target.value)}
-              placeholder="Текст описания задачи..."
-              rows={2}
-              className="w-full resize-none text-[13px] border border-zinc-200 rounded-lg px-3 py-2 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400/20"
-            />
-            <label className="block text-xs font-medium text-zinc-500 mb-1.5">Картинка</label>
-            <div
-              className="rounded-lg border border-zinc-200 bg-zinc-50/30 p-2 focus-within:border-zinc-400 focus-within:ring-1 focus-within:ring-zinc-400/20"
+          <div className="space-y-3">
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Описание</span>
+              <textarea
+                value={newDescription}
+                onChange={(e) => setNewDescription(e.target.value)}
+                placeholder="Текст описания задачи..."
+                rows={2}
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+              />
+            </div>
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Картинка</span>
+              <div
+                className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
               onPaste={async (e) => {
                 const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
                 const file = item?.getAsFile();
@@ -824,7 +847,7 @@ export default function TasksPage() {
               />
               {newImageUrl ? (
                 <>
-                  <div className="min-h-24 w-full overflow-hidden rounded-lg bg-zinc-100">
+                  <div className="min-h-24 w-full overflow-hidden rounded-lg bg-gray-100">
                     <img
                       src={newImageUrl}
                       alt=""
@@ -842,14 +865,14 @@ export default function TasksPage() {
                       type="button"
                       disabled={taskImageUploading}
                       onClick={() => newTaskImageInputRef.current?.click()}
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
+                      className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50"
                     >
                       {taskImageUploading ? 'Загрузка...' : 'Заменить'}
                     </button>
                     <button
                       type="button"
                       onClick={() => { setNewImageUrl(''); setNewImageLoadError(false); }}
-                      className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-50"
+                      className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 hover:bg-gray-50"
                     >
                       Удалить
                     </button>
@@ -862,36 +885,37 @@ export default function TasksPage() {
                       type="button"
                       disabled={taskImageUploading}
                       onClick={() => newTaskImageInputRef.current?.click()}
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
+                      className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50"
                     >
                       {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
                     </button>
-                    <span className="text-xs text-zinc-500">или Ctrl+V</span>
+                    <span className="text-xs text-gray-500">или Ctrl+V</span>
                   </div>
                   <input
                     type="url"
                     value={newImageUrl}
                     onChange={(e) => { setNewImageUrl(e.target.value); setNewImageLoadError(false); }}
                     placeholder="или вставьте ссылку на картинку"
-                    className="mt-2 w-full text-sm border border-zinc-200 rounded px-2 py-1.5 outline-none focus:border-blue-400"
+                    className="mt-2 w-full text-sm border border-gray-200 rounded px-2 py-1.5 outline-none focus:border-blue-400"
                   />
                 </>
               )}
             </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2 pt-2">
+          <div className="flex items-center gap-2 pt-1">
             <button
               type="button"
-              disabled={addingSaving || !newTitle.trim() || !newSpecialist}
+              disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
               onClick={() => void handleAddTask()}
-              className="rounded-xl bg-zinc-900 px-5 py-2 text-[13px] font-medium text-white shadow-sm hover:bg-zinc-800 transition-colors disabled:opacity-50"
+              className="rounded-xl bg-slate-800 px-4 py-2.5 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
             >
               {addingSaving ? 'Сохранение...' : 'Создать'}
             </button>
             <button
               type="button"
-              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); }}
-              className="rounded-xl px-5 py-2 text-[13px] font-medium text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 transition-colors"
+              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewImageUrl(''); }}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
             >
               Отмена
             </button>
@@ -899,57 +923,53 @@ export default function TasksPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 mb-3">
+      <div className="flex flex-wrap items-center gap-2">
         {view !== 'board' && (
-          <div className={isTma ? 'flex items-center overflow-x-auto no-scrollbar gap-1 pt-1' : 'flex items-center gap-1 overflow-x-auto no-scrollbar bg-white p-1 rounded-xl shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200/60'}>
+          <div className={isTma ? 'flex items-center rounded-full bg-gray-100 p-1' : 'flex items-center rounded-full bg-gray-100 p-1'}>
             <button
               type="button"
               onClick={() => setActiveTab('tasks')}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'tasks' ? 'bg-zinc-100 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
+              className={`${isTma ? 'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
+                activeTab === 'tasks' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
               }`}
             >
               Задачи
-              <span className={`ml-1 px-1.5 py-0.5 rounded-md text-xs font-semibold transition-colors duration-200 ${
-                activeTab === 'tasks' ? 'bg-white text-zinc-700 shadow-sm' : 'bg-zinc-100 text-zinc-500'
-              }`}>
+              <span className={`text-xs ${activeTab === 'tasks' ? 'text-gray-600' : 'text-gray-400'}`}>
                 {regularTasks.length}
               </span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('hypotheses')}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'hypotheses' ? 'bg-zinc-100 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
+              className={`${isTma ? 'flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition' : 'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition'} ${
+                activeTab === 'hypotheses' ? 'bg-lime-300 text-gray-900' : 'text-gray-500 hover:text-gray-700'
               }`}
             >
               Задачи по гипотезам
-              <span className={`ml-1 px-1.5 py-0.5 rounded-md text-xs font-semibold transition-colors duration-200 ${
-                activeTab === 'hypotheses' ? 'bg-white text-zinc-700 shadow-sm' : 'bg-zinc-100 text-zinc-500'
-              }`}>
+              <span className={`text-xs ${activeTab === 'hypotheses' ? 'text-gray-600' : 'text-gray-400'}`}>
                 {hypothesisTasks.length}
               </span>
             </button>
           </div>
         )}
-        <div className={isTma ? 'flex items-center overflow-x-auto no-scrollbar gap-1 pt-1' : 'flex items-center gap-1 overflow-x-auto no-scrollbar bg-white p-1 rounded-xl shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200/60'}>
+        <div className="flex items-center rounded-full bg-gray-100 p-1">
           <button
             type="button"
             onClick={() => setView('specialists')}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-              view === 'specialists' ? 'bg-zinc-100 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
+            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+              view === 'specialists' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            По специалистам
+            по специалистам
           </button>
           <button
             type="button"
             onClick={() => setView('projects')}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-              view === 'projects' ? 'bg-zinc-100 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
+            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+              view === 'projects' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            По проектам
+            по проектам
           </button>
           <button
             type="button"
@@ -957,29 +977,29 @@ export default function TasksPage() {
               setView('board');
               setActiveTab('tasks');
             }}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-              view === 'board' ? 'bg-zinc-100 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
+            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+              view === 'board' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            Доска
+            доска
           </button>
         </div>
       </div>
 
       {view === 'specialists' && (
-        <div className={isTma ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'}>
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
           {tasksBySpecialist.map(([specialist, list]) => (
-            <div key={specialist} className={`rounded-[16px] border border-zinc-200/80 bg-white shadow-sm ${isTma ? 'p-3' : 'p-3'}`}>
+            <div key={specialist} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-[15px] font-semibold tracking-tight text-zinc-900">{specialist}</h3>
-                  <p className="text-[11px] text-zinc-500 font-medium mt-0.5">{list.length} задач</p>
+                  <h3 className="text-lg font-semibold text-gray-900">{specialist}</h3>
+                  <p className="text-xs text-gray-500">{list.length} задач</p>
                 </div>
               </div>
-              <div className="mt-3 space-y-2">
+              <div className="mt-4 space-y-3">
                 {list.map(renderTaskCard)}
                 {list.length === 0 && (
-                  <div className="rounded-xl border border-dashed border-zinc-200 p-3 text-center text-[11px] text-zinc-400">
+                  <div className="rounded-lg border border-dashed border-gray-200 p-3 text-center text-sm text-gray-400">
                     Нет задач
                   </div>
                 )}
@@ -987,7 +1007,7 @@ export default function TasksPage() {
             </div>
           ))}
           {tasksBySpecialist.length === 0 && (
-            <div className={`rounded-xl border border-dashed border-zinc-200 text-center text-[11px] text-zinc-500 col-span-full ${isTma ? 'p-3' : 'p-3'}`}>
+            <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 col-span-full ${isTma ? 'p-5' : 'p-6'}`}>
               Задачи пока не добавлены.
             </div>
           )}
@@ -995,20 +1015,20 @@ export default function TasksPage() {
       )}
 
       {view === 'projects' && (
-        <div className={isTma ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'}>
+        <div className={isTma ? 'grid grid-cols-1 gap-4' : 'grid grid-cols-1 gap-6 lg:grid-cols-3'}>
           {tasksByProject.map(({ projectName, tasks: list }) => (
-            <div key={projectName} className={`rounded-[16px] border border-zinc-200/80 bg-white shadow-sm ${isTma ? 'p-3' : 'p-3'}`}>
+            <div key={projectName} className={`rounded-xl border border-gray-200 bg-white shadow-sm ${isTma ? 'p-4' : 'p-5'}`}>
               <div>
-                <h3 className="text-[15px] font-semibold tracking-tight text-zinc-900">{projectName}</h3>
-                <p className="text-[11px] text-zinc-500 font-medium mt-0.5">{list.length} задач</p>
+                <h3 className="text-lg font-semibold text-gray-900">{projectName}</h3>
+                <p className="text-xs text-gray-500">{list.length} задач</p>
               </div>
-              <div className="mt-3 space-y-2">
+              <div className="mt-4 space-y-3">
                 {list.map(renderTaskCard)}
               </div>
             </div>
           ))}
           {tasksByProject.length === 0 && (
-            <div className={`rounded-xl border border-dashed border-zinc-200 text-center text-[11px] text-zinc-500 col-span-full ${isTma ? 'p-3' : 'p-3'}`}>
+            <div className={`rounded-xl border border-dashed border-gray-200 text-center text-sm text-gray-500 col-span-full ${isTma ? 'p-5' : 'p-6'}`}>
               Нет проектов для отображения.
             </div>
           )}
@@ -1022,7 +1042,7 @@ export default function TasksPage() {
               <select
                 value={selectedBoardId ?? ''}
                 onChange={(e) => setSelectedBoardId(e.target.value || null)}
-                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400"
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400"
               >
                 <option value="">{boards.length === 0 ? 'Нет досок' : 'Выберите доску'}</option>
                 {sortedBoards.map((b) => (
@@ -1036,7 +1056,7 @@ export default function TasksPage() {
                   <button
                     type="button"
                     onClick={() => setShowAddBoardForm(true)}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50"
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
                   >
                     + Создать доску
                   </button>
@@ -1044,7 +1064,7 @@ export default function TasksPage() {
                     type="button"
                     onClick={() => void handleCreateColumn()}
                     disabled={!selectedBoardId || addingColumn}
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                   >
                     {addingColumn ? 'Добавление...' : '+ Добавить колонку'}
                   </button>
@@ -1057,10 +1077,10 @@ export default function TasksPage() {
                 onClick={() => { setShowAddBoardForm(false); setNewBoardName(''); }}
               >
                 <div
-                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-xl"
+                  className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <h3 className="text-lg font-semibold text-zinc-900">Создать доску</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">Создать доску</h3>
                   <input
                     type="text"
                     value={newBoardName}
@@ -1070,14 +1090,14 @@ export default function TasksPage() {
                       if (e.key === 'Escape') { setShowAddBoardForm(false); setNewBoardName(''); }
                     }}
                     placeholder="Название доски"
-                    className="mt-3 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20"
+                    className="mt-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20"
                     autoFocus
                   />
                   <div className="mt-4 flex justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => { setShowAddBoardForm(false); setNewBoardName(''); }}
-                      className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                      className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
                     >
                       Отмена
                     </button>
@@ -1094,13 +1114,13 @@ export default function TasksPage() {
               </div>
             )}
             {selectedBoardColumns.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50/50 py-12 text-center">
+              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50/50 py-12 text-center">
                 {boards.length === 0 ? (
-                  <p className="text-sm text-zinc-600">
-                    Нет досок. Примените миграции БД (файл <code className="rounded bg-zinc-200 px-1 text-xs">supabase/migrations/20260228_0001_task_boards_and_columns.sql</code>), чтобы появилась доска по умолчанию с колонками.
+                  <p className="text-sm text-gray-600">
+                    Нет досок. Примените миграции БД (файл <code className="rounded bg-gray-200 px-1 text-xs">supabase/migrations/20260228_0001_task_boards_and_columns.sql</code>), чтобы появилась доска по умолчанию с колонками.
                   </p>
                 ) : (
-                  <p className="text-sm text-zinc-600">
+                  <p className="text-sm text-gray-600">
                     На выбранной доске нет колонок. Нажмите «+ Добавить колонку», чтобы создать колонки (например: Ожидает, В работе, Завершено).
                   </p>
                 )}
@@ -1111,7 +1131,7 @@ export default function TasksPage() {
                   <DroppableColumn
                     key={col.id}
                     columnId={col.id}
-                    baseClassName="flex w-72 flex-shrink-0 flex-col rounded-xl border border-zinc-200 bg-zinc-50/80 p-3 transition-colors"
+                    baseClassName="flex w-72 flex-shrink-0 flex-col rounded-xl border border-gray-200 bg-gray-50/80 p-3 transition-colors"
                   >
                     <div className="mb-2 flex items-center justify-between gap-1">
                       {userIsLead && editingColumnId === col.id ? (
@@ -1121,12 +1141,12 @@ export default function TasksPage() {
                             value={editingColumnTitle}
                             onChange={(e) => setEditingColumnTitle(e.target.value)}
                             placeholder="Название колонки"
-                            className="w-full rounded border border-zinc-200 px-2 py-1 text-sm outline-none focus:border-blue-400"
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-sm outline-none focus:border-blue-400"
                           />
                           <select
                             value={editingColumnStatus}
                             onChange={(e) => setEditingColumnStatus(e.target.value)}
-                            className="w-full rounded border border-zinc-200 px-2 py-1 text-sm outline-none focus:border-blue-400"
+                            className="w-full rounded border border-gray-200 px-2 py-1 text-sm outline-none focus:border-blue-400"
                           >
                             <option value="">Без статуса</option>
                             <option value="backlog">Бэк лог</option>
@@ -1146,7 +1166,7 @@ export default function TasksPage() {
                             <button
                               type="button"
                               onClick={() => setEditingColumnId(null)}
-                              className="rounded border border-zinc-200 px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-50"
+                              className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
                             >
                               Отмена
                             </button>
@@ -1162,7 +1182,7 @@ export default function TasksPage() {
                               setEditingColumnTitle(col.title);
                               setEditingColumnStatus((col.status as string) || '');
                             }}
-                            className="min-w-0 flex-1 text-left text-sm font-semibold text-zinc-900 truncate hover:text-blue-600"
+                            className="min-w-0 flex-1 text-left text-sm font-semibold text-gray-900 truncate hover:text-blue-600"
                             title="Изменить колонку"
                           >
                             {col.title}
@@ -1173,9 +1193,12 @@ export default function TasksPage() {
                               e.stopPropagation();
                               setNewTaskColumnId(col.id);
                               setNewTitle('');
-                              setNewSpecialist('');
+                              setNewProjectId('');
+                              setNewSpecialists([]);
                               setNewDescription('');
                               setNewImageUrl('');
+                              setAssigneeFilterModal('');
+                              setShowAddTaskModal(true);
                             }}
                             className="flex-shrink-0 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                           >
@@ -1183,166 +1206,10 @@ export default function TasksPage() {
                           </button>
                         </DraggableColumnHeader>
                       ) : (
-                        <h3 className="min-w-0 flex-1 text-sm font-semibold text-zinc-900 truncate">{col.title}</h3>
+                        <h3 className="min-w-0 flex-1 text-sm font-semibold text-gray-900 truncate">{col.title}</h3>
                       )}
                     </div>
                     <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
-                      {userIsLead && newTaskColumnId === col.id && (
-                        <div
-                          className="rounded-xl border border-zinc-200/80 bg-white p-4 shadow-md shadow-zinc-200/50 ring-1 ring-zinc-100 transition-shadow"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <input
-                            type="text"
-                            autoFocus
-                            value={newTitle}
-                            onChange={(e) => setNewTitle(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') void handleAddTask();
-                              if (e.key === 'Escape') { setNewTaskColumnId(null); setNewTitle(''); setNewSpecialist(''); }
-                            }}
-                            placeholder="Название задачи..."
-                            className="mb-3 w-full rounded-lg border border-zinc-200 bg-zinc-50/50 px-3 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          />
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400">
-                            Исполнитель
-                          </label>
-                          <select
-                            value={newSpecialist}
-                            onChange={(e) => setNewSpecialist(e.target.value)}
-                            className="mb-3 w-full appearance-none rounded-lg border border-zinc-200 bg-zinc-50/50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          >
-                            <option value="">Выберите исполнителя</option>
-                            {specialistOptions.map((s) => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
-                          </select>
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400">
-                            Описание
-                          </label>
-                          <textarea
-                            value={newDescription}
-                            onChange={(e) => setNewDescription(e.target.value)}
-                            placeholder="Текст описания задачи..."
-                            rows={2}
-                            className="mb-3 w-full resize-none rounded-lg border border-zinc-200 bg-zinc-50/50 px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          />
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400">
-                            Картинка
-                          </label>
-                          <div
-                            className="mb-4 rounded-lg border border-zinc-200 bg-zinc-50/30 p-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400/20"
-                            onPaste={async (e) => {
-                              const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
-                              const file = item?.getAsFile();
-                              if (!file) return;
-                              e.preventDefault();
-                              setTaskImageUploading(true);
-                              try {
-                                const url = await uploadTaskImage(file);
-                                setNewImageUrl(url);
-                              } catch (err) {
-                                void logError('tasks.image.upload.failed', err);
-                              } finally {
-                                setTaskImageUploading(false);
-                              }
-                            }}
-                          >
-                            <input
-                              ref={newTaskImageInputRef}
-                              type="file"
-                              accept="image/*"
-                              className="hidden"
-                              onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                e.target.value = '';
-                                setTaskImageUploading(true);
-                                try {
-                                  const url = await uploadTaskImage(file);
-                                  setNewImageUrl(url);
-                                } catch (err) {
-                                  void logError('tasks.image.upload.failed', err);
-                                } finally {
-                                  setTaskImageUploading(false);
-                                }
-                              }}
-                            />
-                            {newImageUrl ? (
-                              <>
-                                <div className="min-h-24 w-full overflow-hidden rounded-lg bg-zinc-100">
-                                  <img
-                                    src={newImageUrl}
-                                    alt=""
-                                    referrerPolicy="no-referrer"
-                                    className="max-h-40 w-full object-contain"
-                                    onLoad={() => setNewImageLoadError(false)}
-                                    onError={() => setNewImageLoadError(true)}
-                                  />
-                                  {newImageLoadError && (
-                                    <p className="p-2 text-center text-xs text-amber-600">Не удалось загрузить изображение</p>
-                                  )}
-                                </div>
-                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={taskImageUploading}
-                                    onClick={() => newTaskImageInputRef.current?.click()}
-                                    className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-                                  >
-                                    {taskImageUploading ? 'Загрузка...' : 'Заменить'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => { setNewImageUrl(''); setNewImageLoadError(false); }}
-                                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-50"
-                                  >
-                                    Удалить
-                                  </button>
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={taskImageUploading}
-                                    onClick={() => newTaskImageInputRef.current?.click()}
-                                    className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-                                  >
-                                    {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
-                                  </button>
-                                  <span className="text-xs text-zinc-500">или Ctrl+V</span>
-                                </div>
-                                <input
-                                  type="url"
-                                  value={newImageUrl}
-                                  onChange={(e) => { setNewImageUrl(e.target.value); setNewImageLoadError(false); }}
-                                  placeholder="или вставьте ссылку"
-                                  className="mt-2 w-full rounded-lg border border-zinc-200 bg-zinc-50/50 px-2 py-1.5 text-sm outline-none focus:border-blue-400"
-                                />
-                              </>
-                            )}
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              disabled={addingSaving || !newTitle.trim() || !newSpecialist}
-                              onClick={() => void handleAddTask()}
-                              className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none"
-                            >
-                              {addingSaving ? 'Сохранение...' : 'Сохранить'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => { setNewTaskColumnId(null); setNewTitle(''); setNewSpecialist(''); setNewDescription(''); setNewImageUrl(''); }}
-                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-600 shadow-sm transition hover:bg-zinc-50"
-                            >
-                              Отмена
-                            </button>
-                          </div>
-                        </div>
-                      )}
                       {(tasksByColumnForBoard.get(col.id) ?? []).map((task) => {
                         const isEditingResult = editingResultId === task.id;
                         const columnHasStatus = col.status && ['pending', 'in_progress', 'done'].includes(col.status);
@@ -1353,7 +1220,7 @@ export default function TasksPage() {
                             : !columnHasStatus
                               ? 'bg-emerald-500'
                               : task.status === 'done'
-                                ? 'bg-zinc-300'
+                                ? 'bg-gray-300'
                                 : task.status === 'in_progress'
                                   ? 'bg-blue-400'
                                   : 'bg-amber-400/80';
@@ -1369,17 +1236,17 @@ export default function TasksPage() {
                               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTaskModalTaskId(task.id); } }}
                               className={`group relative overflow-hidden rounded-xl border transition-all ${
                                 displayDone
-                                  ? 'border-zinc-200 bg-zinc-50/80'
-                                  : 'border-zinc-200/90 bg-white shadow-sm shadow-zinc-200/40 hover:shadow-md hover:shadow-zinc-200/50'
+                                  ? 'border-gray-200 bg-gray-50/80'
+                                  : 'border-gray-200/90 bg-white shadow-sm shadow-gray-200/40 hover:shadow-md hover:shadow-gray-200/50'
                               } cursor-grab active:cursor-grabbing cursor-pointer`}
                             >
                               <div className={`absolute left-0 top-0 h-full w-1 ${barColor}`} />
                               <div className="min-w-0 p-3 pl-4">
-                                <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{task.projectName}</p>
-                                <p className="text-xs text-zinc-500 mt-0.5">
-                                  Исполнитель: <span className="font-medium text-zinc-600">{task.specialistName}</span>
+                                <p className="text-xs font-medium uppercase tracking-wider text-gray-400">{task.projectName}</p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  Исполнитель: <span className="font-medium text-gray-600">{task.specialistName}</span>
                                 </p>
-                                <p className={`mt-1 break-words text-sm font-semibold leading-snug ${displayDone ? 'text-zinc-400 line-through' : 'text-zinc-900'}`}>
+                                <p className={`mt-1 break-words text-sm font-semibold leading-snug ${displayDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                                   {task.title}
                                 </p>
                               </div>
@@ -1396,22 +1263,22 @@ export default function TasksPage() {
           <DragOverlay>
             {activeColumn ? (
               <div className="rounded-xl border-2 border-blue-400 bg-white px-3 py-2 shadow-lg">
-                <span className="text-sm font-semibold text-zinc-900">{activeColumn.title}</span>
+                <span className="text-sm font-semibold text-gray-900">{activeColumn.title}</span>
               </div>
             ) : activeTask ? (
-              <div className="relative w-64 overflow-hidden rounded-xl border-2 border-blue-300 bg-white shadow-xl shadow-zinc-300/40">
-                <div className={`absolute left-0 top-0 h-full w-1 ${activeTask.status === 'done' ? 'bg-zinc-300' : activeTask.status === 'in_progress' ? 'bg-blue-400' : 'bg-amber-400/80'}`} />
-                <div className={`min-w-0 p-3 pl-4 ${activeTask.status === 'done' ? 'bg-zinc-50/80' : ''}`}>
-                  <p className="text-xs font-medium uppercase tracking-wider text-zinc-400">{activeTask.projectName}</p>
-                  <p className="text-xs text-zinc-500">Исполнитель: {activeTask.specialistName}</p>
-                  <p className={`mt-1 break-words text-sm font-semibold leading-snug ${activeTask.status === 'done' ? 'text-zinc-400 line-through' : 'text-zinc-900'}`}>
+              <div className="relative w-64 overflow-hidden rounded-xl border-2 border-blue-300 bg-white shadow-xl shadow-gray-300/40">
+                <div className={`absolute left-0 top-0 h-full w-1 ${activeTask.status === 'done' ? 'bg-gray-300' : activeTask.status === 'in_progress' ? 'bg-blue-400' : 'bg-amber-400/80'}`} />
+                <div className={`min-w-0 p-3 pl-4 ${activeTask.status === 'done' ? 'bg-gray-50/80' : ''}`}>
+                  <p className="text-xs font-medium uppercase tracking-wider text-gray-400">{activeTask.projectName}</p>
+                  <p className="text-xs text-gray-500">Исполнитель: {activeTask.specialistName}</p>
+                  <p className={`mt-1 break-words text-sm font-semibold leading-snug ${activeTask.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                     {activeTask.title}
                   </p>
-                  {activeTask.description && <p className="mt-1 line-clamp-2 text-xs text-zinc-600">{activeTask.description}</p>}
+                  {activeTask.description && <p className="mt-1 line-clamp-2 text-xs text-gray-600">{activeTask.description}</p>}
                   {activeTask.image_url && <img src={activeTask.image_url} alt="" className="mt-1.5 max-h-20 w-full rounded-lg object-cover" />}
                   {activeTask.result && (
-                    <p className="mt-2 text-xs text-zinc-600">
-                      <span className="font-medium text-zinc-500">Результат:</span> {activeTask.result}
+                    <p className="mt-2 text-xs text-gray-600">
+                      <span className="font-medium text-gray-500">Результат:</span> {activeTask.result}
                     </p>
                   )}
                 </div>
@@ -1419,6 +1286,281 @@ export default function TasksPage() {
             ) : null}
           </DragOverlay>
         </DndContext>
+      )}
+
+      {showAddTaskModal && view === 'board' && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-sm"
+          onClick={() => {
+            setShowAddTaskModal(false);
+            setNewTaskColumnId(null);
+            setNewTitle('');
+            setNewProjectId('');
+            setNewSpecialists([]);
+            setNewDescription('');
+            setNewImageUrl('');
+            setAssigneeFilterModal('');
+          }}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Новая задача</h3>
+                {newTaskColumnId && (
+                  <p className="mt-0.5 text-[11px] text-slate-500">
+                    Колонка: {selectedBoardColumns.find((c) => c.id === newTaskColumnId)?.title ?? ''}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddTaskModal(false);
+                  setNewTaskColumnId(null);
+                  setNewTitle('');
+                  setNewProjectId('');
+                  setNewSpecialists([]);
+                  setNewDescription('');
+                  setNewImageUrl('');
+                  setAssigneeFilterModal('');
+                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 text-sm"
+                aria-label="Закрыть"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-3 space-y-3 text-[13px]">
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Название *</span>
+                <input
+                  type="text"
+                  autoFocus
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleAddTask();
+                    if (e.key === 'Escape') {
+                      setShowAddTaskModal(false);
+                      setNewTaskColumnId(null);
+                      setNewTitle('');
+                      setNewSpecialists([]);
+                    }
+                  }}
+                  placeholder="Название задачи..."
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Проект</span>
+                <select
+                  value={newProjectId}
+                  onChange={(e) => setNewProjectId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 py-2 pl-2.5 pr-8 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                >
+                  <option value="">Без проекта</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Исполнители</span>
+                {specialistOptions.length > 8 && (
+                  <input
+                    type="text"
+                    value={assigneeFilterModal}
+                    onChange={(e) => setAssigneeFilterModal(e.target.value)}
+                    placeholder="Поиск по имени..."
+                    className="mb-1.5 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 outline-none focus:border-slate-400"
+                  />
+                )}
+                <div className="max-h-52 overflow-y-auto overflow-x-hidden rounded-lg border border-slate-200/80 bg-slate-50/60 py-1 shadow-sm">
+                  {(() => {
+                    const q = assigneeFilterModal.trim().toLowerCase();
+                    const filtered = q
+                      ? specialistOptions.filter((s) => s.toLowerCase().includes(q))
+                      : specialistOptions;
+                    return (
+                      <>
+                        {filtered.map((s) => (
+                          <label
+                            key={s}
+                            className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={newSpecialists.includes(s)}
+                              onChange={(e) => {
+                                setNewSpecialists((prev) =>
+                                  e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                                );
+                              }}
+                              className="h-3 w-3 shrink-0 rounded border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                            />
+                            <span className="text-xs font-medium text-slate-700 truncate">{s}</span>
+                          </label>
+                        ))}
+                        {filtered.length === 0 && (
+                          <p className="px-2 py-1.5 text-[11px] text-slate-500">
+                            {specialistOptions.length === 0 ? 'Нет специалистов' : 'Никого не найдено'}
+                          </p>
+                        )}
+                        {specialistOptions.length > 0 && filtered.length > 0 && (assigneeFilterModal.trim() || specialistOptions.length > 12) && (
+                          <p className="sticky bottom-0 border-t border-slate-200/80 bg-slate-100/90 px-2 py-1 text-[10px] text-slate-500">
+                            {assigneeFilterModal.trim()
+                              ? `Показано ${filtered.length} из ${specialistOptions.length}`
+                              : `Всего ${specialistOptions.length}`}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Описание</span>
+                <textarea
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  placeholder="Текст описания задачи..."
+                  rows={2}
+                  className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Картинка</span>
+                <div
+                  className="rounded-lg border border-slate-200 bg-slate-50/50 p-2 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
+                  onPaste={async (e) => {
+                    const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
+                    const file = item?.getAsFile();
+                    if (!file) return;
+                    e.preventDefault();
+                    setTaskImageUploading(true);
+                    try {
+                      const url = await uploadTaskImage(file);
+                      setNewImageUrl(url);
+                    } catch (err) {
+                      void logError('tasks.image.upload.failed', err);
+                    } finally {
+                      setTaskImageUploading(false);
+                    }
+                  }}
+                >
+                  <input
+                    ref={newTaskImageInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      e.target.value = '';
+                      setTaskImageUploading(true);
+                      try {
+                        const url = await uploadTaskImage(file);
+                        setNewImageUrl(url);
+                      } catch (err) {
+                        void logError('tasks.image.upload.failed', err);
+                      } finally {
+                        setTaskImageUploading(false);
+                      }
+                    }}
+                  />
+                  {newImageUrl ? (
+                    <>
+                      <div className="min-h-20 w-full overflow-hidden rounded bg-slate-100">
+                        <img
+                          src={newImageUrl}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                          className="max-h-32 w-full object-contain"
+                          onLoad={() => setNewImageLoadError(false)}
+                          onError={() => setNewImageLoadError(true)}
+                        />
+                        {newImageLoadError && (
+                          <p className="p-1.5 text-center text-[11px] text-amber-600">Не удалось загрузить изображение</p>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={taskImageUploading}
+                          onClick={() => newTaskImageInputRef.current?.click()}
+                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {taskImageUploading ? 'Загрузка...' : 'Заменить'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setNewImageUrl(''); setNewImageLoadError(false); }}
+                          className="rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-50"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={taskImageUploading}
+                          onClick={() => newTaskImageInputRef.current?.click()}
+                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
+                        </button>
+                        <span className="text-[11px] text-slate-500">или Ctrl+V</span>
+                      </div>
+                      <input
+                        type="url"
+                        value={newImageUrl}
+                        onChange={(e) => { setNewImageUrl(e.target.value); setNewImageLoadError(false); }}
+                        placeholder="или вставьте ссылку"
+                        className="mt-1.5 w-full rounded border border-slate-200 bg-slate-50/50 px-2 py-1 text-xs outline-none focus:border-slate-400"
+                      />
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-1.5 pt-1.5 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
+                  onClick={async () => {
+                    await handleAddTask();
+                    setShowAddTaskModal(false);
+                    setNewTaskColumnId(null);
+                  }}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50 disabled:shadow-none"
+                >
+                  {addingSaving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddTaskModal(false);
+                    setNewTaskColumnId(null);
+                    setNewTitle('');
+                    setNewProjectId('');
+                    setNewSpecialists([]);
+                    setNewDescription('');
+                    setNewImageUrl('');
+                    setAssigneeFilterModal('');
+                  }}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {modalTask && (
@@ -1431,11 +1573,11 @@ export default function TasksPage() {
           }}
         >
           <div
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-zinc-200 bg-white shadow-xl"
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-200 bg-white px-4 py-3">
-              <h3 className="text-lg font-semibold text-zinc-900">Задача</h3>
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3">
+              <h3 className="text-lg font-semibold text-gray-900">Задача</h3>
               <button
                 type="button"
                 onClick={() => {
@@ -1443,7 +1585,7 @@ export default function TasksPage() {
                   setEditingDescriptionId(null);
                   setEditingResultId(null);
                 }}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700"
                 aria-label="Закрыть"
               >
                 ×
@@ -1451,47 +1593,83 @@ export default function TasksPage() {
             </div>
             <div className="p-4 space-y-4">
               <div>
-                <p className="text-xs font-medium text-zinc-500">Проект</p>
-                <p className="text-sm font-medium uppercase tracking-wider text-zinc-700">{modalTask.projectName}</p>
-              </div>
-
-              <div>
-                <p className="text-xs font-medium text-zinc-500">Исполнитель</p>
                 {isModalInEditMode ? (
-                  <select
-                    value={editingSpecialistValue}
-                    onChange={(e) => setEditingSpecialistValue(e.target.value)}
-                    className="mt-0.5 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  >
-                    <option value="">Без специалиста</option>
-                    {specialistOptions.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+                  <div>
+                    <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
+                    <select
+                      value={editingProjectId}
+                      onChange={(e) => setEditingProjectId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                    >
+                      <option value="">Без проекта</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
+                      ))}
+                    </select>
+                  </div>
                 ) : (
-                  <p className="text-sm text-zinc-700">{modalTask.specialistName}</p>
+                  <>
+                    <p className="text-xs font-medium text-slate-500">Проект</p>
+                    <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.projectName}</p>
+                  </>
                 )}
               </div>
 
               <div>
-                <p className="text-xs font-medium text-zinc-500">Название</p>
+                {isModalInEditMode ? (
+                  <>
+                    <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
+                    <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
+                      {specialistOptions.map((s) => (
+                        <label
+                          key={s}
+                          className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${editingSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={editingSpecialists.includes(s)}
+                            onChange={(e) => {
+                              setEditingSpecialists((prev) =>
+                                e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                              );
+                            }}
+                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                          />
+                          <span className="text-sm font-medium text-slate-700">{s}</span>
+                        </label>
+                      ))}
+                      {specialistOptions.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-500">Нет специалистов</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs font-medium text-slate-500">Исполнители</p>
+                    <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.specialistName}</p>
+                  </>
+                )}
+              </div>
+
+              <div>
+                <p className="text-xs font-medium text-gray-500">Название</p>
                 {isModalInEditMode ? (
                   <input
                     type="text"
                     value={editingTitleValue}
                     onChange={(e) => setEditingTitleValue(e.target.value)}
-                    className="mt-0.5 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    className="mt-0.5 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
                     placeholder="Название задачи..."
                   />
                 ) : (
-                  <p className={`break-words text-base font-semibold ${modalTask.status === 'done' ? 'text-zinc-400 line-through' : 'text-zinc-900'}`}>
+                  <p className={`break-words text-base font-semibold ${modalTask.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                     {modalTask.title}
                   </p>
                 )}
               </div>
 
               <div>
-                <p className="text-xs font-medium text-zinc-500 mb-1">Описание</p>
+                <p className="text-xs font-medium text-gray-500 mb-1">Описание</p>
                 {isModalInEditMode ? (
                   <>
                     <textarea
@@ -1499,11 +1677,11 @@ export default function TasksPage() {
                       onChange={(e) => setEditingDescriptionValue(e.target.value)}
                       placeholder="Описание..."
                       rows={3}
-                      className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
                     />
-                    <p className="mt-2 text-xs font-medium text-zinc-500">Картинка</p>
+                    <p className="mt-2 text-xs font-medium text-gray-500">Картинка</p>
                     <div
-                      className="mt-0.5 rounded-lg border border-zinc-200 bg-zinc-50/30 p-2"
+                      className="mt-0.5 rounded-lg border border-gray-200 bg-gray-50/30 p-2"
                       onPaste={async (e) => {
                         const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
                         const file = item?.getAsFile();
@@ -1544,26 +1722,26 @@ export default function TasksPage() {
                         <>
                           <img src={editingImageUrlValue} alt="" className="max-h-40 w-full rounded-lg object-contain" />
                           <div className="mt-2 flex gap-2">
-                            <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50">
+                            <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">
                               {taskImageUploading ? 'Загрузка...' : 'Заменить'}
                             </button>
-                            <button type="button" onClick={() => { setEditingImageUrlValue(''); setEditingImageLoadError(false); }} className="rounded border px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-50">
+                            <button type="button" onClick={() => { setEditingImageUrlValue(''); setEditingImageLoadError(false); }} className="rounded border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50">
                               Удалить
                             </button>
                           </div>
                         </>
                       ) : (
                         <>
-                          <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-zinc-300 px-2 py-1 text-xs hover:bg-zinc-50">
+                          <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">
                             {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
                           </button>
-                          <span className="ml-2 text-xs text-zinc-500">или Ctrl+V</span>
+                          <span className="ml-2 text-xs text-gray-500">или Ctrl+V</span>
                           <input
                             type="url"
                             value={editingImageUrlValue}
                             onChange={(e) => setEditingImageUrlValue(e.target.value)}
                             placeholder="или ссылка"
-                            className="mt-2 w-full rounded border border-zinc-200 px-2 py-1 text-sm"
+                            className="mt-2 w-full rounded border border-gray-200 px-2 py-1 text-sm"
                           />
                         </>
                       )}
@@ -1573,25 +1751,26 @@ export default function TasksPage() {
                   <>
                     {(modalTask.description || modalTask.image_url) ? (
                       <div>
-                        {modalTask.description && <p className="whitespace-pre-wrap text-sm text-zinc-600">{modalTask.description}</p>}
+                        {modalTask.description && <p className="whitespace-pre-wrap text-sm text-gray-600">{modalTask.description}</p>}
                         {modalTask.image_url && <img src={modalTask.image_url} alt="" className="mt-2 max-h-48 w-full rounded-lg object-contain" />}
                       </div>
                     ) : (
-                      <p className="text-sm text-zinc-400">—</p>
+                      <p className="text-sm text-gray-400">—</p>
                     )}
                   </>
                 )}
               </div>
 
               {userIsLead && (
-                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-100">
+                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100">
                   {isModalInEditMode ? (
                     <>
                       <button
                         type="button"
                         onClick={async () => {
                           await updateTaskTitle(modalTask.id, editingTitleValue);
-                          await updateTaskSpecialist(modalTask.id, editingSpecialistValue);
+                          await updateTaskProject(modalTask.id, editingProjectId || null);
+                          await updateTaskSpecialist(modalTask.id, editingSpecialists.join(', ').trim() || '');
                           await updateTaskDescriptionAndImage(modalTask.id, editingDescriptionValue, editingImageUrlValue);
                           setIsModalInEditMode(false);
                         }}
@@ -1602,7 +1781,7 @@ export default function TasksPage() {
                       <button
                         type="button"
                         onClick={() => setIsModalInEditMode(false)}
-                        className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50"
+                        className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
                       >
                         Отмена
                       </button>
@@ -1613,7 +1792,8 @@ export default function TasksPage() {
                       onClick={() => {
                         setIsModalInEditMode(true);
                         setEditingTitleValue(modalTask.title);
-                        setEditingSpecialistValue(modalTask.specialist ?? modalTask.specialistName ?? '');
+                        setEditingProjectId(modalTask.project_id ?? '');
+                        setEditingSpecialists((modalTask.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
                         setEditingDescriptionValue(modalTask.description || '');
                         setEditingImageUrlValue(modalTask.image_url || '');
                       }}

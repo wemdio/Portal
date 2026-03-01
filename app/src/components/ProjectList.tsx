@@ -268,9 +268,11 @@ export function ProjectList() {
         .order('created_at', { ascending: false });
       if (error) throw error;
       const grouped: Record<string, Task[]> = {};
+      const key = (id: string | null) => id ?? '__no_project__';
       for (const t of (data ?? []) as Task[]) {
-        if (!grouped[t.project_id]) grouped[t.project_id] = [];
-        grouped[t.project_id].push(t);
+        const k = key(t.project_id);
+        if (!grouped[k]) grouped[k] = [];
+        grouped[k].push(t);
       }
       setProjectTasks(grouped);
     } catch {
