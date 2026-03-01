@@ -34,7 +34,7 @@ interface ProjectFinanceItem {
   cost: number;
   month: string; // YYYY-MM
   isRenewal: boolean;
-  leadSource: string; // outreach | telegram | leadscan | linkedin | performance
+  leadSource: string; // outreach | telegram | leadscan | linkedin | performance | partner
 }
 
 interface ExpenseRow {
@@ -98,6 +98,7 @@ function normalizeLeadSource(raw: string | null | undefined): string {
   if (lower.includes('лидскан') || lower.includes('leadscan')) return 'leadscan';
   if (lower.includes('линкедин') || lower.includes('linkedin')) return 'linkedin';
   if (lower.includes('перфоманс') || lower.includes('performance') || lower.includes('перф')) return 'performance';
+  if (lower.includes('партнер') || lower.includes('партнёр') || lower.includes('partner')) return 'partner';
   return 'outreach';
 }
 
@@ -107,6 +108,7 @@ const SOURCE_LABELS: Record<string, string> = {
   leadscan: 'Лидскан',
   linkedin: 'ЛинкедИн',
   performance: 'Перфоманс',
+  partner: 'Партнер',
 };
 
 function parseBudget(raw: string | null | undefined): number {
@@ -468,7 +470,7 @@ export default function FinancePage() {
 
   // Revenue by source
   const revenueBySource = useMemo(() => {
-    const sources = ['outreach', 'telegram', 'leadscan', 'linkedin', 'performance'] as const;
+    const sources = ['outreach', 'telegram', 'leadscan', 'linkedin', 'performance', 'partner'] as const;
     return sources.map((source) => {
       const items = monthlyProjects.filter((p) => p.leadSource === source);
       const prevItems = prevMonthProjects.filter((p) => p.leadSource === source);
@@ -544,6 +546,7 @@ export default function FinancePage() {
     const performanceRevenue = revenueBySource.find((r) => r.source === 'performance')?.total || 0;
     const linkedinRevenue = revenueBySource.find((r) => r.source === 'linkedin')?.total || 0;
     const telegramRevenue = revenueBySource.find((r) => r.source === 'telegram')?.total || 0;
+    const partnerRevenue = revenueBySource.find((r) => r.source === 'partner')?.total || 0;
 
     // Total revenue growth (final, across all sources)
     const totalRevenueGrowth = prevPnl.revenue > 0
@@ -558,6 +561,7 @@ export default function FinancePage() {
       performanceRevenue,
       linkedinRevenue,
       telegramRevenue,
+      partnerRevenue,
       totalRevenueGrowth,
     };
   }, [kpis, prevPnl, pnl, monthlyProjects, prevMonthProjects, revenueBySource]);
@@ -1149,6 +1153,7 @@ export default function FinancePage() {
                 <span className="text-gray-500">Выручка перфоманс итого: <strong className="text-gray-900">{formatCurrency(extendedKpis.performanceRevenue)}</strong></span>
                 <span className="text-gray-500">Выручка линкедин итого: <strong className="text-gray-900">{formatCurrency(extendedKpis.linkedinRevenue)}</strong></span>
                 <span className="text-gray-500">Выручка телеграм итого: <strong className="text-gray-900">{formatCurrency(extendedKpis.telegramRevenue)}</strong></span>
+                <span className="text-gray-500">Выручка партнер итого: <strong className="text-gray-900">{formatCurrency(extendedKpis.partnerRevenue)}</strong></span>
               </div>
             </div>
           </div>
@@ -1472,7 +1477,7 @@ function MissingFieldsNotice() {
                   <tr className="bg-emerald-50/50">
                     <td className="px-4 py-2 font-mono text-xs text-emerald-700">lead_source</td>
                     <td className="px-4 py-2 text-gray-600">text</td>
-                    <td className="px-4 py-2 text-emerald-700">Используется для разбивки по каналам (Аутрич / Телеграм / Лидскан / ЛинкедИн / Перфоманс)</td>
+                    <td className="px-4 py-2 text-emerald-700">Используется для разбивки по каналам (Аутрич / Телеграм / Лидскан / ЛинкедИн / Перфоманс / Партнер)</td>
                   </tr>
                   <tr>
                     <td className="px-4 py-2 font-mono text-xs text-blue-700">payment_date</td>
@@ -1546,7 +1551,7 @@ function MissingFieldsNotice() {
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-emerald-500 mt-0.5">+</span>
-                <span><strong>Источник выручки</strong> — используется поле lead_source из таблицы projects. Разбивка по каналам (Аутрич, Телеграм, Лидскан, ЛинкедИн, Перфоманс) работает.</span>
+                <span><strong>Источник выручки</strong> — используется поле lead_source из таблицы projects. Разбивка по каналам (Аутрич, Телеграм, Лидскан, ЛинкедИн, Перфоманс, Партнер) работает.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-500 mt-0.5">*</span>

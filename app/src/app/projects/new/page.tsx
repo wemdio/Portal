@@ -10,7 +10,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions } from '@/lib/projectAssignees';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
-const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 const PROJECT_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'Продажа', label: 'Продажа (новый клиент)' },
