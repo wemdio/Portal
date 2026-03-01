@@ -1,21 +1,13 @@
 'use client';
 
-import Link from 'next/link';
-import type { Route } from 'next';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Menu } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
-import { navItems } from '@/lib/navigation';
-import { canAccessBillingCalendar, getCurrentUserRole, isAdmin } from '@/lib/roles';
-import type { UserRole } from '@/types';
 
 const MD_BREAKPOINT = 768;
-const NAV_ACTIVE_ALIASES: Record<string, string[]> = {
-  '/tools': ['/parsers'],
-};
 
 export function LayoutShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -24,7 +16,6 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const isTma = useIsTma();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
 
   useEffect(() => {
     const mql = window.matchMedia(`(max-width: ${MD_BREAKPOINT - 1}px)`);
@@ -42,46 +33,16 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     };
   }, [isTma, pathname]);
 
-  useEffect(() => {
-    if (isTma || !isSpreadsheetPage) return;
-    let cancelled = false;
-    void (async () => {
-      const role = await getCurrentUserRole();
-      if (!cancelled) {
-        setUserRole(role);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isSpreadsheetPage, isTma]);
-
-  const compactNavItems = useMemo(() => {
-    if (!isSpreadsheetPage || isTma) return [];
-    return navItems.filter((item) => {
-      if (item.adminOnly && !isAdmin(userRole)) return false;
-      if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return false;
-      return true;
-    });
-  }, [isSpreadsheetPage, isTma, userRole]);
-
-  const isNavItemActive = (href: string) => {
-    const aliases = NAV_ACTIVE_ALIASES[href] ?? [];
-    return href === '/'
-      ? pathname === '/'
-      : pathname === href ||
-          pathname.startsWith(`${href}/`) ||
-          aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
-  };
-
   // When switching to desktop layout, treat menu as closed without setState in effect
   const mobileMenuOpenResolved = isMobileLayout && mobileMenuOpen;
 
   const isToolsPage = pathname === '/tools';
+  const mainOverflowClass = !isTma && isSpreadsheetPage ? 'overflow-hidden' : 'overflow-y-auto';
   const contentPadding = isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : isToolsPage ? 'px-4 py-6 md:p-8' : 'p-8');
-  const contentWidth = 'w-full';
+  const contentWidth =
+    isRdpPage || isSpreadsheetPage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   const shellClassName = isTma
     ? 'flex min-h-screen overflow-hidden'
@@ -130,36 +91,9 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       <div className="flex min-w-0 flex-1 flex-col">
         {isTma && <TmaHeader />}
         <main
-          className={`flex-1 flex flex-col min-h-0 overflow-y-auto ${contentPadding}${isTma ? ' tma-safe-bottom' : ''} ${!isTma && isMobileLayout && !isSpreadsheetPage ? 'pt-12' : ''}`}
+          className={`flex-1 flex flex-col min-h-0 ${mainOverflowClass} ${contentPadding}${isTma ? ' tma-safe-bottom' : ''} ${!isTma && isMobileLayout && !isSpreadsheetPage ? 'pt-12' : ''}`}
         >
-          {!isTma && isSpreadsheetPage && (
-            <div className="sticky top-0 z-20 border-b border-gray-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-              <div className="mx-auto flex w-full max-w-7xl flex-col items-center gap-1 px-2 py-1.5">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-400">
-                  Навигация по разделам портала
-                </span>
-                <nav
-                  aria-label="Навигация портала"
-                  className="flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-gray-200 bg-gray-50 p-1 no-scrollbar"
-                >
-                  {compactNavItems.map((item) => (
-                    <Link
-                      key={item.name}
-                      href={item.href as Route}
-                      className={`whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                        isNavItemActive(item.href)
-                          ? 'bg-gray-900 text-white'
-                          : 'text-gray-600 hover:bg-white hover:text-gray-900'
-                      }`}
-                    >
-                      {item.name}
-                    </Link>
-                  ))}
-                </nav>
-              </div>
-            </div>
-          )}
-          <div className={`${contentWidth}${isRdpPage ? ' flex flex-col flex-1 min-h-0' : ''}`}>{children}</div>
+          <div className={contentWidth}>{children}</div>
         </main>
       </div>
     </div>
