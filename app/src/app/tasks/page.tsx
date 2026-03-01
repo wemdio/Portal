@@ -105,6 +105,7 @@ export default function TasksPage() {
   const [newTitle, setNewTitle] = useState('');
   const [newProjectId, setNewProjectId] = useState('');
   const [newSpecialist, setNewSpecialist] = useState('');
+  const [newSpecialists, setNewSpecialists] = useState<string[]>([]);
   const [addingSaving, setAddingSaving] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeColumnId, setActiveColumnId] = useState<string | null>(null);
@@ -116,6 +117,7 @@ export default function TasksPage() {
   const [editingColumnTitle, setEditingColumnTitle] = useState('');
   const [editingColumnStatus, setEditingColumnStatus] = useState<string>('');
   const [newTaskColumnId, setNewTaskColumnId] = useState<string | null>(null);
+  const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [newDescription, setNewDescription] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
   const [editingDescriptionId, setEditingDescriptionId] = useState<string | null>(null);
@@ -130,6 +132,9 @@ export default function TasksPage() {
   const [isModalInEditMode, setIsModalInEditMode] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState('');
   const [editingSpecialistValue, setEditingSpecialistValue] = useState('');
+  const [editingProjectId, setEditingProjectId] = useState('');
+  const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
+  const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
 
   const userIsLead = checkIsLead(currentUserRole);
 
@@ -225,9 +230,14 @@ export default function TasksPage() {
   }, []);
 
   const updateTaskSpecialist = useCallback(async (taskId: string, specialist: string) => {
-    const value = specialist.trim() || undefined;
-    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, specialist: value } : t)));
-    await supabase.from('tasks').update({ specialist: value ?? null, updated_at: new Date().toISOString() }).eq('id', taskId);
+    const value = specialist.trim() || null;
+    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, specialist: value ?? undefined } : t)));
+    await supabase.from('tasks').update({ specialist: value, updated_at: new Date().toISOString() }).eq('id', taskId);
+  }, []);
+
+  const updateTaskProject = useCallback(async (taskId: string, projectId: string | null) => {
+    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, project_id: projectId } : t)));
+    await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
   }, []);
 
   const uploadTaskImage = useCallback(async (file: File): Promise<string> => {
@@ -287,11 +297,13 @@ export default function TasksPage() {
   }, [projects]);
 
   const promoteLegacyTask = useCallback(async (legacyTask: EnrichedTask, newStatus: TaskStatus) => {
-    const p = projectMap.get(legacyTask.project_id);
+    const projectId = legacyTask.project_id;
+    if (!projectId) return;
+    const p = projectMap.get(projectId);
     const { data, error } = await supabase
       .from('tasks')
       .insert({
-        project_id: legacyTask.project_id,
+        project_id: projectId,
         title: legacyTask.title,
         status: newStatus,
         specialist: p?.specialist || null,
@@ -309,17 +321,18 @@ export default function TasksPage() {
     let tasks = dbTasks;
     if (shouldFilterByUser) {
       tasks = tasks.filter((t) => {
-        if (t.specialist && t.specialist === currentUserName) return true;
-        const p = projectMap.get(t.project_id);
+        const assignees = (t.specialist || '').split(',').map((s) => s.trim()).filter(Boolean);
+        if (assignees.includes(currentUserName!)) return true;
+        const p = t.project_id ? projectMap.get(t.project_id) : undefined;
         return p?.specialist === currentUserName;
       });
     }
     return tasks.map((t) => {
-      const p = projectMap.get(t.project_id);
+      const p = t.project_id != null ? projectMap.get(t.project_id) : undefined;
       return {
         ...t,
         projectName: p?.client || 'Без проекта',
-        specialistName: t.specialist || p?.specialist || 'Без специалиста',
+        specialistName: t.specialist?.trim() || p?.specialist || 'Без специалиста',
       };
     });
   }, [dbTasks, projectMap, shouldFilterByUser, currentUserName]);
@@ -367,10 +380,11 @@ export default function TasksPage() {
   }, [currentTasks]);
 
   const tasksByProject = useMemo(() => {
-    const map = new Map<string, { projectName: string; tasks: EnrichedTask[] }>();
+    const map = new Map<string | null, { projectName: string; tasks: EnrichedTask[] }>();
     currentTasks.forEach((t) => {
-      if (!map.has(t.project_id)) map.set(t.project_id, { projectName: t.projectName, tasks: [] });
-      map.get(t.project_id)!.tasks.push(t);
+      const key = t.project_id;
+      if (!map.has(key)) map.set(key, { projectName: t.projectName, tasks: [] });
+      map.get(key)!.tasks.push(t);
     });
     return Array.from(map.values()).filter((e) => e.tasks.length > 0);
   }, [currentTasks]);
@@ -489,13 +503,18 @@ export default function TasksPage() {
     [selectedBoardId, selectedBoardColumns, updateTaskColumn, reorderColumnsInDb]
   );
 
+  function getNewTaskSpecialist(): string {
+    return newSpecialists.join(', ').trim();
+  }
+
   async function handleAddTask() {
-    if (!newTitle.trim() || !newSpecialist) return;
+    const specialistValue = getNewTaskSpecialist();
+    if (!newTitle.trim() || !specialistValue) return;
     setAddingSaving(true);
     try {
       const payload: Record<string, string | null> = {
         title: newTitle.trim(),
-        specialist: newSpecialist,
+        specialist: specialistValue,
         project_id: newProjectId || null,
         status: 'pending',
         description: newDescription.trim() || null,
@@ -508,25 +527,13 @@ export default function TasksPage() {
         payload.column_id = targetColId;
         if (targetCol?.status) payload.status = targetCol.status;
       }
-      if (!newProjectId) {
-        const { data: fallback } = await supabase
-          .from('projects')
-          .select('id')
-          .eq('specialist', newSpecialist)
-          .limit(1)
-          .single();
-        if (fallback) payload.project_id = fallback.id;
-        else {
-          setAddingSaving(false);
-          return;
-        }
-      }
       const { data, error } = await supabase.from('tasks').insert(payload).select().single();
       if (error) throw error;
       setDbTasks((prev) => [data as Task, ...prev]);
       setNewTitle('');
       setNewProjectId('');
       setNewSpecialist('');
+      setNewSpecialists([]);
       setNewDescription('');
       setNewImageUrl('');
       setShowAddForm(false);
@@ -731,37 +738,24 @@ export default function TasksPage() {
       </div>
 
       {showAddForm && userIsLead && (
-        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm space-y-3">
-          <h3 className="text-sm font-semibold text-gray-900">Новая задача</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/30 space-y-4">
+          <h3 className="text-base font-semibold text-slate-800">Новая задача</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Специалист *</label>
-              <select
-                value={newSpecialist}
-                onChange={(e) => setNewSpecialist(e.target.value)}
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
-              >
-                <option value="">Выберите специалиста</option>
-                {specialistOptions.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Проект</label>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
               <select
                 value={newProjectId}
                 onChange={(e) => setNewProjectId(e.target.value)}
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               >
                 <option value="">Без проекта</option>
                 {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.client || 'Без названия'}</option>
+                  <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Задача *</label>
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Задача *</label>
               <input
                 type="text"
                 value={newTitle}
@@ -770,22 +764,51 @@ export default function TasksPage() {
                   if (e.key === 'Enter') void handleAddTask();
                 }}
                 placeholder="Название задачи"
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               />
             </div>
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
+              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
+                {specialistOptions.map((s) => (
+                  <label
+                    key={s}
+                    className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={newSpecialists.includes(s)}
+                      onChange={(e) => {
+                        setNewSpecialists((prev) =>
+                          e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                        );
+                      }}
+                      className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                    />
+                    <span className="text-sm font-medium text-slate-700 truncate">{s}</span>
+                  </label>
+                ))}
+                {specialistOptions.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-slate-500">Нет специалистов</p>
+                )}
+              </div>
+            </div>
           </div>
-          <div className="space-y-2">
-            <label className="block text-xs font-medium text-gray-500 mb-1">Описание</label>
-            <textarea
-              value={newDescription}
-              onChange={(e) => setNewDescription(e.target.value)}
-              placeholder="Текст описания задачи..."
-              rows={2}
-              className="w-full resize-none text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
-            />
-            <label className="block text-xs font-medium text-gray-500 mb-1">Картинка</label>
-            <div
-              className="rounded-lg border border-gray-200 bg-gray-50/30 p-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400/20"
+          <div className="space-y-3">
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Описание</span>
+              <textarea
+                value={newDescription}
+                onChange={(e) => setNewDescription(e.target.value)}
+                placeholder="Текст описания задачи..."
+                rows={2}
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+              />
+            </div>
+            <div>
+              <span className="mb-1.5 block text-xs font-medium text-slate-500">Картинка</span>
+              <div
+                className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
               onPaste={async (e) => {
                 const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
                 const file = item?.getAsFile();
@@ -878,20 +901,21 @@ export default function TasksPage() {
                 </>
               )}
             </div>
+            </div>
           </div>
           <div className="flex items-center gap-2 pt-1">
             <button
               type="button"
-              disabled={addingSaving || !newTitle.trim() || !newSpecialist}
+              disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
               onClick={() => void handleAddTask()}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+              className="rounded-xl bg-slate-800 px-4 py-2.5 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
             >
               {addingSaving ? 'Сохранение...' : 'Создать'}
             </button>
             <button
               type="button"
-              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); }}
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewImageUrl(''); }}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
             >
               Отмена
             </button>
@@ -1169,9 +1193,12 @@ export default function TasksPage() {
                               e.stopPropagation();
                               setNewTaskColumnId(col.id);
                               setNewTitle('');
-                              setNewSpecialist('');
+                              setNewProjectId('');
+                              setNewSpecialists([]);
                               setNewDescription('');
                               setNewImageUrl('');
+                              setAssigneeFilterModal('');
+                              setShowAddTaskModal(true);
                             }}
                             className="flex-shrink-0 rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                           >
@@ -1183,162 +1210,6 @@ export default function TasksPage() {
                       )}
                     </div>
                     <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
-                      {userIsLead && newTaskColumnId === col.id && (
-                        <div
-                          className="rounded-xl border border-gray-200/80 bg-white p-4 shadow-md shadow-gray-200/50 ring-1 ring-gray-100 transition-shadow"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <input
-                            type="text"
-                            autoFocus
-                            value={newTitle}
-                            onChange={(e) => setNewTitle(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') void handleAddTask();
-                              if (e.key === 'Escape') { setNewTaskColumnId(null); setNewTitle(''); setNewSpecialist(''); }
-                            }}
-                            placeholder="Название задачи..."
-                            className="mb-3 w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          />
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-                            Исполнитель
-                          </label>
-                          <select
-                            value={newSpecialist}
-                            onChange={(e) => setNewSpecialist(e.target.value)}
-                            className="mb-3 w-full appearance-none rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2.5 text-sm text-gray-900 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          >
-                            <option value="">Выберите исполнителя</option>
-                            {specialistOptions.map((s) => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
-                          </select>
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-                            Описание
-                          </label>
-                          <textarea
-                            value={newDescription}
-                            onChange={(e) => setNewDescription(e.target.value)}
-                            placeholder="Текст описания задачи..."
-                            rows={2}
-                            className="mb-3 w-full resize-none rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 outline-none transition-colors focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-400/20"
-                          />
-                          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-                            Картинка
-                          </label>
-                          <div
-                            className="mb-4 rounded-lg border border-gray-200 bg-gray-50/30 p-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400/20"
-                            onPaste={async (e) => {
-                              const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
-                              const file = item?.getAsFile();
-                              if (!file) return;
-                              e.preventDefault();
-                              setTaskImageUploading(true);
-                              try {
-                                const url = await uploadTaskImage(file);
-                                setNewImageUrl(url);
-                              } catch (err) {
-                                void logError('tasks.image.upload.failed', err);
-                              } finally {
-                                setTaskImageUploading(false);
-                              }
-                            }}
-                          >
-                            <input
-                              ref={newTaskImageInputRef}
-                              type="file"
-                              accept="image/*"
-                              className="hidden"
-                              onChange={async (e) => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                e.target.value = '';
-                                setTaskImageUploading(true);
-                                try {
-                                  const url = await uploadTaskImage(file);
-                                  setNewImageUrl(url);
-                                } catch (err) {
-                                  void logError('tasks.image.upload.failed', err);
-                                } finally {
-                                  setTaskImageUploading(false);
-                                }
-                              }}
-                            />
-                            {newImageUrl ? (
-                              <>
-                                <div className="min-h-24 w-full overflow-hidden rounded-lg bg-gray-100">
-                                  <img
-                                    src={newImageUrl}
-                                    alt=""
-                                    referrerPolicy="no-referrer"
-                                    className="max-h-40 w-full object-contain"
-                                    onLoad={() => setNewImageLoadError(false)}
-                                    onError={() => setNewImageLoadError(true)}
-                                  />
-                                  {newImageLoadError && (
-                                    <p className="p-2 text-center text-xs text-amber-600">Не удалось загрузить изображение</p>
-                                  )}
-                                </div>
-                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={taskImageUploading}
-                                    onClick={() => newTaskImageInputRef.current?.click()}
-                                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50"
-                                  >
-                                    {taskImageUploading ? 'Загрузка...' : 'Заменить'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => { setNewImageUrl(''); setNewImageLoadError(false); }}
-                                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 hover:bg-gray-50"
-                                  >
-                                    Удалить
-                                  </button>
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={taskImageUploading}
-                                    onClick={() => newTaskImageInputRef.current?.click()}
-                                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50"
-                                  >
-                                    {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
-                                  </button>
-                                  <span className="text-xs text-gray-500">или Ctrl+V</span>
-                                </div>
-                                <input
-                                  type="url"
-                                  value={newImageUrl}
-                                  onChange={(e) => { setNewImageUrl(e.target.value); setNewImageLoadError(false); }}
-                                  placeholder="или вставьте ссылку"
-                                  className="mt-2 w-full rounded-lg border border-gray-200 bg-gray-50/50 px-2 py-1.5 text-sm outline-none focus:border-blue-400"
-                                />
-                              </>
-                            )}
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              disabled={addingSaving || !newTitle.trim() || !newSpecialist}
-                              onClick={() => void handleAddTask()}
-                              className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none"
-                            >
-                              {addingSaving ? 'Сохранение...' : 'Сохранить'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => { setNewTaskColumnId(null); setNewTitle(''); setNewSpecialist(''); setNewDescription(''); setNewImageUrl(''); }}
-                              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 shadow-sm transition hover:bg-gray-50"
-                            >
-                              Отмена
-                            </button>
-                          </div>
-                        </div>
-                      )}
                       {(tasksByColumnForBoard.get(col.id) ?? []).map((task) => {
                         const isEditingResult = editingResultId === task.id;
                         const columnHasStatus = col.status && ['pending', 'in_progress', 'done'].includes(col.status);
@@ -1417,6 +1288,281 @@ export default function TasksPage() {
         </DndContext>
       )}
 
+      {showAddTaskModal && view === 'board' && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-sm"
+          onClick={() => {
+            setShowAddTaskModal(false);
+            setNewTaskColumnId(null);
+            setNewTitle('');
+            setNewProjectId('');
+            setNewSpecialists([]);
+            setNewDescription('');
+            setNewImageUrl('');
+            setAssigneeFilterModal('');
+          }}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Новая задача</h3>
+                {newTaskColumnId && (
+                  <p className="mt-0.5 text-[11px] text-slate-500">
+                    Колонка: {selectedBoardColumns.find((c) => c.id === newTaskColumnId)?.title ?? ''}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddTaskModal(false);
+                  setNewTaskColumnId(null);
+                  setNewTitle('');
+                  setNewProjectId('');
+                  setNewSpecialists([]);
+                  setNewDescription('');
+                  setNewImageUrl('');
+                  setAssigneeFilterModal('');
+                }}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 text-sm"
+                aria-label="Закрыть"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-3 space-y-3 text-[13px]">
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Название *</span>
+                <input
+                  type="text"
+                  autoFocus
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleAddTask();
+                    if (e.key === 'Escape') {
+                      setShowAddTaskModal(false);
+                      setNewTaskColumnId(null);
+                      setNewTitle('');
+                      setNewSpecialists([]);
+                    }
+                  }}
+                  placeholder="Название задачи..."
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Проект</span>
+                <select
+                  value={newProjectId}
+                  onChange={(e) => setNewProjectId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 py-2 pl-2.5 pr-8 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                >
+                  <option value="">Без проекта</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Исполнители</span>
+                {specialistOptions.length > 8 && (
+                  <input
+                    type="text"
+                    value={assigneeFilterModal}
+                    onChange={(e) => setAssigneeFilterModal(e.target.value)}
+                    placeholder="Поиск по имени..."
+                    className="mb-1.5 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 outline-none focus:border-slate-400"
+                  />
+                )}
+                <div className="max-h-52 overflow-y-auto overflow-x-hidden rounded-lg border border-slate-200/80 bg-slate-50/60 py-1 shadow-sm">
+                  {(() => {
+                    const q = assigneeFilterModal.trim().toLowerCase();
+                    const filtered = q
+                      ? specialistOptions.filter((s) => s.toLowerCase().includes(q))
+                      : specialistOptions;
+                    return (
+                      <>
+                        {filtered.map((s) => (
+                          <label
+                            key={s}
+                            className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={newSpecialists.includes(s)}
+                              onChange={(e) => {
+                                setNewSpecialists((prev) =>
+                                  e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                                );
+                              }}
+                              className="h-3 w-3 shrink-0 rounded border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                            />
+                            <span className="text-xs font-medium text-slate-700 truncate">{s}</span>
+                          </label>
+                        ))}
+                        {filtered.length === 0 && (
+                          <p className="px-2 py-1.5 text-[11px] text-slate-500">
+                            {specialistOptions.length === 0 ? 'Нет специалистов' : 'Никого не найдено'}
+                          </p>
+                        )}
+                        {specialistOptions.length > 0 && filtered.length > 0 && (assigneeFilterModal.trim() || specialistOptions.length > 12) && (
+                          <p className="sticky bottom-0 border-t border-slate-200/80 bg-slate-100/90 px-2 py-1 text-[10px] text-slate-500">
+                            {assigneeFilterModal.trim()
+                              ? `Показано ${filtered.length} из ${specialistOptions.length}`
+                              : `Всего ${specialistOptions.length}`}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Описание</span>
+                <textarea
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  placeholder="Текст описания задачи..."
+                  rows={2}
+                  className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Картинка</span>
+                <div
+                  className="rounded-lg border border-slate-200 bg-slate-50/50 p-2 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
+                  onPaste={async (e) => {
+                    const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
+                    const file = item?.getAsFile();
+                    if (!file) return;
+                    e.preventDefault();
+                    setTaskImageUploading(true);
+                    try {
+                      const url = await uploadTaskImage(file);
+                      setNewImageUrl(url);
+                    } catch (err) {
+                      void logError('tasks.image.upload.failed', err);
+                    } finally {
+                      setTaskImageUploading(false);
+                    }
+                  }}
+                >
+                  <input
+                    ref={newTaskImageInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      e.target.value = '';
+                      setTaskImageUploading(true);
+                      try {
+                        const url = await uploadTaskImage(file);
+                        setNewImageUrl(url);
+                      } catch (err) {
+                        void logError('tasks.image.upload.failed', err);
+                      } finally {
+                        setTaskImageUploading(false);
+                      }
+                    }}
+                  />
+                  {newImageUrl ? (
+                    <>
+                      <div className="min-h-20 w-full overflow-hidden rounded bg-slate-100">
+                        <img
+                          src={newImageUrl}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                          className="max-h-32 w-full object-contain"
+                          onLoad={() => setNewImageLoadError(false)}
+                          onError={() => setNewImageLoadError(true)}
+                        />
+                        {newImageLoadError && (
+                          <p className="p-1.5 text-center text-[11px] text-amber-600">Не удалось загрузить изображение</p>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={taskImageUploading}
+                          onClick={() => newTaskImageInputRef.current?.click()}
+                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {taskImageUploading ? 'Загрузка...' : 'Заменить'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setNewImageUrl(''); setNewImageLoadError(false); }}
+                          className="rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-50"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={taskImageUploading}
+                          onClick={() => newTaskImageInputRef.current?.click()}
+                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {taskImageUploading ? 'Загрузка...' : 'Выбрать с компьютера'}
+                        </button>
+                        <span className="text-[11px] text-slate-500">или Ctrl+V</span>
+                      </div>
+                      <input
+                        type="url"
+                        value={newImageUrl}
+                        onChange={(e) => { setNewImageUrl(e.target.value); setNewImageLoadError(false); }}
+                        placeholder="или вставьте ссылку"
+                        className="mt-1.5 w-full rounded border border-slate-200 bg-slate-50/50 px-2 py-1 text-xs outline-none focus:border-slate-400"
+                      />
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-1.5 pt-1.5 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
+                  onClick={async () => {
+                    await handleAddTask();
+                    setShowAddTaskModal(false);
+                    setNewTaskColumnId(null);
+                  }}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50 disabled:shadow-none"
+                >
+                  {addingSaving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddTaskModal(false);
+                    setNewTaskColumnId(null);
+                    setNewTitle('');
+                    setNewProjectId('');
+                    setNewSpecialists([]);
+                    setNewDescription('');
+                    setNewImageUrl('');
+                    setAssigneeFilterModal('');
+                  }}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {modalTask && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4 backdrop-blur-sm"
@@ -1447,25 +1593,61 @@ export default function TasksPage() {
             </div>
             <div className="p-4 space-y-4">
               <div>
-                <p className="text-xs font-medium text-gray-500">Проект</p>
-                <p className="text-sm font-medium uppercase tracking-wider text-gray-700">{modalTask.projectName}</p>
+                {isModalInEditMode ? (
+                  <div>
+                    <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
+                    <select
+                      value={editingProjectId}
+                      onChange={(e) => setEditingProjectId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                    >
+                      <option value="">Без проекта</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-xs font-medium text-slate-500">Проект</p>
+                    <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.projectName}</p>
+                  </>
+                )}
               </div>
 
               <div>
-                <p className="text-xs font-medium text-gray-500">Исполнитель</p>
                 {isModalInEditMode ? (
-                  <select
-                    value={editingSpecialistValue}
-                    onChange={(e) => setEditingSpecialistValue(e.target.value)}
-                    className="mt-0.5 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  >
-                    <option value="">Без специалиста</option>
-                    {specialistOptions.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+                  <>
+                    <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
+                    <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
+                      {specialistOptions.map((s) => (
+                        <label
+                          key={s}
+                          className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${editingSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={editingSpecialists.includes(s)}
+                            onChange={(e) => {
+                              setEditingSpecialists((prev) =>
+                                e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                              );
+                            }}
+                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                          />
+                          <span className="text-sm font-medium text-slate-700">{s}</span>
+                        </label>
+                      ))}
+                      {specialistOptions.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-slate-500">Нет специалистов</p>
+                      )}
+                    </div>
+                  </>
                 ) : (
-                  <p className="text-sm text-gray-700">{modalTask.specialistName}</p>
+                  <>
+                    <p className="text-xs font-medium text-slate-500">Исполнители</p>
+                    <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.specialistName}</p>
+                  </>
                 )}
               </div>
 
@@ -1587,7 +1769,8 @@ export default function TasksPage() {
                         type="button"
                         onClick={async () => {
                           await updateTaskTitle(modalTask.id, editingTitleValue);
-                          await updateTaskSpecialist(modalTask.id, editingSpecialistValue);
+                          await updateTaskProject(modalTask.id, editingProjectId || null);
+                          await updateTaskSpecialist(modalTask.id, editingSpecialists.join(', ').trim() || '');
                           await updateTaskDescriptionAndImage(modalTask.id, editingDescriptionValue, editingImageUrlValue);
                           setIsModalInEditMode(false);
                         }}
@@ -1609,7 +1792,8 @@ export default function TasksPage() {
                       onClick={() => {
                         setIsModalInEditMode(true);
                         setEditingTitleValue(modalTask.title);
-                        setEditingSpecialistValue(modalTask.specialist ?? modalTask.specialistName ?? '');
+                        setEditingProjectId(modalTask.project_id ?? '');
+                        setEditingSpecialists((modalTask.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
                         setEditingDescriptionValue(modalTask.description || '');
                         setEditingImageUrlValue(modalTask.image_url || '');
                       }}
