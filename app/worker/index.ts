@@ -12,6 +12,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
+import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 
@@ -85,6 +86,15 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (enrichErr) log('warn', 'Startup recovery: website_enrichment_jobs update failed', enrichErr);
   else if (enrichJobs?.length) log('info', `Startup recovery: reset ${enrichJobs.length} website_enrichment_jobs to pending`);
+
+  // Brief scoring — сбрасываем в 'pending' (воркер сам продолжит с места остановки)
+  const { data: briefJobs, error: briefErr } = await db
+    .from('brief_scoring_jobs')
+    .update({ status: 'pending' })
+    .eq('status', 'running')
+    .select('id');
+  if (briefErr) log('warn', 'Startup recovery: brief_scoring_jobs update failed', briefErr);
+  else if (briefJobs?.length) log('info', `Startup recovery: reset ${briefJobs.length} brief_scoring_jobs to pending`);
 
   // YandexMaps — сбрасываем в 'failed' (нельзя безопасно продолжить посередине HTTP-цикла к Python-сервису)
   const { data: ymJobs, error: ymErr } = await db
@@ -214,6 +224,30 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
   return { id: claimed.id as string, stage };
 }
 
+async function claimBriefScoringJob(): Promise<string | null> {
+  const db = supabaseAdmin!;
+
+  const { data: pending } = await db
+    .from('brief_scoring_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('brief_scoring_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
+}
+
 async function claimEmailValidationJob(): Promise<string | null> {
   const db = supabaseAdmin!;
 
@@ -280,6 +314,13 @@ async function pollOnce(): Promise<boolean> {
   if (enrichJobId) {
     log('info', `Running website enrichment job ${enrichJobId}`);
     await runWebsiteEnrichmentJob(enrichJobId);
+    return true;
+  }
+
+  const briefScoringJobId = await claimBriefScoringJob();
+  if (briefScoringJobId) {
+    log('info', `Running brief scoring job ${briefScoringJobId}`);
+    await runBriefScoringJob(briefScoringJobId);
     return true;
   }
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
@@ -105,6 +106,20 @@ type PersistedEnrichmentState = {
   runs: PersistedEnrichmentRun[];
 };
 
+type PersistedBriefScoringRun = {
+  jobId: string;
+  tabId: string;
+  scoreCol: number;
+  reasonCol: number;
+  totalRows: number;
+  startedAt: string;
+};
+
+type PersistedBriefScoringState = {
+  version: number;
+  runs: PersistedBriefScoringRun[];
+};
+
 type PersonalizationState = {
   isOpen: boolean;
   sourceCol: number;
@@ -140,6 +155,7 @@ type BriefScoringState = {
   totalRows: number;
   currentRow: number;
   error: string | null;
+  jobId: string | null;
 };
 
 type NameCleanupState = {
@@ -202,10 +218,13 @@ const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
-const BRIEF_SCORING_BATCH_SIZE = 10;
-const BRIEF_SCORING_MAX_RETRIES = 3;
-const BRIEF_SCORING_RETRY_BASE_DELAY = 1200;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
+const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
+const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
+const BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES = 10;
+const BRIEF_SCORING_ENQUEUE_CHUNK_SIZE = 50;
+const BRIEF_SCORING_MAX_FIELDS_PER_ROW = 20;
+const BRIEF_SCORING_MAX_CELL_CHARS = 280;
 const BRIEF_STORAGE_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
 const BRIEF_STORAGE_PREFIX = 'brief-scoring';
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
@@ -220,7 +239,7 @@ const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
-const VIRTUAL_ROW_HEIGHT = 32;
+const VIRTUAL_ROW_HEIGHT = 30;
 const VIRTUAL_OVERSCAN = 10;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 const COPY_NOTICE_DURATION_MS = 4000;
@@ -245,6 +264,8 @@ const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 700;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
+const BRIEF_SCORING_STORAGE_KEY_PREFIX = 'portal:brief-scoring';
+const BRIEF_SCORING_STORAGE_VERSION = 1;
 
 const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -372,6 +393,9 @@ const buildStorageKey = (userId: string | null) =>
 const buildEnrichmentStorageKey = (userId: string | null) =>
   `${ENRICHMENT_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
+const buildBriefScoringStorageKey = (userId: string | null) =>
+  `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
+
 const coerceRows = (rows: unknown) => {
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => {
@@ -482,6 +506,41 @@ const readPersistedEnrichment = (raw: unknown): PersistedEnrichmentState => {
     })
     .filter((run): run is PersistedEnrichmentRun => run !== null);
   return { version: ENRICHMENT_STORAGE_VERSION, runs };
+};
+
+const readPersistedBriefScoring = (raw: unknown): PersistedBriefScoringState => {
+  if (!raw) return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  const candidate = parsed as Partial<PersistedBriefScoringState>;
+  if (candidate.version !== BRIEF_SCORING_STORAGE_VERSION || !Array.isArray(candidate.runs)) {
+    return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+  }
+  const runs = candidate.runs
+    .map((run) => {
+      if (!run || typeof run !== 'object') return null;
+      const value = run as Partial<PersistedBriefScoringRun>;
+      if (!value.jobId || !value.tabId) return null;
+      const scoreCol = Number(value.scoreCol ?? 0);
+      const reasonCol = Number(value.reasonCol ?? 1);
+      return {
+        jobId: String(value.jobId),
+        tabId: String(value.tabId),
+        scoreCol: Number.isFinite(scoreCol) ? scoreCol : 0,
+        reasonCol: Number.isFinite(reasonCol) ? reasonCol : 1,
+        totalRows: typeof value.totalRows === 'number' && Number.isFinite(value.totalRows) ? value.totalRows : 0,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : new Date().toISOString(),
+      } satisfies PersistedBriefScoringRun;
+    })
+    .filter((run): run is PersistedBriefScoringRun => run !== null);
+  return { version: BRIEF_SCORING_STORAGE_VERSION, runs };
 };
 
 const trimTrailingEmptyRows = (rows: string[][]) => {
@@ -655,6 +714,7 @@ export function DatabaseSpreadsheet() {
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const enrichmentStorageKey = useMemo(() => buildEnrichmentStorageKey(userId), [userId]);
+  const briefScoringStorageKey = useMemo(() => buildBriefScoringStorageKey(userId), [userId]);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editingTabName, setEditingTabName] = useState('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('cell');
@@ -695,10 +755,20 @@ export function DatabaseSpreadsheet() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const tableWrapperRef = useRef<HTMLDivElement | null>(null);
+  const tableElementRef = useRef<HTMLTableElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
+  const [horizontalScrollLeft, setHorizontalScrollLeft] = useState(0);
+  const [horizontalScrollbarMetrics, setHorizontalScrollbarMetrics] = useState({
+    scrollWidth: 0,
+    clientWidth: 0,
+  });
+  const [fixedScrollbarViewport, setFixedScrollbarViewport] = useState({
+    left: 0,
+    width: 0,
+  });
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
@@ -775,6 +845,7 @@ export function DatabaseSpreadsheet() {
   const [enrichmentTargetOverride, setEnrichmentTargetOverride] = useState<number | null>(null);
   const enrichmentAbortRef = useRef<AbortController | null>(null);
   const resumeEnrichmentRef = useRef<string | null>(null);
+  const resumeBriefScoringRef = useRef<string | null>(null);
   const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
     isOpen: false,
     inputMode: 'pdf',
@@ -787,6 +858,7 @@ export function DatabaseSpreadsheet() {
     totalRows: 0,
     currentRow: 0,
     error: null,
+    jobId: null,
   });
   const briefScoringAbortRef = useRef<AbortController | null>(null);
   const briefFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -882,6 +954,43 @@ export function DatabaseSpreadsheet() {
     return current.runs.find((run) => run.tabId === tabId) ?? null;
   }, [readEnrichmentStorage]);
 
+  const readBriefScoringStorage = useCallback(() => {
+    try {
+      return readPersistedBriefScoring(window.localStorage.getItem(briefScoringStorageKey));
+    } catch (error) {
+      void logError('spreadsheet.brief_scoring.state.read_failed', error);
+      return { version: BRIEF_SCORING_STORAGE_VERSION, runs: [] };
+    }
+  }, [briefScoringStorageKey]);
+
+  const writeBriefScoringStorage = useCallback((state: PersistedBriefScoringState) => {
+    try {
+      window.localStorage.setItem(briefScoringStorageKey, JSON.stringify(state));
+    } catch (error) {
+      void logError('spreadsheet.brief_scoring.state.write_failed', error);
+    }
+  }, [briefScoringStorageKey]);
+
+  const upsertBriefScoringRun = useCallback((run: PersistedBriefScoringRun) => {
+    const current = readBriefScoringStorage();
+    const nextRuns = current.runs.filter(
+      (existing) => existing.jobId !== run.jobId && existing.tabId !== run.tabId,
+    );
+    nextRuns.push(run);
+    writeBriefScoringStorage({ version: BRIEF_SCORING_STORAGE_VERSION, runs: nextRuns });
+  }, [readBriefScoringStorage, writeBriefScoringStorage]);
+
+  const removeBriefScoringRun = useCallback((jobId: string) => {
+    const current = readBriefScoringStorage();
+    const nextRuns = current.runs.filter((run) => run.jobId !== jobId);
+    writeBriefScoringStorage({ version: BRIEF_SCORING_STORAGE_VERSION, runs: nextRuns });
+  }, [readBriefScoringStorage, writeBriefScoringStorage]);
+
+  const getBriefScoringRunForTab = useCallback((tabId: string) => {
+    const current = readBriefScoringStorage();
+    return current.runs.find((run) => run.tabId === tabId) ?? null;
+  }, [readBriefScoringStorage]);
+
   const getFreshToken = useCallback(async (): Promise<string | null> => {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) return session.access_token;
@@ -910,6 +1019,24 @@ export function DatabaseSpreadsheet() {
     setScrollMetrics((prev) =>
       prev.scrollTop === next.scrollTop && prev.height === next.height ? prev : next,
     );
+    setHorizontalScrollLeft((prev) =>
+      Math.abs(prev - wrapper.scrollLeft) < 1 ? prev : wrapper.scrollLeft,
+    );
+    setHorizontalScrollbarMetrics((prev) => {
+      const nextWidth = wrapper.scrollWidth;
+      const nextClientWidth = wrapper.clientWidth;
+      return prev.scrollWidth === nextWidth && prev.clientWidth === nextClientWidth
+        ? prev
+        : { scrollWidth: nextWidth, clientWidth: nextClientWidth };
+    });
+    const rect = wrapper.getBoundingClientRect();
+    const nextLeft = Math.max(8, Math.round(rect.left));
+    const nextWidth = Math.max(0, Math.round(rect.width));
+    setFixedScrollbarViewport((prev) =>
+      prev.left === nextLeft && prev.width === nextWidth
+        ? prev
+        : { left: nextLeft, width: nextWidth },
+    );
   }, []);
 
   const handleTableScroll = useCallback(() => {
@@ -931,14 +1058,29 @@ export function DatabaseSpreadsheet() {
   useEffect(() => {
     const wrapper = tableWrapperRef.current;
     if (!wrapper || typeof ResizeObserver === 'undefined') return;
+    const tableElement = tableElementRef.current;
     const observer = new ResizeObserver(() => updateScrollMetrics());
     observer.observe(wrapper);
+    if (tableElement) {
+      observer.observe(tableElement);
+    }
+    updateScrollMetrics();
     return () => {
       observer.disconnect();
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
       }
+    };
+  }, [updateScrollMetrics, isHydrated]);
+
+  useEffect(() => {
+    const handleViewportUpdate = () => updateScrollMetrics();
+    window.addEventListener('resize', handleViewportUpdate);
+    window.addEventListener('scroll', handleViewportUpdate, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportUpdate);
+      window.removeEventListener('scroll', handleViewportUpdate, true);
     };
   }, [updateScrollMetrics]);
 
@@ -2368,6 +2510,29 @@ export function DatabaseSpreadsheet() {
 
   const rowCount = activeTab?.data.length ?? 0;
   const colCount = activeTab?.data[0]?.length ?? 0;
+  const estimatedTableScrollWidth = useMemo(() => {
+    if (colCount <= 0) return 0;
+    const columnsWidth = Array.from({ length: colCount }, (_, index) => {
+      return columnWidths[index] ?? DEFAULT_COLUMN_WIDTH;
+    }).reduce((sum, width) => sum + width, 0);
+    // 36px left sticky row header + 32px add-column cell + a small trailing buffer.
+    return columnsWidth + 36 + 32 + 24;
+  }, [colCount, columnWidths]);
+  const showBottomHorizontalScrollbar = colCount > 0;
+  const bottomScrollbarContentWidth = Math.max(
+    estimatedTableScrollWidth,
+    horizontalScrollbarMetrics.scrollWidth,
+    horizontalScrollbarMetrics.clientWidth + 1,
+  );
+  const horizontalScrollMax = Math.max(
+    0,
+    bottomScrollbarContentWidth - horizontalScrollbarMetrics.clientWidth,
+  );
+  const horizontalSliderMax = Math.max(1, Math.round(horizontalScrollMax));
+  const horizontalSliderValue = Math.max(
+    0,
+    Math.min(horizontalSliderMax, Math.round(horizontalScrollLeft)),
+  );
   const filterSearch = debouncedFilterMenuSearch.trim().toLowerCase();
   const filteredFilterOptions = filterMenu
     ? filterMenu.options.filter((option) =>
@@ -3448,33 +3613,29 @@ export function DatabaseSpreadsheet() {
 
   // ── Brief Scoring (ЦА по брифу) ──────────────────────────────
   const openBriefScoringModal = () => {
-    setBriefScoring({
-      isOpen: true,
-      inputMode: 'pdf',
-      briefText: '',
-      briefFileName: '',
-      manualText: '',
-      isUploading: false,
-      isScoring: false,
-      progress: 0,
-      totalRows: 0,
-      currentRow: 0,
-      error: null,
+    setBriefScoring((prev) => {
+      if (prev.isScoring) {
+        return { ...prev, isOpen: true, error: null };
+      }
+      return {
+        isOpen: true,
+        inputMode: 'pdf',
+        briefText: '',
+        briefFileName: '',
+        manualText: '',
+        isUploading: false,
+        isScoring: false,
+        progress: 0,
+        totalRows: 0,
+        currentRow: 0,
+        error: null,
+        jobId: null,
+      };
     });
   };
 
   const closeBriefScoringModal = () => {
-    if (briefScoringAbortRef.current) {
-      briefScoringAbortRef.current.abort();
-      briefScoringAbortRef.current = null;
-    }
-    setBriefScoring((prev) => ({
-      ...prev,
-      isOpen: false,
-      isScoring: false,
-      isUploading: false,
-      error: null,
-    }));
+    setBriefScoring((prev) => ({ ...prev, isOpen: false, error: null }));
   };
 
   const handleBriefFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -3580,6 +3741,321 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const ensureBriefScoringColumns = useCallback((tabId: string, scoreColIndex: number, reasonColIndex: number) => {
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const nextData = tab.data.map((row, rowIndex) => {
+          const nextRow = [...row];
+          while (nextRow.length <= reasonColIndex) {
+            nextRow.push('');
+          }
+          if (rowIndex === 0) {
+            if (!String(nextRow[scoreColIndex] ?? '').trim()) nextRow[scoreColIndex] = 'ЦА Балл';
+            if (!String(nextRow[reasonColIndex] ?? '').trim()) nextRow[reasonColIndex] = 'ЦА Причина';
+          }
+          return nextRow;
+        });
+        return { ...tab, data: nextData };
+      }),
+    );
+  }, [setTabs]);
+
+  const runBriefScoringPolling = useCallback(async (params: {
+    jobId: string;
+    tabId: string;
+    scoreColIndex: number;
+    reasonColIndex: number;
+    totalRowsFallback: number;
+    initialToken?: string | null;
+  }) => {
+    const {
+      jobId,
+      tabId,
+      scoreColIndex,
+      reasonColIndex,
+      totalRowsFallback,
+      initialToken,
+    } = params;
+
+    const token = initialToken ?? (await getFreshToken());
+    if (!token) {
+      setBriefScoring((prev) => ({
+        ...prev,
+        isScoring: false,
+        error: 'Необходима авторизация',
+        jobId: null,
+      }));
+      removeBriefScoringRun(jobId);
+      return;
+    }
+
+    const controller = briefScoringAbortRef.current ?? new AbortController();
+    briefScoringAbortRef.current = controller;
+    const signal = controller.signal;
+
+    if (signal.aborted) {
+      setBriefScoring((prev) => ({ ...prev, isScoring: false, jobId: null }));
+      removeBriefScoringRun(jobId);
+      return;
+    }
+
+    ensureBriefScoringColumns(tabId, scoreColIndex, reasonColIndex);
+    setBriefScoring((prev) => ({
+      ...prev,
+      isScoring: true,
+      totalRows: totalRowsFallback,
+      currentRow: Math.min(prev.currentRow, totalRowsFallback),
+      progress:
+        totalRowsFallback > 0
+          ? Math.round((Math.min(prev.currentRow, totalRowsFallback) / totalRowsFallback) * 100)
+          : 0,
+      error: null,
+      jobId,
+    }));
+
+    let cursor: string | null = null;
+    let pollDelayMs = BRIEF_SCORING_POLL_INTERVAL_MS;
+    let processedCount = 0;
+    let errorCount = 0;
+    let consecutivePollingErrors = 0;
+    let currentToken = token;
+    const pendingUpdates = new Map<number, { score: string; reason: string }>();
+
+    const flushUpdates = () => {
+      if (pendingUpdates.size === 0) return;
+      const updates = new Map(pendingUpdates);
+      pendingUpdates.clear();
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== tabId) return tab;
+          const nextData = [...tab.data];
+          updates.forEach((update, rowIndex) => {
+            const existingRow = nextData[rowIndex];
+            if (!existingRow) return;
+            const newRow = [...existingRow];
+            while (newRow.length <= reasonColIndex) {
+              newRow.push('');
+            }
+            newRow[scoreColIndex] = update.score;
+            newRow[reasonColIndex] = update.reason;
+            nextData[rowIndex] = newRow;
+          });
+          return { ...tab, data: nextData };
+        }),
+      );
+    };
+
+    try {
+      while (!signal.aborted) {
+        const fetchResults = async (tkn: string) =>
+          fetch(
+            `/api/brief-scoring/jobs/${jobId}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+            {
+              headers: { Authorization: `Bearer ${tkn}` },
+              signal,
+            },
+          );
+
+        const reqStartedAt = Date.now();
+        let res = await fetchResults(currentToken);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) {
+            currentToken = refreshed;
+            res = await fetchResults(currentToken);
+          } else {
+            throw new Error('Сессия истекла во время оценки ЦА. Войдите заново и перезапустите процесс.');
+          }
+        }
+
+        if (!res.ok) {
+          consecutivePollingErrors += 1;
+          let responseError = `Ошибка API (${res.status})`;
+          try {
+            const errorData = await parseJsonResponse<{ error?: string }>(res, 'brief_scoring.poll.error');
+            if (errorData.error) responseError = errorData.error;
+          } catch {
+            // ignore parse error
+          }
+          if (consecutivePollingErrors >= BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES) {
+            throw new Error(`Оценка ЦА остановлена: ${responseError}`);
+          }
+          await sleep(1000);
+          continue;
+        }
+        consecutivePollingErrors = 0;
+
+        const data = await parseJsonResponse<{
+          job?: {
+            status?: string;
+            total?: number;
+            processed?: number;
+            success_count?: number;
+            error_count?: number;
+            error_message?: string | null;
+          };
+          results?: Array<{
+            id: string;
+            row_index: number;
+            score: number | null;
+            reason: string | null;
+            status: string;
+            last_error: string | null;
+            updated_at: string;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'brief_scoring.results');
+
+        const resultsCount = data.results?.length ?? 0;
+        if (data.results && data.results.length > 0) {
+          for (const result of data.results) {
+            if (result.status === 'completed') {
+              pendingUpdates.set(result.row_index, {
+                score: result.score == null ? '?' : String(result.score),
+                reason: result.reason ?? '',
+              });
+            } else if (result.status === 'failed') {
+              pendingUpdates.set(result.row_index, {
+                score: '⚠',
+                reason: result.last_error ?? 'Ошибка AI',
+              });
+            }
+          }
+          if (pendingUpdates.size >= 50) {
+            flushUpdates();
+          }
+        }
+
+        if (data.next_cursor) {
+          cursor = data.next_cursor;
+        }
+
+        if (data.job) {
+          const total = data.job.total ?? totalRowsFallback;
+          processedCount = data.job.processed ?? processedCount;
+          errorCount = data.job.error_count ?? errorCount;
+          const safeProcessed = Math.min(processedCount, total);
+          setBriefScoring((prev) => ({
+            ...prev,
+            totalRows: total,
+            currentRow: safeProcessed,
+            progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+          }));
+        }
+
+        const status = data.job?.status;
+        if (status && ['completed', 'failed', 'cancelled'].includes(status)) {
+          flushUpdates();
+          const total = data.job?.total ?? totalRowsFallback;
+          const safeProcessed = Math.min(processedCount, total);
+          const finalErrorCount = data.job?.error_count ?? errorCount;
+          const successCount =
+            data.job?.success_count ?? Math.max(0, safeProcessed - finalErrorCount);
+
+          setLastAction({
+            message:
+              status === 'cancelled'
+                ? `Оценка ЦА отменена (обработано: ${safeProcessed})`
+                : finalErrorCount > 0
+                  ? `Оценка ЦА: ${successCount} успешно, ${finalErrorCount} с ошибками`
+                  : `Оценка ЦА завершена: ${safeProcessed} строк`,
+            time: Date.now(),
+          });
+
+          setBriefScoring((prev) => ({
+            ...prev,
+            isScoring: false,
+            isOpen: status === 'failed',
+            totalRows: total,
+            currentRow: safeProcessed,
+            progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+            error: status === 'failed' ? data.job?.error_message ?? 'Произошла ошибка' : null,
+            jobId: null,
+          }));
+          removeBriefScoringRun(jobId);
+          break;
+        }
+
+        if (resultsCount === 0 && status === 'running') {
+          const elapsed = Date.now() - reqStartedAt;
+          pollDelayMs = Math.min(
+            BRIEF_SCORING_MAX_POLL_DELAY_MS,
+            Math.max(Math.floor(pollDelayMs * 1.5), elapsed),
+          );
+        } else {
+          pollDelayMs = BRIEF_SCORING_POLL_INTERVAL_MS;
+        }
+
+        await sleep(pollDelayMs);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false, jobId: null }));
+        removeBriefScoringRun(jobId);
+      } else {
+        setBriefScoring((prev) => ({
+          ...prev,
+          isScoring: false,
+          isOpen: true,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          jobId: null,
+        }));
+        removeBriefScoringRun(jobId);
+      }
+    } finally {
+      flushUpdates();
+      briefScoringAbortRef.current = null;
+    }
+  }, [
+    ensureBriefScoringColumns,
+    getFreshToken,
+    removeBriefScoringRun,
+    setLastAction,
+    setTabs,
+  ]);
+
+  const handleStopBriefScoring = async () => {
+    const jobId = briefScoring.jobId;
+    if (!briefScoring.isScoring || !jobId) return;
+    if (!window.confirm('Остановить оценку ЦА? Уже полученные результаты сохранятся.')) return;
+
+    const token = await getFreshToken();
+    if (!token) {
+      setLastAction({
+        message: 'Не удалось отправить остановку: нужна авторизация',
+        time: Date.now(),
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/brief-scoring/jobs/${jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      if (!response.ok) {
+        const data = await parseJsonResponse<{ error?: string }>(response, 'brief_scoring.cancel');
+        setLastAction({
+          message: data.error ?? `Отмена не подтверждена сервером (HTTP ${response.status})`,
+          time: Date.now(),
+        });
+        return;
+      }
+      setLastAction({
+        message: 'Остановка оценки ЦА отправлена',
+        time: Date.now(),
+      });
+      removeBriefScoringRun(jobId);
+    } catch (err) {
+      setLastAction({
+        message: `Отмена не подтверждена сервером: ${err instanceof Error ? err.message : 'network error'}`,
+        time: Date.now(),
+      });
+    }
+  };
+
   const handleStartBriefScoring = async () => {
     if (!activeTab || briefScoring.isScoring) return;
     flushSave();
@@ -3598,293 +4074,248 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    const dataRows = activeTab.data.slice(1).filter((row) => !isRowEmpty(row));
-    if (dataRows.length === 0) {
+    const tabSnapshot = activeTab;
+    const rowsToProcess: { rowIndex: number; data: Record<string, string> }[] = [];
+    for (let i = 1; i < tabSnapshot.data.length; i += 1) {
+      const row = tabSnapshot.data[i];
+      if (isRowEmpty(row)) continue;
+
+      const rowData: Record<string, string> = {};
+      let fieldsAdded = 0;
+      const addField = (header: string, rawValue: string) => {
+        if (fieldsAdded >= BRIEF_SCORING_MAX_FIELDS_PER_ROW) return;
+        const value = rawValue.trim();
+        if (!value) return;
+        if (rowData[header]) return;
+        rowData[header] = value.length > BRIEF_SCORING_MAX_CELL_CHARS
+          ? value.slice(0, BRIEF_SCORING_MAX_CELL_CHARS)
+          : value;
+        fieldsAdded += 1;
+      };
+
+      for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
+        const header = (headerLabels[c] || toColumnLabel(c)).trim();
+        if (!header) continue;
+        const headerLower = header.toLowerCase();
+        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower) || COMPANY_HEADER_REGEX.test(headerLower);
+        if (!isHinted) continue;
+        addField(header, row[c] ?? '');
+      }
+
+      if (Object.keys(rowData).length === 0) {
+        for (let c = 0; c < tabSnapshot.data[0].length; c += 1) {
+          const header = (headerLabels[c] || toColumnLabel(c)).trim();
+          if (!header) continue;
+          addField(header, row[c] ?? '');
+        }
+      }
+
+      if (Object.keys(rowData).length === 0) continue;
+      rowsToProcess.push({ rowIndex: i, data: rowData });
+    }
+
+    if (rowsToProcess.length === 0) {
       setBriefScoring((prev) => ({ ...prev, error: 'Нет данных для оценки' }));
       return;
     }
 
-    let currentToken = '';
-    let tokenExpiresAt = 0;
-    const TOKEN_SAFETY_MS = 2 * 60 * 1000;
-
-    const loadToken = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) return null;
-      currentToken = session.access_token;
-      tokenExpiresAt = session.expires_at ? session.expires_at * 1000 : 0;
-      return currentToken;
-    };
-
-    const refreshToken = async () => {
-      const { data: refreshed, error } = await supabase.auth.refreshSession();
-      if (error || !refreshed.session?.access_token) return null;
-      currentToken = refreshed.session.access_token;
-      tokenExpiresAt = refreshed.session.expires_at ? refreshed.session.expires_at * 1000 : 0;
-      return currentToken;
-    };
-
-    const ensureToken = async () => {
-      if (!currentToken) return loadToken();
-      if (tokenExpiresAt && Date.now() > tokenExpiresAt - TOKEN_SAFETY_MS) return refreshToken();
-      return currentToken;
-    };
-
-    const initialToken = await loadToken();
-    if (!initialToken) {
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
       setBriefScoring((prev) => ({ ...prev, error: 'Необходима авторизация' }));
       return;
     }
 
-    briefScoringAbortRef.current = new AbortController();
-
-    setBriefScoring((prev) => ({
-      ...prev,
-      isScoring: true,
-      progress: 0,
-      totalRows: dataRows.length,
-      currentRow: 0,
-      error: null,
-    }));
-
-    setUndoSnapshot('Оценка ЦА');
-
-    // Add two new columns: Score and Reason
-    const scoreColIndex = activeTab.data[0].length;
+    const scoreColIndex = tabSnapshot.data[0].length;
     const reasonColIndex = scoreColIndex + 1;
+    const throwIfPayloadTooLarge = (status: number, stage: string) => {
+      if (status !== 413) return;
+      throw new Error(
+        `Слишком большой объем данных при ${stage}. Попробуйте уменьшить число столбцов/длину текста и повторить.`,
+      );
+    };
 
-    const baseData = activeTab.data.map((row, rowIndex) => {
-      const nextRow = [...row];
-      while (nextRow.length <= reasonColIndex) nextRow.push('');
-      if (rowIndex === 0) {
-        nextRow[scoreColIndex] = 'ЦА Балл';
-        nextRow[reasonColIndex] = 'ЦА Причина';
-      }
-      return nextRow;
-    });
-
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
-    );
-
-    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
-    setHighlightedCol(scoreColIndex);
-    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), BRIEF_SCORING_HIGHLIGHT_DURATION);
-
-    if (tableWrapperRef.current) {
-      const wrapper = tableWrapperRef.current;
-      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
-    }
-
-    // Build list of rows to process with all their column data
-    const rowsToProcess: { rowIndex: number; data: Record<string, string> }[] = [];
-    for (let i = 1; i < activeTab.data.length; i++) {
-      const row = activeTab.data[i];
-      if (isRowEmpty(row)) continue;
-      const rowData: Record<string, string> = {};
-      for (let c = 0; c < activeTab.data[0].length; c++) {
-        const header = headerLabels[c] || toColumnLabel(c);
-        const value = row[c]?.trim() ?? '';
-        if (value.length > 0) rowData[header] = value;
-      }
-      rowsToProcess.push({ rowIndex: i, data: rowData });
-    }
-
-    let processedCount = 0;
-    let errorCount = 0;
-
+    let stagedJobId: string | null = null;
     try {
-      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += BRIEF_SCORING_BATCH_SIZE) {
-        if (briefScoringAbortRef.current?.signal.aborted) throw new Error('Отменено пользователем');
+      setBriefScoring((prev) => ({
+        ...prev,
+        isOpen: false,
+        isScoring: true,
+        totalRows: rowsToProcess.length,
+        currentRow: 0,
+        progress: 0,
+        error: null,
+        jobId: null,
+      }));
 
-        const batch = rowsToProcess.slice(batchStart, batchStart + BRIEF_SCORING_BATCH_SIZE);
-        const companies = batch.map((item) => ({ idx: item.rowIndex, data: item.data }));
+      const startRes = await fetch('/api/brief-scoring/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          briefText: effectiveBriefText,
+          total: rowsToProcess.length,
+          mode: 'staged',
+        }),
+      });
+      throwIfPayloadTooLarge(startRes.status, 'создании задачи');
 
-        try {
-          let resData: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
+      const startData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error?: string;
+      }>(startRes, 'brief_scoring.start');
 
-          for (let attempt = 0; attempt <= BRIEF_SCORING_MAX_RETRIES; attempt += 1) {
-            if (briefScoringAbortRef.current?.signal.aborted) {
-              throw new Error('Отменено пользователем');
-            }
+      if (!startRes.ok || !startData.job_id) {
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
+      }
+      stagedJobId = startData.job_id;
+      setBriefScoring((prev) => ({
+        ...prev,
+        isOpen: false,
+        jobId: stagedJobId,
+      }));
 
-            const validToken = await ensureToken();
-            if (!validToken) throw new Error('Необходима авторизация');
-
-            let res: Response;
-            try {
-              res = await fetch('/api/brief-scoring/score', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${validToken}` },
-                body: JSON.stringify({ briefText: effectiveBriefText, companies }),
-                signal: briefScoringAbortRef.current?.signal,
-              });
-            } catch (error) {
-              if (error instanceof Error && error.name === 'AbortError') {
-                throw error;
-              }
-              if (attempt < BRIEF_SCORING_MAX_RETRIES) {
-                const retryDelay =
-                  BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
-                  Math.floor(Math.random() * 300);
-                await sleep(retryDelay);
-                continue;
-              }
-              throw new Error('Не удалось отправить запрос к AI');
-            }
-
-            if (res.status === 401) {
-              const newToken = await refreshToken();
-              if (newToken) {
-                const retryRes = await fetch('/api/brief-scoring/score', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${newToken}` },
-                  body: JSON.stringify({ briefText: effectiveBriefText, companies }),
-                  signal: briefScoringAbortRef.current?.signal,
-                });
-                if (retryRes.ok) {
-                  const retryParsed = (await retryRes.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
-                  if (retryParsed && !retryParsed.error) {
-                    resData = retryParsed;
-                    break;
-                  }
-                }
-              }
-              resData = { error: 'Необходима авторизация' };
-              break;
-            }
-
-            let parsed: { scores?: { idx: number; score: number; reason: string }[]; error?: string } | null = null;
-            try {
-              parsed = (await res.json()) as { scores?: { idx: number; score: number; reason: string }[]; error?: string };
-            } catch {
-              parsed = null;
-            }
-
-            if (res.ok && parsed && !parsed.error) {
-              resData = parsed;
-              break;
-            }
-
-            const shouldRetry = [429, 500, 502, 503, 504].includes(res.status);
-            const errorMessage = parsed?.error || `Ошибка AI (${res.status})`;
-
-            if (shouldRetry && attempt < BRIEF_SCORING_MAX_RETRIES) {
-              const retryDelay =
-                BRIEF_SCORING_RETRY_BASE_DELAY * Math.pow(2, attempt) +
-                Math.floor(Math.random() * 300);
-              await sleep(retryDelay);
-              continue;
-            }
-
-            resData = { error: errorMessage };
-            break;
-          }
-
-          if (!resData) {
-            throw new Error('Не удалось получить ответ от AI');
-          }
-
-          if (resData.error) {
-            errorCount += batch.length;
-            setTabs((prev) =>
-              prev.map((tab) => {
-                if (tab.id !== activeTabId) return tab;
-                const nextData = tab.data.map((row, idx) => {
-                  if (!batch.find((b) => b.rowIndex === idx)) return row;
-                  const newRow = [...row];
-                  while (newRow.length <= reasonColIndex) newRow.push('');
-                  newRow[scoreColIndex] = '⚠';
-                  newRow[reasonColIndex] = resData.error || 'Ошибка AI';
-                  return newRow;
-                });
-                return { ...tab, data: nextData };
-              }),
-            );
-          } else if (resData.scores) {
-            const scoresMap = new Map<number, { score: number; reason: string }>();
-            for (const s of resData.scores) scoresMap.set(s.idx, { score: s.score, reason: s.reason });
-
-            // Count missing scores
-            for (const item of batch) {
-              if (!scoresMap.has(item.rowIndex)) errorCount++;
-            }
-
-            setTabs((prev) =>
-              prev.map((tab) => {
-                if (tab.id !== activeTabId) return tab;
-                const nextData = tab.data.map((row, idx) => {
-                  const score = scoresMap.get(idx);
-                  if (!score) {
-                    if (batch.find((b) => b.rowIndex === idx)) {
-                      const newRow = [...row];
-                      while (newRow.length <= reasonColIndex) newRow.push('');
-                      newRow[scoreColIndex] = '?';
-                      newRow[reasonColIndex] = 'Нет оценки от AI';
-                      return newRow;
-                    }
-                    return row;
-                  }
-                  const newRow = [...row];
-                  while (newRow.length <= reasonColIndex) newRow.push('');
-                  newRow[scoreColIndex] = String(score.score);
-                  newRow[reasonColIndex] = score.reason;
-                  return newRow;
-                });
-                return { ...tab, data: nextData };
-              }),
-            );
-          }
-        } catch (err) {
-          if (err instanceof Error && err.name === 'AbortError') throw err;
-          errorCount += batch.length;
-          setTabs((prev) =>
-            prev.map((tab) => {
-              if (tab.id !== activeTabId) return tab;
-              const nextData = tab.data.map((row, idx) => {
-                if (!batch.find((b) => b.rowIndex === idx)) return row;
-                const newRow = [...row];
-                while (newRow.length <= reasonColIndex) newRow.push('');
-                newRow[scoreColIndex] = '⚠';
-                newRow[reasonColIndex] = err instanceof Error ? err.message : 'Ошибка';
-                return newRow;
-              });
-              return { ...tab, data: nextData };
-            }),
-          );
+      let uploaded = 0;
+      for (let i = 0; i < rowsToProcess.length; i += BRIEF_SCORING_ENQUEUE_CHUNK_SIZE) {
+        const chunk = rowsToProcess.slice(i, i + BRIEF_SCORING_ENQUEUE_CHUNK_SIZE);
+        const appendRes = await fetch('/api/brief-scoring/jobs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${currentToken}`,
+          },
+          body: JSON.stringify({
+            job_id: stagedJobId,
+            companies: chunk.map((row) => ({ idx: row.rowIndex, data: row.data })),
+          }),
+        });
+        throwIfPayloadTooLarge(appendRes.status, 'загрузке данных');
+        const appendData = await parseJsonResponse<{ error?: string }>(appendRes, 'brief_scoring.enqueue');
+        if (!appendRes.ok) {
+          throw new Error(appendData.error ?? 'Не удалось загрузить часть данных для оценки');
         }
 
-        processedCount += batch.length;
+        uploaded += chunk.length;
         setBriefScoring((prev) => ({
           ...prev,
-          currentRow: processedCount,
-          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+          currentRow: uploaded,
+          totalRows: rowsToProcess.length,
+          progress: rowsToProcess.length > 0 ? Math.round((uploaded / rowsToProcess.length) * 100) : 0,
         }));
-
-        if (batchStart + BRIEF_SCORING_BATCH_SIZE < rowsToProcess.length) await sleep(500);
       }
 
-      const successCount = processedCount - errorCount;
-      setLastAction({
-        message: errorCount > 0
-          ? `Оценка ЦА: ${successCount} успешно, ${errorCount} с ошибками`
-          : `Оценка ЦА завершено: ${processedCount} строк`,
-        time: Date.now(),
+      const finalizeRes = await fetch('/api/brief-scoring/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          job_id: stagedJobId,
+          finalize: true,
+          total: rowsToProcess.length,
+        }),
       });
-      setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
-    } catch (err) {
-      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
-        setLastAction({ message: `Оценка ЦА отменено (обработано: ${processedCount})`, time: Date.now() });
-        setBriefScoring((prev) => ({ ...prev, isScoring: false, isOpen: false }));
-      } else {
-        setBriefScoring((prev) => ({
-          ...prev,
-          error: err instanceof Error ? err.message : 'Произошла ошибка',
-          isScoring: false,
-        }));
+      throwIfPayloadTooLarge(finalizeRes.status, 'финализации задачи');
+
+      const finalizeData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error?: string;
+      }>(finalizeRes, 'brief_scoring.finalize');
+      if (!finalizeRes.ok || !finalizeData.job_id) {
+        throw new Error(finalizeData.error ?? 'Не удалось подготовить задачу к запуску');
       }
-    } finally {
-      briefScoringAbortRef.current = null;
+
+      const jobId = finalizeData.job_id;
+      const total = finalizeData.total ?? rowsToProcess.length;
+      const processed = finalizeData.processed ?? 0;
+      const safeProcessed = Math.min(processed, total);
+
+      setUndoSnapshot('Оценка ЦА');
+
+      const baseData = tabSnapshot.data.map((row, rowIndex) => {
+        const nextRow = [...row];
+        while (nextRow.length <= reasonColIndex) nextRow.push('');
+        if (rowIndex === 0) {
+          nextRow[scoreColIndex] = 'ЦА Балл';
+          nextRow[reasonColIndex] = 'ЦА Причина';
+        }
+        return nextRow;
+      });
+
+      setTabs((prev) =>
+        prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+      );
+
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      setHighlightedCol(scoreColIndex);
+      highlightTimeoutRef.current = setTimeout(
+        () => setHighlightedCol(null),
+        BRIEF_SCORING_HIGHLIGHT_DURATION,
+      );
+
+      if (tableWrapperRef.current) {
+        const wrapper = tableWrapperRef.current;
+        requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+      }
+
+      setBriefScoring((prev) => ({
+        ...prev,
+        isScoring: true,
+        isOpen: false,
+        totalRows: total,
+        currentRow: safeProcessed,
+        progress: total > 0 ? Math.round((safeProcessed / total) * 100) : 0,
+        error: null,
+        jobId,
+      }));
+      upsertBriefScoringRun({
+        jobId,
+        tabId: activeTabId,
+        scoreCol: scoreColIndex,
+        reasonCol: reasonColIndex,
+        totalRows: total,
+        startedAt: new Date().toISOString(),
+      });
+
+      await runBriefScoringPolling({
+        jobId,
+        tabId: activeTabId,
+        scoreColIndex,
+        reasonColIndex,
+        totalRowsFallback: total,
+        initialToken: currentToken,
+      });
+    } catch (err) {
+      if (stagedJobId) {
+        try {
+          await fetch(`/api/brief-scoring/jobs/${stagedJobId}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${currentToken}`,
+            },
+            body: JSON.stringify({ action: 'cancel' }),
+          });
+        } catch {
+          // best-effort cleanup
+        }
+      }
+      if (stagedJobId) {
+        removeBriefScoringRun(stagedJobId);
+      }
+      setBriefScoring((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : 'Произошла ошибка',
+        isScoring: false,
+        isOpen: true,
+        jobId: null,
+      }));
     }
   };
 
@@ -5223,14 +5654,71 @@ export function DatabaseSpreadsheet() {
     websiteEnrichment.isGenerating,
   ]);
 
+  useEffect(() => {
+    if (!isHydrated || !activeTab || briefScoring.isScoring) return;
+    const run = getBriefScoringRunForTab(activeTabId);
+    if (!run) return;
+    if (resumeBriefScoringRef.current === run.jobId) return;
+
+    const tabExists = tabs.some((tab) => tab.id === run.tabId);
+    if (!tabExists) {
+      removeBriefScoringRun(run.jobId);
+      return;
+    }
+
+    const totalFallback = run.totalRows > 0 ? run.totalRows : Math.max(0, activeTab.data.length - 1);
+    resumeBriefScoringRef.current = run.jobId;
+    ensureBriefScoringColumns(run.tabId, run.scoreCol, run.reasonCol);
+    setBriefScoring((prev) => ({
+      ...prev,
+      isOpen: false,
+      isScoring: true,
+      error: null,
+      jobId: run.jobId,
+      totalRows: totalFallback,
+      currentRow: Math.min(prev.currentRow, totalFallback),
+      progress:
+        totalFallback > 0
+          ? Math.round((Math.min(prev.currentRow, totalFallback) / totalFallback) * 100)
+          : 0,
+    }));
+
+    void runBriefScoringPolling({
+      jobId: run.jobId,
+      tabId: run.tabId,
+      scoreColIndex: run.scoreCol,
+      reasonColIndex: run.reasonCol,
+      totalRowsFallback: totalFallback,
+    }).finally(() => {
+      resumeBriefScoringRef.current = null;
+    });
+  }, [
+    activeTab,
+    activeTabId,
+    briefScoring.isScoring,
+    ensureBriefScoringColumns,
+    getBriefScoringRunForTab,
+    isHydrated,
+    removeBriefScoringRun,
+    runBriefScoringPolling,
+    tabs,
+  ]);
+
   const toolbarMonochromeButtonClass =
     'inline-flex items-center rounded border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
   const toolbarMonochromeButtonCompactClass =
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
   return (
-    <div className="space-y-0.5 h-[calc(100vh-0.75rem)] flex flex-col">
+    <div className="h-full min-h-0 space-y-0.5 flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
+        <Link
+          href="/tools"
+          className="inline-flex items-center gap-1 rounded-md bg-black px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-gray-800"
+        >
+          <span aria-hidden>←</span>
+          <span>К инструментам</span>
+        </Link>
         <span className="text-xs font-semibold text-gray-500 mr-1">Базы</span>
 
         {selectedRows.size > 0 && (
@@ -5351,7 +5839,9 @@ export function DatabaseSpreadsheet() {
           disabled={colCount === 0}
           className={toolbarMonochromeButtonClass}
         >
-          Оценка ЦА
+          {briefScoring.isScoring
+            ? `Оценка ЦА: ${briefScoring.progress}% (${briefScoring.currentRow}/${briefScoring.totalRows})`
+            : 'Оценка ЦА'}
         </button>
 
         <button
@@ -5547,10 +6037,10 @@ export function DatabaseSpreadsheet() {
       />
 
       <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
-        <div className="rounded border border-gray-200 bg-white overflow-hidden">
+        <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
           <div
             ref={tableWrapperRef}
-            className="overflow-auto h-full"
+            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
             tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
@@ -5568,7 +6058,7 @@ export function DatabaseSpreadsheet() {
                 <div className="mt-1 text-xs text-gray-500">Это может занять несколько секунд.</div>
               </div>
             ) : (
-            <table className="min-w-max border-separate border-spacing-0">
+            <table ref={tableElementRef} className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
                   <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-1 py-0.5 text-[10px] font-semibold text-gray-500 w-9 min-w-[36px]">
@@ -5609,7 +6099,7 @@ export function DatabaseSpreadsheet() {
                           openContextMenu(event, 'col');
                         }}
                         style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-1 text-[10px] font-semibold text-gray-700 transition select-none ${
+                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-0.5 text-[10px] font-semibold text-gray-700 transition select-none ${
                           dragOverCol === colIndex
                             ? 'bg-blue-200 border-l-2 border-l-blue-500'
                             : selectionMode === 'col' &&
@@ -5639,7 +6129,7 @@ export function DatabaseSpreadsheet() {
                       </th>
                     );
                   })}
-                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-1 py-1 w-8">
+                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-1 py-0.5 w-8">
                     <button
                       type="button"
                       onClick={handleAddColumn}
@@ -5809,7 +6299,7 @@ export function DatabaseSpreadsheet() {
                                 data-gramm_editor="false"
                                 data-enable-grammarly="false"
                                 data-lt-active="false"
-                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[24px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
+                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[22px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
                                 effectiveWrapCells
                                   ? 'whitespace-pre-wrap break-words overflow-hidden'
                                   : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
@@ -5817,7 +6307,7 @@ export function DatabaseSpreadsheet() {
                               />
                             ) : (
                               <div
-                                className={`w-full h-full min-h-[24px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
+                                className={`w-full h-full min-h-[22px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
                                   effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
                                 } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
                                 title={!effectiveWrapCells ? value : undefined}
@@ -6114,6 +6604,32 @@ export function DatabaseSpreadsheet() {
           )}
         </aside>
       </div>
+      {showBottomHorizontalScrollbar && fixedScrollbarViewport.width > 0 && (
+        <div
+          className="pointer-events-none fixed bottom-2 z-40"
+          style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
+        >
+          <div className="rounded-md border border-gray-300 bg-white/95 px-2 py-1 shadow-lg backdrop-blur">
+            <input
+              type="range"
+              min={0}
+              max={horizontalSliderMax}
+              value={horizontalSliderValue}
+              onChange={(event) => {
+                const wrapper = tableWrapperRef.current;
+                const next = Number(event.target.value);
+                if (wrapper) {
+                  wrapper.scrollLeft = next;
+                }
+                setHorizontalScrollLeft(next);
+              }}
+              disabled={horizontalScrollMax <= 0}
+              className="pointer-events-auto block h-4 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
+              aria-label="Горизонтальный скролл таблицы"
+            />
+          </div>
+        </div>
+      )}
       {filterMenu && (
         <div
           ref={filterMenuRef}
@@ -6896,8 +7412,7 @@ export function DatabaseSpreadsheet() {
               <button
                 type="button"
                 onClick={closeBriefScoringModal}
-                disabled={briefScoring.isScoring}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 text-xl leading-none"
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
               >
                 &times;
               </button>
@@ -7044,38 +7559,37 @@ export function DatabaseSpreadsheet() {
 
             <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
               <div className="text-xs text-gray-500">
-                Batch: {BRIEF_SCORING_BATCH_SIZE} строк
+                {briefScoring.isScoring
+                  ? `Задача выполняется на сервере${briefScoring.jobId ? ` • ${briefScoring.jobId.slice(0, 8)}` : ''}`
+                  : 'Режим: серверная очередь (можно свернуть окно)'}
               </div>
               <div className="flex gap-3">
                 <button
                   type="button"
                   onClick={closeBriefScoringModal}
-                  disabled={briefScoring.isScoring}
-                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50"
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
                 >
-                  {briefScoring.isScoring ? 'Отменить' : 'Закрыть'}
+                  {briefScoring.isScoring ? 'Свернуть' : 'Закрыть'}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleStartBriefScoring()}
-                  disabled={
-                    briefScoring.isScoring ||
-                    (briefScoring.inputMode === 'pdf' ? !briefScoring.briefText : !briefScoring.manualText.trim())
-                  }
-                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
-                >
-                  {briefScoring.isScoring ? (
-                    <>
-                      <span className="animate-spin">⟳</span>
-                      Оценка...
-                    </>
-                  ) : (
-                    <>
-                      <span>🎯</span>
-                      Запустить оценку
-                    </>
-                  )}
-                </button>
+                {briefScoring.isScoring ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStopBriefScoring()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                  >
+                    Остановить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartBriefScoring()}
+                    disabled={briefScoring.inputMode === 'pdf' ? !briefScoring.briefText : !briefScoring.manualText.trim()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                  >
+                    <span>🎯</span>
+                    Запустить оценку
+                  </button>
+                )}
               </div>
             </div>
           </div>
