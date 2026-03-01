@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
@@ -238,7 +239,7 @@ const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
-const VIRTUAL_ROW_HEIGHT = 32;
+const VIRTUAL_ROW_HEIGHT = 30;
 const VIRTUAL_OVERSCAN = 10;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 const COPY_NOTICE_DURATION_MS = 4000;
@@ -754,10 +755,20 @@ export function DatabaseSpreadsheet() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
   const tableWrapperRef = useRef<HTMLDivElement | null>(null);
+  const tableElementRef = useRef<HTMLTableElement | null>(null);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, height: 0 });
+  const [horizontalScrollLeft, setHorizontalScrollLeft] = useState(0);
+  const [horizontalScrollbarMetrics, setHorizontalScrollbarMetrics] = useState({
+    scrollWidth: 0,
+    clientWidth: 0,
+  });
+  const [fixedScrollbarViewport, setFixedScrollbarViewport] = useState({
+    left: 0,
+    width: 0,
+  });
   const confirmActionRef = useRef<(() => void) | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [highlightedCol, setHighlightedCol] = useState<number | null>(null);
@@ -1008,6 +1019,24 @@ export function DatabaseSpreadsheet() {
     setScrollMetrics((prev) =>
       prev.scrollTop === next.scrollTop && prev.height === next.height ? prev : next,
     );
+    setHorizontalScrollLeft((prev) =>
+      Math.abs(prev - wrapper.scrollLeft) < 1 ? prev : wrapper.scrollLeft,
+    );
+    setHorizontalScrollbarMetrics((prev) => {
+      const nextWidth = wrapper.scrollWidth;
+      const nextClientWidth = wrapper.clientWidth;
+      return prev.scrollWidth === nextWidth && prev.clientWidth === nextClientWidth
+        ? prev
+        : { scrollWidth: nextWidth, clientWidth: nextClientWidth };
+    });
+    const rect = wrapper.getBoundingClientRect();
+    const nextLeft = Math.max(8, Math.round(rect.left));
+    const nextWidth = Math.max(0, Math.round(rect.width));
+    setFixedScrollbarViewport((prev) =>
+      prev.left === nextLeft && prev.width === nextWidth
+        ? prev
+        : { left: nextLeft, width: nextWidth },
+    );
   }, []);
 
   const handleTableScroll = useCallback(() => {
@@ -1029,14 +1058,29 @@ export function DatabaseSpreadsheet() {
   useEffect(() => {
     const wrapper = tableWrapperRef.current;
     if (!wrapper || typeof ResizeObserver === 'undefined') return;
+    const tableElement = tableElementRef.current;
     const observer = new ResizeObserver(() => updateScrollMetrics());
     observer.observe(wrapper);
+    if (tableElement) {
+      observer.observe(tableElement);
+    }
+    updateScrollMetrics();
     return () => {
       observer.disconnect();
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
       }
+    };
+  }, [updateScrollMetrics, isHydrated]);
+
+  useEffect(() => {
+    const handleViewportUpdate = () => updateScrollMetrics();
+    window.addEventListener('resize', handleViewportUpdate);
+    window.addEventListener('scroll', handleViewportUpdate, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportUpdate);
+      window.removeEventListener('scroll', handleViewportUpdate, true);
     };
   }, [updateScrollMetrics]);
 
@@ -2466,6 +2510,29 @@ export function DatabaseSpreadsheet() {
 
   const rowCount = activeTab?.data.length ?? 0;
   const colCount = activeTab?.data[0]?.length ?? 0;
+  const estimatedTableScrollWidth = useMemo(() => {
+    if (colCount <= 0) return 0;
+    const columnsWidth = Array.from({ length: colCount }, (_, index) => {
+      return columnWidths[index] ?? DEFAULT_COLUMN_WIDTH;
+    }).reduce((sum, width) => sum + width, 0);
+    // 36px left sticky row header + 32px add-column cell + a small trailing buffer.
+    return columnsWidth + 36 + 32 + 24;
+  }, [colCount, columnWidths]);
+  const showBottomHorizontalScrollbar = colCount > 0;
+  const bottomScrollbarContentWidth = Math.max(
+    estimatedTableScrollWidth,
+    horizontalScrollbarMetrics.scrollWidth,
+    horizontalScrollbarMetrics.clientWidth + 1,
+  );
+  const horizontalScrollMax = Math.max(
+    0,
+    bottomScrollbarContentWidth - horizontalScrollbarMetrics.clientWidth,
+  );
+  const horizontalSliderMax = Math.max(1, Math.round(horizontalScrollMax));
+  const horizontalSliderValue = Math.max(
+    0,
+    Math.min(horizontalSliderMax, Math.round(horizontalScrollLeft)),
+  );
   const filterSearch = debouncedFilterMenuSearch.trim().toLowerCase();
   const filteredFilterOptions = filterMenu
     ? filterMenu.options.filter((option) =>
@@ -5643,8 +5710,15 @@ export function DatabaseSpreadsheet() {
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
   return (
-    <div className="space-y-0.5 h-[calc(100vh-0.75rem)] flex flex-col">
+    <div className="h-full min-h-0 space-y-0.5 flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
+        <Link
+          href="/tools"
+          className="inline-flex items-center gap-1 rounded-md bg-black px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-gray-800"
+        >
+          <span aria-hidden>←</span>
+          <span>К инструментам</span>
+        </Link>
         <span className="text-xs font-semibold text-gray-500 mr-1">Базы</span>
 
         {selectedRows.size > 0 && (
@@ -5963,10 +6037,10 @@ export function DatabaseSpreadsheet() {
       />
 
       <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
-        <div className="rounded border border-gray-200 bg-white overflow-hidden">
+        <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
           <div
             ref={tableWrapperRef}
-            className="overflow-auto h-full"
+            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
             tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
@@ -5984,7 +6058,7 @@ export function DatabaseSpreadsheet() {
                 <div className="mt-1 text-xs text-gray-500">Это может занять несколько секунд.</div>
               </div>
             ) : (
-            <table className="min-w-max border-separate border-spacing-0">
+            <table ref={tableElementRef} className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
                   <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-1 py-0.5 text-[10px] font-semibold text-gray-500 w-9 min-w-[36px]">
@@ -6025,7 +6099,7 @@ export function DatabaseSpreadsheet() {
                           openContextMenu(event, 'col');
                         }}
                         style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-1 text-[10px] font-semibold text-gray-700 transition select-none ${
+                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-0.5 text-[10px] font-semibold text-gray-700 transition select-none ${
                           dragOverCol === colIndex
                             ? 'bg-blue-200 border-l-2 border-l-blue-500'
                             : selectionMode === 'col' &&
@@ -6055,7 +6129,7 @@ export function DatabaseSpreadsheet() {
                       </th>
                     );
                   })}
-                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-1 py-1 w-8">
+                  <th className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50 px-1 py-0.5 w-8">
                     <button
                       type="button"
                       onClick={handleAddColumn}
@@ -6225,7 +6299,7 @@ export function DatabaseSpreadsheet() {
                                 data-gramm_editor="false"
                                 data-enable-grammarly="false"
                                 data-lt-active="false"
-                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[24px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
+                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[22px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
                                 effectiveWrapCells
                                   ? 'whitespace-pre-wrap break-words overflow-hidden'
                                   : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
@@ -6233,7 +6307,7 @@ export function DatabaseSpreadsheet() {
                               />
                             ) : (
                               <div
-                                className={`w-full h-full min-h-[24px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
+                                className={`w-full h-full min-h-[22px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
                                   effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
                                 } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
                                 title={!effectiveWrapCells ? value : undefined}
@@ -6530,6 +6604,32 @@ export function DatabaseSpreadsheet() {
           )}
         </aside>
       </div>
+      {showBottomHorizontalScrollbar && fixedScrollbarViewport.width > 0 && (
+        <div
+          className="pointer-events-none fixed bottom-2 z-40"
+          style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
+        >
+          <div className="rounded-md border border-gray-300 bg-white/95 px-2 py-1 shadow-lg backdrop-blur">
+            <input
+              type="range"
+              min={0}
+              max={horizontalSliderMax}
+              value={horizontalSliderValue}
+              onChange={(event) => {
+                const wrapper = tableWrapperRef.current;
+                const next = Number(event.target.value);
+                if (wrapper) {
+                  wrapper.scrollLeft = next;
+                }
+                setHorizontalScrollLeft(next);
+              }}
+              disabled={horizontalScrollMax <= 0}
+              className="pointer-events-auto block h-4 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
+              aria-label="Горизонтальный скролл таблицы"
+            />
+          </div>
+        </div>
+      )}
       {filterMenu && (
         <div
           ref={filterMenuRef}
