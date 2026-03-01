@@ -12,7 +12,7 @@ import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } fro
 type ViewMode = 'table' | 'cards' | 'kanban';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
-const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика'];
+const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 const PROJECT_TYPE_OPTIONS = ['Продажа', 'Продление'];
 const STATUS_OPTIONS = ['В работе', 'Тестирование', 'На паузе', 'Подготовка', 'Завершен', 'Отменен'];
@@ -32,12 +32,12 @@ function resolveWorkFormat(value: string) {
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; border: string }> = {
-  'в работе': { label: 'В работе', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-  'тестирование': { label: 'Тестирование', color: 'text-blue-700', bg: 'bg-blue-50', border: 'border-blue-200' },
-  'на паузе': { label: 'На паузе', color: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-200' },
-  'подготовка': { label: 'Подготовка', color: 'text-purple-700', bg: 'bg-purple-50', border: 'border-purple-200' },
-  'завершен': { label: 'Завершен', color: 'text-gray-600', bg: 'bg-gray-100', border: 'border-gray-200' },
-  'отменен': { label: 'Отменен', color: 'text-red-700', bg: 'bg-red-50', border: 'border-red-200' },
+  'в работе': { label: 'В работе', color: 'text-emerald-700', bg: 'bg-emerald-50/50', border: 'border-emerald-200/50' },
+  'тестирование': { label: 'Тестирование', color: 'text-blue-700', bg: 'bg-blue-50/50', border: 'border-blue-200/50' },
+  'на паузе': { label: 'На паузе', color: 'text-amber-700', bg: 'bg-amber-50/50', border: 'border-amber-200/50' },
+  'подготовка': { label: 'Подготовка', color: 'text-purple-700', bg: 'bg-purple-50/50', border: 'border-purple-200/50' },
+  'завершен': { label: 'Завершен', color: 'text-zinc-600', bg: 'bg-zinc-100/50', border: 'border-zinc-200/50' },
+  'отменен': { label: 'Отменен', color: 'text-red-700', bg: 'bg-red-50/50', border: 'border-red-200/50' },
 };
 
 function getStatusConfig(status: string | null | undefined) {
@@ -46,7 +46,15 @@ function getStatusConfig(status: string | null | undefined) {
   for (const [k, v] of Object.entries(STATUS_CONFIG)) {
     if (key.includes(k)) return v;
   }
-  return { label: status, color: 'text-gray-600', bg: 'bg-gray-100', border: 'border-gray-200' };
+  return { label: status, color: 'text-zinc-600', bg: 'bg-zinc-100', border: 'border-zinc-200' };
+}
+
+function normalizeStatus(status: string | null | undefined): string {
+  return (status || '').toLowerCase().replace(/ё/g, 'е');
+}
+
+function isCompletedStatus(status: string | null | undefined): boolean {
+  return normalizeStatus(status).includes('заверш');
 }
 
 function getDeadlineStatus(deadline: string | null | undefined): 'overdue' | 'soon' | 'ok' | null {
@@ -86,7 +94,7 @@ function getPlatformConfig(value: string | null | undefined) {
   for (const [platformKey, config] of Object.entries(PLATFORM_CONFIG)) {
     if (key.includes(platformKey)) return config;
   }
-  return { label: value, className: 'bg-gray-100 text-gray-700' };
+  return { label: value, className: 'bg-zinc-100 text-zinc-700' };
 }
 
 function normalizeUrl(value: string | null | undefined) {
@@ -497,15 +505,17 @@ export function ProjectList() {
       ]
         .filter(Boolean)
         .some((value) => value?.toLowerCase().includes(normalizedSearch));
-    
-    if (statusFilter === 'all') return matchesSearch;
-    
-    const status = project.status?.toLowerCase() || '';
+
+    if (statusFilter === 'all') {
+      return matchesSearch && !isCompletedStatus(project.status);
+    }
+
+    const status = normalizeStatus(project.status);
     return matchesSearch && status.includes(statusFilter);
   });
 
   const statusCounts = {
-    all: projects.length,
+    all: projects.filter((p) => !isCompletedStatus(p.status)).length,
     'подготовка': projects.filter(p => p.status?.toLowerCase().includes('подготовк')).length,
     'в работе': projects.filter(p => p.status?.toLowerCase().includes('работ')).length,
     'тестирование': projects.filter(p => p.status?.toLowerCase().includes('тест')).length,
@@ -518,7 +528,7 @@ export function ProjectList() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-400 text-sm">Загрузка...</div>
+        <div className="text-zinc-400 text-sm">Загрузка...</div>
       </div>
     );
   }
@@ -542,20 +552,19 @@ export function ProjectList() {
   return (
     <div className={isTma ? 'space-y-4' : 'space-y-4'}>
       {/* Header */}
-      <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
+      <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-3 ${isTma ? 'gap-3' : 'gap-4'}`}>
         <div>
-          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold tracking-tight text-gray-900`}>Проекты</h1>
-          <p className="mt-1 text-sm text-gray-500 font-medium">{projects.length} проектов</p>
+          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight text-zinc-900`}>Проекты</h1>
         </div>
-        <div className={isTma ? 'flex w-full flex-col gap-3' : 'flex flex-wrap items-center gap-3'}>
+        <div className={isTma ? 'flex w-full flex-col gap-2' : 'flex flex-wrap items-center gap-2'}>
           {canEdit && (
             <button
               type="button"
               onClick={() => void handleToggleEditing()}
-              className={`inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 border ${isTma ? 'w-full' : ''} ${
+              className={`inline-flex items-center justify-center rounded-xl px-4 py-2 text-xs font-medium transition-all duration-200 ${isTma ? 'w-full' : ''} ${
                 isTableEditing
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                  : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50 shadow-sm'
+                  ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'bg-white text-zinc-700 shadow-sm hover:shadow-md border border-zinc-200/80'
               }`}
             >
               {isTableEditing ? 'Завершить' : 'Редактировать'}
@@ -564,22 +573,25 @@ export function ProjectList() {
         {canCreate && (
           <Link 
             href="/projects/new"
-              className={`inline-flex items-center justify-center rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-gray-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
+              className={`inline-flex items-center justify-center rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
           >
-            Новый проект
+            <span className="mr-1.5 text-sm leading-none">+</span> Новый проект
           </Link>
         )}
         </div>
       </div>
 
       {/* Controls */}
-      <div className={isTma ? 'flex flex-col gap-3 bg-white p-3 rounded-xl shadow-sm border border-gray-200' : 'flex flex-col lg:flex-row gap-4 items-center bg-white p-2 rounded-xl shadow-sm border border-gray-200'}>
+      <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-col lg:flex-row gap-3 items-center mb-3'}>
         {/* Search */}
-        <div className="relative flex-1 w-full">
+        <div className="relative flex-1 w-full lg:max-w-md">
+          <svg className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
           <input
             type="text"
-            className="w-full rounded-lg border-0 bg-gray-50 py-2.5 px-4 text-sm text-gray-900 placeholder-gray-400 focus:ring-0 focus:bg-white transition-colors"
-            placeholder="Поиск..."
+            className="w-full rounded-full border border-zinc-200/80 bg-white py-2.5 pl-11 pr-4 text-sm text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
+            placeholder="Поиск проектов..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -587,7 +599,7 @@ export function ProjectList() {
 
       {/* Status Filter Tabs */}
       {viewMode !== 'kanban' && (
-          <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar border-t border-gray-100 pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar border-l border-gray-100 pl-4 py-1'}>
+          <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar bg-white p-1 rounded-full shadow-sm border border-zinc-200/80'}>
           {[
             { key: 'all', label: 'Все' },
             { key: 'подготовка', label: 'Подготовка' },
@@ -599,15 +611,15 @@ export function ProjectList() {
             <button
               key={tab.key}
               onClick={() => setStatusFilter(tab.key)}
-                className={`flex items-center px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-all duration-200 ${
+                className={`flex items-center px-4 py-2 rounded-full text-[13px] font-medium whitespace-nowrap transition-all duration-300 ${
                 statusFilter === tab.key
-                    ? 'bg-gray-100 text-gray-900'
-                    : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
+                    ? 'bg-zinc-100 text-zinc-900 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
               }`}
             >
               {tab.label}
-                <span className={`ml-2 px-1.5 py-0.5 rounded-full text-[10px] ${
-                  statusFilter === tab.key ? 'bg-white text-gray-700 shadow-sm' : 'bg-gray-100 text-gray-400'
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] transition-colors duration-300 ${
+                  statusFilter === tab.key ? 'bg-white text-zinc-700 shadow-sm' : 'bg-zinc-100 text-zinc-400'
               }`}>
                 {statusCounts[tab.key as keyof typeof statusCounts] || 0}
               </span>
@@ -619,15 +631,15 @@ export function ProjectList() {
 
       {/* Empty State */}
       {filteredProjects.length === 0 && (
-        <div className="text-center py-16 bg-white rounded-2xl border border-dashed border-gray-200">
-          <h3 className="mt-4 text-lg font-medium text-gray-900">Нет проектов</h3>
-          <p className="mt-2 text-sm text-gray-500">
+        <div className="text-center py-16 bg-white rounded-2xl border border-dashed border-zinc-200">
+          <h3 className="mt-4 text-lg font-medium text-zinc-900">Нет проектов</h3>
+          <p className="mt-2 text-sm text-zinc-500">
             {searchTerm ? 'Попробуйте изменить поиск' : 'Создайте первый проект или импортируйте данные'}
           </p>
           {canCreate && (
             <Link 
               href="/projects/new"
-              className="mt-4 inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-700"
+              className="mt-4 inline-flex items-center text-sm font-medium text-zinc-900 hover:text-zinc-600 underline underline-offset-4"
             >
               Создать проект
             </Link>
@@ -674,7 +686,7 @@ export function ProjectList() {
           {kanbanColumns.map((column) => (
             <div 
               key={column.key}
-              className="flex-shrink-0 w-72 bg-gray-50 rounded-xl p-3 border border-gray-200"
+              className="flex-shrink-0 w-72 bg-zinc-50 rounded-xl p-3 border border-zinc-200"
             >
               <div className={`flex items-center justify-between mb-3 px-2`}>
                 <div className="flex items-center">
@@ -682,7 +694,7 @@ export function ProjectList() {
                        style={{ backgroundColor: column.color.replace('text-', '').replace('-700', '') }} />
                   <h3 className={`text-sm font-semibold ${column.color}`}>{column.label}</h3>
                 </div>
-                <span className="text-xs text-gray-400 font-medium">
+                <span className="text-xs text-zinc-400 font-medium">
                   {getProjectsForColumn(column.key).length}
                 </span>
               </div>
@@ -705,27 +717,27 @@ export function ProjectList() {
 
       {/* Table View */}
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
-        <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="relative overflow-hidden rounded-[24px] bg-white shadow-sm border border-zinc-200/80">
           <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
-            <table className="w-full divide-y divide-gray-100 text-xs min-w-[1400px]">
-              <thead className="bg-gray-50 sticky top-0 z-10">
+            <table className="w-full divide-y divide-zinc-200/50 text-xs min-w-[1400px]">
+              <thead className="bg-white/95 backdrop-blur sticky top-0 z-10">
                 <tr>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[140px]">Проект</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Статус</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Сумма</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Дог.</th>
-                  <th className="px-1.5 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[48px]">Пер.</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Дедлайн</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">KPI План</th>
-                  <th className="px-2 py-2 text-center text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[70px]">KPI Факт</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[100px]">Контакты</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Специалист</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[80px]">Формат</th>
-                  <th className="px-2 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider min-w-[160px]">Задачи/Комм.</th>
+                  <th className="px-3 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[140px]">Проект</th>
+                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Статус</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">Сумма</th>
+                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">Дог.</th>
+                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">Пер.</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Дедлайн</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">KPI План</th>
+                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[70px]">KPI Факт</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Контакты</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Специалист</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">Формат</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[160px]">Задачи/Комм.</th>
               </tr>
             </thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
+              <tbody className="divide-y divide-zinc-200/50 bg-white">
                 {sortedProjects.map((project) => {
                   const isSaving = Boolean(savingRows[project.id]);
                   const isDisabled = !canEdit || isSaving;
@@ -753,8 +765,8 @@ export function ProjectList() {
                   const readOnlySpecialist = project.specialist || '—';
                   const readOnlyManager = project.manager || '—';
                 return (
-                    <tr key={project.id} className="even:bg-gray-50/50 hover:bg-blue-50/40 transition-colors group">
-                      <td className="px-2 py-2 align-top overflow-hidden">
+                    <tr key={project.id} className="hover:bg-zinc-50/50 transition-colors group">
+                      <td className="px-3 py-3 align-top overflow-hidden">
                         {isTableEditing ? (
                           <div className="flex items-center gap-2">
                             <InlineInput
@@ -768,7 +780,7 @@ export function ProjectList() {
                             <button
                               type="button"
                               onClick={() => setSelectedProjectId(project.id)}
-                              className="p-1 text-gray-400 hover:text-blue-600 rounded hover:bg-blue-50 transition-colors"
+                              className="p-1 text-zinc-400 hover:text-zinc-900 rounded hover:bg-zinc-100 transition-colors"
                               title="Открыть карточку"
                             >
                               ↗
@@ -778,23 +790,23 @@ export function ProjectList() {
                           <button
                             type="button"
                             onClick={() => setSelectedProjectId(project.id)}
-                            className="text-left font-medium text-gray-900 hover:text-blue-600 transition-colors group/btn"
+                            className="text-left font-medium text-zinc-900 hover:text-zinc-600 transition-colors group/btn"
                           >
                             <div className="flex items-start gap-2">
                               <span className="break-words">{readOnlyProjectTitle}</span>
-                              <span className="opacity-0 group-hover/btn:opacity-100 transition-opacity text-gray-400 mt-1 flex-shrink-0 text-xs">↗</span>
+                              <span className="opacity-0 group-hover/btn:opacity-100 transition-opacity text-zinc-400 mt-1 flex-shrink-0 text-xs">↗</span>
                             </div>
                             {services.length > 0 && (
                               <span className="flex flex-wrap gap-1 mt-1">
                                 {services.map((s) => (
-                                  <span key={s} className="inline-flex items-center bg-blue-50 text-blue-700 text-[10px] font-medium px-1.5 py-0.5 rounded">{s}</span>
+                                  <span key={s} className="inline-flex items-center bg-zinc-100/80 text-zinc-700 text-[10px] font-medium px-1.5 py-0.5 rounded">{s}</span>
                                 ))}
                               </span>
                             )}
                           </button>
                       )}
                     </td>
-                      <td className="px-2 py-2 align-top whitespace-nowrap text-center">
+                      <td className="px-2 py-3 align-top whitespace-nowrap text-center">
                         {(() => {
                           const cfg = getStatusConfig(project.status);
                           return canEdit ? (
@@ -817,7 +829,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-2 py-2 align-top whitespace-nowrap">
+                      <td className="px-2 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={budgetValue}
@@ -827,10 +839,10 @@ export function ProjectList() {
                             placeholder="Сумма"
                           />
                         ) : (
-                          <span className="text-gray-900 font-medium">{readOnlyBudget}</span>
+                          <span className="text-zinc-900 font-medium">{readOnlyBudget}</span>
                       )}
                     </td>
-                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
+                      <td className="px-2 py-3 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={contractValue}
@@ -844,10 +856,10 @@ export function ProjectList() {
                             Дог.
                           </a>
                         ) : (
-                          <span className="text-gray-300">—</span>
+                          <span className="text-zinc-300">—</span>
                         )}
                       </td>
-                      <td className="px-1.5 py-2 align-top whitespace-nowrap text-center">
+                      <td className="px-2 py-3 align-top whitespace-nowrap text-center">
                         {isTableEditing ? (
                           <InlineInput
                             value={handoffValue}
@@ -861,10 +873,10 @@ export function ProjectList() {
                             Пер.
                           </a>
                         ) : (
-                          <span className="text-gray-300">—</span>
+                          <span className="text-zinc-300">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 align-top whitespace-nowrap">
+                      <td className="px-2 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineInput
                             value={deadlineValue}
@@ -879,7 +891,7 @@ export function ProjectList() {
                             <span className={
                               dlStatus === 'overdue' ? 'text-red-600 font-semibold' :
                               dlStatus === 'soon' ? 'text-amber-600 font-medium' :
-                              'text-gray-600'
+                              'text-zinc-600'
                             }>
                               {readOnlyDeadline}
                               {dlStatus === 'overdue' && <span className="ml-1 text-[10px]">●</span>}
@@ -887,7 +899,7 @@ export function ProjectList() {
                           );
                         })()}
                       </td>
-                      <td className="px-2 py-2 align-top">
+                      <td className="px-2 py-3 align-top">
                         {isTableEditing ? (
                           <InlineInput
                             value={kpiValue}
@@ -897,10 +909,10 @@ export function ProjectList() {
                             placeholder="KPI План"
                           />
                         ) : (
-                          <span className="text-gray-900">{readOnlyKpi}</span>
+                          <span className="text-zinc-900">{readOnlyKpi}</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 align-top whitespace-nowrap">
+                      <td className="px-2 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineStepper
                             value={kpiFactValue}
@@ -911,7 +923,7 @@ export function ProjectList() {
                           />
                         ) : (
                           <div className="flex items-center gap-1">
-                            <span className="text-gray-900 tabular-nums">{readOnlyKpiFact}</span>
+                            <span className="text-zinc-900 tabular-nums">{readOnlyKpiFact}</span>
                             {canEdit && (
                               <div className="flex flex-col gap-px ml-0.5">
                                 <button
@@ -922,7 +934,7 @@ export function ProjectList() {
                                     const next = (isNaN(cur) ? 0 : cur) + 1;
                                     void commitProjectUpdate(project, { kpi_fact: next.toString() });
                                   }}
-                                  className="flex items-center justify-center w-4 h-3 text-gray-300 hover:text-gray-600 transition-colors disabled:opacity-30 leading-none"
+                                  className="flex items-center justify-center w-4 h-3 text-zinc-300 hover:text-zinc-600 transition-colors disabled:opacity-30 leading-none"
                                   style={{ fontSize: '8px' }}
                                   title="Увеличить"
                                 >
@@ -936,7 +948,7 @@ export function ProjectList() {
                                     const next = (isNaN(cur) ? 0 : cur) - 1;
                                     void commitProjectUpdate(project, { kpi_fact: next.toString() });
                                   }}
-                                  className="flex items-center justify-center w-4 h-3 text-gray-300 hover:text-gray-600 transition-colors disabled:opacity-30 leading-none"
+                                  className="flex items-center justify-center w-4 h-3 text-zinc-300 hover:text-zinc-600 transition-colors disabled:opacity-30 leading-none"
                                   style={{ fontSize: '8px' }}
                                   title="Уменьшить"
                                 >
@@ -947,7 +959,7 @@ export function ProjectList() {
                           </div>
                         )}
                       </td>
-                      <td className="px-2 py-2 align-top">
+                      <td className="px-2 py-3 align-top">
                         {(() => {
                           const obligation = parseInt(project.contacts_obligation ?? '0', 10) || 0;
                           const done = parseInt(project.contacts_done ?? '0', 10) || 0;
@@ -970,14 +982,14 @@ export function ProjectList() {
                                   if (e.key === 'Enter') e.currentTarget.blur();
                                   if (e.key === 'Escape') setEditingContactsId(null);
                                 }}
-                                className="w-full rounded-md border border-blue-400 bg-white px-2 py-1 text-sm text-gray-900 outline-none ring-2 ring-blue-500/20"
+                                className="w-full rounded-md border border-blue-400 bg-white px-2 py-1 text-sm text-zinc-900 outline-none ring-2 ring-blue-500/20"
                               />
                             );
                           }
 
                           return (
                             <div
-                              className={canEdit ? 'cursor-pointer hover:bg-gray-100 rounded-md px-1 py-0.5 -mx-1 transition-colors' : ''}
+                              className={canEdit ? 'cursor-pointer hover:bg-zinc-100 rounded-md px-1 py-0.5 -mx-1 transition-colors' : ''}
                               onClick={() => {
                                 if (!canEdit || isSaving) return;
                                 setEditingContactsValue(project.contacts_done || '0');
@@ -987,21 +999,21 @@ export function ProjectList() {
                               {obligation > 0 ? (
                                 <>
                                   <div className="flex items-baseline gap-0.5 mb-0.5">
-                                    <span className="text-xs font-medium text-gray-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
-                                    <span className="text-[10px] text-gray-400">/{obligation.toLocaleString('ru-RU')}</span>
+                                    <span className="text-xs font-medium text-zinc-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
+                                    <span className="text-[10px] text-zinc-400">/{obligation.toLocaleString('ru-RU')}</span>
                                   </div>
-                                  <div className="w-full h-1 bg-gray-200 rounded-full overflow-hidden">
+                                  <div className="w-full h-1 bg-zinc-200 rounded-full overflow-hidden">
                                     <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                                   </div>
                                 </>
                               ) : (
-                                <span className="text-gray-300">—</span>
+                                <span className="text-zinc-300">—</span>
                               )}
                             </div>
                           );
                         })()}
                       </td>
-                      <td className="px-2 py-2 align-top truncate">
+                      <td className="px-2 py-3 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={specialistValue}
@@ -1035,12 +1047,12 @@ export function ProjectList() {
                                 >
                                   {readOnlySpecialist.charAt(0).toUpperCase()}
                                 </span>
-                                <span className="text-gray-700 truncate">{readOnlySpecialist}</span>
+                                <span className="text-zinc-700 truncate">{readOnlySpecialist}</span>
                              </div>
-                          ) : <span className="text-gray-300">—</span>
+                          ) : <span className="text-zinc-300">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 align-top truncate">
+                      <td className="px-2 py-3 align-top truncate">
                         {isTableEditing ? (
                           <InlineSelect
                             value={managerValue}
@@ -1074,12 +1086,12 @@ export function ProjectList() {
                                 >
                                   {readOnlyManager.charAt(0).toUpperCase()}
                                 </span>
-                                <span className="text-gray-700 truncate">{readOnlyManager}</span>
+                                <span className="text-zinc-700 truncate">{readOnlyManager}</span>
                              </div>
-                          ) : <span className="text-gray-300">—</span>
+                          ) : <span className="text-zinc-300">—</span>
                         )}
                       </td>
-                      <td className="px-2 py-2 align-top whitespace-nowrap">
+                      <td className="px-2 py-3 align-top whitespace-nowrap">
                         {isTableEditing ? (
                           <InlineSelect
                             value={workFormatValue}
@@ -1095,10 +1107,10 @@ export function ProjectList() {
                             {platformConfig.label}
                           </span>
                         ) : (
-                          <span className="text-gray-300">—</span>
+                          <span className="text-zinc-300">—</span>
                         )}
                     </td>
-                      <td className="px-2 py-2 align-top relative">
+                      <td className="px-2 py-3 align-top relative">
                         {(() => {
                           const tasks = projectTasks[project.id] ?? [];
                           const latestTask = tasks[0];
@@ -1106,40 +1118,40 @@ export function ProjectList() {
                           return (
                             <>
                               <div
-                                className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-gray-100'}`}
+                                className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-zinc-100'}`}
                                 onClick={() => setTaskPopoverId(isOpen ? null : project.id)}
                               >
                                 {latestTask ? (
                                   <div>
-                                    <p className="text-xs text-gray-900 line-clamp-2">{latestTask.title}</p>
+                                    <p className="text-xs text-zinc-900 line-clamp-2">{latestTask.title}</p>
                                     {tasks.length > 1 && (
-                                      <p className="text-[10px] text-gray-400 mt-0.5">+{tasks.length - 1} ещё</p>
+                                      <p className="text-[10px] text-zinc-400 mt-0.5">+{tasks.length - 1} ещё</p>
                                     )}
                                   </div>
                                 ) : (
-                                  <span className="text-gray-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
+                                  <span className="text-zinc-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
                                 )}
                               </div>
                               {isOpen && (
-                                <div className="absolute right-0 top-full mt-1 z-30 w-72 bg-white rounded-xl border border-gray-200 shadow-xl p-3 space-y-2">
+                                <div className="absolute right-0 top-full mt-1 z-30 w-72 bg-white rounded-xl border border-zinc-200 shadow-xl p-3 space-y-2">
                                   <div className="flex items-center justify-between mb-1">
-                                    <span className="text-xs font-bold text-gray-700">Задачи</span>
-                                    <button type="button" onClick={() => setTaskPopoverId(null)} className="text-gray-400 hover:text-gray-600 text-sm">✕</button>
+                                    <span className="text-xs font-medium text-zinc-700">Задачи</span>
+                                    <button type="button" onClick={() => setTaskPopoverId(null)} className="text-zinc-400 hover:text-zinc-600 text-sm">✕</button>
                                   </div>
                                   <div className="max-h-48 overflow-y-auto space-y-1.5">
                                     {tasks.map((t) => (
-                                      <div key={t.id} className="flex items-start gap-2 rounded-lg bg-gray-50 p-2 text-xs group">
-                                        <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-gray-300'}`} />
-                                        <span className={`flex-1 ${t.status === 'done' ? 'line-through text-gray-400' : 'text-gray-800'}`}>{t.title}</span>
+                                      <div key={t.id} className="flex items-start gap-2 rounded-lg bg-zinc-50 p-2 text-xs group">
+                                        <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
+                                        <span className={`flex-1 ${t.status === 'done' ? 'line-through text-zinc-400' : 'text-zinc-800'}`}>{t.title}</span>
                                         {canEdit && (
                                           <button type="button" onClick={() => void deleteTask(t.id, project.id)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 text-[10px] transition-opacity">✕</button>
                                         )}
                                       </div>
                                     ))}
-                                    {tasks.length === 0 && <p className="text-xs text-gray-400 text-center py-2">Нет задач</p>}
+                                    {tasks.length === 0 && <p className="text-xs text-zinc-400 text-center py-2">Нет задач</p>}
                                   </div>
                                   {canEdit && (
-                                    <div className="flex gap-1.5 pt-1 border-t border-gray-100">
+                                    <div className="flex gap-1.5 pt-1 border-t border-zinc-100">
                                       <input
                                         type="text"
                                         value={newTaskTitle}
@@ -1148,12 +1160,12 @@ export function ProjectList() {
                                           if (e.key === 'Enter') void addTask(project.id, newTaskTitle, project.specialist);
                                         }}
                                         placeholder="Новая задача..."
-                                        className="flex-1 text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
+                                        className="flex-1 text-xs border border-zinc-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
                                       />
                                       <button
                                         type="button"
                                         onClick={() => void addTask(project.id, newTaskTitle, project.specialist)}
-                                        className="text-xs bg-blue-600 text-white px-2.5 py-1.5 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                                        className="text-xs bg-zinc-900 text-white px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors font-medium"
                                       >
                                         +
                                       </button>
@@ -1175,16 +1187,16 @@ export function ProjectList() {
       )}
 
       {selectedProject && (
-        <div className={isTma ? 'fixed inset-0 z-50 flex items-stretch justify-center p-0' : 'fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6'}>
+        <div className={isTma ? 'fixed inset-0 z-50 flex items-stretch justify-center p-0' : 'fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-3'}>
           <div
-            className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm transition-opacity"
+            className="absolute inset-0 bg-zinc-900/30 backdrop-blur-sm transition-opacity"
             onClick={() => setSelectedProjectId(null)}
           />
-          <div className={isTma ? 'relative w-full h-[100dvh] overflow-y-auto rounded-none bg-white shadow-2xl ring-1 ring-gray-900/5 flex flex-col' : 'relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl bg-white shadow-2xl ring-1 ring-gray-900/5 flex flex-col'}>
-            <div className={isTma ? 'flex flex-col gap-4 border-b border-gray-100 px-4 py-4 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all' : 'flex items-start justify-between border-b border-gray-100 px-8 py-6 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all'}>
-              <div className={isTma ? 'flex-1' : 'flex-1 pr-8'}>
+          <div className={isTma ? 'relative w-full h-[100dvh] overflow-y-auto rounded-none bg-white shadow-2xl ring-1 ring-zinc-900/5 flex flex-col' : 'project-modal-compact relative w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-[0_8px_30px_rgb(0,0,0,0.08)] border border-zinc-200/60 flex flex-col'}>
+            <div className={isTma ? 'flex flex-col gap-4 border-b border-zinc-100 px-4 py-4 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all' : 'flex items-start justify-between border-b border-zinc-100 px-4 py-3 sticky top-0 bg-white/95 backdrop-blur z-20 transition-all'}>
+              <div className={isTma ? 'flex-1' : 'flex-1 pr-4'}>
                 <div className="flex items-center gap-3 mb-2">
-                  <h2 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold text-gray-900 leading-tight`}>
+                  <h2 className="text-xl font-medium text-zinc-900 leading-tight">
                     {selectedProject.client || 'Без названия'}
                   </h2>
                   {selectedProject.name && (
@@ -1202,13 +1214,13 @@ export function ProjectList() {
                      </span>
                   )}
                 </div>
-                <div className="flex items-center gap-4 text-sm text-gray-500">
+                <div className="flex items-center gap-3 text-xs text-zinc-500">
                    <div className="flex items-center gap-1.5">
                      <span>Дедлайн: {selectedProject.deadline ? formatDate(selectedProject.deadline) : 'Не указан'}</span>
                    </div>
                    {selectedProject.budget && (
                      <div className="flex items-center gap-1.5">
-                       <span className="font-semibold text-gray-700">{selectedProject.budget}</span>
+                       <span className="font-semibold text-zinc-700">{selectedProject.budget}</span>
                      </div>
                    )}
                 </div>
@@ -1218,7 +1230,7 @@ export function ProjectList() {
                   <button
                     type="button"
                     onClick={() => requestDeleteProject(selectedProject.id)}
-                    className="rounded-full p-2 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-all"
+                    className="rounded-full p-2 text-zinc-400 hover:bg-red-50 hover:text-red-500 transition-all"
                     title="Удалить проект"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -1227,19 +1239,19 @@ export function ProjectList() {
                 <button
                   type="button"
                   onClick={() => setSelectedProjectId(null)}
-                  className="group relative rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500 transition-all text-xl leading-none"
+                  className="group relative rounded-full p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-500 transition-all text-xl leading-none"
                 >
                   &times;
                 </button>
               </div>
             </div>
 
-            <div className={isTma ? 'p-4 space-y-6 bg-white min-h-[500px]' : 'p-8 space-y-10 bg-white min-h-[500px]'}>
+            <div className={isTma ? 'p-4 space-y-6 bg-white min-h-[500px]' : 'p-4 space-y-6 bg-white'}>
               
-              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-8'}`}>
-                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200 transition-colors group hover:bg-gray-100/50">
+              <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-200 transition-colors group hover:bg-zinc-100/50">
                   <div className="flex items-center gap-3 mb-3">
-                    <label className="text-sm font-bold text-gray-700 tracking-wide uppercase">Специалист</label>
+                    <label className="text-xs font-medium text-zinc-700 tracking-wide uppercase">Специалист</label>
                   </div>
                   <InlineSelect
                     value={getDraftValue(selectedProject, 'specialist')}
@@ -1252,13 +1264,13 @@ export function ProjectList() {
                       void commitProjectUpdate(selectedProject, { specialist: value });
                     }}
                     disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                    className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 px-3 py-2 text-sm font-medium rounded-lg text-gray-900 placeholder:text-gray-400"
+                    className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 px-2.5 py-1.5 text-xs font-medium rounded-lg text-zinc-900 placeholder:text-zinc-400"
                   />
                 </div>
                 
-                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-200 transition-colors group hover:bg-gray-100/50">
+                <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-200 transition-colors group hover:bg-zinc-100/50">
                   <div className="flex items-center gap-3 mb-3">
-                    <label className="text-sm font-bold text-gray-700 tracking-wide uppercase">Лид (PM)</label>
+                    <label className="text-xs font-medium text-zinc-700 tracking-wide uppercase">Лид (PM)</label>
                   </div>
                   <InlineSelect
                     value={getDraftValue(selectedProject, 'manager')}
@@ -1271,17 +1283,17 @@ export function ProjectList() {
                       void commitProjectUpdate(selectedProject, { manager: value });
                     }}
                     disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
-                    className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 px-3 py-2 text-sm font-medium rounded-lg text-gray-900 placeholder:text-gray-400"
+                    className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 px-2.5 py-1.5 text-xs font-medium rounded-lg text-zinc-900 placeholder:text-zinc-400"
                   />
                 </div>
               </section>
 
               <section>
-                <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2 tracking-tight">
+                <h3 className="text-sm font-medium text-zinc-900 mb-2 flex items-center gap-2 tracking-tight">
                   ОБРАТНАЯ СВЯЗЬ
                 </h3>
                 <div className="relative group">
-                   <div className="absolute -inset-1 rounded-xl bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+                   <div className="absolute -inset-1 rounded-xl bg-zinc-100 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
                    <div className="relative">
                       <InlineTextarea
                         value={getDraftValue(selectedProject, 'client_feedback')}
@@ -1289,16 +1301,16 @@ export function ProjectList() {
                         onCommit={(value) => void commitProjectUpdate(selectedProject, { client_feedback: value })}
                         disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                         placeholder="Добавьте обратную связь от заказчика..."
-                        rows={3}
-                        className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 p-4 text-gray-700 leading-relaxed resize-none rounded-lg placeholder:text-gray-400"
+                        rows={2}
+                        className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 p-2 text-sm text-zinc-700 leading-relaxed resize-none rounded-lg placeholder:text-zinc-400"
                       />
                    </div>
                 </div>
               </section>
 
-              <section className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
-                <div className="flex flex-col h-full rounded-2xl bg-blue-50/30 border border-blue-100 p-6 transition-all hover:shadow-md hover:border-blue-200">
-                   <h3 className="text-sm font-bold text-blue-900 uppercase tracking-wide mb-4 flex items-center gap-2">
+              <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="flex flex-col h-full rounded-xl bg-blue-50/30 border border-blue-100 p-3 transition-all hover:shadow-md hover:border-blue-200">
+                   <h3 className="text-xs font-medium text-blue-900 uppercase tracking-wide mb-2 flex items-center gap-2">
                      <span className="w-2 h-2 rounded-full bg-blue-600 ring-2 ring-blue-100"></span>
                      Гипотезы и Задачи
                    </h3>
@@ -1312,13 +1324,13 @@ export function ProjectList() {
                       onCommit={(value) => void commitProjectUpdate(selectedProject, { hypotheses: value })}
                       disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                       placeholder="Опишите гипотезы и задачи..."
-                      rows={8}
-                      className="flex-1 bg-white border border-gray-200 shadow-sm focus:border-blue-500 text-gray-700 leading-relaxed rounded-xl placeholder:text-gray-400 p-4"
+                      rows={6}
+                      className="flex-1 bg-white border border-zinc-200 shadow-sm focus:border-blue-500 text-sm text-zinc-700 leading-relaxed rounded-lg placeholder:text-zinc-400 p-2"
                    />
                 </div>
                 
-                <div className="flex flex-col h-full rounded-2xl bg-emerald-50/30 border border-emerald-100 p-6 transition-all hover:shadow-md hover:border-emerald-200">
-                   <h3 className="text-sm font-bold text-emerald-900 uppercase tracking-wide mb-4 flex items-center gap-2">
+                <div className="flex flex-col h-full rounded-xl bg-emerald-50/30 border border-emerald-100 p-3 transition-all hover:shadow-md hover:border-emerald-200">
+                   <h3 className="text-xs font-medium text-emerald-900 uppercase tracking-wide mb-2 flex items-center gap-2">
                      <span className="w-2 h-2 rounded-full bg-emerald-600 ring-2 ring-emerald-100"></span>
                      Результат
                    </h3>
@@ -1328,47 +1340,47 @@ export function ProjectList() {
                       onCommit={(value) => void commitProjectUpdate(selectedProject, { hypotheses_result: value })}
                       disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                       placeholder="Каков результат?"
-                      rows={8}
-                      className="flex-1 bg-white border border-gray-200 shadow-sm focus:border-emerald-500 text-gray-700 leading-relaxed rounded-xl placeholder:text-gray-400 p-4"
+                      rows={6}
+                      className="flex-1 bg-white border border-zinc-200 shadow-sm focus:border-emerald-500 text-sm text-zinc-700 leading-relaxed rounded-lg placeholder:text-zinc-400 p-2"
                    />
                 </div>
               </section>
 
               <section>
-                <h3 className="text-lg font-bold text-gray-900 mb-4">Подзадачи и комментарии</h3>
-                <div className={`grid grid-cols-1 md:grid-cols-2 ${isTma ? 'gap-4' : 'gap-6'}`}>
+                <h3 className="text-sm font-medium text-zinc-900 mb-2">Подзадачи и комментарии</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">Подзадачи</label>
+                    <label className="block text-xs font-medium text-zinc-700 mb-2">Подзадачи</label>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'subtasks')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'subtasks', value)}
                       onCommit={(value) => void commitProjectUpdate(selectedProject, { subtasks: value })}
                       disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                       placeholder="Список подзадач..."
-                      rows={4}
-                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                      rows={3}
+                      className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 text-sm text-zinc-700 rounded-lg placeholder:text-zinc-400 p-2"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">Комментарий передачи</label>
+                    <label className="block text-xs font-medium text-zinc-700 mb-2">Комментарий передачи</label>
                     <InlineTextarea
                       value={getDraftValue(selectedProject, 'comments')}
                       onChange={(value) => setDraftValue(selectedProject.id, 'comments', value)}
                       onCommit={(value) => void commitProjectUpdate(selectedProject, { comments: value })}
                       disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                       placeholder="Внутренний комментарий..."
-                      rows={4}
-                      className="bg-white border border-gray-300 shadow-sm focus:border-blue-500 text-gray-700 rounded-lg placeholder:text-gray-400 p-3"
+                      rows={3}
+                      className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 text-sm text-zinc-700 rounded-lg placeholder:text-zinc-400 p-2"
                     />
                   </div>
                 </div>
               </section>
 
               <section>
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-bold text-gray-900">Материалы и ссылки</h3>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-medium text-zinc-900">Материалы и ссылки</h3>
                 </div>
-                <div className="bg-gray-50/80 rounded-2xl p-6 border border-gray-100">
+                <div className="bg-zinc-50/80 rounded-xl p-3 border border-zinc-100">
                   <InlineTextarea
                     value={getDraftValue(selectedProject, 'materials_links')}
                     onChange={(value) => setDraftValue(selectedProject.id, 'materials_links', value)}
@@ -1376,15 +1388,15 @@ export function ProjectList() {
                     disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
                     placeholder="Вставьте ссылки (каждая с новой строки)..."
                     rows={2}
-                    className="bg-white border border-gray-300 shadow-sm mb-6 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 rounded-lg"
+                    className="bg-white border border-zinc-300 shadow-sm mb-3 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 rounded-lg"
                   />
                   
                   {parseMaterials(getDraftValue(selectedProject, 'materials_links')).length > 0 && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {parseMaterials(getDraftValue(selectedProject, 'materials_links')).map((item, index) => {
                           const url = normalizeUrl(item);
                           return (
-                            <div key={`${item}-${index}`} className="group relative flex items-center p-3 bg-white rounded-xl border border-gray-200 shadow-sm hover:border-blue-400 hover:shadow-md transition-all duration-200">
+                            <div key={`${item}-${index}`} className="group relative flex items-center p-2 bg-white rounded-lg border border-zinc-200 shadow-sm hover:border-blue-400 hover:shadow-md transition-all duration-200">
                               {url ? (
                                 <a
                                   href={url}
@@ -1392,22 +1404,22 @@ export function ProjectList() {
                                   rel="noreferrer"
                                   className="flex items-center w-full min-w-0"
                                 >
-                                  <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-blue-50 text-blue-600 group-hover:bg-blue-600 group-hover:text-white transition-colors mr-3 text-xs font-bold">
+                                  <div className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-blue-50 text-blue-600 group-hover:bg-blue-600 group-hover:text-white transition-colors mr-2 text-[10px] font-medium">
                                     ↗
                                   </div>
                                   <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-medium text-gray-900 truncate group-hover:text-blue-600 transition-colors">
+                                    <p className="text-xs font-medium text-zinc-900 truncate group-hover:text-blue-600 transition-colors">
                                       {formatUrlLabel(url)}
                                     </p>
-                                    <p className="text-xs text-gray-400 truncate">Открыть ссылку</p>
+                                    <p className="text-xs text-zinc-400 truncate">Открыть ссылку</p>
                                   </div>
                                 </a>
                               ) : (
                                 <div className="flex items-center w-full min-w-0">
-                                  <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 text-gray-500 mr-3 text-xs font-bold">
+                                  <div className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-zinc-100 text-zinc-500 mr-2 text-[10px] font-medium">
                                     TXT
                                   </div>
-                                  <span className="text-sm font-medium text-gray-700 truncate">{item}</span>
+                                  <span className="text-xs font-medium text-zinc-700 truncate">{item}</span>
                                 </div>
                               )}
                             </div>
@@ -1420,25 +1432,25 @@ export function ProjectList() {
 
               {/* Collapsible Project Settings */}
               {canEdit && (
-                <section className="border-t border-gray-200 pt-6">
+                <section className="border-t border-zinc-200 pt-4">
                   <button
                     type="button"
                     onClick={() => setShowProjectSettings(!showProjectSettings)}
-                    className="flex items-center gap-3 w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
+                    className="flex items-center gap-2 w-full px-3 py-2 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition-colors"
                   >
-                    <svg className={`w-5 h-5 text-gray-600 transition-transform ${showProjectSettings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className={`w-4 h-4 text-zinc-600 transition-transform ${showProjectSettings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
-                    <span className="text-sm font-bold text-gray-700 uppercase tracking-wide">Настройки проекта</span>
-                    <span className="text-xs text-gray-400 ml-auto">{showProjectSettings ? 'Свернуть' : 'Развернуть'}</span>
+                    <span className="text-xs font-medium text-zinc-700 uppercase tracking-wide">Настройки проекта</span>
+                    <span className="text-[10px] text-zinc-400 ml-auto">{showProjectSettings ? 'Свернуть' : 'Развернуть'}</span>
                   </button>
 
                   {showProjectSettings && (
-                    <div className="mt-6 space-y-5">
+                    <div className="mt-3 space-y-3">
                       {/* Client & Status */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Клиент</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Клиент</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'client')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'client', value)}
@@ -1448,7 +1460,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Статус</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Статус</label>
                           <InlineSelect
                             value={getDraftValue(selectedProject, 'status')}
                             options={STATUS_OPTIONS}
@@ -1463,7 +1475,7 @@ export function ProjectList() {
 
                       {/* Services */}
                       <div>
-                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Услуги</label>
+                        <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Услуги</label>
                         <div className="flex flex-wrap gap-2">
                           {SERVICE_OPTIONS.map((service) => {
                             const currentServices = parseServices(getDraftValue(selectedProject, 'name'));
@@ -1481,10 +1493,10 @@ export function ProjectList() {
                                   setDraftValue(selectedProject.id, 'name', newValue);
                                   void commitProjectUpdate(selectedProject, { name: newValue });
                                 }}
-                                className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                                className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-colors disabled:opacity-50 ${
                                   isSelected
                                     ? 'bg-blue-600 text-white border-blue-600'
-                                    : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                                    : 'bg-white text-zinc-700 border-zinc-300 hover:border-blue-400 hover:bg-blue-50'
                                 }`}
                               >
                                 {service}
@@ -1497,7 +1509,7 @@ export function ProjectList() {
                       {/* Financial */}
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Сумма договора</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Сумма договора</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'budget')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'budget', value)}
@@ -1507,7 +1519,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Маржа</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Маржа</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'margin')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'margin', value)}
@@ -1517,7 +1529,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Тип проекта</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Тип проекта</label>
                           <InlineSelect
                             value={getDraftValue(selectedProject, 'project_type')}
                             options={PROJECT_TYPE_OPTIONS}
@@ -1533,7 +1545,7 @@ export function ProjectList() {
                       {/* Platform & Source */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Где ведется проект</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Где ведется проект</label>
                           <InlineSelect
                             value={getDraftValue(selectedProject, 'work_format')}
                             options={WORK_FORMAT_OPTIONS}
@@ -1545,7 +1557,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Источник лида</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Источник лида</label>
                           <InlineSelect
                             value={getDraftValue(selectedProject, 'lead_source')}
                             options={LEAD_SOURCE_OPTIONS}
@@ -1561,7 +1573,7 @@ export function ProjectList() {
                       {/* Dates */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата оплаты</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Дата оплаты</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'payment_date')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'payment_date', value)}
@@ -1571,7 +1583,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата договора</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Дата договора</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'contract_date')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'contract_date', value)}
@@ -1584,7 +1596,7 @@ export function ProjectList() {
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дата запуска</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Дата запуска</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'launch_date')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'launch_date', value)}
@@ -1594,7 +1606,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Дедлайн</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Дедлайн</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'deadline')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'deadline', value)}
@@ -1608,7 +1620,7 @@ export function ProjectList() {
                       {/* Links */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Ссылка на договор</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Ссылка на договор</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'contract_link')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'contract_link', value)}
@@ -1618,7 +1630,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Ссылка на передачу</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Ссылка на передачу</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'handoff_link')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'handoff_link', value)}
@@ -1632,7 +1644,7 @@ export function ProjectList() {
                       {/* KPI */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">KPI План</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">KPI План</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'kpi_plan')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'kpi_plan', value)}
@@ -1642,7 +1654,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">KPI Факт</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">KPI Факт</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'kpi_fact')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'kpi_fact', value)}
@@ -1656,7 +1668,7 @@ export function ProjectList() {
                       {/* Contacts */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Обязательство по контактам</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Обязательство по контактам</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'contacts_obligation')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'contacts_obligation', value)}
@@ -1666,7 +1678,7 @@ export function ProjectList() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Контактов пройдено</label>
+                          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">Контактов пройдено</label>
                           <InlineInput
                             value={getDraftValue(selectedProject, 'contacts_done')}
                             onChange={(value) => setDraftValue(selectedProject.id, 'contacts_done', value)}
@@ -1683,8 +1695,8 @@ export function ProjectList() {
             </div>
             
              {selectedProject.updated_at && (
-               <div className={isTma ? 'px-4 py-3 border-t border-gray-100' : 'px-8 py-3 rounded-b-3xl border-t border-gray-100'}>
-                 <span className="text-xs text-gray-400">
+               <div className={isTma ? 'px-4 py-3 border-t border-zinc-100' : 'px-8 py-3 rounded-b-3xl border-t border-zinc-100'}>
+                 <span className="text-xs text-zinc-400">
                     Последнее обновление: {new Date(selectedProject.updated_at).toLocaleDateString()}
                  </span>
                </div>
@@ -1711,10 +1723,10 @@ export function ProjectList() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
               </svg>
             </div>
-            <h3 className="text-lg font-semibold text-gray-900 text-center">Удалить проект?</h3>
-            <p className="mt-2 text-sm text-gray-500 text-center">
+            <h3 className="text-lg font-semibold text-zinc-900 text-center">Удалить проект?</h3>
+            <p className="mt-2 text-sm text-zinc-500 text-center">
               Вы уверены, что хотите удалить проект{' '}
-              <span className="font-medium text-gray-700">
+              <span className="font-medium text-zinc-700">
                 {projects.find((p) => p.id === deleteConfirmId)?.client || 'Без названия'}
               </span>
               ? Это действие нельзя отменить.
@@ -1732,7 +1744,7 @@ export function ProjectList() {
                   setDeleteError(null);
                 }}
                 disabled={deleting}
-                className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50"
+                className="flex-1 px-4 py-2.5 border border-zinc-300 rounded-lg text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors disabled:opacity-50"
               >
                 Отмена
               </button>
@@ -1792,7 +1804,7 @@ function InlineStepper({
         }}
         disabled={disabled}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-gray-200 bg-white pl-3 pr-8 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed"
+        className="w-full rounded-lg border border-zinc-200 bg-white pl-3 pr-8 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 outline-none transition-all disabled:bg-zinc-50 disabled:text-zinc-500 disabled:cursor-not-allowed"
       />
       <div className="absolute right-1 top-1/2 -translate-y-1/2 flex flex-col gap-0.5">
         <button
@@ -1802,7 +1814,7 @@ function InlineStepper({
             handleStep(1);
           }}
           disabled={disabled}
-          className="flex h-3.5 w-5 items-center justify-center rounded-sm bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 disabled:opacity-50 text-[10px]"
+          className="flex h-3.5 w-5 items-center justify-center rounded-sm bg-zinc-100 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 disabled:opacity-50 text-[10px]"
         >
           ▲
         </button>
@@ -1813,7 +1825,7 @@ function InlineStepper({
              handleStep(-1);
           }}
           disabled={disabled}
-          className="flex h-3.5 w-5 items-center justify-center rounded-sm bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 disabled:opacity-50 text-[10px]"
+          className="flex h-3.5 w-5 items-center justify-center rounded-sm bg-zinc-100 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 disabled:opacity-50 text-[10px]"
         >
           ▼
         </button>
@@ -1852,7 +1864,7 @@ function InlineInput({
       }}
       disabled={disabled}
       placeholder={placeholder}
-      className={`w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed ${className || ''}`}
+      className={`w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 outline-none transition-all disabled:bg-zinc-50 disabled:text-zinc-500 disabled:cursor-not-allowed ${className || ''}`}
     />
   );
 }
@@ -1882,7 +1894,7 @@ function InlineTextarea({
       onBlur={(e) => onCommit?.(e.target.value)}
       disabled={disabled}
       placeholder={placeholder}
-      className={`w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed ${className || ''}`}
+      className={`w-full resize-none rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 outline-none transition-all disabled:bg-zinc-50 disabled:text-zinc-500 disabled:cursor-not-allowed ${className || ''}`}
     />
   );
 }
@@ -1906,7 +1918,7 @@ function InlineSelect({
         value={value || ''}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className={`w-full appearance-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed ${className || ''}`}
+        className={`w-full appearance-none rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 outline-none transition-all disabled:bg-zinc-50 disabled:text-zinc-500 disabled:cursor-not-allowed ${className || ''}`}
       >
         <option value="">Не выбрано</option>
         {options.map((option) => (
@@ -1915,7 +1927,7 @@ function InlineSelect({
           </option>
         ))}
       </select>
-      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500 text-xs">
+      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-zinc-500 text-xs">
         ▼
       </div>
     </div>
@@ -1935,11 +1947,11 @@ function InfoItem({ label, value, href, className, valueClassName }: InfoItemPro
   const containerClassName = `flex flex-col gap-1 min-w-0${className ? ` ${className}` : ''}`;
   const baseValueClassName = valueClassName
     ? `text-sm ${valueClassName}`
-    : 'text-sm text-gray-900';
+    : 'text-sm text-zinc-900';
 
   return (
     <div className={containerClassName}>
-      <span className="text-[11px] uppercase tracking-wide text-gray-400">{label}</span>
+      <span className="text-[11px] uppercase tracking-wide text-zinc-400">{label}</span>
       {displayValue ? (
         href ? (
           <a
@@ -1954,7 +1966,7 @@ function InfoItem({ label, value, href, className, valueClassName }: InfoItemPro
           <span className={baseValueClassName}>{displayValue}</span>
         )
       ) : (
-        <span className="text-sm text-gray-400">—</span>
+        <span className="text-sm text-zinc-400">—</span>
       )}
     </div>
   );
@@ -1994,21 +2006,21 @@ function ProjectCard({
       ? 'inline-flex items-center rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700'
       : deadlineStatus === 'soon'
         ? 'inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700'
-        : 'inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-700';
+        : 'inline-flex items-center rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-700';
 
   return (
     <div
-      className={`bg-white rounded-2xl border shadow-sm ${
+      className={`bg-white rounded-3xl border shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.04)] transition-all ${
         deadlineStatus === 'overdue'
-          ? 'border-red-200 ring-2 ring-red-100 border-l-4 border-l-red-400'
+          ? 'border-red-100 border-l-[6px] border-l-red-400'
           : deadlineStatus === 'soon'
-            ? 'border-amber-200 border-l-4 border-l-amber-400'
-            : 'border-gray-200 border-l-4 border-l-gray-300'
-      } ${isTma ? 'p-4' : 'p-4 md:p-5'} hover:shadow-md transition-shadow`}
+            ? 'border-amber-100 border-l-[6px] border-l-amber-400'
+            : 'border-zinc-200/80 border-l-[6px] border-l-zinc-200'
+      } ${isTma ? 'p-5' : 'p-6'}`}
     >
       <div className="flex items-start justify-between gap-3">
         <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
-          <h3 className="text-base font-semibold text-gray-900 hover:text-blue-600 transition-colors truncate">
+          <h3 className="text-base font-semibold text-zinc-900 hover:text-blue-600 transition-colors truncate">
             {cardTitle}
           </h3>
           {cardServices.length > 0 && (
@@ -2026,33 +2038,33 @@ function ProjectCard({
           <div className="relative">
           <button 
             onClick={() => setOpenMenuId(isMenuOpen ? null : project.id)}
-            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 font-bold"
+            className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 font-medium"
           >
             •••
           </button>
           {isMenuOpen && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setOpenMenuId(null)} />
-              <div className="absolute right-0 top-8 z-20 w-48 bg-white rounded-xl shadow-xl border border-gray-200 py-1">
+              <div className="absolute right-0 top-8 z-20 w-48 bg-white rounded-xl shadow-xl border border-zinc-200 py-1">
                 <Link 
                   href={`/projects/${project.id}`}
-                  className="flex items-center px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  className="flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                 >
                   Открыть
                 </Link>
                 <Link 
                     href={`/projects/${project.id}?mode=edit`}
-                  className="flex items-center px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  className="flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                 >
                   Редактировать
                 </Link>
-                <div className="border-t border-gray-100 my-1" />
-                <div className="px-3 py-1 text-xs text-gray-400 uppercase">Статус</div>
+                <div className="border-t border-zinc-100 my-1" />
+                <div className="px-3 py-1 text-xs text-zinc-400 uppercase">Статус</div>
                 {Object.entries(STATUS_CONFIG).map(([key, config]) => (
                   <button
                     key={key}
                     onClick={() => onStatusChange(project.id, config.label)}
-                    className="w-full flex items-center px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    className="w-full flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                   >
                     <span className={`w-2 h-2 rounded-full mr-2 ${config.bg.replace('-50', '-500')}`} />
                     {config.label}
@@ -2060,7 +2072,7 @@ function ProjectCard({
                 ))}
                 {canDelete && onDeleteRequest && (
                   <>
-                    <div className="border-t border-gray-100 my-1" />
+                    <div className="border-t border-zinc-100 my-1" />
                     <button
                       onClick={() => onDeleteRequest(project.id)}
                       className="w-full flex items-center px-3 py-2 text-sm text-red-600 hover:bg-red-50"
@@ -2121,7 +2133,7 @@ function ProjectCard({
               label="Комментарий"
               value={commentValue}
               className="md:col-span-2 xl:col-span-4"
-              valueClassName="text-gray-700 break-words"
+              valueClassName="text-zinc-700 break-words"
             />
           </>
         )}
@@ -2148,14 +2160,14 @@ function KanbanCard({
   const deadlineStatus = getDeadlineStatus(project.deadline);
 
   return (
-    <div className={`bg-white rounded-lg border ${
-      deadlineStatus === 'overdue' ? 'border-red-200' :
-      deadlineStatus === 'soon' ? 'border-amber-200' :
-      'border-gray-200'
-    } p-3 shadow-sm hover:shadow-md transition-shadow cursor-pointer group`}>
+    <div className={`bg-white rounded-2xl border ${
+      deadlineStatus === 'overdue' ? 'border-red-100' :
+      deadlineStatus === 'soon' ? 'border-amber-100' :
+      'border-zinc-200/80'
+    } p-3.5 shadow-sm hover:shadow-[0_4px_12px_rgba(0,0,0,0.03)] transition-all cursor-pointer group`}>
       <div className="flex items-start justify-between">
         <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
-          <h4 className="text-sm font-medium text-gray-900 group-hover:text-blue-600 truncate">
+          <h4 className="text-sm font-medium text-zinc-900 group-hover:text-blue-600 truncate">
             {project.client || 'Без названия'}
           </h4>
           {project.name && (
@@ -2169,26 +2181,26 @@ function KanbanCard({
         <div className="relative">
           <button 
             onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
-            className="p-1 rounded hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity font-bold text-xs text-gray-400"
+            className="p-1 rounded hover:bg-zinc-100 opacity-0 group-hover:opacity-100 transition-opacity font-medium text-xs text-zinc-400"
           >
             •••
           </button>
           {showMenu && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setShowMenu(false)} />
-              <div className="absolute right-0 top-6 z-20 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1">
+              <div className="absolute right-0 top-6 z-20 w-36 bg-white rounded-lg shadow-lg border border-zinc-200 py-1">
                 {columns.map((col) => (
                   <button
                     key={col.key}
                     onClick={() => { onStatusChange(project.id, col.label); setShowMenu(false); }}
-                    className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                    className="w-full text-left px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-50"
                   >
                     {col.label}
                   </button>
                 ))}
                 {canDelete && onDeleteRequest && (
                   <>
-                    <div className="border-t border-gray-100 my-1" />
+                    <div className="border-t border-zinc-100 my-1" />
                     <button
                       onClick={() => { onDeleteRequest(project.id); setShowMenu(false); }}
                       className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
@@ -2203,7 +2215,7 @@ function KanbanCard({
         </div>
       </div>
       
-      <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+      <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500">
         {project.manager && (
           <span className="flex items-center">
             {project.manager.split(' ')[0]}
