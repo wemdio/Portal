@@ -67,7 +67,7 @@ const CampaignRow = memo(function CampaignRow({
   );
 });
 
-const CampaignRow = memo(function CampaignRow({
+interface ReportSummary {
   totalCampaigns: number;
   totalContacts: number;
   totalEmailsSent: number;
