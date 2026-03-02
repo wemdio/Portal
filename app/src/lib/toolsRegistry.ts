@@ -25,6 +25,7 @@ export const ALL_TOOL_IDS = [
   'ai-caller',
   'ai-caller-v2',
   'databases',
+  'database-review',
   'parsers',
   'email-sequence',
   'auto-report',
@@ -32,6 +33,9 @@ export const ALL_TOOL_IDS = [
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
+
+/** Tool IDs that are disabled by default (no visibility row = off). */
+export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['database-review'] as const;
 
 export interface ToolConfig {
   id: ToolId;
@@ -74,6 +78,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'Работа с базами',
     description: 'Табличный редактор с вкладками и копированием.',
     href: '/tools/databases',
+    accentColor: 'blue',
+  },
+  'database-review': {
+    id: 'database-review',
+    title: 'Проверка баз',
+    description: 'Проверка и согласование баз: комментарии, пометки цветом, отправка клиенту.',
+    href: '/tools/databases/review',
     accentColor: 'blue',
   },
   parsers: {

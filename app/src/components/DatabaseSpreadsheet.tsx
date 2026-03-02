@@ -787,6 +787,26 @@ export function DatabaseSpreadsheet() {
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [reviewSubmit, setReviewSubmit] = useState<{
+    isOpen: boolean;
+    comment: string;
+    projectId: string;
+    submitting: boolean;
+  }>({ isOpen: false, comment: '', projectId: '', submitting: false });
+  const [reviewSubmitToast, setReviewSubmitToast] = useState('');
+  const [projectsList, setProjectsList] = useState<Array<{ id: string; name: string }>>([]);
+  const [reviewPublish, setReviewPublish] = useState<{
+    isOpen: boolean;
+    requestId: string;
+    chatId: number | null;
+    message: string;
+    publishing: boolean;
+  }>({ isOpen: false, requestId: '', chatId: null, message: '', publishing: false });
+  const [tgChats, setTgChats] = useState<Array<{ id: number; title: string }>>([]);
+  const [myReviewRequests, setMyReviewRequests] = useState<Array<{
+    id: string; tab_id: string; tab_name: string; status: string; project_name?: string;
+  }>>([]);
+
   const flushSave = () => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -5144,6 +5164,79 @@ export function DatabaseSpreadsheet() {
 
   // ── Name Cleanup (Очистка названий) ──────────────────────────────
 
+  const handleSubmitForReview = async () => {
+    if (!activeTab) return;
+    setReviewSubmit((s) => ({ ...s, submitting: true }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) { setReviewSubmitToast('Не авторизован'); return; }
+      flushSave();
+      const res = await fetch('/api/database-review/submit', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tabId: activeTab.id,
+          tabName: activeTab.name,
+          projectId: reviewSubmit.projectId || undefined,
+          comment: reviewSubmit.comment || undefined,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setReviewSubmitToast(d.error || 'Ошибка отправки'); return; }
+      setReviewSubmitToast('Отправлено на проверку!');
+      setReviewSubmit({ isOpen: false, comment: '', projectId: '', submitting: false });
+    } catch {
+      setReviewSubmitToast('Ошибка сети');
+    } finally {
+      setReviewSubmit((s) => ({ ...s, submitting: false }));
+    }
+  };
+
+  useEffect(() => {
+    if (!reviewSubmitToast) return;
+    const t = setTimeout(() => setReviewSubmitToast(''), 3000);
+    return () => clearTimeout(t);
+  }, [reviewSubmitToast]);
+
+  const openPublishModal = async (requestId: string) => {
+    setReviewPublish({ isOpen: true, requestId, chatId: null, message: '', publishing: false });
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) return;
+    const res = await fetch('/api/ai-caller/telegram/chats', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const d = await res.json();
+    setTgChats((d.chats ?? []).map((c: { id: number; title: string }) => ({ id: c.id, title: c.title })));
+  };
+
+  const handlePublishToTelegram = async () => {
+    if (!reviewPublish.requestId || !reviewPublish.chatId) return;
+    setReviewPublish((s) => ({ ...s, publishing: true }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) { setReviewSubmitToast('Не авторизован'); return; }
+      const res = await fetch(`/api/database-review/requests/${reviewPublish.requestId}/publish`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId: reviewPublish.chatId, message: reviewPublish.message }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setReviewSubmitToast(d.error || 'Ошибка отправки'); return; }
+      setReviewSubmitToast('Отправлено клиенту в Telegram!');
+      setReviewPublish({ isOpen: false, requestId: '', chatId: null, message: '', publishing: false });
+      setMyReviewRequests((prev) =>
+        prev.map((r) => r.id === reviewPublish.requestId ? { ...r, status: 'sent_to_client' } : r),
+      );
+    } catch {
+      setReviewSubmitToast('Ошибка сети');
+    } finally {
+      setReviewPublish((s) => ({ ...s, publishing: false }));
+    }
+  };
+
   const openNameCleanupModal = () => {
     setNameCleanup({
       isOpen: true,
@@ -5488,6 +5581,34 @@ export function DatabaseSpreadsheet() {
       subscription?.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      const h = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+      const [projRes, reqRes] = await Promise.all([
+        supabase.from('projects').select('id, name').order('name'),
+        fetch('/api/database-review/requests', { headers: h }).then((r) => r.json()).catch(() => ({ requests: [] })),
+      ]);
+      if (cancelled) return;
+      setProjectsList((projRes.data ?? []) as Array<{ id: string; name: string }>);
+      setMyReviewRequests(
+        (reqRes.requests ?? []).map((r: Record<string, unknown>) => ({
+          id: r.id as string,
+          tab_id: r.tab_id as string,
+          tab_name: (r.tab_name as string) || '',
+          status: r.status as string,
+          project_name: (r.project_name as string) || '',
+        })),
+      );
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
 
   useEffect(() => {
     if (!storageKey) return;
@@ -5861,6 +5982,17 @@ export function DatabaseSpreadsheet() {
           title="Очистка невидимых символов и проблемных пробелов для экспорта в Instantly"
         >
           Whitespace Fix
+        </button>
+
+        <div className="h-4 w-px bg-gray-200 mx-0.5" />
+
+        <button
+          type="button"
+          onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
+          disabled={!activeTab || rowCount === 0}
+          className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          ✓ На проверку
         </button>
 
         {importStatus.status !== 'idle' && (
@@ -8021,6 +8153,125 @@ export function DatabaseSpreadsheet() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Review submit modal */}
+      {reviewSubmit.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setReviewSubmit((s) => ({ ...s, isOpen: false }))}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Отправить на проверку</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Вкладка <strong>{activeTab?.name}</strong> будет отправлена ревьюеру.
+            </p>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Проект (необязательно)</label>
+            <select
+              value={reviewSubmit.projectId}
+              onChange={(e) => setReviewSubmit((s) => ({ ...s, projectId: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-3 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            >
+              <option value="">— Без проекта —</option>
+              {projectsList.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Комментарий (необязательно)</label>
+            <textarea
+              value={reviewSubmit.comment}
+              onChange={(e) => setReviewSubmit((s) => ({ ...s, comment: e.target.value }))}
+              placeholder="Описание базы, особенности…"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500 mb-4"
+              rows={3}
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReviewSubmit((s) => ({ ...s, isOpen: false }))}
+                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={reviewSubmit.submitting}
+                onClick={() => void handleSubmitForReview()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg disabled:opacity-50 transition-colors"
+              >
+                {reviewSubmit.submitting ? '⟳ Отправка…' : '✓ Отправить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* "Согласовать с клиентом" button — shown for approved requests matching current tab */}
+      {(() => {
+        const approvedReq = activeTab && myReviewRequests.find(
+          (r) => r.tab_id === activeTab.id && r.status === 'review_approved',
+        );
+        if (!approvedReq) return null;
+        return (
+          <div className="fixed bottom-4 right-4 z-[9998]">
+            <button
+              type="button"
+              onClick={() => void openPublishModal(approvedReq.id)}
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg transition-all hover:shadow-xl"
+            >
+              📨 Согласовать с клиентом
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* Telegram publish modal */}
+      {reviewPublish.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setReviewPublish((s) => ({ ...s, isOpen: false }))}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Согласовать с клиентом</h3>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Чат Telegram</label>
+            <select
+              value={reviewPublish.chatId ?? ''}
+              onChange={(e) => setReviewPublish((s) => ({ ...s, chatId: Number(e.target.value) || null }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Выберите чат…</option>
+              {tgChats.map((c) => (
+                <option key={c.id} value={c.id}>{c.title}</option>
+              ))}
+            </select>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Сообщение (необязательно)</label>
+            <textarea
+              value={reviewPublish.message}
+              onChange={(e) => setReviewPublish((s) => ({ ...s, message: e.target.value }))}
+              placeholder="Дополнительное сообщение для клиента…"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+              rows={3}
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setReviewPublish((s) => ({ ...s, isOpen: false }))}
+                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={reviewPublish.publishing || !reviewPublish.chatId}
+                onClick={() => void handlePublishToTelegram()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors"
+              >
+                {reviewPublish.publishing ? '⟳ Отправка…' : '📨 Отправить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Review toast */}
+      {reviewSubmitToast && (
+        <div className="fixed top-4 right-4 z-[9999] bg-emerald-50 border border-emerald-200 text-sm px-4 py-2 rounded-lg text-emerald-700 shadow-lg">
+          {reviewSubmitToast}
         </div>
       )}
     </div>

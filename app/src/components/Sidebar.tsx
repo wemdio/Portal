@@ -42,6 +42,8 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
   const [navTabVisibility, setNavTabVisibility] = useState<Record<string, boolean>>({});
   const [hovered, setHovered] = useState(false);
+  const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
+  const [badges, setBadges] = useState<Record<string, number>>({});
   const [tmaTheme, setTmaTheme] = useState<TmaTheme>(() => {
     if (typeof window === 'undefined') return 'dark';
     const root = document.documentElement;
@@ -141,7 +143,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     <>
       <div
         className={`flex h-10 items-center px-3 border-b flex-shrink-0 safe-top ${
-          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
+          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-zinc-100'
         }`}
       >
         <span className={`text-xs font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>Portal</span>
@@ -162,7 +164,6 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
-          if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
@@ -170,20 +171,28 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             : pathname === item.href ||
               pathname.startsWith(`${item.href}/`) ||
               aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
-
           return (
             <Link
               key={item.name}
               href={item.href as Route}
               onClick={() => onMobileClose?.()}
-              className={`flex items-center rounded-md px-2 py-1 text-[11px] truncate transition-colors duration-200
+              className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
                 ${isActive
-                  ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
-                  : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
+                  ? (isTma
+                      ? 'tma-chip-active font-medium'
+                      : 'bg-gray-100 text-gray-900 font-medium')
+                  : (isTma
+                      ? 'tma-nav-item'
+                      : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
                 }
               `}
             >
-              {item.name}
+              <span className="truncate">{item.name}</span>
+              {badgeCount > 0 && (
+                <span className="ml-auto flex-shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1">
+                  {badgeCount}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -191,14 +200,14 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
 
       <div
         className={`p-1.5 border-t flex-shrink-0 safe-bottom ${
-          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-gray-100'
+          isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-zinc-100'
         }`}
       >
         <Link
           href={'/profile' as Route}
           onClick={() => onMobileClose?.()}
           className={`mb-2 flex items-center gap-2 rounded-lg px-1.5 py-1.5 transition ${
-            isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-gray-50'
+            isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-zinc-50'
           }`}
           aria-label="Открыть профиль"
         >
@@ -241,7 +250,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           ) : (
             <div
               className={`h-7 w-7 rounded-full flex items-center justify-center text-[10px] font-bold ring-1 ring-black/5 ${
-                isTma ? 'tma-chip' : 'bg-gray-100 text-gray-700'
+                isTma ? 'tma-chip' : 'bg-zinc-100 text-zinc-700'
               }`}
               aria-hidden="true"
             >
@@ -250,12 +259,12 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           )}
           <div className="min-w-0 flex-1">
             <p
-              className={`text-[11px] font-medium truncate leading-tight ${isTma ? 'tma-text' : 'text-gray-900'}`}
+              className={`text-[11px] font-medium truncate leading-tight ${isTma ? 'tma-text' : 'text-zinc-900'}`}
               title={userFullName || userEmail || ''}
             >
               {userFullName || userEmail?.split('@')[0] || 'User'}
             </p>
-            <p className={`text-[10px] mt-0.5 truncate leading-tight ${isTma ? 'tma-muted' : 'text-gray-500'}`}>
+            <p className={`text-[10px] mt-0.5 truncate leading-tight ${isTma ? 'tma-muted' : 'text-zinc-500'}`}>
               {userRole ? ROLE_LABELS[userRole] : '...'}
             </p>
           </div>
@@ -295,7 +304,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           className={`flex w-full items-center rounded-md px-1.5 py-1 text-[11px] transition-colors ${
             isTma
               ? 'tma-danger hover:bg-[color:var(--tma-surface-2)]'
-              : 'text-gray-500 hover:bg-gray-50 hover:text-red-600'
+              : 'text-zinc-500 hover:bg-zinc-50 hover:text-red-600'
           }`}
         >
           Выйти
@@ -314,17 +323,17 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             aria-hidden="true"
           />
           <div
-            className={`absolute left-0 top-0 h-full w-full max-w-[min(100vw-3rem,20rem)] border-r border-gray-200 bg-white shadow-2xl transition-transform duration-200 ${
+            className={`absolute left-0 top-0 h-full w-full max-w-[min(100vw-3rem,20rem)] border-r border-zinc-200/80 bg-white shadow-2xl transition-transform duration-200 ${
               mobileOpen ? 'translate-x-0' : '-translate-x-full'
             }`}
           >
             <div className="flex h-full flex-col">
-              <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 shrink-0">
-                <span className="text-base font-bold text-gray-900">Portal</span>
+              <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 shrink-0">
+                <span className="text-base font-bold text-zinc-900">Portal</span>
                 <button
                   type="button"
                   onClick={() => onMobileClose?.()}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100"
                   aria-label="Закрыть меню"
                 >
                   ✕
@@ -345,10 +354,10 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           onMouseLeave={() => setHovered(false)}
         >
           {!hovered && (
-            <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-gray-200/60 to-transparent cursor-pointer" />
+            <div className="absolute left-0 top-0 w-3 h-full bg-gradient-to-r from-zinc-200/60 to-transparent cursor-pointer" />
           )}
           <div
-            className={`absolute left-0 top-0 h-full w-40 bg-white border-r border-gray-200 shadow-2xl flex flex-col text-gray-900
+            className={`absolute left-0 top-0 h-full w-40 bg-white border-r border-zinc-200/80 shadow-2xl flex flex-col text-zinc-900
               transition-all duration-200 ease-out
               ${hovered ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'}`}
           >
@@ -359,7 +368,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     }
 
     return (
-      <div className="fixed left-0 top-0 z-40 flex h-screen w-40 flex-col border-r border-gray-200 bg-white text-gray-900 flex-shrink-0">
+      <div className="fixed left-0 top-0 z-40 flex h-screen w-40 flex-col border-r border-zinc-200/80 bg-white text-zinc-900 flex-shrink-0">
         {sidebarContent}
       </div>
     );
@@ -374,7 +383,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       <div
         className={`absolute left-0 top-0 h-full w-full border-r shadow-2xl transition-transform ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
-        } ${isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'bg-white border-gray-200'}`}
+        } ${isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'bg-white border-zinc-200/80'}`}
       >
         <div className="flex h-full w-full flex-col">{sidebarContent}</div>
       </div>

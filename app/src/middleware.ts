@@ -82,7 +82,8 @@ export async function middleware(request: NextRequest) {
   const isPublicPath =
     pathname === '/login' ||
     pathname.startsWith('/api/telegram/verify') ||
-    pathname.startsWith('/api/telegram/link')
+    pathname.startsWith('/api/telegram/link') ||
+    pathname.startsWith('/review/base/')
 
   // Protect routes
   if (!user && !isPublicPath) {
