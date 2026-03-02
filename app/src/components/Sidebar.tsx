@@ -164,6 +164,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
+          if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
@@ -178,12 +179,8 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
                 ${isActive
-                  ? (isTma
-                      ? 'tma-chip-active font-medium'
-                      : 'bg-gray-100 text-gray-900 font-medium')
-                  : (isTma
-                      ? 'tma-nav-item'
-                      : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
+                  ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
+                  : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
                 }
               `}
             >
