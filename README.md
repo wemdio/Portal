@@ -48,6 +48,8 @@ SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 SUPABASE_DB_URL=your_database_url
 DATABASE_URL=your_database_url
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+AI_CALLER_TG_BOT_TOKEN=your_ai_caller_tg_bot_token
+GUEST_TOKEN_SECRET=your_guest_token_secret
 S3_BUCKET=your_s3_bucket_name
 S3_REGION=us-east-1
 S3_ACCESS_KEY_ID=your_s3_access_key_id
@@ -159,6 +161,42 @@ docker-compose -f docker-compose.prod.yml up -d
 - Среднее время job снижается, success rate приемлемый.
 - Ошибки Supabase и блокировки провайдеров не растут.
 - Запас RAM стабильно >20–30%.
+
+## Проверка и согласование баз
+
+### Процесс
+
+1. **Специалист** подготавливает базу в «Работа с базами» → нажимает «На проверку».
+2. **Ревьюер** (пользователь с включённым переключателем «Проверка баз» в админке) видит заявки в `/tools/databases/review`. Может одобрить, отправить на доработку, оставить цветовые пометки и комментарии к строкам.
+3. После одобрения ревьюер отправляет базу в **Telegram-чат** проекта с inline-кнопками «Согласовано» / «Пожелания правок».
+4. **Клиент** нажимает кнопку в Telegram:
+   - «Согласовано» → база получает статус `client_approved`.
+   - «Пожелания правок» → бот присылает гостевую ссылку; клиент оставляет комментарии и цветовые метки.
+
+### Таблицы Supabase
+
+- `database_review_requests` — заявки на проверку (статусы, привязка к вкладке, Telegram, guest-токен).
+- `database_review_row_marks` — пометки строк (цвет, комментарий, тип автора).
+
+### Переменные окружения
+
+| Переменная | Описание |
+|---|---|
+| `AI_CALLER_TG_BOT_TOKEN` | Токен Telegram-бота (общий для звонилки и согласования) |
+| `GUEST_TOKEN_SECRET` | Секрет для подписи гостевых токенов (по умолчанию `SUPABASE_SERVICE_ROLE_KEY`) |
+
+### Настройка Telegram Webhook
+
+После деплоя установите webhook для обработки inline-кнопок:
+
+```bash
+curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
+  -d "url=https://<YOUR_DOMAIN>/api/ai-caller/telegram/webhook"
+```
+
+### Переключатель «Проверка баз»
+
+Инструмент `database-review` по умолчанию **выключен**. Включается администратором в `/admin/users` через переключатель видимости инструментов.
 
 ## Telegram Mini App (TMA)
 

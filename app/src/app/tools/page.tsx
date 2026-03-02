@@ -11,6 +11,7 @@ import {
   PhoneCall,
   AudioLines,
   FileText,
+  ClipboardCheck,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -22,10 +23,11 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'ai-caller': PhoneCall,
   'ai-caller-v2': AudioLines,
   databases: Database,
+  'database-review': ClipboardCheck,
   parsers: Search,
   'email-sequence': Mail,
   'auto-report': FileText,
-  rdp: FileText, // not used, RdpToolCard has its own icon
+  rdp: FileText,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {

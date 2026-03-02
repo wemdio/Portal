@@ -5,7 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { ALL_TOOL_IDS } from '@/lib/toolsRegistry';
+import { ALL_TOOL_IDS, DEFAULT_OFF_TOOL_IDS } from '@/lib/toolsRegistry';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,7 +58,8 @@ export async function GET(
   const visibility: Record<string, boolean> = {};
   for (const id of ALL_TOOL_IDS) {
     const row = rows?.find((r) => r.tool_id === id);
-    visibility[id] = row?.enabled ?? true;
+    const defaultEnabled = !(DEFAULT_OFF_TOOL_IDS as readonly string[]).includes(id);
+    visibility[id] = row?.enabled ?? defaultEnabled;
   }
 
   return NextResponse.json({ visibility });
