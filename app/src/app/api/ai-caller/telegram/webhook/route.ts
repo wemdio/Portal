@@ -122,9 +122,9 @@ async function handleChatDiscovery(update: Record<string, unknown>) {
         title: (chat.title as string) || `Chat ${chat.id}`,
         type: (chat.type as string) || 'group',
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'chat_id' }).catch(() => {});
+      }, { onConflict: 'chat_id' });
     } else if (chat.id && kicked) {
-      await supabaseAdmin.from('ai_caller_tg_chats').delete().eq('chat_id', chat.id).catch(() => {});
+      await supabaseAdmin.from('ai_caller_tg_chats').delete().eq('chat_id', chat.id);
     }
   }
 
@@ -137,7 +137,7 @@ async function handleChatDiscovery(update: Record<string, unknown>) {
         title: (chat.title as string) || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || `Chat ${chat.id}`,
         type: (chat.type as string) || 'unknown',
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'chat_id' }).catch(() => {});
+      }, { onConflict: 'chat_id' });
     }
   }
 }
