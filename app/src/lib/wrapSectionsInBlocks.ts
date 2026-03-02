@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
 
-type ContentNode = { type?: string; content?: unknown[]; attrs?: Record<string, unknown> };
+type ContentNode = JSONContent;
 
 const SECTION_COLOR_VARIANTS = [
   'blue',

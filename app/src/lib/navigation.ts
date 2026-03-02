@@ -5,6 +5,8 @@ export type NavItem = {
   billingCalendarOnly?: boolean;
   /** If set, this item is hidden when the user has it disabled in user_tool_visibility */
   navTabId?: string;
+  requiresTool?: string;
+  badgeId?: string;
 };
 
 export const navItems: NavItem[] = [
