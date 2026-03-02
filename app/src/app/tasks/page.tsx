@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
@@ -166,7 +167,6 @@ export default function TasksPage() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newProjectId, setNewProjectId] = useState('');
-  const [newSpecialist, setNewSpecialist] = useState('');
   const [newSpecialists, setNewSpecialists] = useState<string[]>([]);
   const [addingSaving, setAddingSaving] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -182,18 +182,15 @@ export default function TasksPage() {
   const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [newDescription, setNewDescription] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
-  const [editingDescriptionId, setEditingDescriptionId] = useState<string | null>(null);
   const [editingDescriptionValue, setEditingDescriptionValue] = useState('');
   const [editingImageUrlValue, setEditingImageUrlValue] = useState('');
   const [taskImageUploading, setTaskImageUploading] = useState(false);
   const [newImageLoadError, setNewImageLoadError] = useState(false);
-  const [editingImageLoadError, setEditingImageLoadError] = useState(false);
   const newTaskImageInputRef = useRef<HTMLInputElement>(null);
   const editTaskImageInputRef = useRef<HTMLInputElement>(null);
   const [taskModalTaskId, setTaskModalTaskId] = useState<string | null>(null);
   const [isModalInEditMode, setIsModalInEditMode] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState('');
-  const [editingSpecialistValue, setEditingSpecialistValue] = useState('');
   const [editingProjectId, setEditingProjectId] = useState('');
   const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
   const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
@@ -287,7 +284,6 @@ export default function TasksPage() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', taskId);
-      setEditingDescriptionId(null);
     },
     []
   );
@@ -601,7 +597,6 @@ export default function TasksPage() {
       setDbTasks((prev) => [data as Task, ...prev]);
       setNewTitle('');
       setNewProjectId('');
-      setNewSpecialist('');
       setNewSpecialists([]);
       setNewDescription('');
       setNewImageUrl('');
@@ -1212,7 +1207,7 @@ export default function TasksPage() {
               </div>
             ) : (
               <div className="flex gap-4 overflow-x-auto pb-2">
-                {selectedBoardColumns.map((col, colIdx) => (
+                {selectedBoardColumns.map((col) => (
                   <DroppableColumn
                     key={col.id}
                     columnId={col.id}
@@ -1297,7 +1292,6 @@ export default function TasksPage() {
                     </div>
                     <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
                       {(tasksByColumnForBoard.get(col.id) ?? []).map((task) => {
-                        const isEditingResult = editingResultId === task.id;
                         const columnHasStatus = col.status && ['pending', 'in_progress', 'done', 'deferred'].includes(col.status);
                         // Strikethrough only when task is physically in a "done" column
                         const displayDone = col.status === 'done';
@@ -1652,7 +1646,6 @@ export default function TasksPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4 backdrop-blur-sm"
           onClick={() => {
             setTaskModalTaskId(null);
-            setEditingDescriptionId(null);
             setEditingResultId(null);
           }}
         >
@@ -1666,7 +1659,6 @@ export default function TasksPage() {
                 type="button"
                 onClick={() => {
                   setTaskModalTaskId(null);
-                  setEditingDescriptionId(null);
                   setEditingResultId(null);
                 }}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700"
@@ -1811,7 +1803,7 @@ export default function TasksPage() {
                             <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">
                               {taskImageUploading ? 'Загрузка...' : 'Заменить'}
                             </button>
-                            <button type="button" onClick={() => { setEditingImageUrlValue(''); setEditingImageLoadError(false); }} className="rounded border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50">
+                            <button type="button" onClick={() => { setEditingImageUrlValue(''); }} className="rounded border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50">
                               Удалить
                             </button>
                           </div>

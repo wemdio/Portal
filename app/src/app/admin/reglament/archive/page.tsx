@@ -26,26 +26,26 @@ export default function AdminReglamentArchivePage() {
   const [error, setError] = useState<string | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
 
-  const loadDocuments = async () => {
-    setLoading(true);
-    setError(null);
-    const { data, error: loadError } = await supabase
-      .from('reglament_documents')
-      .select('id, title, slug, status, summary, updated_at, published_at, delete_at')
-      .not('delete_at', 'is', null)
-      .order('delete_at', { ascending: true });
-
-    if (loadError) {
-      setError(`Не удалось загрузить архив: ${loadError.message}`);
-      setLoading(false);
-      return;
-    }
-
-    setDocuments((data ?? []) as ArchiveItem[]);
-    setLoading(false);
-  };
-
   useEffect(() => {
+    const loadDocuments = async () => {
+      setLoading(true);
+      setError(null);
+      const { data, error: loadError } = await supabase
+        .from('reglament_documents')
+        .select('id, title, slug, status, summary, updated_at, published_at, delete_at')
+        .not('delete_at', 'is', null)
+        .order('delete_at', { ascending: true });
+
+      if (loadError) {
+        setError(`Не удалось загрузить архив: ${loadError.message}`);
+        setLoading(false);
+        return;
+      }
+
+      setDocuments((data ?? []) as ArchiveItem[]);
+      setLoading(false);
+    };
+
     void loadDocuments();
   }, []);
 

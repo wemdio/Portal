@@ -74,9 +74,7 @@ export default function UsersPage() {
   const [modalFlyIn, setModalFlyIn] = useState(false);
   const [modalRole, setModalRole] = useState<UserRole | null>(null);
   const [toolVisibility, setToolVisibility] = useState<Record<string, boolean>>({});
-  const [toolVisibilitySaving, setToolVisibilitySaving] = useState(false);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
-  const [saveSuccessShown, setSaveSuccessShown] = useState(false);
 
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
@@ -323,45 +321,6 @@ export default function UsersPage() {
       }
     } finally {
       setCreating(false);
-    }
-  }
-
-  async function handleUpdateRole(userId: string, newRole: UserRole) {
-    setSaving(true);
-    try {
-      await apiFetch<{ ok: true }>(`/api/admin/users/${userId}/role`, {
-        method: 'POST',
-        body: JSON.stringify({ role: newRole }),
-      });
-
-      setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
-      if (userId === actionModalUserId) setModalRole(newRole);
-      void logAudit('admin.users.role.updated', 'User role updated', {
-        targetUserId: userId,
-        role: newRole,
-      });
-    } catch (err: unknown) {
-      void logError('admin.users.role.update.failed', err, { targetUserId: userId, role: newRole });
-      setError(getErrorMessage(err) || 'Ошибка обновления роли');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSaveToolVisibility() {
-    if (!actionModalUserId) return;
-    setToolVisibilitySaving(true);
-    setError('');
-    try {
-      await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tools`, {
-        method: 'POST',
-        body: JSON.stringify({ visibility: toolVisibility }),
-      });
-    } catch (err: unknown) {
-      void logError('admin.users.tools.save.failed', err, { targetUserId: actionModalUserId });
-      setError(getErrorMessage(err) || 'Ошибка сохранения настроек инструментов');
-    } finally {
-      setToolVisibilitySaving(false);
     }
   }
 
