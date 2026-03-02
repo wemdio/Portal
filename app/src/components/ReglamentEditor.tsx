@@ -14,6 +14,7 @@ import {
 } from '@/lib/reglamentEditor';
 
 const EDITOR_BASE_WIDTH = 1400;
+const CUSTOM_FONTS_STORAGE_KEY = 'reglament-custom-fonts';
 
 type ReglamentEditorProps = {
   content: JSONContent | null | undefined;
@@ -32,6 +33,8 @@ type ToolbarButtonProps = {
   children: ReactNode;
 };
 
+type ColorSwatch = { label: string; value: string };
+
 const toolbarInputBase =
   'h-8 min-w-0 rounded-md border border-gray-200 bg-white px-2.5 text-xs text-gray-700 shadow-sm transition focus:border-gray-300 focus:outline-none focus:ring-1 focus:ring-gray-200';
 
@@ -40,7 +43,7 @@ function ToolbarButton({ onClick, active, disabled, title, children }: ToolbarBu
     <button
       type="button"
       title={title}
-      onClick={onClick}
+      onMouseDown={(e) => { e.preventDefault(); if (!disabled) onClick(); }}
       disabled={disabled}
       className={
         'inline-flex h-8 items-center justify-center rounded-md border px-2.5 text-xs font-medium transition ' +
@@ -55,6 +58,101 @@ function ToolbarButton({ onClick, active, disabled, title, children }: ToolbarBu
   );
 }
 
+function ColorPalette({
+  colors,
+  value,
+  onChange,
+  allowCustom = true,
+  columns = 5,
+}: {
+  colors: ColorSwatch[];
+  value: string;
+  onChange: (color: string) => void;
+  allowCustom?: boolean;
+  columns?: number;
+}) {
+  const customColorRef = useRef<HTMLInputElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isCustom = Boolean(value && !colors.some((c) => c.value.toLowerCase() === value.toLowerCase()));
+
+  useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
+
+  const handleCustomChange = (val: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => onChange(val), 80);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div
+        className="grid gap-[3px]"
+        style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+      >
+        {colors.map((color) => {
+          const isActive = color.value.toLowerCase() === value.toLowerCase();
+          return (
+            <button
+              key={color.value}
+              type="button"
+              title={color.label}
+              onMouseDown={(e) => { e.preventDefault(); onChange(color.value); }}
+              className="relative rounded transition-transform hover:scale-110 focus:outline-none"
+              style={{
+                aspectRatio: '1',
+                background: color.value,
+                border: isActive ? '2px solid #111827' : '1px solid rgba(0,0,0,0.12)',
+                boxShadow: isActive ? '0 0 0 1.5px white inset' : undefined,
+              }}
+              aria-label={color.label}
+              aria-pressed={isActive}
+            />
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          title="Сбросить цвет"
+          onMouseDown={(e) => { e.preventDefault(); onChange(''); }}
+          className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-[11px] text-gray-400 hover:border-gray-400 hover:text-gray-600"
+        >
+          ✕
+        </button>
+        {allowCustom && (
+          <label
+            className="flex h-[22px] cursor-pointer items-center gap-1 rounded border border-dashed border-gray-300 px-1.5 text-[10px] text-gray-500 hover:border-gray-400"
+            title="Произвольный цвет"
+          >
+            <span
+              className="block h-3.5 w-3.5 shrink-0 rounded-full border border-gray-300"
+              style={{ background: isCustom ? value : 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)' }}
+            />
+            <span>Свой</span>
+            <input
+              ref={customColorRef}
+              type="color"
+              defaultValue={isCustom ? value : '#3b82f6'}
+              onChange={(e) => handleCustomChange(e.target.value)}
+              className="sr-only"
+            />
+          </label>
+        )}
+        {value && (
+          <span
+            className="ml-auto flex h-[22px] items-center gap-1 rounded border border-gray-200 px-1.5 text-[10px] text-gray-500"
+          >
+            <span
+              className="block h-3 w-3 shrink-0 rounded-full border border-gray-300"
+              style={{ background: value }}
+            />
+            {value}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ReglamentEditor({ content, onChange, onUploadImage, disabled = false, scale = 1 }: ReglamentEditorProps) {
   const [toolbarTick, setToolbarTick] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -63,7 +161,10 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
   const [buttonForm, setButtonForm] = useState({ label: 'Кнопка', href: 'https://', style: 'primary' });
   const [showPopoverModal, setShowPopoverModal] = useState(false);
   const [popoverForm, setPopoverForm] = useState({ triggerText: 'Подсказка', popoverContent: '' });
+  const [customFonts, setCustomFonts] = useState<{ label: string; value: string }[]>([]);
+  const [fontUploadError, setFontUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fontFileInputRef = useRef<HTMLInputElement>(null);
   const lastContentRef = useRef<string>(JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT));
   const stickyToolbarRef = useRef<HTMLDivElement>(null);
   const toolbarColumnRef = useRef<HTMLDivElement>(null);
@@ -116,6 +217,92 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
     editor.setEditable(!disabled);
   }, [editor, disabled]);
 
+  // Restore custom fonts from localStorage on mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(CUSTOM_FONTS_STORAGE_KEY);
+      if (!stored) return;
+      const fonts = JSON.parse(stored) as { name: string; dataUrl: string }[];
+      Promise.all(
+        fonts.map(async ({ name, dataUrl }) => {
+          try {
+            const fontFace = new FontFace(name, `url(${dataUrl})`);
+            await fontFace.load();
+            document.fonts.add(fontFace);
+            return { label: name, value: name };
+          } catch {
+            return null;
+          }
+        })
+      ).then((results) => {
+        const loaded = results.filter(Boolean) as { label: string; value: string }[];
+        if (loaded.length) setCustomFonts(loaded);
+      });
+    } catch {
+      // ignore parse errors
+    }
+  }, []);
+
+  async function handleFontUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setFontUploadError(null);
+
+    if (file.size > 6 * 1024 * 1024) {
+      setFontUploadError('Шрифт слишком большой (максимум 6 МБ)');
+      return;
+    }
+
+    const fontName = file.name.replace(/\.[^.]+$/, '');
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const fontFace = new FontFace(fontName, arrayBuffer);
+      await fontFace.load();
+      document.fonts.add(fontFace);
+
+      // Encode as base64 dataUrl for persistence
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+      const ext = file.name.split('.').pop()?.toLowerCase() ?? 'ttf';
+      const mimeMap: Record<string, string> = { ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2' };
+      const dataUrl = `data:${mimeMap[ext] ?? 'font/ttf'};base64,${base64}`;
+
+      try {
+        const stored = localStorage.getItem(CUSTOM_FONTS_STORAGE_KEY);
+        const existing: { name: string; dataUrl: string }[] = stored ? JSON.parse(stored) : [];
+        const updated = existing.filter((f) => f.name !== fontName);
+        updated.push({ name: fontName, dataUrl });
+        localStorage.setItem(CUSTOM_FONTS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        // localStorage full — font works for this session only
+      }
+
+      setCustomFonts((prev) => {
+        const filtered = prev.filter((f) => f.value !== fontName);
+        return [...filtered, { label: fontName, value: fontName }];
+      });
+      editor?.chain().focus().setFontFamily(fontName).run();
+    } catch (err) {
+      console.error('Font load error', err);
+      setFontUploadError('Не удалось загрузить шрифт');
+    }
+  }
+
+  function removeCustomFont(fontName: string) {
+    try {
+      const stored = localStorage.getItem(CUSTOM_FONTS_STORAGE_KEY);
+      if (stored) {
+        const existing: { name: string; dataUrl: string }[] = JSON.parse(stored);
+        localStorage.setItem(CUSTOM_FONTS_STORAGE_KEY, JSON.stringify(existing.filter((f) => f.name !== fontName)));
+      }
+    } catch { /* ignore */ }
+    setCustomFonts((prev) => prev.filter((f) => f.value !== fontName));
+    if (currentFont === fontName) editor?.chain().focus().unsetFontFamily().run();
+  }
+
   const MIN_TOP = 80;
 
   useLayoutEffect(() => {
@@ -131,12 +318,7 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
       const scale = Math.min(1, Math.max(0.7, vw / 1280));
       const editorTop = editorContentBlockRef.current?.getBoundingClientRect().top ?? colRect.top;
       const minTop = Math.max(MIN_TOP, editorTop);
-      let top = minTop;
-      if (panel) {
-        const panelHeight = Math.min(panel.getBoundingClientRect().height, vh - minTop - padding);
-        const centerY = vh / 2;
-        top = Math.max(minTop, Math.min(vh - panelHeight - padding, centerY - panelHeight / 2));
-      }
+      const top = minTop;
       setPanelPosition((prev) =>
         prev.left === left && prev.top === top && prev.scale === scale ? prev : { left, top, scale }
       );
@@ -335,12 +517,13 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
             fixedToolbarRef.current = el;
             stickyToolbarRef.current = el;
           }}
-          className="z-10 min-w-[200px] origin-top-right rounded-xl border border-gray-200 bg-gray-50/50 shadow-sm max-h-[calc(100vh-3rem)] overflow-y-auto w-fit transition-[top,left,transform] duration-150 ease-out"
+          className="z-10 min-w-[200px] origin-top-right rounded-xl border border-gray-200 bg-gray-50/50 shadow-sm overflow-y-auto w-fit transition-[top,left,transform] duration-150 ease-out"
           style={{
             position: 'fixed',
             left: panelPosition.left,
             top: panelPosition.top,
             transform: `scale(${panelPosition.scale})`,
+            maxHeight: `calc((100vh - ${panelPosition.top + 20}px) / ${panelPosition.scale})`,
           }}
         >
           <div className="grid grid-cols-2 gap-x-2 gap-y-3 p-4 content-start">
@@ -437,75 +620,112 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
 
         <div className="col-span-2 h-px bg-gray-200" aria-hidden />
 
-        <div className="col-span-2 flex items-center gap-3">
-          <span className="w-20 shrink-0 text-xs font-medium text-gray-600">Шрифт</span>
-          <select
-            key={`font-${toolbarTick}`}
-            value={currentFont}
-            onChange={(event) => {
-              const value = event.target.value;
-              if (!value) {
-                editor.chain().focus().unsetFontFamily().run();
-                return;
-              }
-              editor.chain().focus().setFontFamily(value).run();
-            }}
-            className={`${toolbarInputBase} flex-1`}
-          >
-            {REGLAMENT_FONT_OPTIONS.map((option) => (
-              <option key={option.label} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+        {/* Font selector + custom font upload */}
+        <div className="col-span-2 space-y-1">
+          <span className="text-xs font-medium text-gray-600">Шрифт</span>
+          <div className="flex items-center gap-1">
+            <select
+              key={`font-${toolbarTick}`}
+              value={currentFont}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (!value) {
+                  editor.chain().focus().unsetFontFamily().run();
+                  return;
+                }
+                editor.chain().focus().setFontFamily(value).run();
+              }}
+              className={`${toolbarInputBase} min-w-0 flex-1`}
+            >
+              {REGLAMENT_FONT_OPTIONS.map((option) => (
+                <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>
+                  {option.label}
+                </option>
+              ))}
+              {customFonts.length > 0 && (
+                <optgroup label="Пользовательские">
+                  {customFonts.map((f) => (
+                    <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                      {f.label}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            <button
+              type="button"
+              title="Загрузить шрифт (.ttf, .otf, .woff, .woff2)"
+              onClick={() => fontFileInputRef.current?.click()}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-dashed border-gray-300 bg-white text-gray-500 hover:border-blue-400 hover:text-blue-600 transition"
+            >
+              +
+            </button>
+            <input
+              ref={fontFileInputRef}
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2"
+              className="hidden"
+              onChange={handleFontUpload}
+            />
+          </div>
+          {fontUploadError && (
+            <p className="text-[10px] text-red-600">{fontUploadError}</p>
+          )}
+          {customFonts.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {customFonts.map((f) => (
+                <span
+                  key={f.value}
+                  className="flex items-center gap-0.5 rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[10px] text-gray-600"
+                  style={{ fontFamily: f.value }}
+                >
+                  {f.label}
+                  <button
+                    type="button"
+                    title="Удалить шрифт"
+                    onClick={() => removeCustomFont(f.value)}
+                    className="ml-0.5 text-gray-400 hover:text-red-500"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="col-span-2 flex items-center gap-3">
-          <span className="w-20 shrink-0 text-xs font-medium text-gray-600">Цвет текста</span>
-          <select
-            key={`color-${toolbarTick}`}
+        {/* Text color palette */}
+        <div className="col-span-2 space-y-1">
+          <span className="text-xs font-medium text-gray-600">Цвет текста</span>
+          <ColorPalette
+            colors={REGLAMENT_TEXT_COLORS}
             value={currentTextColor}
-            onChange={(event) => {
-              const value = event.target.value;
+            columns={5}
+            onChange={(value) => {
               if (!value) {
                 editor.chain().focus().unsetColor().run();
-                return;
+              } else {
+                editor.chain().focus().setColor(value).run();
               }
-              editor.chain().focus().setColor(value).run();
             }}
-            className={`${toolbarInputBase} flex-1`}
-          >
-            <option value="">Сбросить</option>
-            {REGLAMENT_TEXT_COLORS.map((option) => (
-              <option key={option.label} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          />
         </div>
 
-        <div className="col-span-2 flex items-center gap-3">
-          <span className="w-20 shrink-0 text-xs font-medium text-gray-600">Выделение</span>
-          <select
-            key={`highlight-${toolbarTick}`}
+        {/* Highlight color palette */}
+        <div className="col-span-2 space-y-1">
+          <span className="text-xs font-medium text-gray-600">Выделение</span>
+          <ColorPalette
+            colors={REGLAMENT_HIGHLIGHT_COLORS}
             value={currentHighlight}
-            onChange={(event) => {
-              const value = event.target.value;
+            columns={5}
+            onChange={(value) => {
               if (!value) {
                 editor.chain().focus().unsetHighlight().run();
-                return;
+              } else {
+                editor.chain().focus().toggleHighlight({ color: value }).run();
               }
-              editor.chain().focus().toggleHighlight({ color: value }).run();
             }}
-            className={`${toolbarInputBase} flex-1`}
-          >
-            <option value="">Сбросить</option>
-            {REGLAMENT_HIGHLIGHT_COLORS.map((option) => (
-              <option key={option.label} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          />
         </div>
 
         <div className="col-span-2 flex items-center gap-3">
