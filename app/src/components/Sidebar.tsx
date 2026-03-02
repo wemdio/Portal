@@ -10,6 +10,7 @@ import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems } from '@/lib/navigation';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -39,6 +40,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   const [userFullName, setUserFullName] = useState<string | null>(null);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
   const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
+  const [navTabVisibility, setNavTabVisibility] = useState<Record<string, boolean>>({});
   const [hovered, setHovered] = useState(false);
   const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
   const [badges, setBadges] = useState<Record<string, number>>({});
@@ -74,33 +76,31 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         setUserRole(null);
         setUserFullName(null);
         setUserAvatarUrl(null);
+        setNavTabVisibility({});
         return;
       }
 
       setUserEmail(session.user.email ?? null);
-      const profile = await fetchUserRole(session.user.id);
+      const [profile, navRows] = await Promise.all([
+        fetchUserRole(session.user.id),
+        supabase
+          .from('user_tool_visibility')
+          .select('tool_id, enabled')
+          .eq('user_id', session.user.id)
+          .in('tool_id', ALL_NAV_TAB_IDS as unknown as string[])
+          .then(({ data }) => data),
+      ]);
       if (!isMounted) return;
       setUserRole(profile.role);
       setUserFullName(profile.full_name);
       setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
 
-      fetch('/api/user/tools', {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      })
-        .then((r) => r.json())
-        .then((d) => { if (isMounted && d.toolIds) setVisibleTools(d.toolIds); })
-        .catch(() => {});
-
-      fetch('/api/database-review/requests?status=submitted', {
-        headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
-      })
-        .then((r) => r.json())
-        .then((d) => {
-          if (isMounted && Array.isArray(d.requests)) {
-            setBadges((prev) => ({ ...prev, 'review-count': d.requests.length }));
-          }
-        })
-        .catch(() => {});
+      const vis: Record<string, boolean> = {};
+      for (const id of ALL_NAV_TAB_IDS) {
+        const row = navRows?.find((r) => r.tool_id === id);
+        vis[id] = row?.enabled ?? false;
+      }
+      setNavTabVisibility(vis);
     };
 
     void (async () => {
@@ -164,7 +164,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
-          if (item.requiresTool && visibleTools && !visibleTools.includes(item.requiresTool)) return null;
+          if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
@@ -172,7 +172,6 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             : pathname === item.href ||
               pathname.startsWith(`${item.href}/`) ||
               aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
-          const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
           return (
             <Link
               key={item.name}
@@ -180,21 +179,12 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
                 ${isActive
-                  ? (isTma
-                      ? 'tma-chip-active font-medium'
-                      : 'bg-zinc-100 text-zinc-900 font-semibold shadow-sm')
-                  : (isTma
-                      ? 'tma-nav-item'
-                      : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900')
+                  ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
+                  : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
                 }
               `}
             >
-              <span className="truncate">{item.name}</span>
-              {badgeCount > 0 && (
-                <span className="ml-auto flex-shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1">
-                  {badgeCount}
-                </span>
-              )}
+              {item.name}
             </Link>
           );
         })}

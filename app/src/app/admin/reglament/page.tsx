@@ -10,7 +10,7 @@ import type { ReglamentDocument } from '@/types';
 
 type ReglamentListItem = Pick<
   ReglamentDocument,
-  'id' | 'title' | 'slug' | 'status' | 'summary' | 'updated_at' | 'published_at'
+  'id' | 'title' | 'slug' | 'status' | 'summary' | 'updated_at' | 'published_at' | 'delete_at'
 >;
 
 const dateFormatter = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' });
@@ -27,8 +27,12 @@ export default function AdminReglamentPage() {
   const [documents, setDocuments] = useState<ReglamentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteConfirmDoc, setDeleteConfirmDoc] = useState<ReglamentListItem | null>(null);
 
   const filteredDocuments = useMemo(() => {
     if (!query.trim()) return documents;
@@ -41,7 +45,8 @@ export default function AdminReglamentPage() {
     setError(null);
     const { data, error: loadError } = await supabase
       .from('reglament_documents')
-      .select('id, title, slug, status, summary, updated_at, published_at')
+      .select('id, title, slug, status, summary, updated_at, published_at, delete_at')
+      .is('delete_at', null)
       .order('updated_at', { ascending: false });
 
     if (loadError) {
@@ -93,29 +98,42 @@ export default function AdminReglamentPage() {
     router.push(`/admin/reglament/${data.id}`);
   };
 
+  const handleImportFromGoogleDoc = async () => {
+    const url = importUrl.trim();
+    if (!url || importing) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setError('Необходима авторизация');
+        setImporting(false);
+        return;
+      }
+      const res = await fetch('/api/reglament/import-google-doc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ url }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json?.error ?? 'Не удалось импортировать документ');
+        setImporting(false);
+        return;
+      }
+      setImportUrl('');
+      router.push(json.redirectUrl ?? `/admin/reglament/${json.id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка при импорте');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const togglePublish = async (doc: ReglamentListItem) => {
     const nextStatus = doc.status === 'published' ? 'draft' : 'published';
     const now = new Date().toISOString();
-
-    if (nextStatus === 'published') {
-      const { data: publishedDocs, error: publishedError } = await supabase
-        .from('reglament_documents')
-        .select('id, title')
-        .eq('status', 'published')
-        .neq('id', doc.id)
-        .limit(1);
-
-      if (publishedError) {
-        setError(`Не удалось проверить опубликованные документы: ${publishedError.message}`);
-        return;
-      }
-
-      if (publishedDocs && publishedDocs.length > 0) {
-        const already = publishedDocs[0] as { id: string; title: string };
-        setError(`Уже опубликован регламент «${already.title}». Сначала снимите его с публикации.`);
-        return;
-      }
-    }
 
     const { error: updateError } = await supabase
       .from('reglament_documents')
@@ -138,6 +156,29 @@ export default function AdminReglamentPage() {
           : item
       )
     );
+  };
+
+  const handleDeleteClick = (doc: ReglamentListItem) => {
+    setDeleteConfirmDoc(doc);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteConfirmDoc) return;
+    setDeletingId(deleteConfirmDoc.id);
+    setError(null);
+    setDeleteConfirmDoc(null);
+    const deleteAt = new Date();
+    deleteAt.setDate(deleteAt.getDate() + 7);
+    const { error: updateError } = await supabase
+      .from('reglament_documents')
+      .update({ delete_at: deleteAt.toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', deleteConfirmDoc.id);
+    setDeletingId(null);
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+    setDocuments((prev) => prev.filter((item) => item.id !== deleteConfirmDoc.id));
   };
 
   return (
@@ -164,6 +205,12 @@ export default function AdminReglamentPage() {
           >
             {creating ? 'Создание...' : 'Создать документ'}
           </button>
+          <Link
+            href="/admin/reglament/archive"
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            Архив
+          </Link>
           <button
             type="button"
             onClick={loadDocuments}
@@ -182,12 +229,31 @@ export default function AdminReglamentPage() {
           onChange={(event) => setQuery(event.target.value)}
           className="w-full md:w-96 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
         />
-        <Link
-          href="/reglament"
-          className="text-sm font-medium text-blue-600 hover:text-blue-700"
-        >
-          Открыть пользовательский раздел →
-        </Link>
+      </div>
+
+      <div className="mb-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-gray-900 mb-2">Импорт из Google Docs</h3>
+        <p className="text-xs text-gray-500 mb-3">
+          Вставьте ссылку на Google Doc. Документ должен быть доступен по ссылке (Файл → Поделиться → Доступ по ссылке).
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input
+            type="url"
+            placeholder="https://docs.google.com/document/d/..."
+            value={importUrl}
+            onChange={(e) => setImportUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleImportFromGoogleDoc()}
+            className="flex-1 min-w-[200px] rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={handleImportFromGoogleDoc}
+            disabled={importing || !importUrl.trim()}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60"
+          >
+            {importing ? 'Импорт...' : 'Импортировать'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -212,8 +278,10 @@ export default function AdminReglamentPage() {
               className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-blue-200 hover:shadow-md"
             >
               <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{doc.title}</h3>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-lg font-semibold text-gray-900 truncate" title={doc.title}>
+                    {doc.title}
+                  </h3>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <span
@@ -228,22 +296,31 @@ export default function AdminReglamentPage() {
                   <button
                     type="button"
                     onClick={() => togglePublish(doc)}
-                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    className="cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
                   >
                     {doc.status === 'published' ? 'Снять с публикации' : 'Опубликовать'}
                   </button>
                   <Link
                     href={`/admin/reglament/${doc.id}`}
-                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                    className="cursor-pointer rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
                   >
                     Редактировать
                   </Link>
                   <Link
                     href={`/reglament/${doc.slug}`}
-                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    className="cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
                   >
                     Просмотр
                   </Link>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteClick(doc)}
+                    disabled={deletingId === doc.id}
+                    title="Удалить документ"
+                    className="cursor-pointer rounded-lg border border-red-200 bg-red-50/50 px-3 py-1.5 text-xs font-semibold text-red-600 shadow-sm transition-all hover:border-red-300 hover:bg-red-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {deletingId === doc.id ? 'Удаление...' : 'Удалить'}
+                  </button>
                 </div>
               </div>
               {doc.summary && <p className="mt-3 text-sm text-gray-600">{doc.summary}</p>}
@@ -255,6 +332,38 @@ export default function AdminReglamentPage() {
         </div>
       )}
 
+      {deleteConfirmDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div
+            className="absolute inset-0"
+            onClick={() => setDeleteConfirmDoc(null)}
+            aria-hidden="true"
+          />
+          <div className="relative w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Удалить документ?</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Документ «{deleteConfirmDoc.title}» будет перемещён в архив. Через неделю он будет удалён безвозвратно. Восстановить можно из архива.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmDoc(null)}
+                className="cursor-pointer rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteConfirm}
+                disabled={deletingId === deleteConfirmDoc.id}
+                className="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-red-700 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1 disabled:opacity-60 disabled:hover:shadow-sm"
+              >
+                {deletingId === deleteConfirmDoc.id ? 'Удаление...' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

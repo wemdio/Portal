@@ -1,6 +1,8 @@
+/* eslint-disable @next/next/no-img-element */
 'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { usePathname } from 'next/navigation';
 import {
   DndContext,
   DragOverlay,
@@ -21,6 +23,56 @@ import { isLead as checkIsLead } from '@/lib/roles';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
+
+type ProfileOption = {
+  id: string;
+  fullName: string;
+  nickname: string; // email local-part, used as display handle
+  email: string;
+  role: UserRole | null;
+  avatarUrl: string | null;
+  initials: string;
+  color: string;
+  /** value stored in tasks.specialist */
+  value: string;
+};
+
+const ROLE_LABELS: Partial<Record<UserRole, string>> = {
+  admin: 'Адм.',
+  lead: 'Лид',
+  manager: 'Менеджер',
+  director: 'Директор',
+  sales: 'Продажи',
+  marketer: 'Маркетолог',
+  technician: 'Техник',
+};
+
+const AVATAR_PALETTE = ['#3b82f6','#8b5cf6','#10b981','#f59e0b','#f43f5e','#06b6d4','#ec4899','#14b8a6'];
+
+function profileAvatarColor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length];
+}
+
+function buildProfileOption(raw: { id: string; full_name?: string | null; email?: string | null; role?: string | null; avatar_url?: string | null }): ProfileOption {
+  const fullName = raw.full_name?.trim() ?? '';
+  const email = raw.email?.trim() ?? '';
+  const nickname = email.split('@')[0] ?? fullName;
+  const value = fullName || nickname;
+  const initials = (fullName || nickname).slice(0, 2).toUpperCase();
+  return {
+    id: raw.id,
+    fullName,
+    nickname,
+    email,
+    role: (raw.role as UserRole) ?? null,
+    avatarUrl: raw.avatar_url ?? null,
+    initials,
+    color: profileAvatarColor(raw.id),
+    value,
+  };
+}
 
 const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; className: string }> = {
   pending: { label: 'Ожидает', className: 'bg-gray-100 text-gray-600 border-gray-200' },
@@ -87,11 +139,21 @@ function DraggableColumnHeader({ column, children }: { column: TaskBoardColumn; 
 
 export default function TasksPage() {
   const isTma = useIsTma();
+  const pathname = usePathname();
+  const isBoardPage = pathname === '/board';
   const [projects, setProjects] = useState<Project[]>([]);
   const [dbTasks, setDbTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'tasks' | 'hypotheses'>('tasks');
   const [view, setView] = useState<'specialists' | 'projects' | 'board'>('specialists');
+  // Set initial view: force board on /board page, or read ?view= param on /tasks
+  useEffect(() => {
+    if (isBoardPage) { setView('board'); return; }
+    if (typeof window === 'undefined') return;
+    const v = new URLSearchParams(window.location.search).get('view');
+    if (v === 'board' || v === 'projects' || v === 'specialists') setView(v);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBoardPage]);
   const [boards, setBoards] = useState<TaskBoard[]>([]);
   const [columns, setColumns] = useState<TaskBoardColumn[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
@@ -100,11 +162,11 @@ export default function TasksPage() {
 
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  const [allProfiles, setAllProfiles] = useState<ProfileOption[]>([]);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newProjectId, setNewProjectId] = useState('');
-  const [newSpecialist, setNewSpecialist] = useState('');
   const [newSpecialists, setNewSpecialists] = useState<string[]>([]);
   const [addingSaving, setAddingSaving] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -120,18 +182,15 @@ export default function TasksPage() {
   const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [newDescription, setNewDescription] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
-  const [editingDescriptionId, setEditingDescriptionId] = useState<string | null>(null);
   const [editingDescriptionValue, setEditingDescriptionValue] = useState('');
   const [editingImageUrlValue, setEditingImageUrlValue] = useState('');
   const [taskImageUploading, setTaskImageUploading] = useState(false);
   const [newImageLoadError, setNewImageLoadError] = useState(false);
-  const [editingImageLoadError, setEditingImageLoadError] = useState(false);
   const newTaskImageInputRef = useRef<HTMLInputElement>(null);
   const editTaskImageInputRef = useRef<HTMLInputElement>(null);
   const [taskModalTaskId, setTaskModalTaskId] = useState<string | null>(null);
   const [isModalInEditMode, setIsModalInEditMode] = useState(false);
   const [editingTitleValue, setEditingTitleValue] = useState('');
-  const [editingSpecialistValue, setEditingSpecialistValue] = useState('');
   const [editingProjectId, setEditingProjectId] = useState('');
   const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
   const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
@@ -174,11 +233,12 @@ export default function TasksPage() {
         }
       }
 
-      const [projRes, taskRes, boardsRes, columnsRes] = await Promise.all([
+      const [projRes, taskRes, boardsRes, columnsRes, profilesRes] = await Promise.all([
         supabase.from('projects').select('*'),
         supabase.from('tasks').select('*').order('created_at', { ascending: false }),
         supabase.from('task_boards').select('*').order('position', { ascending: true }),
         supabase.from('task_board_columns').select('*').order('position', { ascending: true }),
+        supabase.from('profiles').select('id, full_name, email, role, avatar_url').order('full_name', { ascending: true }),
       ]);
       if (projRes.error) throw projRes.error;
       setProjects((projRes.data ?? []) as Project[]);
@@ -186,6 +246,11 @@ export default function TasksPage() {
       const boardsData = (boardsRes.data ?? []) as TaskBoard[];
       setBoards(boardsData);
       setColumns((columnsRes.data ?? []) as TaskBoardColumn[]);
+      setAllProfiles(
+        ((profilesRes.data ?? []) as Parameters<typeof buildProfileOption>[0][])
+          .map(buildProfileOption)
+          .filter((p) => p.value)
+      );
     } catch (error) {
       void logError('tasks.fetch.failed', error);
     } finally {
@@ -219,7 +284,6 @@ export default function TasksPage() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', taskId);
-      setEditingDescriptionId(null);
     },
     []
   );
@@ -390,12 +454,12 @@ export default function TasksPage() {
   }, [currentTasks]);
 
   const specialistOptions = useMemo(() => {
+    if (allProfiles.length > 0) return allProfiles;
+    // fallback: derive names from projects when profiles not loaded yet
     const set = new Set<string>();
-    projects.forEach((p) => {
-      if (p.specialist) set.add(p.specialist);
-    });
-    return Array.from(set).sort();
-  }, [projects]);
+    projects.forEach((p) => { if (p.specialist) set.add(p.specialist); });
+    return Array.from(set).sort().map((name) => buildProfileOption({ id: name, full_name: name, email: '', role: null, avatar_url: null }));
+  }, [allProfiles, projects]);
 
   const selectedBoardColumns = useMemo(() => {
     if (!selectedBoardId) return [];
@@ -512,16 +576,17 @@ export default function TasksPage() {
     if (!newTitle.trim() || !specialistValue) return;
     setAddingSaving(true);
     try {
+      const isBoardTask = view === 'board' && selectedBoardId && selectedBoardColumns.length > 0;
       const payload: Record<string, string | null> = {
         title: newTitle.trim(),
         specialist: specialistValue,
-        project_id: newProjectId || null,
+        project_id: isBoardTask ? null : (newProjectId || null),
         status: 'pending',
         description: newDescription.trim() || null,
         image_url: newImageUrl.trim() || null,
       };
-      if (view === 'board' && selectedBoardId && selectedBoardColumns.length > 0) {
-        payload.board_id = selectedBoardId;
+      if (isBoardTask) {
+        payload.board_id = selectedBoardId!;
         const targetColId = newTaskColumnId ?? selectedBoardColumns[0].id;
         const targetCol = selectedBoardColumns.find((c) => c.id === targetColId);
         payload.column_id = targetColId;
@@ -532,7 +597,6 @@ export default function TasksPage() {
       setDbTasks((prev) => [data as Task, ...prev]);
       setNewTitle('');
       setNewProjectId('');
-      setNewSpecialist('');
       setNewSpecialists([]);
       setNewDescription('');
       setNewImageUrl('');
@@ -597,7 +661,7 @@ export default function TasksPage() {
     try {
       const payload: { title?: string; status?: string | null } = {};
       if (title.trim()) payload.title = title.trim();
-      const validStatuses = ['pending', 'in_progress', 'done', 'backlog'];
+      const validStatuses = ['pending', 'in_progress', 'done', 'backlog', 'deferred'];
       if (status && validStatuses.includes(status)) payload.status = status;
       else payload.status = null;
       const { error } = await supabase.from('task_board_columns').update(payload).eq('id', columnId);
@@ -720,11 +784,15 @@ export default function TasksPage() {
     <div className={isTma ? 'space-y-4' : 'space-y-6'}>
       <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center justify-between gap-4'}>
         <div>
-          <p className="text-sm text-gray-400">Главная / задачи</p>
-          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold text-gray-900`}>Задачи</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            {shouldFilterByUser ? 'Ваши задачи.' : 'Задачи специалистов и проектов в одном месте.'}
-          </p>
+          <p className="text-sm text-gray-400">{isBoardPage ? 'Главная / Доска' : 'Главная / задачи'}</p>
+          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold text-gray-900`}>
+            {isBoardPage ? 'Доска' : 'Задачи'}
+          </h1>
+          {!isBoardPage && (
+            <p className="mt-1 text-sm text-gray-500">
+              {shouldFilterByUser ? 'Ваши задачи.' : 'Задачи специалистов и проектов в одном месте.'}
+            </p>
+          )}
         </div>
         {userIsLead && view !== 'board' && (
           <button
@@ -769,23 +837,33 @@ export default function TasksPage() {
             </div>
             <div>
               <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
-              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
-                {specialistOptions.map((s) => (
+              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1 shadow-sm">
+                {specialistOptions.map((p) => (
                   <label
-                    key={s}
-                    className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                    key={p.id}
+                    className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 transition-colors ${newSpecialists.includes(p.value) ? 'bg-blue-50/60' : 'hover:bg-slate-100/50'}`}
                   >
                     <input
                       type="checkbox"
-                      checked={newSpecialists.includes(s)}
-                      onChange={(e) => {
-                        setNewSpecialists((prev) =>
-                          e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
-                        );
-                      }}
-                      className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
-                    />
-                    <span className="text-sm font-medium text-slate-700 truncate">{s}</span>
+                            checked={newSpecialists.includes(p.value)}
+                            onChange={(e) => {
+                              setNewSpecialists((prev) =>
+                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
+                              );
+                            }}
+                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
+                            {p.fullName && p.fullName !== p.nickname && (
+                              <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
+                            )}
+                          </span>
+                    {p.role && (
+                      <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+                        {ROLE_LABELS[p.role] ?? p.role}
+                      </span>
+                    )}
                   </label>
                 ))}
                 {specialistOptions.length === 0 && (
@@ -952,38 +1030,40 @@ export default function TasksPage() {
             </button>
           </div>
         )}
-        <div className="flex items-center rounded-full bg-gray-100 p-1">
-          <button
-            type="button"
-            onClick={() => setView('specialists')}
-            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
-              view === 'specialists' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            по специалистам
-          </button>
-          <button
-            type="button"
-            onClick={() => setView('projects')}
-            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
-              view === 'projects' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            по проектам
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setView('board');
-              setActiveTab('tasks');
-            }}
-            className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
-              view === 'board' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            доска
-          </button>
-        </div>
+        {!isBoardPage && (
+          <div className="flex items-center rounded-full bg-gray-100 p-1">
+            <button
+              type="button"
+              onClick={() => setView('specialists')}
+              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                view === 'specialists' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              по специалистам
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('projects')}
+              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                view === 'projects' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              по проектам
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setView('board');
+                setActiveTab('tasks');
+              }}
+              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                view === 'board' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              доска
+            </button>
+          </div>
+        )}
       </div>
 
       {view === 'specialists' && (
@@ -1127,7 +1207,7 @@ export default function TasksPage() {
               </div>
             ) : (
               <div className="flex gap-4 overflow-x-auto pb-2">
-                {selectedBoardColumns.map((col, colIdx) => (
+                {selectedBoardColumns.map((col) => (
                   <DroppableColumn
                     key={col.id}
                     columnId={col.id}
@@ -1153,6 +1233,7 @@ export default function TasksPage() {
                             <option value="pending">Ожидает</option>
                             <option value="in_progress">В работе</option>
                             <option value="done">Завершено</option>
+                            <option value="deferred">Отложено</option>
                           </select>
                           <div className="flex gap-1">
                             <button
@@ -1211,19 +1292,21 @@ export default function TasksPage() {
                     </div>
                     <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
                       {(tasksByColumnForBoard.get(col.id) ?? []).map((task) => {
-                        const isEditingResult = editingResultId === task.id;
-                        const columnHasStatus = col.status && ['pending', 'in_progress', 'done'].includes(col.status);
-                        const displayDone = columnHasStatus && task.status === 'done';
+                        const columnHasStatus = col.status && ['pending', 'in_progress', 'done', 'deferred'].includes(col.status);
+                        // Strikethrough only when task is physically in a "done" column
+                        const displayDone = col.status === 'done';
                         const barColor =
                           col.status === 'backlog'
                             ? 'bg-red-500'
-                            : !columnHasStatus
-                              ? 'bg-emerald-500'
-                              : task.status === 'done'
-                                ? 'bg-gray-300'
-                                : task.status === 'in_progress'
-                                  ? 'bg-blue-400'
-                                  : 'bg-amber-400/80';
+                            : col.status === 'deferred'
+                              ? 'bg-purple-400'
+                              : !columnHasStatus
+                                ? 'bg-emerald-500'
+                                : task.status === 'done'
+                                  ? 'bg-gray-300'
+                                  : task.status === 'in_progress'
+                                    ? 'bg-blue-400'
+                                    : 'bg-amber-400/80';
                         return (
                           <DraggableTaskCard key={task.id} task={task}>
                             <div
@@ -1242,8 +1325,7 @@ export default function TasksPage() {
                             >
                               <div className={`absolute left-0 top-0 h-full w-1 ${barColor}`} />
                               <div className="min-w-0 p-3 pl-4">
-                                <p className="text-xs font-medium uppercase tracking-wider text-gray-400">{task.projectName}</p>
-                                <p className="text-xs text-gray-500 mt-0.5">
+                                <p className="text-xs text-gray-500">
                                   Исполнитель: <span className="font-medium text-gray-600">{task.specialistName}</span>
                                 </p>
                                 <p className={`mt-1 break-words text-sm font-semibold leading-snug ${displayDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
@@ -1267,11 +1349,10 @@ export default function TasksPage() {
               </div>
             ) : activeTask ? (
               <div className="relative w-64 overflow-hidden rounded-xl border-2 border-blue-300 bg-white shadow-xl shadow-gray-300/40">
-                <div className={`absolute left-0 top-0 h-full w-1 ${activeTask.status === 'done' ? 'bg-gray-300' : activeTask.status === 'in_progress' ? 'bg-blue-400' : 'bg-amber-400/80'}`} />
-                <div className={`min-w-0 p-3 pl-4 ${activeTask.status === 'done' ? 'bg-gray-50/80' : ''}`}>
-                  <p className="text-xs font-medium uppercase tracking-wider text-gray-400">{activeTask.projectName}</p>
+                <div className={`absolute left-0 top-0 h-full w-1 ${activeTask.status === 'in_progress' ? 'bg-blue-400' : 'bg-amber-400/80'}`} />
+                <div className="min-w-0 p-3 pl-4">
                   <p className="text-xs text-gray-500">Исполнитель: {activeTask.specialistName}</p>
-                  <p className={`mt-1 break-words text-sm font-semibold leading-snug ${activeTask.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                  <p className="mt-1 break-words text-sm font-semibold leading-snug text-gray-900">
                     {activeTask.title}
                   </p>
                   {activeTask.description && <p className="mt-1 line-clamp-2 text-xs text-gray-600">{activeTask.description}</p>}
@@ -1355,65 +1436,62 @@ export default function TasksPage() {
                 />
               </div>
               <div>
-                <span className="mb-1 block text-[11px] font-medium text-slate-500">Проект</span>
-                <select
-                  value={newProjectId}
-                  onChange={(e) => setNewProjectId(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 py-2 pl-2.5 pr-8 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-                >
-                  <option value="">Без проекта</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
                 <span className="mb-1 block text-[11px] font-medium text-slate-500">Исполнители</span>
-                {specialistOptions.length > 8 && (
-                  <input
-                    type="text"
-                    value={assigneeFilterModal}
-                    onChange={(e) => setAssigneeFilterModal(e.target.value)}
-                    placeholder="Поиск по имени..."
-                    className="mb-1.5 w-full rounded border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 outline-none focus:border-slate-400"
-                  />
-                )}
-                <div className="max-h-52 overflow-y-auto overflow-x-hidden rounded-lg border border-slate-200/80 bg-slate-50/60 py-1 shadow-sm">
+                <input
+                  type="text"
+                  value={assigneeFilterModal}
+                  onChange={(e) => setAssigneeFilterModal(e.target.value)}
+                  placeholder="Поиск по никнейму или роли..."
+                  className="mb-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                />
+                <div className="max-h-52 overflow-y-auto overflow-x-hidden rounded-lg border border-slate-200/80 bg-white py-1 shadow-sm">
                   {(() => {
                     const q = assigneeFilterModal.trim().toLowerCase();
                     const filtered = q
-                      ? specialistOptions.filter((s) => s.toLowerCase().includes(q))
+                      ? specialistOptions.filter((p) =>
+                          p.nickname.toLowerCase().includes(q) ||
+                          p.fullName.toLowerCase().includes(q) ||
+                          (p.role && (ROLE_LABELS[p.role] ?? p.role).toLowerCase().includes(q))
+                        )
                       : specialistOptions;
                     return (
                       <>
-                        {filtered.map((s) => (
+                        {filtered.map((p) => (
                           <label
-                            key={s}
-                            className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 transition-colors ${newSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                            key={p.id}
+                            className={`flex cursor-pointer items-center gap-2 px-2.5 py-1.5 transition-colors ${newSpecialists.includes(p.value) ? 'bg-blue-50/70' : 'hover:bg-slate-50'}`}
                           >
                             <input
                               type="checkbox"
-                              checked={newSpecialists.includes(s)}
-                              onChange={(e) => {
-                                setNewSpecialists((prev) =>
-                                  e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
-                                );
-                              }}
-                              className="h-3 w-3 shrink-0 rounded border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
-                            />
-                            <span className="text-xs font-medium text-slate-700 truncate">{s}</span>
+                            checked={newSpecialists.includes(p.value)}
+                            onChange={(e) => {
+                              setNewSpecialists((prev) =>
+                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
+                              );
+                            }}
+                            className="h-3.5 w-3.5 shrink-0 rounded border-slate-300 text-blue-600 shadow-sm focus:ring-1 focus:ring-blue-400 focus:ring-offset-0"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
+                            {p.fullName && p.fullName !== p.nickname && (
+                              <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
+                            )}
+                          </span>
+                            {p.role && (
+                              <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+                                {ROLE_LABELS[p.role] ?? p.role}
+                              </span>
+                            )}
                           </label>
                         ))}
                         {filtered.length === 0 && (
-                          <p className="px-2 py-1.5 text-[11px] text-slate-500">
+                          <p className="px-2.5 py-2 text-[11px] text-slate-400">
                             {specialistOptions.length === 0 ? 'Нет специалистов' : 'Никого не найдено'}
                           </p>
                         )}
-                        {specialistOptions.length > 0 && filtered.length > 0 && (assigneeFilterModal.trim() || specialistOptions.length > 12) && (
-                          <p className="sticky bottom-0 border-t border-slate-200/80 bg-slate-100/90 px-2 py-1 text-[10px] text-slate-500">
-                            {assigneeFilterModal.trim()
-                              ? `Показано ${filtered.length} из ${specialistOptions.length}`
-                              : `Всего ${specialistOptions.length}`}
+                        {filtered.length > 0 && (
+                          <p className="sticky bottom-0 border-t border-slate-100 bg-white/90 px-2.5 py-1 text-[10px] text-slate-400">
+                            {q ? `Показано ${filtered.length} из ${specialistOptions.length}` : `Всего ${specialistOptions.length}`}
                           </p>
                         )}
                       </>
@@ -1568,7 +1646,6 @@ export default function TasksPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4 backdrop-blur-sm"
           onClick={() => {
             setTaskModalTaskId(null);
-            setEditingDescriptionId(null);
             setEditingResultId(null);
           }}
         >
@@ -1582,7 +1659,6 @@ export default function TasksPage() {
                 type="button"
                 onClick={() => {
                   setTaskModalTaskId(null);
-                  setEditingDescriptionId(null);
                   setEditingResultId(null);
                 }}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700"
@@ -1592,50 +1668,52 @@ export default function TasksPage() {
               </button>
             </div>
             <div className="p-4 space-y-4">
-              <div>
-                {isModalInEditMode ? (
-                  <div>
-                    <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
-                    <select
-                      value={editingProjectId}
-                      onChange={(e) => setEditingProjectId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-                    >
-                      <option value="">Без проекта</option>
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <>
-                    <p className="text-xs font-medium text-slate-500">Проект</p>
-                    <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.projectName}</p>
-                  </>
-                )}
-              </div>
+              {!modalTask.board_id && (
+                <div>
+                  {isModalInEditMode ? (
+                    <div>
+                      <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
+                      <select
+                        value={editingProjectId}
+                        onChange={(e) => setEditingProjectId(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                      >
+                        <option value="">Без проекта</option>
+                        {projects.map((p) => (
+                          <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs font-medium text-slate-500">Проект</p>
+                      <p className="mt-0.5 text-sm font-medium text-slate-700">{modalTask.projectName}</p>
+                    </>
+                  )}
+                </div>
+              )}
 
               <div>
                 {isModalInEditMode ? (
                   <>
                     <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
                     <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1.5 shadow-sm">
-                      {specialistOptions.map((s) => (
+                      {specialistOptions.map((p) => (
                         <label
-                          key={s}
-                          className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition-colors ${editingSpecialists.includes(s) ? 'bg-slate-100/80' : 'hover:bg-slate-100/50'}`}
+                          key={p.id}
+                          className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 transition-colors ${editingSpecialists.includes(p.value) ? 'bg-blue-50/60' : 'hover:bg-slate-100/50'}`}
                         >
                           <input
                             type="checkbox"
-                            checked={editingSpecialists.includes(s)}
+                            checked={editingSpecialists.includes(p.value)}
                             onChange={(e) => {
                               setEditingSpecialists((prev) =>
-                                e.target.checked ? [...prev, s] : prev.filter((x) => x !== s)
+                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
                               );
                             }}
-                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-slate-700 shadow-sm focus:ring-2 focus:ring-slate-400 focus:ring-offset-0"
+                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
                           />
-                          <span className="text-sm font-medium text-slate-700">{s}</span>
+                          <span className="min-w-0 flex-1 text-sm font-medium text-slate-700 truncate">@{p.nickname}</span>
                         </label>
                       ))}
                       {specialistOptions.length === 0 && (
@@ -1725,7 +1803,7 @@ export default function TasksPage() {
                             <button type="button" disabled={taskImageUploading} onClick={() => editTaskImageInputRef.current?.click()} className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">
                               {taskImageUploading ? 'Загрузка...' : 'Заменить'}
                             </button>
-                            <button type="button" onClick={() => { setEditingImageUrlValue(''); setEditingImageLoadError(false); }} className="rounded border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50">
+                            <button type="button" onClick={() => { setEditingImageUrlValue(''); }} className="rounded border px-2 py-1 text-xs text-gray-500 hover:bg-gray-50">
                               Удалить
                             </button>
                           </div>

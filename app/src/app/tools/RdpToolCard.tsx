@@ -54,9 +54,9 @@ export function RdpToolCard() {
   );
 
   const baseClassPc =
-    'group rounded-2xl border border-gray-200 bg-white p-6 transition hover:shadow-md hover:border-gray-300 w-full min-w-0 h-full flex flex-col';
+    'group rounded-2xl border border-gray-200 bg-white p-10 transition hover:shadow-md hover:border-gray-300 w-full min-w-0 h-full flex flex-col';
   const baseClassMobile =
-    'rounded-2xl border-2 border-gray-200 bg-gray-50 p-6 w-full h-full min-h-0 text-left cursor-pointer transition flex flex-col';
+    'rounded-2xl border-2 border-gray-200 bg-gray-50 p-10 w-full h-full min-h-0 text-left cursor-pointer transition flex flex-col';
 
   if (isPcViewport === null) {
     return (
@@ -99,7 +99,7 @@ export function RdpToolCard() {
             className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden border border-amber-100"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="bg-amber-50 px-6 pt-6 pb-4 flex flex-col items-center">
+            <div className="bg-amber-50 px-8 pt-8 pb-5 flex flex-col items-center">
               <div className="h-12 w-12 rounded-full bg-amber-100 flex items-center justify-center mb-3">
                 <AlertCircle className="h-6 w-6 text-amber-600" />
               </div>
@@ -107,7 +107,7 @@ export function RdpToolCard() {
                 Только с ПК/ноутбука
               </p>
             </div>
-            <div className="px-6 pb-6 pt-2">
+            <div className="px-8 pb-8 pt-3">
               <p className="text-gray-600 text-sm text-center">
                 Воспользуйтесь данным функционалом через ваш ПК или ноутбук.
               </p>
