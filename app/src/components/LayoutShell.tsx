@@ -53,7 +53,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     );
   const mainOverflowClass = !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
   const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-8';
-  const desktopToolsPadding = shouldUseCompactDensity ? 'px-2 py-2 md:p-3' : 'px-4 py-6 md:p-8';
+  const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
   const contentPadding = isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);

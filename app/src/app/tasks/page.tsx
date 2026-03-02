@@ -850,27 +850,20 @@ export default function TasksPage() {
                   >
                     <input
                       type="checkbox"
-                      checked={newSpecialists.includes(p.value)}
-                      onChange={(e) => {
-                        setNewSpecialists((prev) =>
-                          e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
-                        );
-                      }}
-                      className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
-                    />
-                    {p.avatarUrl ? (
-                      <img src={p.avatarUrl} alt={p.nickname} className="h-7 w-7 shrink-0 rounded-full object-cover" />
-                    ) : (
-                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white" style={{ background: p.color }}>
-                        {p.initials}
-                      </span>
-                    )}
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
-                      {p.fullName && p.fullName !== p.nickname && (
-                        <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
-                      )}
-                    </span>
+                            checked={newSpecialists.includes(p.value)}
+                            onChange={(e) => {
+                              setNewSpecialists((prev) =>
+                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
+                              );
+                            }}
+                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
+                            {p.fullName && p.fullName !== p.nickname && (
+                              <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
+                            )}
+                          </span>
                     {p.role && (
                       <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
                         {ROLE_LABELS[p.role] ?? p.role}
@@ -1476,27 +1469,20 @@ export default function TasksPage() {
                           >
                             <input
                               type="checkbox"
-                              checked={newSpecialists.includes(p.value)}
-                              onChange={(e) => {
-                                setNewSpecialists((prev) =>
-                                  e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
-                                );
-                              }}
-                              className="h-3.5 w-3.5 shrink-0 rounded border-slate-300 text-blue-600 shadow-sm focus:ring-1 focus:ring-blue-400 focus:ring-offset-0"
-                            />
-                            {p.avatarUrl ? (
-                              <img src={p.avatarUrl} alt={p.nickname} className="h-7 w-7 shrink-0 rounded-full object-cover" />
-                            ) : (
-                              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white" style={{ background: p.color }}>
-                                {p.initials}
-                              </span>
+                            checked={newSpecialists.includes(p.value)}
+                            onChange={(e) => {
+                              setNewSpecialists((prev) =>
+                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
+                              );
+                            }}
+                            className="h-3.5 w-3.5 shrink-0 rounded border-slate-300 text-blue-600 shadow-sm focus:ring-1 focus:ring-blue-400 focus:ring-offset-0"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
+                            {p.fullName && p.fullName !== p.nickname && (
+                              <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
                             )}
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
-                              {p.fullName && p.fullName !== p.nickname && (
-                                <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
-                              )}
-                            </span>
+                          </span>
                             {p.role && (
                               <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
                                 {ROLE_LABELS[p.role] ?? p.role}
@@ -1735,13 +1721,6 @@ export default function TasksPage() {
                             }}
                             className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
                           />
-                          {p.avatarUrl ? (
-                            <img src={p.avatarUrl} alt={p.nickname} className="h-6 w-6 shrink-0 rounded-full object-cover" />
-                          ) : (
-                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white" style={{ background: p.color }}>
-                              {p.initials}
-                            </span>
-                          )}
                           <span className="min-w-0 flex-1 text-sm font-medium text-slate-700 truncate">@{p.nickname}</span>
                         </label>
                       ))}

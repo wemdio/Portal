@@ -184,12 +184,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
                 }
               `}
             >
-              <span className="truncate">{item.name}</span>
-              {badgeCount > 0 && (
-                <span className="ml-auto flex-shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1">
-                  {badgeCount}
-                </span>
-              )}
+              {item.name}
             </Link>
           );
         })}
