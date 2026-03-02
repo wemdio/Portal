@@ -153,6 +153,7 @@ export function ProjectList() {
   const [editingContactsValue, setEditingContactsValue] = useState('');
   const [projectTasks, setProjectTasks] = useState<Record<string, Task[]>>({});
   const [taskPopoverId, setTaskPopoverId] = useState<string | null>(null);
+  const [taskPopoverPos, setTaskPopoverPos] = useState<{ top: number; right: number; openUp: boolean } | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
 
   useEffect(() => {
@@ -163,6 +164,13 @@ export function ProjectList() {
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!taskPopoverId) return;
+    const close = () => { setTaskPopoverId(null); setTaskPopoverPos(null); };
+    window.addEventListener('scroll', close, true);
+    return () => window.removeEventListener('scroll', close, true);
+  }, [taskPopoverId]);
 
   async function checkPermissions() {
     const role = await getCurrentUserRole();
@@ -1119,7 +1127,21 @@ export function ProjectList() {
                             <>
                               <div
                                 className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-zinc-100'}`}
-                                onClick={() => setTaskPopoverId(isOpen ? null : project.id)}
+                                onClick={(e) => {
+                                  if (isOpen) {
+                                    setTaskPopoverId(null);
+                                    setTaskPopoverPos(null);
+                                  } else {
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    const openUp = rect.bottom + 300 > window.innerHeight;
+                                    setTaskPopoverId(project.id);
+                                    setTaskPopoverPos({
+                                      top: openUp ? rect.top : rect.bottom,
+                                      right: window.innerWidth - rect.right,
+                                      openUp,
+                                    });
+                                  }
+                                }}
                               >
                                 {latestTask ? (
                                   <div>
@@ -1132,11 +1154,17 @@ export function ProjectList() {
                                   <span className="text-zinc-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
                                 )}
                               </div>
-                              {isOpen && (
-                                <div className="absolute right-0 top-full mt-1 z-30 w-72 bg-white rounded-xl border border-zinc-200 shadow-xl p-3 space-y-2">
+                              {isOpen && taskPopoverPos && (
+                                <div
+                                  className="fixed z-50 w-72 bg-white rounded-xl border border-zinc-200 shadow-xl p-3 space-y-2"
+                                  style={taskPopoverPos.openUp
+                                    ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
+                                    : { top: `${taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
+                                  }
+                                >
                                   <div className="flex items-center justify-between mb-1">
                                     <span className="text-xs font-medium text-zinc-700">Задачи</span>
-                                    <button type="button" onClick={() => setTaskPopoverId(null)} className="text-zinc-400 hover:text-zinc-600 text-sm">✕</button>
+                                    <button type="button" onClick={() => { setTaskPopoverId(null); setTaskPopoverPos(null); }} className="text-zinc-400 hover:text-zinc-600 text-sm">✕</button>
                                   </div>
                                   <div className="max-h-48 overflow-y-auto space-y-1.5">
                                     {tasks.map((t) => (

@@ -6401,7 +6401,7 @@ export function DatabaseSpreadsheet() {
                               width: getColumnWidth(colIndex),
                               minWidth: getColumnWidth(colIndex),
                             }}
-                            className={`border-b border-r border-gray-100 p-0 align-top ${cellBackground}`}
+                            className={`border-b border-r border-gray-200 p-0 align-top ${cellBackground}`}
                           >
                             {isActive ? (
                               <textarea
@@ -6450,7 +6450,7 @@ export function DatabaseSpreadsheet() {
                           </td>
                         );
                       })}
-                      <td className="border-b border-gray-100 bg-gray-50" />
+                      <td className="border-b border-gray-200 bg-gray-50" />
                     </tr>
                   );
                 })}
@@ -6474,9 +6474,9 @@ export function DatabaseSpreadsheet() {
                       </div>
                     </th>
                     {Array.from({ length: colCount }, (_, colIndex) => (
-                      <td key={`add-row-${colIndex}`} className="border-b border-r border-gray-100 bg-gray-50" />
+                      <td key={`add-row-${colIndex}`} className="border-b border-r border-gray-200 bg-gray-50" />
                     ))}
-                    <td className="border-b border-gray-100 bg-gray-50" />
+                    <td className="border-b border-gray-200 bg-gray-50" />
                   </tr>
                 )}
                 {rowCount === 0 && (
