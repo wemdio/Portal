@@ -36,7 +36,7 @@ interface ProjectOption {
   client: string;
 }
 
-type ModalMode = 'create' | 'edit' | 'decision';
+type ModalMode = 'create' | 'edit' | 'decision' | 'pay_today';
 
 /* ═══════════════════════════════════════════
    CONSTANTS
@@ -136,6 +136,16 @@ function daysBetween(dateStr1: string, dateStr2: string): number {
 function todayStr(): string {
   const d = new Date();
   return toDateStr(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function getNextMonthDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  const day = d.getDate();
+  const nextMonth = d.getMonth() + 1;
+  const nextYear = nextMonth > 11 ? d.getFullYear() + 1 : d.getFullYear();
+  const normalizedMonth = nextMonth % 12;
+  const daysInNext = new Date(nextYear, normalizedMonth + 1, 0).getDate();
+  return toDateStr(nextYear, normalizedMonth, Math.min(day, daysInNext));
 }
 
 /* ═══════════════════════════════════════════
@@ -337,6 +347,23 @@ export default function BillingCalendarPage() {
     setModalOpen(true);
   }
 
+  function openPayTodayModal() {
+    setModalMode('pay_today');
+    setEditingItem(null);
+    setForm({
+      project_id: '',
+      project_name: '',
+      email_provider: '',
+      email_count: 1,
+      next_billing_date: todayStr(),
+      billing_amount: 0,
+      currency: 'USD',
+      billing_cycle: 'monthly',
+      notes: '',
+    });
+    setModalOpen(true);
+  }
+
   function openEditModal(item: EmailSubscription) {
     setModalMode('edit');
     setEditingItem(item);
@@ -384,6 +411,26 @@ export default function BillingCalendarPage() {
         await supabase
           .from('email_subscriptions')
           .insert({ ...payload, created_by: userId, status: 'active' });
+      } else if (modalMode === 'pay_today') {
+        await supabase
+          .from('email_subscriptions')
+          .insert({
+            ...payload,
+            next_billing_date: todayStr(),
+            created_by: userId,
+            status: 'keep',
+            lead_decision: 'keep',
+            lead_decision_by: userId,
+            lead_decision_at: new Date().toISOString(),
+          });
+        await supabase
+          .from('email_subscriptions')
+          .insert({
+            ...payload,
+            next_billing_date: getNextMonthDate(todayStr()),
+            created_by: userId,
+            status: 'active',
+          });
       } else if (modalMode === 'edit' && editingItem) {
         await supabase
           .from('email_subscriptions')
@@ -412,6 +459,24 @@ export default function BillingCalendarPage() {
           status: decisionForm.decision,
         })
         .eq('id', editingItem.id);
+
+      if (decisionForm.decision === 'keep') {
+        await supabase
+          .from('email_subscriptions')
+          .insert({
+            project_id: editingItem.project_id,
+            project_name: editingItem.project_name,
+            email_provider: editingItem.email_provider,
+            email_count: editingItem.email_count,
+            next_billing_date: getNextMonthDate(editingItem.next_billing_date),
+            billing_amount: editingItem.billing_amount,
+            currency: editingItem.currency,
+            billing_cycle: editingItem.billing_cycle,
+            notes: editingItem.notes,
+            created_by: editingItem.created_by,
+            status: 'active',
+          });
+      }
 
       setModalOpen(false);
       fetchSubscriptions();
@@ -544,12 +609,20 @@ export default function BillingCalendarPage() {
           </div>
 
           {isTechnician(userRole) && (
-            <button
-              onClick={() => openCreateModal()}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
-            >
-              + Добавить
-            </button>
+            <>
+              <button
+                onClick={openPayTodayModal}
+                className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm"
+              >
+                Оплата сегодня
+              </button>
+              <button
+                onClick={() => openCreateModal()}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+              >
+                + Добавить
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -631,7 +704,7 @@ export default function BillingCalendarPage() {
           <div className="grid grid-cols-7">
             {/* Empty cells before first day */}
             {Array.from({ length: firstDay }).map((_, i) => (
-              <div key={`empty-${i}`} className="min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
+              <div key={`empty-${i}`} className="min-h-[56px] sm:min-h-[80px] border-b border-r border-gray-200 bg-gray-50/30" />
             ))}
 
             {/* Day cells */}
@@ -645,7 +718,7 @@ export default function BillingCalendarPage() {
               return (
                 <div
                   key={day}
-                  className={`min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 p-1 sm:p-1.5 transition-colors
+                  className={`min-h-[56px] sm:min-h-[80px] border-b border-r border-gray-200 p-1 sm:p-1.5 transition-colors
                     ${isToday ? 'bg-blue-50/40' : isWeekend ? 'bg-gray-50/40' : 'hover:bg-gray-50/50'}
                     ${isTechnician(userRole) ? 'cursor-pointer' : ''}
                   `}
@@ -702,7 +775,7 @@ export default function BillingCalendarPage() {
 
             {/* Empty cells after last day */}
             {Array.from({ length: (7 - ((firstDay + daysInMonth) % 7)) % 7 }).map((_, i) => (
-              <div key={`trail-${i}`} className="min-h-[84px] sm:min-h-[120px] border-b border-r border-gray-50 bg-gray-50/30" />
+              <div key={`trail-${i}`} className="min-h-[56px] sm:min-h-[80px] border-b border-r border-gray-200 bg-gray-50/30" />
             ))}
           </div>
         </div>
@@ -843,7 +916,7 @@ export default function BillingCalendarPage() {
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <h3 className="text-lg font-bold text-gray-900">
-                {modalMode === 'create' ? 'Новая подписка' : modalMode === 'edit' ? 'Редактирование' : 'Решение по подписке'}
+                {modalMode === 'create' ? 'Новая подписка' : modalMode === 'pay_today' ? 'Оплата сегодня' : modalMode === 'edit' ? 'Редактирование' : 'Решение по подписке'}
               </h3>
               <button
                 onClick={() => setModalOpen(false)}
@@ -857,8 +930,16 @@ export default function BillingCalendarPage() {
 
             {/* Modal Body */}
             <div className="px-6 py-5 space-y-4">
-              {(modalMode === 'create' || modalMode === 'edit') && (
+              {(modalMode === 'create' || modalMode === 'edit' || modalMode === 'pay_today') && (
                 <>
+                  {modalMode === 'pay_today' && (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                      <p className="text-sm text-emerald-700">
+                        Оплата будет добавлена на сегодня без согласования. Следующее списание создастся автоматически через месяц.
+                      </p>
+                    </div>
+                  )}
+
                   {/* Project Select */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Проект</label>
@@ -916,12 +997,15 @@ export default function BillingCalendarPage() {
 
                   {/* Billing Date */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата следующего списания</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {modalMode === 'pay_today' ? 'Дата оплаты (сегодня)' : 'Дата следующего списания'}
+                    </label>
                     <input
                       type="date"
                       value={form.next_billing_date}
                       onChange={(e) => setForm({ ...form, next_billing_date: e.target.value })}
-                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                      disabled={modalMode === 'pay_today'}
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:opacity-60 disabled:cursor-not-allowed disabled:bg-gray-50"
                     />
                   </div>
 
@@ -1071,13 +1155,15 @@ export default function BillingCalendarPage() {
               >
                 Отмена
               </button>
-              {(modalMode === 'create' || modalMode === 'edit') && (
+              {(modalMode === 'create' || modalMode === 'edit' || modalMode === 'pay_today') && (
                 <button
                   onClick={handleSave}
                   disabled={!form.project_name.trim() || !form.next_billing_date}
-                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    modalMode === 'pay_today' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
                 >
-                  {modalMode === 'create' ? 'Создать' : 'Сохранить'}
+                  {modalMode === 'create' ? 'Создать' : modalMode === 'pay_today' ? 'Оплатить' : 'Сохранить'}
                 </button>
               )}
               {modalMode === 'decision' && (
