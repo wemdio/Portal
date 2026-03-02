@@ -1,6 +1,25 @@
 /**
  * Реестр инструментов портала. Используется на странице /tools и в настройках видимости для пользователей.
  */
+
+/** Идентификаторы вкладок боковой панели, управляемых через admin */
+export const ALL_NAV_TAB_IDS = ['nav-tasks-board'] as const;
+export type NavTabId = (typeof ALL_NAV_TAB_IDS)[number];
+
+export interface NavTabConfig {
+  id: NavTabId;
+  title: string;
+  description: string;
+}
+
+export const NAV_TABS_CONFIG: Record<NavTabId, NavTabConfig> = {
+  'nav-tasks-board': {
+    id: 'nav-tasks-board',
+    title: 'Доска',
+    description: 'Отдельный пункт в боковой панели для открытия доски задач',
+  },
+};
+
 export const ALL_TOOL_IDS = [
   'done-for-you',
   'ai-caller',

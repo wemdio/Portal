@@ -9,7 +9,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { Check, ChevronDown, ChevronUp, MoreVertical } from 'lucide-react';
-import { ALL_TOOL_IDS, TOOLS_CONFIG } from '@/lib/toolsRegistry';
+import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -815,35 +815,68 @@ export default function UsersPage() {
                     </button>
                   )}
                 </div>
-                <div>
-                  <h4 className="text-sm font-medium text-gray-900 mb-3">Отображение инструментов</h4>
-                  <ul className="space-y-2">
-                    {ALL_TOOL_IDS.map((toolId) => (
-                      <li key={toolId} className="flex items-center justify-between gap-4">
-                        <span className="text-sm text-gray-700">{TOOLS_CONFIG[toolId].title}</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={toolVisibility[toolId] !== false}
-                          onClick={() =>
-                            setToolVisibility((prev) => ({
-                              ...prev,
-                              [toolId]: prev[toolId] === false,
-                            }))
-                          }
-                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-                            toolVisibility[toolId] !== false ? 'bg-blue-600' : 'bg-gray-200'
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition ${
-                              toolVisibility[toolId] !== false ? 'translate-x-5' : 'translate-x-1'
+                <div className="space-y-5">
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-900 mb-3">Отображение инструментов</h4>
+                    <ul className="space-y-2">
+                      {ALL_TOOL_IDS.map((toolId) => (
+                        <li key={toolId} className="flex items-center justify-between gap-4">
+                          <span className="text-sm text-gray-700">{TOOLS_CONFIG[toolId].title}</span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={toolVisibility[toolId] !== false}
+                            onClick={() =>
+                              setToolVisibility((prev) => ({
+                                ...prev,
+                                [toolId]: prev[toolId] === false,
+                              }))
+                            }
+                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                              toolVisibility[toolId] !== false ? 'bg-blue-600' : 'bg-gray-200'
                             }`}
-                          />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                          >
+                            <span
+                              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition ${
+                                toolVisibility[toolId] !== false ? 'translate-x-5' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-900 mb-1">Отображение вкладок в боковой панели</h4>
+                    <p className="text-xs text-gray-500 mb-3">Управляет дополнительными пунктами навигации для данного пользователя</p>
+                    <ul className="space-y-2">
+                      {ALL_NAV_TAB_IDS.map((tabId) => (
+                        <li key={tabId} className="flex items-center justify-between gap-4">
+                          <span className="text-sm text-gray-700">{NAV_TABS_CONFIG[tabId].title}</span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={toolVisibility[tabId] !== false}
+                            onClick={() =>
+                              setToolVisibility((prev) => ({
+                                ...prev,
+                                [tabId]: prev[tabId] === false,
+                              }))
+                            }
+                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                              toolVisibility[tabId] !== false ? 'bg-blue-600' : 'bg-gray-200'
+                            }`}
+                          >
+                            <span
+                              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition ${
+                                toolVisibility[tabId] !== false ? 'translate-x-5' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
               </div>
               <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end">

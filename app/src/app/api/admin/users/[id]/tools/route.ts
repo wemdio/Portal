@@ -5,7 +5,9 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
-import { ALL_TOOL_IDS } from '@/lib/toolsRegistry';
+import { ALL_TOOL_IDS, ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
+
+const ALL_VISIBILITY_IDS = [...ALL_TOOL_IDS, ...ALL_NAV_TAB_IDS] as const;
 
 export const dynamic = 'force-dynamic';
 
@@ -55,10 +57,12 @@ export async function GET(
     .select('tool_id, enabled')
     .eq('user_id', targetUserId);
 
+  const navTabIdSet = new Set<string>(ALL_NAV_TAB_IDS);
   const visibility: Record<string, boolean> = {};
-  for (const id of ALL_TOOL_IDS) {
+  for (const id of ALL_VISIBILITY_IDS) {
     const row = rows?.find((r) => r.tool_id === id);
-    visibility[id] = row?.enabled ?? true;
+    // Nav tab items default to OFF; tool items default to ON
+    visibility[id] = row?.enabled ?? (navTabIdSet.has(id) ? false : true);
   }
 
   return NextResponse.json({ visibility });
@@ -81,7 +85,7 @@ export async function POST(
     return jsonError('Missing visibility object', 400);
   }
 
-  const toWrite = ALL_TOOL_IDS.map((toolId) => ({
+  const toWrite = ALL_VISIBILITY_IDS.map((toolId) => ({
     user_id: targetUserId,
     tool_id: toolId,
     enabled: visibility[toolId] !== false,

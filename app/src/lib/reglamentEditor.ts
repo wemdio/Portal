@@ -12,6 +12,10 @@ import BulletList from '@tiptap/extension-bullet-list';
 import OrderedList from '@tiptap/extension-ordered-list';
 import ListItem from '@tiptap/extension-list-item';
 import Blockquote from '@tiptap/extension-blockquote';
+import { Table } from '@tiptap/extension-table/table';
+import { TableRow } from '@tiptap/extension-table/row';
+import { TableCell } from '@tiptap/extension-table/cell';
+import { TableHeader } from '@tiptap/extension-table/header';
 import type { JSONContent } from '@tiptap/core';
 import { Callout } from '@/components/ReglamentCallout';
 import { SectionBlock } from '@/components/ReglamentSectionBlock';
@@ -131,7 +135,7 @@ export const REGLAMENT_EXTENSIONS = [
     blockquote: false,
   }),
   ParagraphWithClass,
-  HeadingWithClass.configure({ levels: [2, 3, 4] }),
+  HeadingWithClass.configure({ levels: [1, 2, 3, 4] }),
   BulletListWithClass,
   OrderedListWithClass,
   ListItemWithClass,
@@ -154,6 +158,10 @@ export const REGLAMENT_EXTENSIONS = [
        enabled: true,
      },
    }),
+  Table.configure({ resizable: true }),
+  TableRow,
+  TableCell,
+  TableHeader,
   Callout,
   SectionBlock,
   DivBlock,
@@ -170,20 +178,60 @@ export const REGLAMENT_FONT_OPTIONS = [
 ];
 
 export const REGLAMENT_TEXT_COLORS = [
-  { label: 'Черный', value: '#111827' },
-  { label: 'Серый', value: '#4B5563' },
-  { label: 'Синий', value: '#1D4ED8' },
-  { label: 'Фиолетовый', value: '#6D28D9' },
-  { label: 'Красный', value: '#B91C1C' },
-  { label: 'Зеленый', value: '#15803D' },
+  // Neutrals
+  { label: 'Черный', value: '#000000' },
+  { label: 'Темно-серый', value: '#1f2937' },
+  { label: 'Серый', value: '#6b7280' },
+  { label: 'Серебристый', value: '#9ca3af' },
+  { label: 'Белый', value: '#ffffff' },
+  // Blues
+  { label: 'Темно-синий', value: '#1e3a8a' },
+  { label: 'Синий', value: '#1d4ed8' },
+  { label: 'Голубой', value: '#0284c7' },
+  { label: 'Циан', value: '#0891b2' },
+  { label: 'Бирюзовый', value: '#0d9488' },
+  // Purples & Pinks
+  { label: 'Фиолетовый темный', value: '#4c1d95' },
+  { label: 'Фиолетовый', value: '#7c3aed' },
+  { label: 'Сиреневый', value: '#a855f7' },
+  { label: 'Фуксия', value: '#c026d3' },
+  { label: 'Розовый', value: '#db2777' },
+  // Reds & Oranges
+  { label: 'Темно-красный', value: '#991b1b' },
+  { label: 'Красный', value: '#dc2626' },
+  { label: 'Оранжевый', value: '#ea580c' },
+  { label: 'Янтарный', value: '#d97706' },
+  { label: 'Желтый', value: '#ca8a04' },
+  // Greens
+  { label: 'Темно-зеленый', value: '#14532d' },
+  { label: 'Зеленый', value: '#16a34a' },
+  { label: 'Изумрудный', value: '#059669' },
+  { label: 'Лайм', value: '#65a30d' },
+  { label: 'Коричневый', value: '#92400e' },
 ];
 
 export const REGLAMENT_HIGHLIGHT_COLORS = [
-  { label: 'Желтый', value: '#FEF3C7' },
-  { label: 'Зеленый', value: '#DCFCE7' },
-  { label: 'Синий', value: '#DBEAFE' },
-  { label: 'Розовый', value: '#FCE7F3' },
-  { label: 'Оранжевый', value: '#FFEDD5' },
+  // Yellows & Oranges
+  { label: 'Желтый', value: '#fef08a' },
+  { label: 'Светло-оранжевый', value: '#fed7aa' },
+  { label: 'Персиковый', value: '#fde68a' },
+  // Pinks & Reds
+  { label: 'Розовый', value: '#fbcfe8' },
+  { label: 'Красный пастель', value: '#fecaca' },
+  // Purples
+  { label: 'Лавандовый', value: '#e9d5ff' },
+  { label: 'Индиго', value: '#c7d2fe' },
+  // Blues & Cyans
+  { label: 'Синий', value: '#bfdbfe' },
+  { label: 'Голубой', value: '#bae6fd' },
+  { label: 'Циан', value: '#a5f3fc' },
+  // Greens
+  { label: 'Мятный', value: '#a7f3d0' },
+  { label: 'Зеленый', value: '#bbf7d0' },
+  { label: 'Лайм', value: '#d9f99d' },
+  // Neutrals
+  { label: 'Серый', value: '#e5e7eb' },
+  { label: 'Слоновая кость', value: '#fef9c3' },
 ];
 
 export const REGLAMENT_CALLOUT_VARIANTS = [
@@ -200,11 +248,19 @@ export const REGLAMENT_STORAGE_BUCKET =
 export const REGLAMENT_STORAGE_PREFIX = 'reglament';
 
 export function createReglamentSlug(value: string): string {
+  const CYR_MAP: Record<string, string> = {
+    а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'yo',ж:'zh',з:'z',и:'i',й:'j',
+    к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',
+    х:'kh',ц:'ts',ч:'ch',ш:'sh',щ:'shch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya',
+  };
   const cleaned = value.trim().toLowerCase();
   if (!cleaned) return '';
   return cleaned
+    .split('')
+    .map((ch) => CYR_MAP[ch] ?? ch)
+    .join('')
     .replace(/[\s_]+/g, '-')
-    .replace(/[^a-z0-9а-яё-]/gi, '')
+    .replace(/[^a-z0-9-]/g, '')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
 }

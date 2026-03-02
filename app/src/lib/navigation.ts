@@ -3,12 +3,15 @@ export type NavItem = {
   href: string;
   adminOnly?: boolean;
   billingCalendarOnly?: boolean;
+  /** If set, this item is hidden when the user has it disabled in user_tool_visibility */
+  navTabId?: string;
 };
 
 export const navItems: NavItem[] = [
   { name: 'Проекты', href: '/' },
   { name: 'Аналитика проектов', href: '/analytics/projects' },
   { name: 'Задачи', href: '/tasks' },
+  { name: 'Доска', href: '/board', navTabId: 'nav-tasks-board' },
   { name: 'Команда', href: '/team' },
   { name: 'Финансы', href: '/finance' },
   { name: 'Инструменты', href: '/tools' },

@@ -754,8 +754,14 @@ export async function runSearchParserJob(jobId: string) {
 
       let insertedCount = 0;
       let hadQueryFailures = false;
+      let statsProvider: string = 'google';
+      let statsLastGooglePage: number | null = null;
 
       try {
+        if (USE_SERPER) {
+          statsProvider = 'serper';
+          statsLastGooglePage = 1;
+        }
         const runGoogle = async (q: string) => {
           // Google has internal delays, but we still gate globally to avoid bursts
           // when query concurrency > 1.
@@ -976,6 +982,22 @@ export async function runSearchParserJob(jobId: string) {
           }
         }
         } // конец блока «старый подход» (Google/DDG/Bing/Mojeek)
+
+        if (USE_SERPER) {
+          statsProvider = 'serper';
+          statsLastGooglePage = 1;
+        } else if (MULTI_PROVIDER_ENABLED && debugPrimary && typeof debugPrimary === 'object') {
+          statsProvider = 'multi';
+          const g = (debugPrimary as Record<string, unknown>).google;
+          if (g && typeof g === 'object' && typeof (g as { last_page_fetched?: number }).last_page_fetched === 'number') {
+            statsLastGooglePage = (g as { last_page_fetched: number }).last_page_fetched;
+          }
+        } else {
+          statsProvider = provider;
+          if (provider === 'google' && debugPrimary && typeof debugPrimary === 'object' && typeof (debugPrimary as { last_page_fetched?: number }).last_page_fetched === 'number') {
+            statsLastGooglePage = (debugPrimary as { last_page_fetched: number }).last_page_fetched ?? null;
+          }
+        }
 
         // Build rows (local dedupe only)
         const rows = results
@@ -1238,6 +1260,21 @@ export async function runSearchParserJob(jobId: string) {
           progress_percent: progressPercent,
           progress_stage: 'searching',
         });
+        try {
+          await admin.from('search_parser_query_stats').upsert(
+            {
+              job_id: jobId,
+              query,
+              query_index: index,
+              provider: statsProvider,
+              last_google_page: statsLastGooglePage,
+              results_count: insertedCount,
+            },
+            { onConflict: 'job_id,query_index' },
+          );
+        } catch (statsErr) {
+          console.warn('search_parser_query_stats upsert failed:', statsErr);
+        }
       }
     });
 
