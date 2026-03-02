@@ -40,6 +40,8 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
   const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
+  const [badges, setBadges] = useState<Record<string, number>>({});
   const [tmaTheme, setTmaTheme] = useState<TmaTheme>(() => {
     if (typeof window === 'undefined') return 'dark';
     const root = document.documentElement;
@@ -81,6 +83,24 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       setUserRole(profile.role);
       setUserFullName(profile.full_name);
       setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
+
+      fetch('/api/user/tools', {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      })
+        .then((r) => r.json())
+        .then((d) => { if (isMounted && d.toolIds) setVisibleTools(d.toolIds); })
+        .catch(() => {});
+
+      fetch('/api/database-review/requests?status=submitted', {
+        headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (isMounted && Array.isArray(d.requests)) {
+            setBadges((prev) => ({ ...prev, 'review-count': d.requests.length }));
+          }
+        })
+        .catch(() => {});
     };
 
     void (async () => {
@@ -144,6 +164,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         {navItems.map((item) => {
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
+          if (item.requiresTool && visibleTools && !visibleTools.includes(item.requiresTool)) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
@@ -151,6 +172,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             : pathname === item.href ||
               pathname.startsWith(`${item.href}/`) ||
               aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
+          const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
           return (
             <Link
               key={item.name}
@@ -167,7 +189,12 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
                 }
               `}
             >
-              {item.name}
+              <span className="truncate">{item.name}</span>
+              {badgeCount > 0 && (
+                <span className="ml-auto flex-shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1">
+                  {badgeCount}
+                </span>
+              )}
             </Link>
           );
         })}
