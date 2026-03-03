@@ -3,10 +3,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import type { SearchParserJob, SearchResult } from '@/types/parsers';
+import type { SearchParserJob, SearchResult, SearchQueryStat } from '@/types/parsers';
 import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
-import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy } from 'lucide-react';
+import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy, ChevronDown, Search } from 'lucide-react';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 type Lead = {
@@ -259,6 +259,8 @@ export function SearchParserView() {
   const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
+  const [queryStats, setQueryStats] = useState<SearchQueryStat[]>([]);
+  const [queryStatsOpen, setQueryStatsOpen] = useState(false);
   const latestCreatedAtRef = useRef<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
@@ -423,6 +425,18 @@ export function SearchParserView() {
     [apiFetch],
   );
 
+  const loadQueryStats = useCallback(
+    async (jobId: string) => {
+      try {
+        const data = await apiFetch<{ stats: SearchQueryStat[] }>(`/api/parsers/search/${jobId}/query-stats`);
+        setQueryStats(data.stats ?? []);
+      } catch {
+        setQueryStats([]);
+      }
+    },
+    [apiFetch],
+  );
+
   useEffect(() => {
     refreshJobs();
   }, [refreshJobs]);
@@ -430,13 +444,17 @@ export function SearchParserView() {
   useEffect(() => {
     if (activeJobId) {
       setResults([]);
+      setQueryStats([]);
+      setQueryStatsOpen(false);
       latestCreatedAtRef.current = null;
       loadResults(activeJobId, 'initial');
+      loadQueryStats(activeJobId);
     } else {
       setResults([]);
+      setQueryStats([]);
       latestCreatedAtRef.current = null;
     }
-  }, [activeJobId, loadResults]);
+  }, [activeJobId, loadResults, loadQueryStats]);
 
   // Auto-refresh active job
   useEffect(() => {
@@ -444,12 +462,12 @@ export function SearchParserView() {
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = setInterval(() => {
         refreshJobs();
-        // Only append new rows; don't flicker the table.
         loadResults(activeJobId, 'incremental');
+        loadQueryStats(activeJobId);
       }, 5000);
       return () => clearInterval(interval);
     }
-  }, [activeJob, activeJobId, refreshJobs, loadResults]);
+  }, [activeJob, activeJobId, refreshJobs, loadResults, loadQueryStats]);
 
   const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; queries_text?: string; user_query?: string }) => {
     setBusy(true);
@@ -862,6 +880,82 @@ export function SearchParserView() {
               {!activeJobStoppedByUser && activeJob.status === 'failed' ? <span>{activeJob.error_message}</span> : null}
               {!activeJobStoppedByUser && activeJob.status !== 'failed' ? (
                 <span>{activeJob.error_message}</span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {activeJobId && queryStats.length > 0 ? (
+            <div className="border-b border-gray-200">
+              <button
+                type="button"
+                onClick={() => setQueryStatsOpen((v) => !v)}
+                className="w-full flex items-center gap-2 px-6 py-3.5 text-left text-sm font-medium text-gray-700 bg-gray-50/50 hover:bg-gray-100 active:bg-gray-150 transition-colors cursor-pointer"
+              >
+                <Search className="h-4 w-4 text-gray-400 flex-shrink-0" />
+                <span>Глубина поиска по запросам</span>
+                <span className="text-xs text-gray-400 font-normal">({queryStats.length})</span>
+                <ChevronDown className={`ml-auto h-4 w-4 text-gray-400 transition-transform ${queryStatsOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {queryStatsOpen ? (
+                <div className="px-6 pb-4">
+                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Запрос</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Провайдер</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Страниц Google</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Результатов</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 bg-white">
+                        {queryStats.map((qs) => (
+                          <tr key={qs.id} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 text-gray-400 font-mono tabular-nums">{qs.query_index + 1}</td>
+                            <td className="px-3 py-2 text-gray-900 max-w-[320px] truncate" title={qs.query}>{qs.query}</td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-xs font-medium ${
+                                qs.provider === 'google' ? 'bg-blue-50 text-blue-700' :
+                                qs.provider === 'serper' ? 'bg-purple-50 text-purple-700' :
+                                qs.provider === 'multi' ? 'bg-indigo-50 text-indigo-700' :
+                                'bg-gray-100 text-gray-600'
+                              }`}>
+                                {qs.provider ?? '—'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums">
+                              {qs.last_google_page != null ? (
+                                <span className={qs.last_google_page >= 3 ? 'text-emerald-600 font-semibold' : 'text-gray-700'}>
+                                  {qs.last_google_page}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-gray-700">{qs.results_count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-gray-50">
+                        <tr className="text-xs font-medium text-gray-600">
+                          <td className="px-3 py-2" colSpan={3}>Итого</td>
+                          <td className="px-3 py-2 text-right font-mono tabular-nums">
+                            {(() => {
+                              const pages = queryStats.filter((s) => s.last_google_page != null).map((s) => s.last_google_page!);
+                              if (pages.length === 0) return '—';
+                              const avg = pages.reduce((a, b) => a + b, 0) / pages.length;
+                              return `~${avg.toFixed(1)}`;
+                            })()}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono tabular-nums">
+                            {queryStats.reduce((sum, s) => sum + s.results_count, 0)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
               ) : null}
             </div>
           ) : null}

@@ -108,7 +108,7 @@ function parseHhSearchLink(value: string): LinkParseResult {
 
   const area = parseAreaParams(params);
   const salaryFrom = parseNumberParam(params.get('salary') ?? params.get('salary_from'));
-  const currency = (params.get('currency') ?? '').trim() || undefined;
+  const currency = (params.get('currency') ?? params.get('currency_code') ?? '').trim() || undefined;
   const date_from = normalizeDateParam(params.get('date_from'));
   const date_to = normalizeDateParam(params.get('date_to'));
   const per_page = parseNumberParam(params.get('per_page') ?? params.get('items_on_page'));

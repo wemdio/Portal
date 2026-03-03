@@ -139,9 +139,24 @@ export function YandexMapsParserForm(props: {
     appendUrls(generateSearchUrls(cities, rubrics));
   };
 
+  const canGenerateBulk = selectedCities.length > 0 && (customKeyword.trim() || selectedRubrics.length > 0);
+
+  const collectAllUrls = (): string[] => {
+    let urls = [...searchUrls];
+    if (canGenerateBulk) {
+      const cities = selectedCities.map((s) => s.trim()).filter(Boolean);
+      const rubrics = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics).map((s) => s.trim()).filter(Boolean);
+      const generated = generateSearchUrls(cities, rubrics);
+      urls = [...urls, ...generated];
+    }
+    return [...new Set(urls.filter(Boolean))];
+  };
+
+  const canSubmit = searchUrls.length > 0 || canGenerateBulk;
+
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const urls = searchUrls;
+    const urls = collectAllUrls();
     if (!urls.length) return;
     await props.onCreate({
       search_urls: urls,
@@ -175,36 +190,6 @@ export function YandexMapsParserForm(props: {
             onChange={(e) => setSearchUrlsText(e.target.value)}
           />
 
-          <div className="bg-gray-50 rounded-lg p-4 border border-gray-100">
-            <label className="block text-xs font-medium text-gray-700 mb-2 uppercase tracking-wider">Быстрое добавление</label>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <div className="w-full sm:w-1/3">
-                <input
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-                  placeholder="Город (опц.)"
-                  value={singleCity}
-                  onChange={(e) => setSingleCity(e.target.value)}
-                />
-              </div>
-              <div className="w-full sm:w-1/3">
-                <input
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-                  placeholder="Ключевое слово (напр. кафе)"
-                  value={singleKeyword}
-                  onChange={(e) => setSingleKeyword(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleGenerateSingle())}
-                />
-              </div>
-              <button
-                type="button"
-                onClick={handleGenerateSingle}
-                disabled={!singleKeyword}
-                className="w-full sm:w-auto inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Добавить
-              </button>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -222,7 +207,7 @@ export function YandexMapsParserForm(props: {
               options={CITIES}
               value={selectedCities}
               onChange={setSelectedCities}
-              className="h-60 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
+              className="h-87 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
             />
             <p className="text-xs text-gray-500">Нажмите для выбора.</p>
           </div>
@@ -246,128 +231,23 @@ export function YandexMapsParserForm(props: {
                 value={selectedRubrics}
                 onChange={setSelectedRubrics}
                 disabled={Boolean(customKeyword.trim())}
-                className={`h-32 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
+                className={`h-60 shadow-sm focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500 ${Boolean(customKeyword.trim()) ? 'bg-gray-50 opacity-60' : ''}`}
               />
             </div>
 
-            <button
-              type="button"
-              onClick={handleGenerateBulk}
-              disabled={!selectedCities.length || (!customKeyword.trim() && !selectedRubrics.length)}
-              className="w-full inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Сгенерировать и добавить
-            </button>
           </div>
         </div>
       </div>
 
       {/* Settings Section */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
-          <h3 className="text-base font-semibold text-gray-900 border-b border-gray-100 pb-2">Параметры сбора</h3>
-          
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Макс. ссылок на 1 URL</label>
-              <input
-                type="number"
-                min={1}
-                max={5000}
-                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none sm:text-sm px-3 py-2"
-                value={maxResults}
-                onChange={(e) => setMaxResults(Math.max(1, Math.min(5000, Number(e.target.value) || 1)))}
-              />
-            </div>
-            
-            <div className="pt-2">
-              <Switch
-                checked={headless}
-                onCheckedChange={setHeadless}
-                label={<span className="font-medium text-gray-700">Headless режим (скрытый браузер)</span>}
-              />
-              <p className="text-xs text-gray-500 mt-1 ml-14">Отключите для отладки, если парсер не работает.</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-4">
-          <div className="flex items-center justify-between border-b border-gray-100 pb-2">
-            <h3 className="text-base font-semibold text-gray-900">Прокси</h3>
-            <Switch
-              checked={proxy.enabled}
-              onCheckedChange={(enabled) => setProxy((p) => ({ ...p, enabled }))}
-              label="Вкл"
-            />
-          </div>
-
-          <div className={`space-y-3 transition-opacity duration-200 ${proxy.enabled ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="col-span-1">
-                <label className="block text-xs font-medium text-gray-500 mb-1">Протокол</label>
-                <select
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm"
-                  value={proxy.protocol}
-                  onChange={(e) => setProxy((p) => ({ ...p, protocol: e.target.value as ProxyForm['protocol'] }))}
-                >
-                  <option value="http">http</option>
-                  <option value="https">https</option>
-                  <option value="socks5">socks5</option>
-                </select>
-              </div>
-              <div className="col-span-2">
-                <label className="block text-xs font-medium text-gray-500 mb-1">Host</label>
-                <input
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm px-3 py-2"
-                  placeholder="1.2.3.4"
-                  value={proxy.host}
-                  onChange={(e) => setProxy((p) => ({ ...p, host: e.target.value }))}
-                />
-              </div>
-            </div>
-            
-            <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Port</label>
-              <input
-                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm px-3 py-2"
-                placeholder="8080"
-                value={proxy.port}
-                onChange={(e) => setProxy((p) => ({ ...p, port: e.target.value }))}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">Username</label>
-                <input
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm px-3 py-2"
-                  placeholder="user"
-                  value={proxy.username}
-                  onChange={(e) => setProxy((p) => ({ ...p, username: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">Password</label>
-                <input
-                  type="password"
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none text-sm px-3 py-2"
-                  placeholder="pass"
-                  value={proxy.password}
-                  onChange={(e) => setProxy((p) => ({ ...p, password: e.target.value }))}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
 
       <div className="flex justify-end pt-4">
         <button
           type="submit"
-          disabled={props.busy || searchUrls.length === 0}
+          disabled={props.busy || !canSubmit}
           className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-6 py-3 text-base font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95"
         >
-          {props.busy ? 'Создание...' : 'Создать задачу'}
+          {props.busy ? 'Запуск...' : 'Запустить парсинг'}
         </button>
       </div>
     </form>
