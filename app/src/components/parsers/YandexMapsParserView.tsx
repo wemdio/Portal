@@ -580,7 +580,7 @@ export function YandexMapsParserView() {
                               >
                                 Перезапустить
                               </button>
-                              {totalLinks > 0 && (
+                              {totalLinks > 0 && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
                                 <button
                                   type="button"
                                   onClick={handleParse}

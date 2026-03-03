@@ -223,10 +223,10 @@ export default function AudioTranscribeToolPage() {
               <AudioLines className="h-3.5 w-3.5" />
               Инструмент расшифровки аудио
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Расшифровка звонков и записей</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Расшифровка видео и аудио</h1>
             <p className="max-w-2xl text-sm text-gray-500">
-              Загрузите запись звонка или встречи в формате MP3, WAV, MP4 или AVI. Мы расшифруем
-              аудио через Whisper на Replicate и вернём чистый текст для анализа, пометок и отчётов.
+              Загрузите запись в формате MP3, WAV, MP4 или AVI. Мы расшифруем
+              аудио через AI и вернём чистый текст.
             </p>
             <p className="text-xs text-gray-400">
               Максимальный размер файла — до 600&nbsp;МБ. Обработка крупных записей может занять
