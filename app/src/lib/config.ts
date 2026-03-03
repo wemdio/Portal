@@ -44,6 +44,9 @@ export const SEARCH_CONFIG = {
     CONCURRENCY: 3,
   },
 
+  // Serper API: сколько страниц Google запрашивать на каждый поисковый запрос (1–10).
+  SERPER_PAGES: Math.max(1, Math.min(10, Number(process.env.SEARCH_SERPER_PAGES) || 5)),
+
   // Стабильность важнее скорости — bursty traffic быстро ловит блоки.
   QUERY_CONCURRENCY: 2,
 };
