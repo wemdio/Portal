@@ -11,6 +11,8 @@ export type SearchParserStartPayload = {
   queries_text?: string;
   /** Текст для отображения в истории (то, что ввёл пользователь). */
   user_query?: string;
+  /** Глубина поиска: сколько страниц Google парсить на каждый запрос (1–10, по умолчанию 5). */
+  search_depth?: number;
 };
 
 interface Props {
@@ -25,6 +27,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [generatingQueries, setGeneratingQueries] = useState(false);
   const [pdfUploading, setPdfUploading] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
+  const [searchDepth, setSearchDepth] = useState(5);
   const [error, setError] = useState<string | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -131,6 +134,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
     if (hasQueriesText) payload.queries_text = queriesText.trim();
     if (hasQueriesList && !hasQueriesText) payload.queries = queries.map((q) => q.trim()).filter(Boolean);
     payload.user_query = payload.brief ?? payload.queries_text ?? (payload.queries?.slice(0, 3).join(', ') ?? 'Запросы');
+    payload.search_depth = searchDepth;
     onStart(payload);
   };
 
@@ -241,6 +245,26 @@ export function SearchParserForm({ onStart, busy }: Props) {
             </ul>
           </div>
         )}
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Глубина поиска (страниц Google на запрос)
+          </label>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={1}
+              max={10}
+              value={searchDepth}
+              onChange={(e) => setSearchDepth(Number(e.target.value))}
+              className="flex-1 h-2 accent-blue-600"
+            />
+            <span className="text-sm font-mono font-semibold text-gray-900 w-6 text-center tabular-nums">{searchDepth}</span>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            По умолчанию: 5. Чем больше — тем глубже поиск, но дольше выполнение.
+          </p>
+        </div>
 
         {error && (
           <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">

@@ -32,7 +32,7 @@ export interface SerperSearchDebug {
 
 export async function serperSearchDetailed(
   query: string,
-  opts?: { num?: number; gl?: string; hl?: string },
+  opts?: { num?: number; gl?: string; hl?: string; page?: number },
 ): Promise<{
   results: SearchResultItem[];
   debug: SerperSearchDebug;
@@ -43,9 +43,11 @@ export async function serperSearchDetailed(
   }
 
   const num = Math.min(100, Math.max(10, opts?.num ?? 100));
+  const page = Math.max(1, opts?.page ?? 1);
   const body = {
     q: query,
     num,
+    page,
     ...(opts?.gl ? { gl: opts.gl } : {}),
     ...(opts?.hl ? { hl: opts.hl } : {}),
   };
@@ -75,6 +77,7 @@ export async function serperSearchDetailed(
   const organic = Array.isArray(data.organic) ? data.organic : [];
   debug.organic_count = organic.length;
 
+  const positionOffset = (page - 1) * num;
   const results: SearchResultItem[] = organic
     .filter((item): item is SerperOrganicItem => item != null && typeof item === 'object' && typeof item.link === 'string')
     .map((item, index) => ({
@@ -82,8 +85,59 @@ export async function serperSearchDetailed(
       title: (String(item.title ?? '').trim() || item.link) ?? '',
       link: String(item.link).trim(),
       snippet: String(item.snippet ?? '').trim(),
-      position: typeof item.position === 'number' && item.position > 0 ? item.position : index + 1,
+      position: typeof item.position === 'number' && item.position > 0 ? item.position : positionOffset + index + 1,
     }));
 
   return { results, debug };
+}
+
+/**
+ * Fetch multiple pages from Serper and merge results (deduped by link).
+ * Returns combined results and the number of the last page that returned data.
+ */
+export async function serperSearchMultiPage(
+  query: string,
+  opts?: { num?: number; gl?: string; hl?: string; pages?: number; delayMs?: number },
+): Promise<{
+  results: SearchResultItem[];
+  lastPage: number;
+  debug: SerperSearchDebug;
+}> {
+  const totalPages = Math.max(1, Math.min(10, opts?.pages ?? 1));
+  const delayMs = opts?.delayMs ?? 300;
+
+  const allResults: SearchResultItem[] = [];
+  const seenLinks = new Set<string>();
+  let lastPage = 0;
+  let latestDebug: SerperSearchDebug | null = null;
+
+  for (let page = 1; page <= totalPages; page++) {
+    const out = await serperSearchDetailed(query, {
+      num: opts?.num,
+      gl: opts?.gl,
+      hl: opts?.hl,
+      page,
+    });
+    latestDebug = out.debug;
+
+    if (out.results.length === 0) break;
+
+    lastPage = page;
+    for (const r of out.results) {
+      const key = r.link.toLowerCase();
+      if (seenLinks.has(key)) continue;
+      seenLinks.add(key);
+      allResults.push(r);
+    }
+
+    if (page < totalPages && delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return {
+    results: allResults,
+    lastPage: lastPage || 1,
+    debug: latestDebug ?? { request_url: SERPER_API_URL, status: 0, organic_count: 0 },
+  };
 }
