@@ -88,6 +88,13 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
         body: formData,
       });
 
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/json')) {
+        setError('Сервер вернул некорректный ответ. Попробуйте TXT-файл или повторите позже.');
+        setParsing(false);
+        return;
+      }
+
       const data = await res.json();
 
       if (!res.ok) {

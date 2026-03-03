@@ -129,25 +129,27 @@ export async function POST(req: NextRequest) {
       const buffer = Buffer.from(await file.arrayBuffer());
 
       if (file.name.endsWith('.pdf')) {
-        // pdf-parse v2 API
-        if (!globalThis.DOMMatrix) {
-          const { default: DOMMatrix } = await import('@thednp/dommatrix');
-          globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
-        }
-        const { PDFParse } = await import('pdf-parse');
-        const { getData } = await import('pdf-parse/worker');
-        PDFParse.setWorker(getData());
-        const parser = new PDFParse({ data: buffer });
         try {
-          const result = await parser.getText();
-          briefText = result.text?.trim() ?? '';
-        } finally {
-          await parser.destroy().catch(() => undefined);
+          if (!globalThis.DOMMatrix) {
+            const { default: DOMMatrix } = await import('@thednp/dommatrix');
+            globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
+          }
+          const { PDFParse } = await import('pdf-parse');
+          const { getData } = await import('pdf-parse/worker');
+          PDFParse.setWorker(getData());
+          const parser = new PDFParse({ data: buffer });
+          try {
+            const result = await parser.getText();
+            briefText = result.text?.trim() ?? '';
+          } finally {
+            await parser.destroy().catch(() => undefined);
+          }
+        } catch (pdfErr) {
+          console.warn('[briefs/parse] pdf-parse failed, falling back to raw text:', pdfErr);
+          const raw = buffer.toString('utf-8');
+          briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
         }
-      } else if (file.name.endsWith('.txt') || file.name.endsWith('.md')) {
-        briefText = buffer.toString('utf-8');
       } else {
-        // Try to read as text
         briefText = buffer.toString('utf-8');
       }
     } else if (text) {
