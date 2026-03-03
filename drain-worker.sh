@@ -71,9 +71,9 @@ containers=(
   "portal-worker-emailvalidation"
 )
 
-echo "[drain] Stopping worker containers..."
+echo "[drain] Stopping worker containers (timeout 15s each)..."
 for c in "${containers[@]}"; do
-  docker stop "$c" 2>/dev/null || true
+  sudo -n docker stop -t 15 "$c" 2>/dev/null || true
 done
 
 echo "[drain] Workers stopped"
