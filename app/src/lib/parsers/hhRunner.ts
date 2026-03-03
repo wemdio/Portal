@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError, logInfo } from '@/lib/loggerServer';
-import { fetchVacancies, HHApiError, ParserJobCancelledError, withTimeout, type ParserProgressStage } from '@/lib/parsers/hhParser';
+import { fetchVacancies, HHApiError, ParserJobCancelledError, withTimeout, type ParserProgressStage, type PartitionProgress } from '@/lib/parsers/hhParser';
 import type { HHSearchConfig, HHVacancy } from '@/lib/parsers/hhParser';
 import { startTrace } from '@/lib/tracer';
 
@@ -123,6 +123,20 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
       .eq('id', jobId);
     if (error) {
       await logError('parser.hh.stage.update.failed', error, { jobId, searchText, stage }, logMeta);
+    }
+  };
+
+  let lastPartitionDetail: string | null = null;
+  const updatePartitionProgress = async (info: PartitionProgress) => {
+    const detail = JSON.stringify(info);
+    if (detail === lastPartitionDetail) return;
+    lastPartitionDetail = detail;
+    const { error } = await db
+      .from('parser_jobs')
+      .update({ progress_detail: info })
+      .eq('id', jobId);
+    if (error) {
+      await logError('parser.hh.partition_detail.update.failed', error, { jobId, searchText, info }, logMeta);
     }
   };
 
@@ -254,6 +268,9 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
           onStage: (stage) => {
             void updateStage(stage);
           },
+          onPartitionProgress: (info) => {
+            void updatePartitionProgress(info);
+          },
         });
 
         const employersTotal = new Set(
@@ -292,6 +309,7 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
             error_message: null,
             progress_percent: 100,
             progress_stage: 'completed',
+            progress_detail: null,
           })
           .eq('id', jobId);
 
@@ -315,8 +333,11 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
   } catch (err: unknown) {
     if (err instanceof ParserJobCancelledError) {
       await updateStage('cancelled');
+      const timeoutLabel = drainTimeoutMs >= 3_600_000
+        ? `${Math.round(drainTimeoutMs / 3_600_000)} ч.`
+        : `${Math.round(drainTimeoutMs / 60_000)} мин.`;
       const message = err.message === 'Job timed out'
-        ? 'Задача превысила лимит времени выполнения (30 минут). Пожалуйста, попробуйте запустить парсинг еще раз.'
+        ? `Задача превысила лимит времени выполнения (${timeoutLabel}). Пожалуйста, попробуйте запустить парсинг еще раз.`
         : 'Задача отменена пользователем';
       await trace?.cancel(message);
       await logAudit('parser.hh.execute.cancelled', 'HH parser execution cancelled', { jobId, searchText, message }, logMeta);
@@ -328,6 +349,7 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
           error_message: message,
           progress_percent: lastPercent ?? null,
           progress_stage: 'failed',
+          progress_detail: null,
         })
         .eq('id', jobId);
       if (updateError) {
@@ -357,6 +379,7 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
         error_message: jobMessage,
         progress_percent: lastPercent ?? null,
         progress_stage: 'failed',
+        progress_detail: null,
       })
       .eq('id', jobId);
 

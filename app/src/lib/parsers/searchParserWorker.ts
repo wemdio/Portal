@@ -1167,6 +1167,7 @@ export async function runSearchParserJob(jobId: string) {
             inserted: insertedCount,
             fallback_used: usedFallback,
             provider,
+            ...(statsLastGooglePage != null ? { last_google_page: statsLastGooglePage } : {}),
             links: {
               ...(provider === 'google' && debugPrimary && typeof debugPrimary === 'object'
                 ? {
