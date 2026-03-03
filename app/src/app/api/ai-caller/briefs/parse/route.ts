@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { inflateSync } from 'zlib';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-2.5-pro';
@@ -99,7 +101,59 @@ function sanitizeCompanyForSpeech(raw: string): string {
   return text;
 }
 
+function extractTextFromPdfBuffer(buffer: Buffer): string {
+  const binary = buffer.toString('binary');
+  const textParts: string[] = [];
+
+  const decodePdfString = (s: string) =>
+    s
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\\/g, '\\')
+      .replace(/\\([()])/g, '$1');
+
+  const extractTjText = (content: string) => {
+    const tj = /\(([^)]*)\)\s*Tj/g;
+    let m: RegExpExecArray | null;
+    while ((m = tj.exec(content)) !== null) textParts.push(decodePdfString(m[1]));
+
+    const tjArr = /\[([^\]]+)\]\s*TJ/gi;
+    while ((m = tjArr.exec(content)) !== null) {
+      const inner = /\(([^)]*)\)/g;
+      let im: RegExpExecArray | null;
+      while ((im = inner.exec(m[1])) !== null) textParts.push(decodePdfString(im[1]));
+    }
+  };
+
+  // Decompress FlateDecode streams and extract text operators
+  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let sm: RegExpExecArray | null;
+  while ((sm = streamRe.exec(binary)) !== null) {
+    try {
+      const decompressed = inflateSync(Buffer.from(sm[1], 'binary')).toString('utf-8');
+      extractTjText(decompressed);
+    } catch {
+      extractTjText(sm[1]);
+    }
+  }
+
+  extractTjText(binary);
+
+  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
 export async function POST(req: NextRequest) {
+  try {
+    return await handlePost(req);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Internal server error';
+    console.error('[briefs/parse] unhandled error:', err);
+    return NextResponse.json({ error: `Ошибка сервера: ${msg}` }, { status: 500 });
+  }
+}
+
+async function handlePost(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -116,7 +170,6 @@ export async function POST(req: NextRequest) {
 
   const provider = resolveAiCallerProvider(req);
 
-  // Parse multipart form data
   let briefText = '';
   let presetId = '';
   try {
@@ -128,24 +181,10 @@ export async function POST(req: NextRequest) {
     if (file) {
       const buffer = Buffer.from(await file.arrayBuffer());
 
-      if (file.name.endsWith('.pdf')) {
-        try {
-          if (!globalThis.DOMMatrix) {
-            const { default: DOMMatrix } = await import('@thednp/dommatrix');
-            globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
-          }
-          const { PDFParse } = await import('pdf-parse');
-          const { getData } = await import('pdf-parse/worker');
-          PDFParse.setWorker(getData());
-          const parser = new PDFParse({ data: buffer });
-          try {
-            const result = await parser.getText();
-            briefText = result.text?.trim() ?? '';
-          } finally {
-            await parser.destroy().catch(() => undefined);
-          }
-        } catch (pdfErr) {
-          console.warn('[briefs/parse] pdf-parse failed, falling back to raw text:', pdfErr);
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        briefText = extractTextFromPdfBuffer(buffer);
+        if (!briefText || briefText.length < 20) {
+          // Fallback: strip non-printable chars from raw binary
           const raw = buffer.toString('utf-8');
           briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
         }
@@ -155,7 +194,8 @@ export async function POST(req: NextRequest) {
     } else if (text) {
       briefText = text;
     }
-  } catch {
+  } catch (err) {
+    console.error('[briefs/parse] file read error:', err);
     return NextResponse.json({ error: 'Не удалось прочитать файл' }, { status: 400 });
   }
 
