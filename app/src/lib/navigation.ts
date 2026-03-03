@@ -15,6 +15,7 @@ export const navItems: NavItem[] = [
   { name: 'Задачи', href: '/tasks' },
   { name: 'Команда', href: '/team' },
   { name: 'Финансы', href: '/finance' },
+  { name: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
   { name: 'Инструменты', href: '/tools' },
   { name: 'Проверка баз', href: '/tools/databases/review', requiresTool: 'database-review', badgeId: 'review-count' },
   { name: 'Оплаты', href: '/payments' },

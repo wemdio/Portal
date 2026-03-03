@@ -11,6 +11,7 @@ export const ALL_TOOL_IDS = [
   'email-sequence',
   'auto-report',
   'rdp',
+  'instantly',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -96,5 +97,12 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Подключение к удалённому ПК через браузер.',
     href: '/tools/rdp',
     accentColor: 'emerald',
+  },
+  instantly: {
+    id: 'instantly',
+    title: 'Instantly',
+    description: 'Управление email-аутричем: кампании, аккаунты, лиды, аналитика.',
+    href: '/instantly',
+    accentColor: 'blue',
   },
 };
