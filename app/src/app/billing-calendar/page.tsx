@@ -1224,7 +1224,7 @@ function UpcomingDeadlines({
   const upcoming = subscriptions
     .filter((sub) => {
       const daysUntil = daysBetween(today, sub.next_billing_date);
-      return daysUntil >= -3 && daysUntil <= 7 && sub.status !== 'expired';
+      return daysUntil >= -3 && daysUntil <= 7 && (sub.status === 'active' || sub.status === 'pending_review');
     })
     .sort((a, b) => a.next_billing_date.localeCompare(b.next_billing_date));
 
