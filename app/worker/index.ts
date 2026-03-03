@@ -196,8 +196,8 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
   const db = supabaseAdmin!;
 
   // Collect-links step: jobs in 'pending' status with initial stage ('pending')
-  // Parse step: jobs in 'pending' status explicitly marked 'ready_to_parse' by the user
-  // 'links_collected' stage is intentionally skipped — user must confirm parse step
+  //   → after collecting, automatically continues to parse-orgs within the same run
+  // Parse step: jobs in 'pending' + 'ready_to_parse' — manual re-parse of existing links
   const { data: pending } = await db
     .from('yandex_maps_jobs')
     .select('id, progress_stage')

@@ -29,7 +29,7 @@ describe('yandexMapsServiceClient', () => {
     expect(res.links).toEqual(['a', 'b']);
     expect(fetchMock).toHaveBeenCalledWith(
       'http://localhost:8000/collect-links',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({ method: 'POST', signal: expect.any(Object) }),
     );
   });
 
@@ -41,6 +41,16 @@ describe('yandexMapsServiceClient', () => {
       text: async () => 'boom',
     });
     await expect(yandexMapsParseOrgs({ links: ['x'] })).rejects.toThrow('yandexmaps service error 500');
+  });
+
+  it('retries and throws detailed error on fetch failure', async () => {
+    process.env.YANDEXMAPS_SERVICE_MAX_RETRIES = '1';
+    process.env.YANDEXMAPS_SERVICE_TIMEOUT_MS = '1000';
+    const fetchMock = (globalThis as unknown as { fetch: typeof fetch }).fetch as unknown as jest.Mock;
+    fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }));
+    fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }));
+    await expect(yandexMapsCollectLinks({ search_url: 'https://yandex.ru/maps/?text=x' })).rejects.toThrow('yandexmaps fetch failed');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

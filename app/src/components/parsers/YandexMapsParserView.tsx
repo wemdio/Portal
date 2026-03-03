@@ -120,15 +120,15 @@ export function YandexMapsParserView() {
 
   useEffect(() => {
     if (!activeJobId || !activeJob) return;
-    // Обновляем, если задача выполняется ИЛИ ожидает выполнения (чтобы поймать начало)
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = window.setInterval(() => {
         void refreshJobs();
+        void loadLinks(activeJobId);
         void loadResults(activeJobId);
       }, 2000);
       return () => window.clearInterval(interval);
     }
-  }, [activeJob, activeJobId, refreshJobs, loadResults]);
+  }, [activeJob, activeJobId, refreshJobs, loadLinks, loadResults]);
 
   const handleCreate = useCallback(async (payload: {
     search_urls: string[];
@@ -150,8 +150,16 @@ export function YandexMapsParserView() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      const jobId = data.job.id;
       await refreshJobs();
-      setActiveJobId(data.job.id);
+      setActiveJobId(jobId);
+
+      try {
+        await apiFetch(`/api/parsers/yandexmaps/${jobId}/collect-links`, { method: 'POST' });
+        await refreshJobs();
+      } catch {
+        // Job was already created in 'pending' — worker will pick it up
+      }
     } catch (e) {
       console.error(e);
       setError('Не удалось создать запуск');
@@ -167,13 +175,14 @@ export function YandexMapsParserView() {
     try {
       await apiFetch(`/api/parsers/yandexmaps/${activeJobId}/collect-links`, { method: 'POST' });
       await refreshJobs();
+      await loadLinks(activeJobId);
     } catch (e) {
       console.error(e);
-      setError('Не удалось запустить сбор ссылок');
+      setError('Не удалось запустить парсинг');
     } finally {
       setJobActionId(null);
     }
-  }, [activeJobId, apiFetch, refreshJobs]);
+  }, [activeJobId, apiFetch, refreshJobs, loadLinks]);
 
   const handleSaveLinks = useCallback(async () => {
     if (!activeJobId) return;
@@ -387,14 +396,17 @@ export function YandexMapsParserView() {
     if (!stage) return '—';
     if (stage === 'collecting_links') return 'Сбор ссылок';
     if (stage.startsWith('collecting_links:')) return `Сбор ссылок (URL ${stage.split(':')[1]})`;
-    if (stage === 'links_collected') return 'Ссылки собраны';
+    if (stage === 'links_collected') return 'Ссылки собраны, запуск парсинга...';
     if (stage === 'parsing_organizations') return 'Парсинг организаций';
-    if (stage.startsWith('parsing_organizations:')) return 'Парсинг организаций';
+    if (stage.startsWith('parsing_organizations:')) return `Парсинг организаций (${stage.split(':')[1]})`;
     if (stage === 'completed') return 'Завершено';
     return stage;
   };
 
-  const stage = getStageLabel(activeJob?.progress_stage?.toString() ?? '');
+  const stageStr = activeJob?.progress_stage?.toString() ?? '';
+  const stage = getStageLabel(stageStr);
+  const isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
+  const isParsing = stageStr.includes('parsing_organizations');
 
   return (
     <div className="space-y-8">
@@ -424,7 +436,7 @@ export function YandexMapsParserView() {
       {/* Top Section: New Run */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900">Новый запуск</h3>
+          <h3 className="text-base font-semibold text-gray-900">Новый парсинг</h3>
         </div>
         <div className="p-6">
           <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
@@ -473,8 +485,8 @@ export function YandexMapsParserView() {
                       <span>{formatDate(j.created_at)}</span>
                       <span className="font-medium">
                         {j.total_organizations 
-                          ? `${j.processed_organizations} / ${j.total_organizations} орг.` 
-                          : `${j.total_links} ссылок`
+                          ? `${j.processed_organizations}/${j.total_organizations} орг.` 
+                          : `${j.total_links} ссыл.`
                         }
                       </span>
                     </div>
@@ -523,13 +535,21 @@ export function YandexMapsParserView() {
                         </div>
                         <div className="flex items-center gap-1.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                          {(activeJob?.progress_stage?.toString().includes('collecting') || activeJob?.progress_stage === 'links_collected') ? (
-                            <>Найдено: <span className="font-medium text-gray-900">{totalLinks}</span></>
-                          ) : (
-                            <>Обработано: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span></>
-                          )}
+                          Ссылок: <span className="font-medium text-gray-900">{totalLinks}</span>
                         </div>
+                        {(isParsing || activeJob.status === 'completed') && (
+                          <div className="flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                            Организаций: <span className="font-medium text-gray-900">{processedOrgs} / {totalOrgs}</span>
+                          </div>
+                        )}
                       </div>
+
+                      {activeJob.status === 'running' ? (
+                        <div className="mt-3 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-900">
+                          Парсинг может занимать длительное время. Можно закрыть вкладку — задача выполняется в фоне, зайдите позже.
+                        </div>
+                      ) : null}
 
                       {activeJob.error_message && !isStoppedByUser(activeJob.status, activeJob.error_message) && (
                         <div className="mt-4 rounded-md bg-red-50 p-3 text-sm text-red-700 border border-red-100">
@@ -550,25 +570,36 @@ export function YandexMapsParserView() {
                         </button>
                       ) : (
                         <>
-                          {activeJob.status !== 'completed' && (
+                          {activeJob.status === 'failed' && (
                             <>
                               <button
                                 type="button"
                                 onClick={handleCollectLinks}
                                 disabled={jobActionId === activeJob.id}
-                                className="inline-flex items-center justify-center rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:opacity-50"
-                              >
-                                Собрать ссылки
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleParse}
-                                disabled={jobActionId === activeJob.id}
                                 className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-2 disabled:opacity-50"
                               >
-                                Парсить
+                                Перезапустить
                               </button>
+                              {totalLinks > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={handleParse}
+                                  disabled={jobActionId === activeJob.id}
+                                  className="inline-flex items-center justify-center rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:opacity-50"
+                                >
+                                  Парсить ссылки
+                                </button>
+                              )}
                             </>
+                          )}
+                          {activeJob.status === 'pending' && (
+                            <span className="inline-flex items-center gap-1.5 text-sm text-gray-500">
+                              <svg className="h-4 w-4 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                              </svg>
+                              Ожидание запуска...
+                            </span>
                           )}
                           <button
                             type="button"

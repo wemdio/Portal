@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
 import { decryptJsonAes256Gcm } from '@/lib/cryptoGcm';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { yandexMapsCollectLinks, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
+import { yandexMapsCollectLinks, yandexMapsHealth, yandexMapsParseOrgs } from '@/lib/parsers/yandexMapsServiceClient';
 import { startTrace } from '@/lib/tracer';
 
 type ProxyCreds = { username: string; password: string };
@@ -122,6 +122,15 @@ export async function runYandexMapsCollectLinks(jobId: string) {
       return;
     }
 
+    const serviceHealthy = await yandexMapsHealth();
+    if (!serviceHealthy) {
+      const msg = 'Сервис yandexmaps недоступен (health check failed). Проверьте, что контейнер yandexmaps запущен.';
+      await setJobPatch(jobId, { status: 'failed', error_message: msg });
+      await trace?.fail(new Error(msg));
+      void logError('parser.yandexmaps.collect.health_failed', new Error(msg), { jobId }, logMeta);
+      return;
+    }
+
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
     let allLinks: string[] = [];
@@ -147,33 +156,45 @@ export async function runYandexMapsCollectLinks(jobId: string) {
           headless,
           proxy: buildProxy(job),
         });
-        allLinks = normalizeYandexOrgUrls([...allLinks, ...(res.links ?? [])]);
+        const newLinks = res.links ?? [];
+        allLinks = normalizeYandexOrgUrls([...allLinks, ...newLinks]);
+
+        if (newLinks.length > 0) {
+          const rows = allLinks.map((link) => ({ job_id: jobId, link }));
+          await supabaseAdmin.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+        }
+
         await setJobPatch(jobId, {
           total_links: allLinks.length,
           processed_links: allLinks.length,
           progress_stage: `collecting_links:${urlIndex}/${searchUrls.length}`,
         });
-        await urlSpan?.end({ links_collected: res.links?.length ?? 0, total_unique: allLinks.length });
+        await urlSpan?.end({ links_collected: newLinks.length, total_unique: allLinks.length });
       } catch (e) {
         await urlSpan?.fail(e);
         void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
       }
     }
 
-    const rows = allLinks.map((link) => ({ job_id: jobId, link }));
-    if (rows.length) {
-      await supabaseAdmin.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
-    }
-
     await setJobPatch(jobId, {
-      status: 'pending',
-      progress_stage: 'links_collected',
       total_links: allLinks.length,
       processed_links: allLinks.length,
+      progress_stage: 'links_collected',
     });
 
     await trace?.end({ total_unique_links: allLinks.length });
     void logInfo('parser.yandexmaps.collect.complete', 'YandexMaps collect-links completed', { jobId, totalLinks: allLinks.length }, logMeta);
+
+    if (allLinks.length > 0) {
+      void logInfo('parser.yandexmaps.auto_parse', 'Auto-starting parse after collect', { jobId, totalLinks: allLinks.length }, logMeta);
+      await runYandexMapsParseOrganizations(jobId);
+    } else {
+      await setJobPatch(jobId, {
+        status: 'completed',
+        progress_stage: 'completed',
+        completed_at: new Date().toISOString(),
+      });
+    }
   } catch (e) {
     await setJobPatch(jobId, { status: 'failed', error_message: e instanceof Error ? e.message : 'Ошибка' });
     await trace?.fail(e);
@@ -191,6 +212,9 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
   if (!job) return;
 
   if (job.status === 'completed') return;
+
+  const isCancelled = job.status === 'failed';
+  if (isCancelled) return;
 
   const requestId = crypto.randomUUID();
   const logMeta = { userId: job.user_id, requestId, route: 'yandex_maps_parse_orgs' };
@@ -226,6 +250,15 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
     if (!links.length) {
       await setJobPatch(jobId, { status: 'failed', error_message: 'Нет ссылок организаций (сначала соберите ссылки)' });
       await trace?.fail(new Error('Missing links'));
+      return;
+    }
+
+    const serviceHealthy = await yandexMapsHealth();
+    if (!serviceHealthy) {
+      const msg = 'Сервис yandexmaps недоступен (health check failed). Проверьте, что контейнер yandexmaps запущен.';
+      await setJobPatch(jobId, { status: 'failed', error_message: msg });
+      await trace?.fail(new Error(msg));
+      void logError('parser.yandexmaps.parse.health_failed', new Error(msg), { jobId }, logMeta);
       return;
     }
 

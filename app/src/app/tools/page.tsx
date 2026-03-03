@@ -12,6 +12,7 @@ import {
   AudioLines,
   FileText,
   ClipboardCheck,
+  Waves,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -27,6 +28,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   parsers: Search,
   'email-sequence': Mail,
   'auto-report': FileText,
+   'audio-transcribe': Waves,
   rdp: FileText,
 };
 

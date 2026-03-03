@@ -29,6 +29,7 @@ export const ALL_TOOL_IDS = [
   'parsers',
   'email-sequence',
   'auto-report',
+  'audio-transcribe',
   'rdp',
 ] as const;
 
@@ -108,6 +109,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
       'Отчёт по кампаниям Instantly: подгрузка кампаний, выбор проектов, статистика и детализация по письмам.',
     href: '/tools/auto-report',
     accentColor: 'blue',
+  },
+  'audio-transcribe': {
+    id: 'audio-transcribe',
+    title: 'Расшифровка аудио',
+    description: 'Загрузка записи звонка и получение расшифровки через Whisper на Replicate.',
+    href: '/tools/audio-transcribe',
+    accentColor: 'emerald',
   },
   rdp: {
     id: 'rdp',
