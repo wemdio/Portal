@@ -54,5 +54,6 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+ENV BODY_SIZE_LIMIT=25mb
 
 CMD ["node", "scripts/start.js"]
