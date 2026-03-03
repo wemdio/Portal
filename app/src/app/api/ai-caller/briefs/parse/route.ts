@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { inflateSync } from 'zlib';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 const OPENROUTER_MODEL = 'google/gemini-2.5-pro';
@@ -100,7 +102,6 @@ function sanitizeCompanyForSpeech(raw: string): string {
 }
 
 function extractTextFromPdfBuffer(buffer: Buffer): string {
-  const zlib = require('zlib') as typeof import('zlib');
   const binary = buffer.toString('binary');
   const textParts: string[] = [];
 
@@ -130,15 +131,13 @@ function extractTextFromPdfBuffer(buffer: Buffer): string {
   let sm: RegExpExecArray | null;
   while ((sm = streamRe.exec(binary)) !== null) {
     try {
-      const decompressed = zlib.inflateSync(Buffer.from(sm[1], 'binary')).toString('utf-8');
+      const decompressed = inflateSync(Buffer.from(sm[1], 'binary')).toString('utf-8');
       extractTjText(decompressed);
     } catch {
-      // Not FlateDecode or corrupted — try raw
       extractTjText(sm[1]);
     }
   }
 
-  // Also scan uncompressed content
   extractTjText(binary);
 
   return textParts.join(' ').replace(/\s+/g, ' ').trim();
