@@ -36,7 +36,7 @@ export const ALL_TOOL_IDS = [
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
 
 /** Tool IDs that are disabled by default (no visibility row = off). */
-export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = [] as const;
+export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['database-review'] as const;
 
 export interface ToolConfig {
   id: ToolId;
