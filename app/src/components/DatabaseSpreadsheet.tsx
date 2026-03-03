@@ -794,6 +794,15 @@ export function DatabaseSpreadsheet() {
     submitting: boolean;
   }>({ isOpen: false, comment: '', projectId: '', submitting: false });
   const [reviewSubmitToast, setReviewSubmitToast] = useState('');
+  const [instantlyPush, setInstantlyPush] = useState<{
+    isOpen: boolean;
+    campaignId: string;
+    leadListId: string;
+    pushing: boolean;
+    result: string;
+  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '' });
+  const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string }>>([]);
+  const [instantlyLeadLists, setInstantlyLeadLists] = useState<Array<{ id: string; name: string }>>([]);
   const [projectsList, setProjectsList] = useState<Array<{ id: string; name: string }>>([]);
   const [reviewPublish, setReviewPublish] = useState<{
     isOpen: boolean;
@@ -1272,12 +1281,11 @@ export function DatabaseSpreadsheet() {
       setContextMenu(null);
       setFilterMenu(null);
     };
-    const handleWindowClick = (event: Event) => {
+    const handleWindowClick: EventListener = (event) => {
       if (isMenuEventTarget(event.target)) return;
       handleClose();
     };
-    const handleScrollableClose = (event: Event) => {
-      if (isMenuEventTarget(event.target)) return;
+    const handleScrollableClose: EventListener = () => {
       handleClose();
     };
     const tableEl = tableWrapperRef.current;
@@ -5995,6 +6003,33 @@ export function DatabaseSpreadsheet() {
           ✓ На проверку
         </button>
 
+        <button
+          type="button"
+          onClick={async () => {
+            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '' });
+            try {
+              const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+              const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+              const [cRes, lRes] = await Promise.all([
+                fetch('/api/instantly/campaigns?limit=all', { headers }),
+                fetch('/api/instantly/lead-lists?limit=all', { headers }),
+              ]);
+              if (cRes.ok) {
+                const cd = await cRes.json();
+                setInstantlyCampaigns((cd.items ?? []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name })));
+              }
+              if (lRes.ok) {
+                const ld = await lRes.json();
+                setInstantlyLeadLists((ld.items ?? []).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
+              }
+            } catch {}
+          }}
+          disabled={!activeTab || rowCount === 0}
+          className="inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Push to Instantly
+        </button>
+
         {importStatus.status !== 'idle' && (
           <>
             <div className="h-4 w-px bg-gray-200 mx-0.5" />
@@ -8198,6 +8233,123 @@ export function DatabaseSpreadsheet() {
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg disabled:opacity-50 transition-colors"
               >
                 {reviewSubmit.submitting ? '⟳ Отправка…' : '✓ Отправить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Instantly push modal */}
+      {instantlyPush.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' }))}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Push to Instantly</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Загрузить <strong>{rowCount}</strong> строк из вкладки <strong>{activeTab?.name}</strong> как лидов в Instantly.
+            </p>
+            {instantlyPush.result && (
+              <div className={`mb-4 rounded-lg p-3 text-sm ${instantlyPush.result.startsWith('Ошибка') ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                {instantlyPush.result}
+              </div>
+            )}
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
+            <select
+              value={instantlyPush.campaignId}
+              onChange={(e) => setInstantlyPush((s) => ({ ...s, campaignId: e.target.value, leadListId: '' }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">— Выберите кампанию —</option>
+              {instantlyCampaigns.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
+            <select
+              value={instantlyPush.leadListId}
+              onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">— Выберите lead-список —</option>
+              {instantlyLeadLists.map((l) => (
+                <option key={l.id} value={l.id}>{l.name}</option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' }))}
+                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={instantlyPush.pushing || (!instantlyPush.campaignId && !instantlyPush.leadListId)}
+                onClick={async () => {
+                  if (!activeTab) return;
+                  setInstantlyPush((s) => ({ ...s, pushing: true, result: '' }));
+                  try {
+                    const headers = activeTab.data[0] ?? [];
+                    const emailColIdx = headers.findIndex((h) => /^email$/i.test(String(h).trim()));
+                    if (emailColIdx < 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: столбец email не найден в заголовках' })); return; }
+                    const fieldMap: Record<string, number> = {};
+                    headers.forEach((h, i) => {
+                      const norm = String(h).trim().toLowerCase();
+                      if (norm === 'first_name' || norm === 'firstname' || norm === 'имя') fieldMap['first_name'] = i;
+                      else if (norm === 'last_name' || norm === 'lastname' || norm === 'фамилия') fieldMap['last_name'] = i;
+                      else if (norm === 'company_name' || norm === 'company' || norm === 'компания') fieldMap['company_name'] = i;
+                      else if (norm === 'phone' || norm === 'телефон') fieldMap['phone'] = i;
+                      else if (norm === 'website' || norm === 'сайт') fieldMap['website'] = i;
+                      else if (norm === 'linkedin_url' || norm === 'linkedin') fieldMap['linkedin_url'] = i;
+                    });
+                    const leads = activeTab.data.slice(1).filter((row) => {
+                      const email = String(row[emailColIdx] ?? '').trim();
+                      return email && email.includes('@');
+                    }).map((row) => {
+                      const lead: Record<string, string> = { email: String(row[emailColIdx]).trim() };
+                      for (const [field, colIdx] of Object.entries(fieldMap)) {
+                        const v = String(row[colIdx] ?? '').trim();
+                        if (v) lead[field] = v;
+                      }
+                      if (instantlyPush.campaignId) lead.campaign_id = instantlyPush.campaignId;
+                      if (instantlyPush.leadListId) lead.lead_list_id = instantlyPush.leadListId;
+                      const customVars: Record<string, string> = {};
+                      headers.forEach((h, i) => {
+                        if (i === emailColIdx || Object.values(fieldMap).includes(i)) return;
+                        const v = String(row[i] ?? '').trim();
+                        if (v) customVars[String(h).trim()] = v;
+                      });
+                      if (Object.keys(customVars).length > 0) lead.custom_variables = JSON.stringify(customVars);
+                      return lead;
+                    });
+                    if (leads.length === 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: нет валидных email в данных' })); return; }
+                    const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+                    const BATCH = 500;
+                    let pushed = 0;
+                    for (let i = 0; i < leads.length; i += BATCH) {
+                      const batch = leads.slice(i, i + BATCH);
+                      const parsedBatch = batch.map((l) => {
+                        const cv = l.custom_variables;
+                        const rest = { ...l };
+                        delete rest.custom_variables;
+                        return { ...rest, custom_variables: cv ? JSON.parse(cv) : undefined };
+                      });
+                      const res = await fetch('/api/instantly/leads', {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ leads: parsedBatch, skip_if_in_workspace: true }),
+                      });
+                      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+                      pushed += batch.length;
+                    }
+                    setInstantlyPush((s) => ({ ...s, pushing: false, result: `Загружено ${pushed} лидов в Instantly` }));
+                  } catch (err) {
+                    setInstantlyPush((s) => ({ ...s, pushing: false, result: `Ошибка: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}` }));
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors"
+              >
+                {instantlyPush.pushing ? '⟳ Загрузка…' : 'Push'}
               </button>
             </div>
           </div>
