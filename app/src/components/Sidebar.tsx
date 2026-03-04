@@ -126,14 +126,22 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       if (!token || cancelled) return;
       const headers = { Authorization: `Bearer ${token}` };
 
-      const [toolsRes, reviewRes] = await Promise.all([
-        fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ tools: [] })),
+      const [toolsRes, submittedRes, reworkRes] = await Promise.all([
+        fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ toolIds: [] })),
         fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
+        fetch('/api/database-review/requests', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
       ]);
       if (cancelled) return;
       const tools = (toolsRes.toolIds ?? []) as string[];
       setVisibleTools(tools);
-      setBadges({ 'review-count': tools.includes('database-review') ? (reviewRes.requests ?? []).length : 0 });
+      const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
+      const reworkCount = ((reworkRes.requests ?? []) as Array<{ status: string }>).filter(
+        (r) => reworkStatuses.has(r.status),
+      ).length;
+      setBadges({
+        'review-count': tools.includes('database-review') ? (submittedRes.requests ?? []).length : 0,
+        'rework-count': reworkCount,
+      });
     })();
     return () => { cancelled = true; };
   }, [userRole]);
