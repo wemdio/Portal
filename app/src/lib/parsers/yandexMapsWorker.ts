@@ -133,7 +133,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
-    let allLinks: string[] = [];
+    const allLinks: string[] = [];
     const allLinksSet = new Set<string>();
     let urlIndex = 0;
     for (const search_url of searchUrls) {
