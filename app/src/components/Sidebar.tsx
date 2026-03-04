@@ -119,6 +119,25 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      const headers = { Authorization: `Bearer ${token}` };
+
+      const [toolsRes, reviewRes] = await Promise.all([
+        fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ tools: [] })),
+        fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
+      ]);
+      if (cancelled) return;
+      setVisibleTools((toolsRes.tools ?? []) as string[]);
+      setBadges({ 'review-count': (toolsRes.tools ?? []).includes('database-review') ? (reviewRes.requests ?? []).length : 0 });
+    })();
+    return () => { cancelled = true; };
+  }, [userRole]);
+
+  useEffect(() => {
     if (!isTma || typeof window === 'undefined') return;
     const root = document.documentElement;
     root.dataset.tmaTheme = tmaTheme;
@@ -165,6 +184,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           if (item.adminOnly && !isAdmin(userRole)) return null;
           if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return null;
           if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
+          if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
 
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
@@ -172,6 +192,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             : pathname === item.href ||
               pathname.startsWith(`${item.href}/`) ||
               aliases.some((alias) => pathname === alias || pathname.startsWith(`${alias}/`));
+          const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
           return (
             <Link
               key={item.name}
@@ -185,6 +206,11 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               `}
             >
               {item.name}
+              {badgeCount > 0 && (
+                <span className="ml-auto inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[9px] font-bold text-white bg-red-500 rounded-full">
+                  {badgeCount}
+                </span>
+              )}
             </Link>
           );
         })}
