@@ -12,6 +12,63 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
+function buildQueueItems(
+  rows: EnqueueRow[],
+  userId: string,
+  now: string,
+): { items: ReturnType<typeof buildOneItem>[]; invalidCount: number } {
+  let invalidCount = 0;
+  const items = rows.map((row) => {
+    const item = buildOneItem(row, userId, now);
+    if (item.status === 'failed') invalidCount += 1;
+    return item;
+  });
+  return { items, invalidCount };
+}
+
+function buildOneItem(row: EnqueueRow, userId: string, now: string) {
+  const rawEmail = String(row.email ?? '').trim();
+  const normalized = normalizeEmail(rawEmail);
+  let status: 'pending' | 'failed' = 'pending';
+  let lastError: string | null = null;
+  let result: string | null = null;
+  let quality: string | null = null;
+
+  if (!rawEmail) {
+    status = 'failed'; lastError = 'Пустой email'; result = 'invalid'; quality = 'bad';
+  } else if (!normalized) {
+    status = 'failed'; lastError = 'Невалидный формат'; result = 'invalid'; quality = 'bad';
+  } else {
+    const syntaxCheck = checkSyntax(normalized);
+    if (!syntaxCheck.valid) {
+      status = 'failed'; lastError = syntaxCheck.error ?? 'Невалидный формат'; result = 'invalid'; quality = 'bad';
+    }
+  }
+
+  return {
+    job_id: '',
+    user_id: userId,
+    row_index: row.rowIndex,
+    email_raw: rawEmail,
+    email_normalized: normalized || rawEmail.toLowerCase(),
+    status, last_error: lastError, result, quality,
+    attempt_count: 0, created_at: now, updated_at: now,
+    completed_at: status === 'failed' ? now : null,
+  };
+}
+
+async function insertQueueBatches(
+  items: { job_id: string }[],
+  batchSize = 500,
+): Promise<string | null> {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const { error } = await supabaseAdmin!.from('email_validation_queue').insert(batch);
+    if (error) return error.message;
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const token = getBearerToken(req.headers.get('authorization'));
@@ -22,9 +79,9 @@ export async function POST(req: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return jsonError('Unauthorized', 401);
 
-    let body: { rows?: EnqueueRow[] };
+    let body: { rows?: EnqueueRow[]; job_id?: string };
     try {
-      body = (await req.json()) as { rows?: EnqueueRow[] };
+      body = (await req.json()) as { rows?: EnqueueRow[]; job_id?: string };
     } catch {
       return jsonError('Invalid JSON body', 400);
     }
@@ -37,7 +94,42 @@ export async function POST(req: NextRequest) {
       return jsonError('Too many rows (max 100k)', 400);
     }
 
-    // Block if user already has an active validation job
+    const now = new Date().toISOString();
+    const { items: queueItems, invalidCount } = buildQueueItems(rows, user.id, now);
+
+    // Append to existing job
+    if (body.job_id) {
+      const { data: existing, error: lookupErr } = await supabaseAdmin
+        .from('email_validation_jobs')
+        .select('id, user_id, total, processed, error_count')
+        .eq('id', body.job_id)
+        .single<{ id: string; user_id: string; total: number; processed: number; error_count: number }>();
+
+      if (lookupErr || !existing) return jsonError('Job not found', 404);
+      if (existing.user_id !== user.id) return jsonError('Unauthorized', 403);
+
+      const itemsToInsert = queueItems.map((item) => ({ ...item, job_id: existing.id }));
+      const insertErr = await insertQueueBatches(itemsToInsert);
+      if (insertErr) return jsonError(insertErr, 500);
+
+      await supabaseAdmin
+        .from('email_validation_jobs')
+        .update({
+          total: existing.total + rows.length,
+          processed: existing.processed + invalidCount,
+          error_count: existing.error_count + invalidCount,
+        })
+        .eq('id', existing.id);
+
+      return NextResponse.json({
+        job_id: existing.id,
+        total: existing.total + rows.length,
+        processed: existing.processed + invalidCount,
+        error_count: existing.error_count + invalidCount,
+      });
+    }
+
+    // Create new job
     const { data: existingJobs } = await supabaseAdmin
       .from('email_validation_jobs')
       .select('id, status, total, processed, created_at')
@@ -62,57 +154,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const now = new Date().toISOString();
-    let invalidCount = 0;
-
-    const queueItems = rows.map((row) => {
-      const rawEmail = String(row.email ?? '').trim();
-      const normalized = normalizeEmail(rawEmail);
-      let status: 'pending' | 'failed' = 'pending';
-      let lastError: string | null = null;
-      let result: string | null = null;
-      let quality: string | null = null;
-
-      if (!rawEmail) {
-        status = 'failed';
-        lastError = 'Пустой email';
-        result = 'invalid';
-        quality = 'bad';
-        invalidCount += 1;
-      } else if (!normalized) {
-        status = 'failed';
-        lastError = 'Невалидный формат';
-        result = 'invalid';
-        quality = 'bad';
-        invalidCount += 1;
-      } else {
-        const syntaxCheck = checkSyntax(normalized);
-        if (!syntaxCheck.valid) {
-          status = 'failed';
-          lastError = syntaxCheck.error ?? 'Невалидный формат';
-          result = 'invalid';
-          quality = 'bad';
-          invalidCount += 1;
-        }
-      }
-
-      return {
-        job_id: '',
-        user_id: user.id,
-        row_index: row.rowIndex,
-        email_raw: rawEmail,
-        email_normalized: normalized || rawEmail.toLowerCase(),
-        status,
-        last_error: lastError,
-        result,
-        quality,
-        attempt_count: 0,
-        created_at: now,
-        updated_at: now,
-        completed_at: status === 'failed' ? now : null,
-      };
-    });
-
     const { data: job, error: jobError } = await supabaseAdmin
       .from('email_validation_jobs')
       .insert({
@@ -133,15 +174,8 @@ export async function POST(req: NextRequest) {
 
     const jobId = job.id;
     const itemsToInsert = queueItems.map((item) => ({ ...item, job_id: jobId }));
-
-    const batchSize = 500;
-    for (let i = 0; i < itemsToInsert.length; i += batchSize) {
-      const batch = itemsToInsert.slice(i, i + batchSize);
-      const { error } = await supabaseAdmin.from('email_validation_queue').insert(batch);
-      if (error) {
-        return jsonError(error.message, 500);
-      }
-    }
+    const insertErr = await insertQueueBatches(itemsToInsert);
+    if (insertErr) return jsonError(insertErr, 500);
 
     return NextResponse.json({
       job_id: jobId,
