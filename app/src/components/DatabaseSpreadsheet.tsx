@@ -830,7 +830,15 @@ export function DatabaseSpreadsheet() {
   const [tgChats, setTgChats] = useState<Array<{ id: number; title: string }>>([]);
   const [myReviewRequests, setMyReviewRequests] = useState<Array<{
     id: string; tab_id: string; tab_name: string; status: string; project_name?: string;
+    reviewer_comment?: string;
   }>>([]);
+  const [reviewMarks, setReviewMarks] = useState<Array<{
+    row_index: number; color: string; comment: string; author_type: string;
+  }>>([]);
+  const [reviewMarksPopup, setReviewMarksPopup] = useState<{
+    rowIndex: number; marks: Array<{ color: string; comment: string; author_type: string }>;
+    top: number; left: number;
+  } | null>(null);
 
   const flushSave = () => {
     if (saveTimeoutRef.current) {
@@ -5281,20 +5289,50 @@ export function DatabaseSpreadsheet() {
       const token = session?.access_token;
       if (!token) { setReviewSubmitToast('Не авторизован'); return; }
       flushSave();
-      const res = await fetch('/api/database-review/submit', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tabId: activeTab.id,
-          tabName: activeTab.name,
-          projectId: reviewSubmit.projectId || undefined,
-          comment: reviewSubmit.comment || undefined,
-        }),
-      });
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+      const existingReq = activeReviewReq && reworkStatuses.has(activeReviewReq.status) ? activeReviewReq : null;
+
+      let res: Response;
+      if (existingReq) {
+        res = await fetch(`/api/database-review/submit`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            tabId: activeTab.id,
+            tabName: activeTab.name,
+            projectId: reviewSubmit.projectId || undefined,
+            comment: reviewSubmit.comment || undefined,
+            existingRequestId: existingReq.id,
+          }),
+        });
+      } else {
+        res = await fetch('/api/database-review/submit', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            tabId: activeTab.id,
+            tabName: activeTab.name,
+            projectId: reviewSubmit.projectId || undefined,
+            comment: reviewSubmit.comment || undefined,
+          }),
+        });
+      }
       const d = await res.json();
       if (!res.ok) { setReviewSubmitToast(d.error || 'Ошибка отправки'); return; }
-      setReviewSubmitToast('Отправлено на проверку!');
+      setReviewSubmitToast(existingReq ? 'Переотправлено на проверку!' : 'Отправлено на проверку!');
       setReviewSubmit({ isOpen: false, comment: '', projectId: '', submitting: false });
+      setMyReviewRequests((prev) => {
+        if (existingReq) {
+          return prev.map((r) => r.id === existingReq.id ? { ...r, status: 'submitted', reviewer_comment: '' } : r);
+        }
+        return [...prev, {
+          id: d.request?.id || '',
+          tab_id: activeTab.id,
+          tab_name: activeTab.name,
+          status: 'submitted',
+        }];
+      });
+      setReviewMarks([]);
     } catch {
       setReviewSubmitToast('Ошибка сети');
     } finally {
@@ -5307,6 +5345,16 @@ export function DatabaseSpreadsheet() {
     const t = setTimeout(() => setReviewSubmitToast(''), 3000);
     return () => clearTimeout(t);
   }, [reviewSubmitToast]);
+
+  useEffect(() => {
+    if (!reviewMarksPopup) return;
+    const handler = (e: Event) => {
+      const el = document.getElementById('review-marks-popup');
+      if (el && !el.contains(e.target as Node)) setReviewMarksPopup(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [reviewMarksPopup]);
 
   const openPublishModal = async (requestId: string) => {
     setReviewPublish({ isOpen: true, requestId, chatId: null, message: '', publishing: false });
@@ -5719,11 +5767,50 @@ export function DatabaseSpreadsheet() {
           tab_name: (r.tab_name as string) || '',
           status: r.status as string,
           project_name: (r.project_name as string) || '',
+          reviewer_comment: (r.reviewer_comment as string) || '',
         })),
       );
     })();
     return () => { cancelled = true; };
   }, [userId]);
+
+  const activeReviewReq = activeTab ? myReviewRequests.find((r) => r.tab_id === activeTab.id) : null;
+  const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
+  const hasRework = activeReviewReq && reworkStatuses.has(activeReviewReq.status);
+  const reviewMarksMap = useMemo(() => {
+    const map = new Map<number, typeof reviewMarks>();
+    for (const m of reviewMarks) {
+      const arr = map.get(m.row_index) ?? [];
+      arr.push(m);
+      map.set(m.row_index, arr);
+    }
+    return map;
+  }, [reviewMarks]);
+
+  useEffect(() => {
+    if (!hasRework || !activeReviewReq) { setReviewMarks([]); return; }
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      const res = await fetch(`/api/database-review/requests/${activeReviewReq.id}/marks`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const d = await res.json();
+      if (cancelled) return;
+      setReviewMarks(
+        (d.marks ?? []).map((m: Record<string, unknown>) => ({
+          row_index: m.row_index as number,
+          color: (m.color as string) || '',
+          comment: (m.comment as string) || '',
+          author_type: (m.author_type as string) || 'reviewer',
+        })),
+      );
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasRework, activeReviewReq?.id]);
 
   useEffect(() => {
     if (!storageKey) return;
@@ -6146,14 +6233,41 @@ export function DatabaseSpreadsheet() {
 
         <div className="h-4 w-px bg-gray-200 mx-0.5" />
 
-        <button
-          type="button"
-          onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
-          disabled={!activeTab || rowCount === 0}
-          className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          ✓ На проверку
-        </button>
+        {activeReviewReq && (() => {
+          const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+            submitted: { label: 'На проверке', cls: 'border-gray-300 bg-gray-50 text-gray-600' },
+            needs_rework: { label: 'На доработке', cls: 'border-orange-300 bg-orange-50 text-orange-700' },
+            review_approved: { label: 'Одобрено', cls: 'border-green-300 bg-green-50 text-green-700' },
+            sent_to_client: { label: 'У клиента', cls: 'border-blue-300 bg-blue-50 text-blue-700' },
+            client_approved: { label: 'Клиент согласовал', cls: 'border-green-300 bg-green-50 text-green-700' },
+            client_requested_changes: { label: 'Клиент: правки', cls: 'border-red-300 bg-red-50 text-red-700' },
+          };
+          const badge = STATUS_BADGE[activeReviewReq.status];
+          return badge ? (
+            <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium ${badge.cls}`}>
+              {badge.label}
+              {activeReviewReq.reviewer_comment && reworkStatuses.has(activeReviewReq.status) && (
+                <span
+                  className="cursor-help underline decoration-dotted"
+                  title={activeReviewReq.reviewer_comment}
+                >
+                  💬
+                </span>
+              )}
+            </span>
+          ) : null;
+        })()}
+
+        {(!activeReviewReq || reworkStatuses.has(activeReviewReq.status)) && (
+          <button
+            type="button"
+            onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
+            disabled={!activeTab || rowCount === 0}
+            className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {activeReviewReq ? '↻ Переотправить' : '✓ На проверку'}
+          </button>
+        )}
 
         <button
           type="button"
@@ -6471,11 +6585,17 @@ export function DatabaseSpreadsheet() {
                   if (!row) return null;
                   const isChecked = selectedRows.has(rowIndex);
                   const isHeaderRow = rowIndex === 0;
+                  const rowMarks = reviewMarksMap.get(rowIndex);
+                  const rowMarkColor = rowMarks?.[0]?.color || '';
+                  const rowHasComment = rowMarks?.some((m) => m.comment);
                   return (
                     <tr
                       key={`row-${rowIndex}`}
                       className="group"
-                      style={isLargeTable ? { height: VIRTUAL_ROW_HEIGHT } : undefined}
+                      style={{
+                        ...(isLargeTable ? { height: VIRTUAL_ROW_HEIGHT } : {}),
+                        ...(rowMarkColor ? { backgroundColor: rowMarkColor } : {}),
+                      }}
                     >
                       <th
                         draggable={!isHeaderRow}
@@ -6507,7 +6627,9 @@ export function DatabaseSpreadsheet() {
                               ? 'bg-blue-100 text-blue-900'
                               : isChecked 
                                 ? 'bg-blue-50 text-blue-800'
-                                : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
+                                : rowMarkColor
+                                  ? 'text-gray-600'
+                                  : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
                         }`}
                       >
                         <div className="flex items-center justify-center gap-1 h-full">
@@ -6521,6 +6643,25 @@ export function DatabaseSpreadsheet() {
                             aria-label={`Выбрать строку ${rowIndex + 1}`}
                           />
                           <span className="min-w-[1.5rem] text-center">{rowIndex + 1}</span>
+                          {rowHasComment && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                setReviewMarksPopup({
+                                  rowIndex,
+                                  marks: rowMarks!.filter((m) => m.comment),
+                                  top: rect.bottom + 4,
+                                  left: rect.right + 4,
+                                });
+                              }}
+                              className="text-[9px] leading-none opacity-70 hover:opacity-100"
+                              title="Комментарии к строке"
+                            >
+                              💬
+                            </button>
+                          )}
                         </div>
                       </th>
                       {row.map((value, colIndex) => {
@@ -6543,7 +6684,7 @@ export function DatabaseSpreadsheet() {
                             ? 'bg-amber-50'
                             : isHighlighted
                               ? 'bg-purple-50'
-                              : 'bg-white';
+                              : rowMarkColor ? '' : 'bg-white';
 
                         return (
                           <td
@@ -8578,6 +8719,32 @@ export function DatabaseSpreadsheet() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Review marks popup */}
+      {reviewMarksPopup && (
+        <div
+          id="review-marks-popup"
+          className="fixed z-[9999] bg-white border border-gray-200 rounded-xl shadow-2xl p-3 max-w-xs"
+          style={{ top: reviewMarksPopup.top, left: reviewMarksPopup.left }}
+        >
+          <div className="text-[10px] font-medium text-gray-400 mb-2">Строка {reviewMarksPopup.rowIndex + 1}</div>
+          {reviewMarksPopup.marks.map((m, i) => (
+            <div key={i} className="mb-2 last:mb-0">
+              <span className="text-[9px] font-medium text-gray-400 uppercase">
+                {m.author_type === 'client' ? 'Клиент' : 'Ревьюер'}
+              </span>
+              <p className="text-xs text-gray-800 mt-0.5">{m.comment}</p>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => setReviewMarksPopup(null)}
+            className="absolute top-1 right-2 text-gray-400 hover:text-gray-600 text-xs"
+          >
+            ✕
+          </button>
         </div>
       )}
 
