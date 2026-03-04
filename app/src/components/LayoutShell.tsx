@@ -62,7 +62,9 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
 
   const shellClassName = isTma
     ? 'flex min-h-screen overflow-hidden'
-    : 'flex min-h-screen overflow-x-hidden';
+    : isSpreadsheetPage
+      ? 'flex h-screen overflow-hidden'
+      : 'flex min-h-screen overflow-x-hidden';
 
   return (
     <div
