@@ -30,6 +30,7 @@ export const ALL_TOOL_IDS = [
   'email-sequence',
   'auto-report',
   'audio-transcribe',
+  'tg-transcribe',
   'rdp',
   'instantly',
 ] as const;
@@ -116,6 +117,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'Расшифровка видео и аудио',
     description: 'Загрузка документа получение расшифровки при помощи AI.',
     href: '/tools/audio-transcribe',
+    accentColor: 'blue',
+  },
+  'tg-transcribe': {
+    id: 'tg-transcribe',
+    title: 'Транскрибации из ТГ',
+    description: 'Автоматическая расшифровка видео из Telegram-группы с разделением по авторам.',
+    href: '/tools/tg-transcribe',
     accentColor: 'blue',
   },
   rdp: {

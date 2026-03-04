@@ -5,7 +5,7 @@
   "scripts": {
     "postinstall": "playwright install chromium",
     "db:migrate": "node scripts/db/ensureDatabase.js",
-    "predev": "node scripts/db/ensureDatabase.js",
+    "predev": "node scripts/db/ensureDatabase.js && node scripts/ensureTgBotApi.js",
     "dev": "concurrently \"next dev\" \"cd ../services/yandexmaps && uvicorn server:app --reload --port 8010\" \"npm run dev:workers\"",
     "dev:next": "next dev",
     "dev:workers": "concurrently \"npm run build:workers:watch\" \"node --watch --env-file ../.env dist/workers/hh.js\" \"node --watch --env-file ../.env dist/workers/search.js\" \"node --watch --env-file ../.env dist/workers/enrich.js\" \"node --watch --env-file ../.env dist/workers/yandexmaps.js\" \"node --watch --env-file ../.env dist/workers/emailvalidation.js\"",

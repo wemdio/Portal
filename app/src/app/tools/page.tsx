@@ -14,6 +14,7 @@ import {
   ClipboardCheck,
   Send,
   Waves,
+  Video,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -30,6 +31,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'email-sequence': Mail,
   'auto-report': FileText,
    'audio-transcribe': Waves,
+  'tg-transcribe': Video,
   rdp: FileText,
   instantly: Send,
 };
