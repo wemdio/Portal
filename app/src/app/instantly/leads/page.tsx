@@ -20,7 +20,11 @@ const INTEREST_LABELS: Record<number, { label: string; cls: string }> = {
 
 export default function LeadsPage() {
   return (
-    <Suspense fallback={<div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-400" /></div>}>
+    <Suspense fallback={
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+      </div>
+    }>
       <LeadsContent />
     </Suspense>
   );
