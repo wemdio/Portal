@@ -158,6 +158,99 @@ export async function yandexMapsCollectLinks(req: CollectLinksRequest): Promise<
   return await postJson<CollectLinksResponse>('/collect-links', req);
 }
 
+export type CollectLinksChunk = { links: string[]; total: number; done?: boolean; error?: string };
+
+/**
+ * Streaming version: calls /collect-links/stream and invokes onChunk for every
+ * NDJSON line so the caller can persist links to DB incrementally.
+ */
+export async function yandexMapsCollectLinksStream(
+  req: CollectLinksRequest,
+  onChunk: (chunk: CollectLinksChunk) => void | Promise<void>,
+): Promise<{ links: string[]; total: number }> {
+  const url = `${getServiceUrl()}/collect-links/stream`;
+  const timeoutMs = getTimeoutMs();
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    },
+    timeoutMs,
+  );
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new YandexMapsServiceHttpError(
+      `yandexmaps stream error ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`,
+    );
+  }
+
+  if (!res.body) throw new Error('No response body from streaming endpoint');
+
+  const allLinks: string[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let parsed: CollectLinksChunk;
+      try {
+        parsed = JSON.parse(trimmed) as CollectLinksChunk;
+      } catch {
+        continue;
+      }
+
+      if (parsed.error) throw new Error(`yandexmaps stream: ${parsed.error}`);
+
+      if (parsed.links) {
+        for (const link of parsed.links) {
+          if (!seen.has(link)) {
+            seen.add(link);
+            allLinks.push(link);
+          }
+        }
+      }
+      total = parsed.total ?? total;
+
+      await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
+    }
+
+    if (done) break;
+  }
+
+  if (buffer.trim()) {
+    try {
+      const parsed = JSON.parse(buffer.trim()) as CollectLinksChunk;
+      if (parsed.links) {
+        for (const link of parsed.links) {
+          if (!seen.has(link)) {
+            seen.add(link);
+            allLinks.push(link);
+          }
+        }
+      }
+      total = parsed.total ?? total;
+      await onChunk({ links: parsed.links ?? [], total, done: parsed.done });
+    } catch { /* ignore trailing partial */ }
+  }
+
+  return { links: allLinks, total };
+}
+
 export async function yandexMapsParseOrgs(req: ParseOrgsRequest): Promise<ParseOrgsResponse> {
   return await postJson<ParseOrgsResponse>('/parse-orgs', req);
 }
