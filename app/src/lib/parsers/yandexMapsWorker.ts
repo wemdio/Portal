@@ -107,9 +107,10 @@ export async function runYandexMapsCollectLinks(jobId: string) {
     await supabaseAdmin.from('yandex_maps_organizations').delete().eq('job_id', jobId);
 
     const cfg = (job.config && typeof job.config === 'object') ? (job.config as Record<string, unknown>) : {};
-    const searchUrls = Array.isArray((cfg as { search_urls?: unknown }).search_urls)
+    const MAX_SEARCH_URLS = 500;
+    const searchUrls = (Array.isArray((cfg as { search_urls?: unknown }).search_urls)
       ? ((cfg as { search_urls: unknown[] }).search_urls.filter((x): x is string => typeof x === 'string').map((s) => s.trim()).filter(Boolean))
-      : [];
+      : []).slice(0, MAX_SEARCH_URLS);
     const maxResultsRaw = (cfg as { max_results?: unknown }).max_results;
     const maxResults = typeof maxResultsRaw === 'number' || typeof maxResultsRaw === 'string'
       ? (Number(maxResultsRaw) || 5000)
@@ -135,50 +136,60 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     const allLinks: string[] = [];
     const allLinksSet = new Set<string>();
-    let urlIndex = 0;
-    for (const search_url of searchUrls) {
-      urlIndex += 1;
+    const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '4');
+    let completedUrls = 0;
+    const proxy = buildProxy(job);
+
+    const urlBatches = chunk(
+      searchUrls.map((url, i) => ({ url, index: i + 1 })),
+      collectConcurrency,
+    );
+
+    for (const batch of urlBatches) {
       const current = await getJob(jobId);
       if (current?.status === 'failed') {
         await trace?.cancel('Cancelled');
         return;
       }
 
-      const urlSpan = await trace?.startChild({
-        name: 'yandexmaps.collect_links.url',
-        input: { search_url, index: urlIndex, total: searchUrls.length, max_results: maxResults },
-        message: `URL ${urlIndex}/${searchUrls.length}`,
-      });
+      await Promise.all(batch.map(async ({ url: search_url, index: urlIndex }) => {
+        const urlSpan = await trace?.startChild({
+          name: 'yandexmaps.collect_links.url',
+          input: { search_url, index: urlIndex, total: searchUrls.length, max_results: maxResults },
+          message: `URL ${urlIndex}/${searchUrls.length}`,
+        });
 
-      try {
-        const proxy = buildProxy(job);
-        const { total } = await yandexMapsCollectLinksStream(
-          { search_url, max_results: maxResults, headless, proxy },
-          async (chunk) => {
-            if (chunk.links.length > 0) {
-              const normalized = normalizeYandexOrgUrls(chunk.links);
-              for (const link of normalized) {
-                if (!allLinksSet.has(link)) {
-                  allLinksSet.add(link);
-                  allLinks.push(link);
+        try {
+          const { total } = await yandexMapsCollectLinksStream(
+            { search_url, max_results: maxResults, headless, proxy },
+            async (ch) => {
+              if (ch.links.length > 0) {
+                const normalized = normalizeYandexOrgUrls(ch.links);
+                for (const link of normalized) {
+                  if (!allLinksSet.has(link)) {
+                    allLinksSet.add(link);
+                    allLinks.push(link);
+                  }
                 }
+                const rows = normalized.map((link) => ({ job_id: jobId, link }));
+                await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
               }
-              const rows = normalized.map((link) => ({ job_id: jobId, link }));
-              await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
-            }
-            await setJobPatch(jobId, {
-              total_links: allLinks.length,
-              processed_links: allLinks.length,
-              progress_stage: `collecting_links:${urlIndex}/${searchUrls.length}`,
-            });
-          },
-        );
+              await setJobPatch(jobId, {
+                total_links: allLinks.length,
+                processed_links: allLinks.length,
+                progress_stage: `collecting_links:${completedUrls + batch.length}/${searchUrls.length}`,
+              });
+            },
+          );
 
-        await urlSpan?.end({ links_collected: total, total_unique: allLinks.length });
-      } catch (e) {
-        await urlSpan?.fail(e);
-        void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
-      }
+          await urlSpan?.end({ links_collected: total, total_unique: allLinks.length });
+        } catch (e) {
+          await urlSpan?.fail(e);
+          void logWarn('parser.yandexmaps.collect.url_failed', 'Collect-links failed for URL', { jobId, search_url }, logMeta);
+        }
+      }));
+
+      completedUrls += batch.length;
     }
 
     await setJobPatch(jobId, {
