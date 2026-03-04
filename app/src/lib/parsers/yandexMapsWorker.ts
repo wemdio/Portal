@@ -164,7 +164,7 @@ export async function runYandexMapsCollectLinks(jobId: string) {
                 }
               }
               const rows = normalized.map((link) => ({ job_id: jobId, link }));
-              await supabaseAdmin.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
+              await supabaseAdmin!.from('yandex_maps_links').upsert(rows, { onConflict: 'job_id,link' });
             }
             await setJobPatch(jobId, {
               total_links: allLinks.length,
