@@ -131,8 +131,9 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
         fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
       ]);
       if (cancelled) return;
-      setVisibleTools((toolsRes.tools ?? []) as string[]);
-      setBadges({ 'review-count': (toolsRes.tools ?? []).includes('database-review') ? (reviewRes.requests ?? []).length : 0 });
+      const tools = (toolsRes.toolIds ?? []) as string[];
+      setVisibleTools(tools);
+      setBadges({ 'review-count': tools.includes('database-review') ? (reviewRes.requests ?? []).length : 0 });
     })();
     return () => { cancelled = true; };
   }, [userRole]);
