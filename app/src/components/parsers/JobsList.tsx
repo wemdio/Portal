@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob } from '@/types';
+import type { ParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw } from 'lucide-react';
 
@@ -16,6 +16,20 @@ const STAGE_LABELS: Record<string, string> = {
 };
 
 function resolveStageLabel(job: ParserJob) {
+  if (job.progress_stage === 'partitioning') {
+    const detail = getPartitionDetail(job);
+    if (detail) {
+      return `Разбиение на подзапросы (${detail.completed_subqueries}/${detail.total_subqueries})`;
+    }
+    return STAGE_LABELS.partitioning;
+  }
+  if (job.progress_stage === 'fetching_vacancies') {
+    const detail = getPartitionDetail(job);
+    if (detail && detail.completed_subqueries < detail.total_subqueries) {
+      return `Ищем вакансии (подзапрос ${detail.completed_subqueries + 1}/${detail.total_subqueries})`;
+    }
+    return STAGE_LABELS.fetching_vacancies;
+  }
   if (job.progress_stage && STAGE_LABELS[job.progress_stage]) {
     return STAGE_LABELS[job.progress_stage];
   }
@@ -26,6 +40,13 @@ function resolveStageLabel(job: ParserJob) {
   }
   if (job.status === 'pending') return STAGE_LABELS.pending;
   return 'В процессе';
+}
+
+function getPartitionDetail(job: ParserJob): PartitionProgressDetail | null {
+  if (!job.progress_detail) return null;
+  const d = job.progress_detail;
+  if (typeof d.total_subqueries !== 'number' || d.total_subqueries <= 1) return null;
+  return d;
 }
 
 type Props = {
@@ -108,6 +129,8 @@ export function JobsList({
             const progressValue = progressFromJob ?? fallbackProgress;
             const hasProgress = progressValue != null;
             const stageLabel = resolveStageLabel(job);
+            const partDetail = getPartitionDetail(job);
+            const isPartitioning = job.status === 'running' && partDetail != null;
             return (
               <div
                 key={job.id}
@@ -124,6 +147,28 @@ export function JobsList({
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
                       <span className="font-medium text-gray-900">Запрос:</span> {job.config?.text}
                     </div>
+                    {isPartitioning ? (
+                      <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
+                        <div className="flex items-center gap-2 text-xs font-medium text-blue-700">
+                          <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Разбиение на подзапросы: {partDetail.completed_subqueries} из {partDetail.total_subqueries}
+                        </div>
+                        {partDetail.current_subquery && partDetail.completed_subqueries < partDetail.total_subqueries ? (
+                          <div className="mt-1 text-xs text-blue-600 truncate" title={partDetail.current_subquery}>
+                            Текущий: {partDetail.current_subquery}
+                          </div>
+                        ) : null}
+                        <div className="mt-1.5 h-1.5 w-full rounded-full bg-blue-100 overflow-hidden">
+                          <div
+                            className="h-full bg-blue-500 transition-all duration-300"
+                            style={{ width: `${Math.round((partDetail.completed_subqueries / partDetail.total_subqueries) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="mt-3">
                       <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
                         {hasProgress ? (

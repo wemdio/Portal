@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import type { JSONContent } from '@tiptap/core';
 import { generateJSON } from '@tiptap/html';
 import { ReglamentEditor } from '@/components/ReglamentEditor';
@@ -14,6 +14,7 @@ import {
   REGLAMENT_STORAGE_BUCKET,
   REGLAMENT_STORAGE_PREFIX,
 } from '@/lib/reglamentEditor';
+import { wrapSectionsInBlocks } from '@/lib/wrapSectionsInBlocks';
 import type { ReglamentDocument, ReglamentStatus } from '@/types';
 import { LegacyReglamentPage } from '@/app/reglament/page';
 
@@ -33,14 +34,17 @@ function formatDate(value?: string | null) {
 
 export default function AdminReglamentEditPage() {
   const isTma = useIsTma();
+  const router = useRouter();
   const params = useParams<{ id: string }>();
   const docId = params?.id;
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const title = 'Регламент';
+  const [title, setTitle] = useState('');
   const [status, setStatus] = useState<ReglamentStatus>('draft');
   const [content, setContent] = useState<JSONContent>(DEFAULT_REGLAMENT_CONTENT);
   const [metadata, setMetadata] = useState<ReglamentDocState | null>(null);
@@ -55,7 +59,7 @@ export default function AdminReglamentEditPage() {
     if (!metadata) return false;
     const contentSerialized = JSON.stringify(content ?? DEFAULT_REGLAMENT_CONTENT);
     const baselineSerialized = JSON.stringify((metadata.content ?? DEFAULT_REGLAMENT_CONTENT) as JSONContent);
-    return title !== 'Регламент' || status !== metadata.status || contentSerialized !== baselineSerialized;
+    return title !== (metadata.title ?? '') || status !== metadata.status || contentSerialized !== baselineSerialized;
   }, [content, metadata, status, title]);
 
   useEffect(() => {
@@ -82,8 +86,17 @@ export default function AdminReglamentEditPage() {
 
       const docData = data as ReglamentDocState;
       setMetadata(docData);
+      setTitle(docData.title ?? '');
       setStatus(docData.status ?? 'draft');
-      setContent((docData.content ?? DEFAULT_REGLAMENT_CONTENT) as JSONContent);
+      let loadedContent = (docData.content ?? DEFAULT_REGLAMENT_CONTENT) as JSONContent;
+      if (
+        loadedContent?.type === 'doc' &&
+        loadedContent?.content?.length &&
+        !JSON.stringify(loadedContent).includes('sectionBlock')
+      ) {
+        loadedContent = wrapSectionsInBlocks(loadedContent);
+      }
+      setContent(loadedContent);
       initialRef.current = docData;
       setLoading(false);
     };
@@ -159,32 +172,11 @@ export default function AdminReglamentEditPage() {
     const finalStatus = nextStatus ?? status;
     const publishedAt = finalStatus === 'published' ? (metadata?.published_at ?? now) : null;
 
-    if (finalStatus === 'published') {
-      const { data: publishedDocs, error: publishedError } = await supabase
-        .from('reglament_documents')
-        .select('id, title')
-        .eq('status', 'published')
-        .neq('id', docId)
-        .limit(1);
-
-      if (publishedError) {
-        setError(`Не удалось проверить опубликованные документы: ${publishedError.message}`);
-        setSaving(false);
-        return;
-      }
-
-      if (publishedDocs && publishedDocs.length > 0) {
-        const already = publishedDocs[0] as { id: string; title: string };
-        setError(`Уже опубликован регламент «${already.title}». Сначала снимите его с публикации.`);
-        setSaving(false);
-        return;
-      }
-    }
-
+    const trimmedTitle = title.trim() || 'Без названия';
     const { error: updateError } = await supabase
       .from('reglament_documents')
       .update({
-        title: 'Регламент',
+        title: trimmedTitle,
         slug: metadata.slug,
         status: finalStatus,
         content,
@@ -202,7 +194,7 @@ export default function AdminReglamentEditPage() {
 
     const updated: ReglamentDocState = {
       id: docId,
-      title: 'Регламент',
+      title: trimmedTitle,
       slug: metadata?.slug ?? 'reglament',
       status: finalStatus,
       content,
@@ -214,6 +206,24 @@ export default function AdminReglamentEditPage() {
     initialRef.current = updated;
     setStatus(finalStatus);
     setSaveMessage('Сохранено');
+  };
+
+  const handleDeleteClick = () => {
+    setShowDeleteModal(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!docId || !metadata) return;
+    setDeleting(true);
+    setError(null);
+    setShowDeleteModal(false);
+    const { error: deleteError } = await supabase.from('reglament_documents').delete().eq('id', docId);
+    setDeleting(false);
+    if (deleteError) {
+      setError(deleteError.message);
+      return;
+    }
+    router.push('/admin/reglament');
   };
 
   const handleUploadImage = async (file: File) => {
@@ -285,7 +295,7 @@ export default function AdminReglamentEditPage() {
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           <Link
             href={`/reglament/${metadata.slug}`}
-            className="w-full sm:w-auto rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+            className="w-full sm:w-auto cursor-pointer rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
           >
             Просмотр
           </Link>
@@ -293,7 +303,7 @@ export default function AdminReglamentEditPage() {
             type="button"
             onClick={() => handleSave()}
             disabled={saving || !dirty}
-            className="w-full sm:w-auto rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+            className="w-full sm:w-auto cursor-pointer rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:shadow-sm"
           >
             {saving ? 'Сохранение...' : dirty ? 'Сохранить' : 'Сохранено'}
           </button>
@@ -301,9 +311,18 @@ export default function AdminReglamentEditPage() {
             type="button"
             onClick={() => handleSave(status === 'published' ? 'draft' : 'published')}
             disabled={saving || !canPublish}
-            className="w-full sm:w-auto rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+            className="w-full sm:w-auto cursor-pointer rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {status === 'published' ? 'Снять с публикации' : 'Опубликовать'}
+          </button>
+          <button
+            type="button"
+            onClick={handleDeleteClick}
+            disabled={deleting}
+            title="Удалить документ"
+            className="w-full sm:w-auto cursor-pointer rounded-lg border border-red-200 bg-red-50/50 px-4 py-2 text-sm font-semibold text-red-600 shadow-sm transition-all hover:border-red-300 hover:bg-red-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {deleting ? 'Удаление...' : 'Удалить'}
           </button>
         </div>
       </div>
@@ -321,6 +340,17 @@ export default function AdminReglamentEditPage() {
       )}
 
       <div className="space-y-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <label className="block text-sm font-medium text-gray-700 mb-2">Название документа</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Введите название..."
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-200"
+          />
+        </div>
+
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm text-sm text-gray-600">
           <div className="flex items-center justify-between">
             <span>Статус</span>
@@ -342,6 +372,39 @@ export default function AdminReglamentEditPage() {
           />
         </div>
       </div>
+
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div
+            className="absolute inset-0"
+            onClick={() => setShowDeleteModal(false)}
+            aria-hidden="true"
+          />
+          <div className="relative w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">Удалить документ?</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Документ «{title || metadata?.title || 'Без названия'}» будет удалён. Это действие нельзя отменить.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal(false)}
+                className="cursor-pointer rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 shadow-sm transition-all hover:border-gray-300 hover:bg-gray-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteConfirm}
+                disabled={deleting}
+                className="cursor-pointer rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-red-700 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1 disabled:opacity-60 disabled:hover:shadow-sm"
+              >
+                {deleting ? 'Удаление...' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div
         ref={legacyRootRef}

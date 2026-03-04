@@ -122,8 +122,8 @@ const PARTITION_CONCURRENCY = (() => {
   return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
 })();
 const PARTITION_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_PARTITION_TIMEOUT_MS ?? '120000');
-  return Number.isFinite(raw) ? Math.max(30_000, Math.floor(raw)) : 120000;
+  const raw = Number(process.env.HH_PARTITION_TIMEOUT_MS ?? '300000');
+  return Number.isFinite(raw) ? Math.max(30_000, Math.floor(raw)) : 300000;
 })();
 const EMPLOYER_CONCURRENCY = (() => {
   const raw = Number(process.env.HH_EMPLOYER_CONCURRENCY ?? String(MAX_CONCURRENCY));
@@ -134,20 +134,20 @@ const PAGE_DELAY_MS = (() => {
   return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
 })();
 const MAX_RETRIES = (() => {
-  const raw = Number(process.env.HH_MAX_RETRIES ?? '5');
-  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 5;
+  const raw = Number(process.env.HH_MAX_RETRIES ?? '7');
+  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 7;
 })();
 const REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_REQUEST_TIMEOUT_MS ?? '10000');
-  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 10000;
+  const raw = Number(process.env.HH_REQUEST_TIMEOUT_MS ?? '30000');
+  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 30000;
 })();
 const VACANCY_REQUEST_TIMEOUT_MS = (() => {
   const raw = Number(process.env.HH_VACANCY_REQUEST_TIMEOUT_MS ?? String(REQUEST_TIMEOUT_MS));
   return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : REQUEST_TIMEOUT_MS;
 })();
 const EMPLOYER_REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_EMPLOYER_REQUEST_TIMEOUT_MS ?? '14000');
-  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 14000;
+  const raw = Number(process.env.HH_EMPLOYER_REQUEST_TIMEOUT_MS ?? '30000');
+  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 30000;
 })();
 const PROXY_URLS = (() => {
   const urls: string[] = [];
@@ -167,12 +167,69 @@ const PROXY_URLS = (() => {
   return urls;
 })();
 
-const PROXY_DISPATCHERS: Dispatcher[] = PROXY_URLS.map((url) => new ProxyAgent(url));
+type ProxyEntry = {
+  url: string;
+  dispatcher: Dispatcher;
+  failedAt: number;
+  consecutiveFailures: number;
+};
 
-function getProxyDispatcher(): Dispatcher | undefined {
-  if (PROXY_DISPATCHERS.length === 0) return undefined;
-  const index = Math.floor(Math.random() * PROXY_DISPATCHERS.length);
-  return PROXY_DISPATCHERS[index];
+const PROXY_COOLDOWN_MS = 60_000;
+const PROXY_MAX_CONSECUTIVE_FAILURES = 3;
+
+const PROXY_ENTRIES: ProxyEntry[] = PROXY_URLS.map((url) => ({
+  url,
+  dispatcher: new ProxyAgent(url),
+  failedAt: 0,
+  consecutiveFailures: 0,
+}));
+
+function isProxyConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const cause = (err as Error & { cause?: Error & { code?: string } }).cause;
+  const code = cause?.code ?? '';
+  const msg = err.message + (cause?.message ?? '');
+  return (
+    code === 'ECONNREFUSED' ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ENOTFOUND' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT')
+  );
+}
+
+function getHealthyProxies(): ProxyEntry[] {
+  const now = Date.now();
+  return PROXY_ENTRIES.filter(
+    (p) =>
+      p.consecutiveFailures < PROXY_MAX_CONSECUTIVE_FAILURES ||
+      now - p.failedAt > PROXY_COOLDOWN_MS,
+  );
+}
+
+function getProxyDispatcher(exclude?: ProxyEntry): { entry: ProxyEntry; dispatcher: Dispatcher } | undefined {
+  if (PROXY_ENTRIES.length === 0) return undefined;
+  let candidates = getHealthyProxies().filter((p) => p !== exclude);
+  if (candidates.length === 0) {
+    candidates = PROXY_ENTRIES.filter((p) => p !== exclude);
+  }
+  if (candidates.length === 0) {
+    candidates = PROXY_ENTRIES;
+  }
+  const entry = candidates[Math.floor(Math.random() * candidates.length)];
+  return { entry, dispatcher: entry.dispatcher };
+}
+
+function markProxyFailed(entry: ProxyEntry) {
+  entry.failedAt = Date.now();
+  entry.consecutiveFailures += 1;
+}
+
+function markProxySuccess(entry: ProxyEntry) {
+  entry.consecutiveFailures = 0;
 }
 
 let lastRequestAt = 0;
@@ -308,20 +365,69 @@ function addDays(date: Date, days: number): Date {
   return next;
 }
 
+const HH_API_VALID_PARAMS = new Set([
+  'text',
+  'search_field',
+  'experience',
+  'employment',
+  'schedule',
+  'area',
+  'metro',
+  'professional_role',
+  'industry',
+  'employer_id',
+  'currency',
+  'salary',
+  'label',
+  'only_with_salary',
+  'period',
+  'date_from',
+  'date_to',
+  'top_lat',
+  'bottom_lat',
+  'left_lng',
+  'right_lng',
+  'order_by',
+  'sort_point_lat',
+  'sort_point_lng',
+  'clusters',
+  'describe_arguments',
+  'per_page',
+  'page',
+  'no_magic',
+  'premium',
+  'responses_count_enabled',
+  'part_time',
+  'accept_temporary',
+  'locale',
+  'host',
+]);
+
+const HH_NOOP_VALUES: Record<string, Set<string>> = {
+  experience: new Set(['doesNotMatter']),
+  order_by: new Set(['']),
+};
+
+function isNoopValue(key: string, value: string): boolean {
+  return HH_NOOP_VALUES[key]?.has(value) ?? false;
+}
+
 function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefined {
   if (!params) return undefined;
   const cleaned: HHSearchParams = {};
 
   for (const [key, value] of Object.entries(params)) {
     if (!key) continue;
+    if (!HH_API_VALID_PARAMS.has(key)) continue;
     if (Array.isArray(value)) {
-      const items = value.map((item) => String(item).trim()).filter(Boolean);
+      const items = value.map((item) => String(item).trim()).filter((v) => v && !isNoopValue(key, v));
       if (items.length === 1) cleaned[key] = items[0];
       else if (items.length > 1) cleaned[key] = items;
       continue;
     }
     const trimmed = String(value).trim();
-    if (trimmed) cleaned[key] = trimmed;
+    if (!trimmed || isNoopValue(key, trimmed)) continue;
+    cleaned[key] = trimmed;
   }
 
   return Object.keys(cleaned).length > 0 ? cleaned : undefined;
@@ -404,7 +510,8 @@ function appendExtraParams(params: URLSearchParams, extras?: HHSearchParams) {
 }
 
 export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
-  const params = normalizeExtraParams(config.params);
+  const rawParams = config.params;
+  const params = normalizeExtraParams(rawParams);
   const next: HHSearchConfig = { ...config, params };
 
   if (typeof next.text === 'string') next.text = next.text.trim();
@@ -431,7 +538,7 @@ export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
     next.currency = cleaned ? cleaned : undefined;
   }
   if (!next.currency) {
-    const currency = getParamString(params, 'currency');
+    const currency = getParamString(params, 'currency') ?? getParamString(rawParams, 'currency_code');
     if (currency) next.currency = currency;
   }
 
@@ -446,7 +553,7 @@ export function normalizeSearchParams(config: HHSearchConfig): HHSearchConfig {
   }
 
   if (next.per_page === undefined) {
-    next.per_page = getParamNumber(params, ['per_page', 'items_on_page']);
+    next.per_page = getParamNumber(params, ['per_page']) ?? getParamNumber(rawParams, ['items_on_page']);
   }
   if (next.per_page !== undefined) {
     next.per_page = Math.max(1, Math.min(100, next.per_page));
@@ -518,14 +625,20 @@ export async function fetchWithRetry<T>(
   const timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   let lastError: unknown;
+  let lastProxyEntry: ProxyEntry | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let release: (() => void) | null = null;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let currentProxy: ProxyEntry | undefined;
     try {
       release = await throttleHhRequest();
       const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      const proxyResult = PROXY_ENTRIES.length > 0 ? getProxyDispatcher(lastProxyEntry) : undefined;
+      currentProxy = proxyResult?.entry;
+
       const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         headers: {
           'User-Agent': 'Portal/1.0 (HH parser)',
@@ -533,9 +646,11 @@ export async function fetchWithRetry<T>(
         },
         cache: 'no-store',
         signal: controller.signal,
-        ...(PROXY_DISPATCHERS.length > 0 ? { dispatcher: getProxyDispatcher() } : {}),
+        ...(proxyResult ? { dispatcher: proxyResult.dispatcher } : {}),
       };
       const res = await fetch(url, fetchInit);
+
+      if (currentProxy) markProxySuccess(currentProxy);
 
       if (res.ok) {
         const bodyText = await res.text().catch(() => '');
@@ -568,19 +683,43 @@ export async function fetchWithRetry<T>(
         });
       }
 
-      // On 429/403 set global backoff so ALL concurrent requests also pause
       if (res.status === 429 || res.status === 403) {
         const backoff = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** (attempt + 2));
         setGlobalBackoff(backoff);
       }
 
+      lastProxyEntry = currentProxy;
       const base = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(base + jitter);
       continue;
     } catch (err) {
+      const isProxyConnErr = currentProxy && isProxyConnectionError(err);
+      if (isProxyConnErr && currentProxy) {
+        markProxyFailed(currentProxy);
+        lastProxyEntry = currentProxy;
+        const reason = getFetchFailureReason(err);
+        logError('hh.proxy_failed', err as Error, {
+          url,
+          proxy: currentProxy.url.replace(/:[^:@]+@/, ':***@'),
+          reason,
+          attempt: attempt + 1,
+          maxRetries,
+          consecutiveFailures: currentProxy.consecutiveFailures,
+        });
+        lastError = new Error(`fetch failed: ${reason}`);
+        if (attempt < maxRetries) {
+          await sleep(Math.min(500, minDelayMs));
+          continue;
+        }
+        break;
+      }
+
       if (err instanceof Error && err.name === 'AbortError') {
         lastError = new Error('HH API request timed out');
+      } else if (err instanceof HHApiError) {
+        lastError = err;
+        throw err;
       } else {
         const reason = getFetchFailureReason(err);
         const isGenericFetchFailed = err instanceof Error && err.message === 'fetch failed';
@@ -591,6 +730,7 @@ export async function fetchWithRetry<T>(
           lastError = err;
         }
       }
+      lastProxyEntry = currentProxy;
       if (attempt === maxRetries) break;
       const base = Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
@@ -660,18 +800,36 @@ async function fetchEmployerDetails(
 
 export async function partitionQuery(config: HHSearchConfig, trace?: Span | null): Promise<HHSearchConfig[]> {
   const normalized = normalizeSearchParams(config);
-  const found = await fetchFound(normalized, trace);
-  if (found <= FOUND_LIMIT) return [normalized];
 
-  const dateFrom = normalized.date_from ? parseISODate(normalized.date_from) : null;
-  const dateTo = normalized.date_to ? parseISODate(normalized.date_to) : null;
-
-  if (dateFrom && dateTo && dateFrom < dateTo) {
-    return partitionByDate(normalized, dateFrom, dateTo, 0, trace);
+  if (normalized.text?.includes('|')) {
+    const terms = normalized.text.split('|').map((s) => s.trim()).filter(Boolean);
+    if (terms.length > 1) {
+      const subConfigs = terms.map((t) => ({ ...normalized, text: t }));
+      const allParts: HHSearchConfig[] = [];
+      await mapWithConcurrency(subConfigs, PARTITION_CONCURRENCY, async (sub) => {
+        const parts = await partitionQuerySingle(sub, trace);
+        allParts.push(...parts);
+      });
+      return allParts;
+    }
   }
 
-  const fallback = await partitionFallback(normalized);
-  return fallback.length > 0 ? fallback : [normalized];
+  return partitionQuerySingle(normalized, trace);
+}
+
+async function partitionQuerySingle(config: HHSearchConfig, trace?: Span | null): Promise<HHSearchConfig[]> {
+  const found = await fetchFound(config, trace);
+  if (found <= FOUND_LIMIT) return [config];
+
+  const dateFrom = config.date_from ? parseISODate(config.date_from) : null;
+  const dateTo = config.date_to ? parseISODate(config.date_to) : null;
+
+  if (dateFrom && dateTo && dateFrom < dateTo) {
+    return partitionByDate(config, dateFrom, dateTo, 0, trace);
+  }
+
+  const fallback = await partitionFallback(config);
+  return fallback.length > 0 ? fallback : [config];
 }
 
 async function partitionByDate(
@@ -727,14 +885,6 @@ async function partitionFallback(config: HHSearchConfig, allowDateFallback = tru
     return parts;
   }
 
-  if (config.text?.includes('|')) {
-    const parts = config.text
-      .split('|')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (parts.length > 1) return parts.map((t) => ({ ...config, text: t }));
-  }
-
   if (allowDateFallback && !config.date_from && !config.date_to) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -778,6 +928,13 @@ function mapVacancy(item: HHApiVacancyItem): HHVacancy {
   };
 }
 
+export type PartitionProgress = {
+  total_subqueries: number;
+  completed_subqueries: number;
+  subquery_labels: string[];
+  current_subquery: string | null;
+};
+
 type FetchVacanciesOptions = {
   jobId?: string;
   searchText?: string;
@@ -786,6 +943,7 @@ type FetchVacanciesOptions = {
   onProgress?: (progress: FetchVacanciesProgress) => void;
   progressIntervalMs?: number;
   onStage?: (stage: ParserProgressStage) => void;
+  onPartitionProgress?: (info: PartitionProgress) => void;
   trace?: Span | null;
   logMeta?: {
     userId?: string | null;
@@ -864,10 +1022,14 @@ export async function fetchVacancies(
     message: 'Подготовка разбиения запроса',
   });
   let partitions: HHSearchConfig[];
+  const pipeTerms = (normalized.text ?? '').split('|').filter((s) => s.trim()).length;
+  const partitionTimeout = pipeTerms > 3
+    ? PARTITION_TIMEOUT_MS + (pipeTerms - 3) * 30_000
+    : PARTITION_TIMEOUT_MS;
   try {
     partitions = await withTimeout(
       partitionQuery(normalized, options?.trace),
-      PARTITION_TIMEOUT_MS,
+      partitionTimeout,
       () =>
         new HHApiError('HH partitioning timed out', {
           status: 0,
@@ -879,6 +1041,22 @@ export async function fetchVacancies(
     await partitionSpan?.fail(err);
     throw err;
   }
+  const partitionLabels = partitions.map((p) => {
+    const parts: string[] = [];
+    if (p.text) parts.push(p.text.length > 40 ? p.text.slice(0, 37) + '...' : p.text);
+    if (p.date_from || p.date_to) parts.push(`${p.date_from ?? '...'} → ${p.date_to ?? '...'}`);
+    return parts.join(' | ') || '—';
+  });
+
+  if (partitions.length > 1) {
+    options?.onPartitionProgress?.({
+      total_subqueries: partitions.length,
+      completed_subqueries: 0,
+      subquery_labels: partitionLabels,
+      current_subquery: partitionLabels[0] ?? null,
+    });
+  }
+
   options?.onStage?.('fetching_vacancies');
   void logInfo(
     'parser.hh.partitions',
@@ -900,6 +1078,7 @@ export async function fetchVacancies(
   let totalFound = 0;
   let totalFoundRaw = 0;
   let fetchedCount = 0;
+  let completedPartitions = 0;
 
   const registerItems = (items?: HHApiVacancyItem[]) => {
     if (!items || items.length === 0) return;
@@ -1033,13 +1212,31 @@ export async function fetchVacancies(
           { found: partFoundCapped, found_raw: partFound, fetched: partitionCollected, pages: totalPages },
           `Разбиение ${index + 1}: ${partitionCollected} вакансий`,
         );
+        if (partitions.length > 1) {
+          completedPartitions += 1;
+          const nextIdx = Math.min(index + 1, partitions.length - 1);
+          options?.onPartitionProgress?.({
+            total_subqueries: partitions.length,
+            completed_subqueries: completedPartitions,
+            subquery_labels: partitionLabels,
+            current_subquery: completedPartitions < partitions.length ? partitionLabels[nextIdx] : null,
+          });
+        }
       } catch (partErr) {
         await partSpan?.fail(partErr);
         // Re-throw cancellation
         if (partErr instanceof ParserJobCancelledError) throw partErr;
 
-        // Log and continue — one failed partition shouldn't kill the whole job
         partitionErrors += 1;
+        if (partitions.length > 1) {
+          completedPartitions += 1;
+          options?.onPartitionProgress?.({
+            total_subqueries: partitions.length,
+            completed_subqueries: completedPartitions,
+            subquery_labels: partitionLabels,
+            current_subquery: completedPartitions < partitions.length ? partitionLabels[Math.min(index + 1, partitions.length - 1)] : null,
+          });
+        }
         void logError(
           'parser.hh.partition.failed',
           partErr,

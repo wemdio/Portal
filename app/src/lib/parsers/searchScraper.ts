@@ -454,6 +454,8 @@ type GoogleSearchDebugInfo = {
   h3_count: number;
   anchor_with_h3_count: number;
   html_snippet: string;
+  /** До какой страницы в Google зашли (1-based). Заполняется только в googleSearchDetailed при пагинации. */
+  last_page_fetched?: number;
 };
 
 type DuckDuckGoSearchDebugInfo = {
@@ -1117,6 +1119,7 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
   const combined: SearchResultItem[] = [];
   const seen = new Set<string>();
   let lastDebug: GoogleSearchDebugInfo | null = null;
+  let lastPageFetched = 0;
 
   for (let page = 0; page < pages; page += 1) {
     const start = page * pageSize;
@@ -1124,6 +1127,7 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
     try {
       const out = await googleSearchDetailedByUrl(query, requestUrl);
       lastDebug = out.debug;
+      lastPageFetched = page + 1;
       for (const r of out.results) {
         const key = r.link.toLowerCase();
         if (seen.has(key)) continue;
@@ -1148,7 +1152,10 @@ export async function googleSearchDetailed(query: string, numResults = 10): Prom
     throw new GoogleSearchError('request_failed', 'Google search failed (no debug)');
   }
 
-  return { results: combined, debug: lastDebug };
+  return {
+    results: combined,
+    debug: { ...lastDebug, last_page_fetched: lastPageFetched },
+  };
 }
 
 export async function duckDuckGoSearchDetailed(query: string): Promise<{

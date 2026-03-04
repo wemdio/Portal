@@ -36,6 +36,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# FFmpeg для инструмента расшифровки аудио/видео (извлечение дорожки и конвертация в mp3)
+RUN apk add --no-cache ffmpeg
+
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs

@@ -499,24 +499,175 @@ input[type=number]::-webkit-outer-spin-button {
   margin-top: 0.85rem;
 }
 
-.reglament-prose h2:not([class]) {
+/* ===== STANDALONE HEADINGS (outside sections) ===== */
+.reglament-prose h1:not([class]) {
   font-size: 1.6rem;
   line-height: 1.25;
+  font-weight: 800;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  padding: 1rem 1.25rem 1rem 1.5rem;
+  background: linear-gradient(135deg, #eff6ff 0%, #f0f7ff 100%);
+  border-left: 5px solid #1d4ed8;
+  border-radius: 0.75rem;
+  color: #1e3a8a;
+  box-shadow: 0 2px 8px rgba(29, 78, 216, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  letter-spacing: -0.01em;
+}
+
+.reglament-prose h1:not([class]):first-child {
+  margin-top: 0;
+}
+
+.reglament-prose h2:not([class]) {
+  font-size: 1.35rem;
+  line-height: 1.3;
   font-weight: 700;
-  margin-top: 1.6rem;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  padding: 0.85rem 1.25rem 0.85rem 1.4rem;
+  background: linear-gradient(135deg, #f5f3ff 0%, #f4f2ff 100%);
+  border-left: 5px solid #7c3aed;
+  border-radius: 0.75rem;
+  color: #4c1d95;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  letter-spacing: -0.01em;
+}
+
+.reglament-prose h2:not([class]):first-child {
+  margin-top: 0;
 }
 
 .reglament-prose h3:not([class]) {
-  font-size: 1.25rem;
-  line-height: 1.3;
+  font-size: 1.1rem;
+  line-height: 1.35;
   font-weight: 600;
-  margin-top: 1.2rem;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  padding: 0.6rem 1rem 0.6rem 1rem;
+  background: #f8fafc;
+  border-left: 3px solid #94a3b8;
+  border-radius: 0.5rem;
+  color: #334155;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.reglament-prose h4:not([class]) {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.4rem;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .reglament-prose ul:not([class]),
 .reglament-prose ol:not([class]) {
-  list-style: none; /* Убираем маркеры по умолчанию */
+  margin: 0.75rem 0;
+}
+
+.reglament-prose ul:not([class]) {
+  list-style: none;
   padding-left: 0;
+}
+
+.reglament-prose ul:not([class]) li:not([class]) {
+  position: relative;
+  padding-left: 1.6rem;
+  margin: 0.45rem 0;
+  line-height: 1.6;
+}
+
+.reglament-prose ul:not([class]) li:not([class])::before {
+  content: '';
+  position: absolute;
+  left: 0.15rem;
+  top: 0.55em;
+  width: 7px;
+  height: 7px;
+  background: #64748b;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(100, 116, 139, 0.15);
+}
+
+/* Nested bullet — smaller hollow dot */
+.reglament-prose ul:not([class]) li:not([class]) ul:not([class]) li:not([class])::before {
+  width: 5px;
+  height: 5px;
+  background: transparent;
+  border: 1.5px solid #94a3b8;
+  box-shadow: none;
+  top: 0.6em;
+}
+
+.reglament-prose ol:not([class]) {
+  list-style: none;
+  padding-left: 0;
+  counter-reset: reglament-ol;
+}
+
+.reglament-prose ol:not([class]) li:not([class]) {
+  position: relative;
+  padding-left: 2.75rem;
+  margin: 0.55rem 0;
+  counter-increment: reglament-ol;
+  line-height: 1.6;
+}
+
+.reglament-prose ol:not([class]) li:not([class])::before {
+  content: counter(reglament-ol);
+  position: absolute;
+  left: 0;
+  top: 0.1em;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  border-radius: 50%;
+  border: 1px solid #bfdbfe;
+}
+
+.reglament-prose li:not([class]) {
+  margin: 0.3rem 0;
+}
+
+/* ===== CHECKLIST ITEMS (Google Docs checkbox lists) ===== */
+.reglament-prose li.checklist-item,
+.reglament-content li.checklist-item {
+  list-style: none;
+  padding-left: 2rem;
+  position: relative;
+  margin: 0.4rem 0;
+}
+
+.reglament-prose li.checklist-item::before,
+.reglament-content li.checklist-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.2em;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid #94a3b8;
+  border-radius: 4px;
+  background: white;
+}
+
+.reglament-prose li.checklist-item.checked::before,
+.reglament-content li.checklist-item.checked::before {
+  background: #10b981;
+  border-color: #10b981;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M2 6l3 3 5-5' stroke='white' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 0.75rem;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 
 .reglament-prose a:not([class]) {
@@ -531,11 +682,406 @@ input[type=number]::-webkit-outer-spin-button {
   border: 1px solid #e5e7eb;
 }
 
+/* Блок «Примечание» — жёлтый фон, оранжевая рамка */
 .reglament-prose blockquote:not([class]) {
-  border-left: 4px solid #e5e7eb;
-  background: #f9fafb;
-  padding: 0.75rem 1rem;
+  margin: 1.25rem 0;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, #fffbeb 0%, #fefce8 100%);
+  border-left: 4px solid #f59e0b;
+  border: 1px solid #fde68a;
+  border-left-width: 4px;
+  border-radius: 0.6rem;
+  color: #78350f;
+  font-style: normal;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.1), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.reglament-prose blockquote:not([class])::before {
+  content: '📌 Примечание';
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #b45309;
+  margin-bottom: 0.5rem;
+}
+
+/* Blockquote inside a colored section — matches section accent */
+.reglament-prose section blockquote:not([class]),
+.reglament-content section blockquote:not([class]) {
+  border-left-color: var(--sec-accent, #f59e0b);
+  border-color: var(--sec-border, #fde68a);
+  border-left-width: 4px;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--sec-heading, #78350f);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.reglament-prose section blockquote:not([class])::before,
+.reglament-content section blockquote:not([class])::before {
+  color: var(--sec-accent, #b45309);
+}
+
+/* ===== SECTION CARD BASE ===== */
+.reglament-prose section,
+.reglament-content section {
+  margin: 1.5rem 0;
+  padding: 1.5rem 1.75rem;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.875rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  position: relative;
+  overflow: hidden;
+}
+
+.reglament-prose section:first-child,
+.reglament-content section:first-child {
+  margin-top: 0;
+}
+
+/* ===== COLOR VARIANT CSS VARIABLES ===== */
+.reglament-prose section.section-blue,
+.reglament-content section.section-blue {
+  --sec-accent: #3b82f6;
+  --sec-accent-dark: #1d4ed8;
+  --sec-bg: #eff6ff;
+  --sec-bg-end: #f0f7ff;
+  --sec-border: #bfdbfe;
+  --sec-heading: #1e3a8a;
+  --sec-heading-border: #93c5fd;
+  --sec-badge-bg: #dbeafe;
+  --sec-badge-text: #1d4ed8;
+  --sec-bullet: #3b82f6;
+  --sec-h3: #1d4ed8;
+  --sec-h3-border: #bfdbfe;
+}
+
+.reglament-prose section.section-violet,
+.reglament-content section.section-violet {
+  --sec-accent: #8b5cf6;
+  --sec-accent-dark: #6d28d9;
+  --sec-bg: #f5f3ff;
+  --sec-bg-end: #f4f2ff;
+  --sec-border: #ddd6fe;
+  --sec-heading: #4c1d95;
+  --sec-heading-border: #c4b5fd;
+  --sec-badge-bg: #ede9fe;
+  --sec-badge-text: #6d28d9;
+  --sec-bullet: #8b5cf6;
+  --sec-h3: #6d28d9;
+  --sec-h3-border: #ddd6fe;
+}
+
+.reglament-prose section.section-emerald,
+.reglament-content section.section-emerald {
+  --sec-accent: #10b981;
+  --sec-accent-dark: #047857;
+  --sec-bg: #ecfdf5;
+  --sec-bg-end: #f0fdf7;
+  --sec-border: #a7f3d0;
+  --sec-heading: #064e3b;
+  --sec-heading-border: #6ee7b7;
+  --sec-badge-bg: #d1fae5;
+  --sec-badge-text: #047857;
+  --sec-bullet: #10b981;
+  --sec-h3: #065f46;
+  --sec-h3-border: #a7f3d0;
+}
+
+.reglament-prose section.section-amber,
+.reglament-content section.section-amber {
+  --sec-accent: #f59e0b;
+  --sec-accent-dark: #b45309;
+  --sec-bg: #fffbeb;
+  --sec-bg-end: #fefce8;
+  --sec-border: #fde68a;
+  --sec-heading: #78350f;
+  --sec-heading-border: #fcd34d;
+  --sec-badge-bg: #fef3c7;
+  --sec-badge-text: #b45309;
+  --sec-bullet: #f59e0b;
+  --sec-h3: #92400e;
+  --sec-h3-border: #fde68a;
+}
+
+.reglament-prose section.section-rose,
+.reglament-content section.section-rose {
+  --sec-accent: #f43f5e;
+  --sec-accent-dark: #be123c;
+  --sec-bg: #fff1f2;
+  --sec-bg-end: #fff0f1;
+  --sec-border: #fecdd3;
+  --sec-heading: #881337;
+  --sec-heading-border: #fda4af;
+  --sec-badge-bg: #ffe4e6;
+  --sec-badge-text: #be123c;
+  --sec-bullet: #f43f5e;
+  --sec-h3: #9f1239;
+  --sec-h3-border: #fecdd3;
+}
+
+.reglament-prose section.section-cyan,
+.reglament-content section.section-cyan {
+  --sec-accent: #06b6d4;
+  --sec-accent-dark: #0e7490;
+  --sec-bg: #ecfeff;
+  --sec-bg-end: #f0feff;
+  --sec-border: #a5f3fc;
+  --sec-heading: #164e63;
+  --sec-heading-border: #67e8f9;
+  --sec-badge-bg: #cffafe;
+  --sec-badge-text: #0e7490;
+  --sec-bullet: #06b6d4;
+  --sec-h3: #0e7490;
+  --sec-h3-border: #a5f3fc;
+}
+
+/* ===== APPLY VARIANT COLORS ===== */
+.reglament-prose section.section-card,
+.reglament-content section.section-card {
+  background: linear-gradient(135deg, var(--sec-bg, #f8fafc) 0%, var(--sec-bg-end, #f1f5f9) 100%);
+  border-color: var(--sec-border, #e2e8f0);
+  border-left: 5px solid var(--sec-accent, #3b82f6);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* Accent top strip */
+.reglament-prose section.section-card::before,
+.reglament-content section.section-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--sec-accent, #3b82f6) 0%,
+    var(--sec-accent-dark, #1d4ed8) 100%
+  );
+  border-radius: 0.875rem 0.875rem 0 0;
+}
+
+/* ===== HEADING INSIDE SECTION ===== */
+/* Override the standalone heading card styles when inside a section */
+.reglament-prose section h1:not([class]),
+.reglament-content section h1:not([class]),
+.reglament-prose section h2:not([class]),
+.reglament-content section h2:not([class]) {
+  padding: 0 0 0.85rem 0;
+  margin: 0.5rem 0 1.1rem 0;
+  background: none;
+  border-left: none;
+  border-bottom: 2px solid var(--sec-heading-border, #e2e8f0);
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 1.1rem;
+  line-height: 1.35;
+  font-weight: 700;
+  color: var(--sec-heading, #1e293b);
+}
+
+.reglament-prose section > h1:first-child,
+.reglament-prose section > h2:first-child,
+.reglament-prose section > h3:first-child,
+.reglament-content section > h1:first-child,
+.reglament-content section > h2:first-child,
+.reglament-content section > h3:first-child {
+  margin-top: 0;
+}
+
+/* H3 inside colored section — sub-section header card */
+.reglament-prose section h3:not([class]),
+.reglament-content section h3:not([class]) {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--sec-heading, #1e293b);
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid var(--sec-border, #e2e8f0);
+  border-left: 3px solid var(--sec-accent, #94a3b8);
+  border-radius: 0.5rem;
+  padding: 0.6rem 1rem;
+  margin: 1.25rem 0 0.75rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* H4 inside colored section */
+.reglament-prose section h4:not([class]),
+.reglament-content section h4:not([class]) {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--sec-h3, #475569);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 1rem 0 0.4rem;
+  padding: 0;
+  background: none;
+  border: none;
+}
+
+/* ===== BULLET LIST INSIDE SECTION ===== */
+.reglament-prose section ul:not([class]),
+.reglament-content section ul:not([class]) {
+  padding-left: 0;
+  margin: 0.5rem 0;
+}
+
+.reglament-prose section ul:not([class]) li:not([class]),
+.reglament-content section ul:not([class]) li:not([class]) {
+  padding: 0.5rem 0.75rem 0.5rem 2rem;
+  margin: 0;
+  border-bottom: 1px solid var(--sec-border, #e2e8f0);
+  border-radius: 0;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.reglament-prose section ul:not([class]) li:not([class]):last-child,
+.reglament-content section ul:not([class]) li:not([class]):last-child {
+  border-bottom: none;
+}
+
+.reglament-prose section ul:not([class]) li:not([class]):hover,
+.reglament-content section ul:not([class]) li:not([class]):hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.reglament-prose section ul:not([class]) li:not([class])::before,
+.reglament-content section ul:not([class]) li:not([class])::before {
+  background: var(--sec-bullet, #64748b);
+  width: 7px;
+  height: 7px;
+  top: 0.95em;
+  left: 0.6rem;
+  box-shadow: 0 0 0 2.5px rgba(100, 116, 139, 0.18);
+}
+
+/* ===== ORDERED LIST INSIDE SECTION ===== */
+.reglament-prose section ol:not([class]),
+.reglament-content section ol:not([class]) {
+  padding-left: 0;
+  margin: 0.5rem 0;
+}
+
+.reglament-prose section ol:not([class]) li:not([class]),
+.reglament-content section ol:not([class]) li:not([class]) {
+  padding: 0.65rem 0.75rem 0.65rem 3.25rem;
+  margin: 0;
+  border-bottom: 1px solid var(--sec-border, #e2e8f0);
+  transition: background 0.12s;
+}
+
+.reglament-prose section ol:not([class]) li:not([class]):last-child,
+.reglament-content section ol:not([class]) li:not([class]):last-child {
+  border-bottom: none;
+}
+
+.reglament-prose section ol:not([class]) li:not([class]):hover,
+.reglament-content section ol:not([class]) li:not([class]):hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.reglament-prose section ol:not([class]) li:not([class])::before,
+.reglament-content section ol:not([class]) li:not([class])::before {
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: var(--sec-badge-bg, #dbeafe);
+  color: var(--sec-badge-text, #1d4ed8);
+  border: 1.5px solid var(--sec-border, #bfdbfe);
+  top: 0.55rem;
+  left: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+/* Wrap list in a rounded container */
+.reglament-prose section ul:not([class]),
+.reglament-content section ul:not([class]),
+.reglament-prose section ol:not([class]),
+.reglament-content section ol:not([class]) {
+  border: 1px solid var(--sec-border, #e2e8f0);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/* Параграфы в карточках — чуть больше отступ */
+.reglament-prose p:not([class]) {
+  margin: 0.5rem 0;
+  line-height: 1.7;
+}
+
+.reglament-prose p:not([class]):first-of-type {
+  margin-top: 0;
+}
+
+/* Paragraphs inside sections — comfortable reading spacing */
+.reglament-prose section p:not([class]),
+.reglament-content section p:not([class]) {
+  margin: 0.65rem 0;
+  line-height: 1.75;
+  color: #374151;
+}
+
+.reglament-prose section p:not([class]):first-of-type,
+.reglament-content section p:not([class]):first-of-type {
+  margin-top: 0;
+}
+
+/* ===== TABLES ===== */
+.reglament-prose .tableWrapper,
+.reglament-content .tableWrapper {
+  margin: 1.25rem 0;
+  overflow-x: auto;
   border-radius: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.reglament-prose table,
+.reglament-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+  font-size: 0.88rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.reglament-prose th,
+.reglament-prose td,
+.reglament-content th,
+.reglament-content td {
+  border: 1px solid #e2e8f0;
+  padding: 0.65rem 1rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.reglament-prose th,
+.reglament-content th {
+  background: linear-gradient(135deg, #f1f5f9 0%, #e8eef5 100%);
+  font-weight: 700;
+  color: #1e293b;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 2px solid #cbd5e1;
+}
+
+.reglament-prose tr:nth-child(even) td,
+.reglament-content tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+.reglament-prose tr:hover td,
+.reglament-content tr:hover td {
+  background: #f0f7ff;
+  transition: background 0.15s;
 }
 
 .reglament-editor .reglament-prose {
@@ -571,8 +1117,9 @@ input[type=number]::-webkit-outer-spin-button {
 }
 
 .reglament-callout[data-variant='note'] {
-  background: #f5f3ff;
-  border-color: #c4b5fd;
+  background: #fffbeb;
+  border-color: #f59e0b;
+  border-left-width: 4px;
 }
 
 .reglament-content .group > .flex > div.p-2.bg-indigo-100 {

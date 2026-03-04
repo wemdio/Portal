@@ -3,7 +3,7 @@ import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdo
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
 const MAX_CONCURRENCY = 3;
-const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '15') * 60 * 1000;
+const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '360') * 60 * 1000;
 const WORKER_ID = `hh-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();

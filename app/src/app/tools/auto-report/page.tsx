@@ -1,8 +1,6 @@
 'use client';
 
 import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
-import Link from 'next/link';
-import type { Route } from 'next';
 import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
@@ -68,12 +66,6 @@ const CampaignRow = memo(function CampaignRow({
     </li>
   );
 });
-
-const RESULTS_SHEET_URL =
-  'https://docs.google.com/spreadsheets/d/1I4mQLI2evf1049-pJmX5YU8jwNnOMK5fRz1X6EymRW0/edit?usp=sharing';
-
-const INSTANTLY_ANALYTICS_URL = (id: string) =>
-  `https://app.instantly.ai/app/campaign/${id}/analytics`;
 
 interface ReportSummary {
   totalCampaigns: number;
@@ -213,14 +205,6 @@ function StyledReportView({
   periodText: string;
 }) {
   const campaigns = Object.values(campaignData);
-  const totalOpenPct =
-    summary.totalEmailsSent > 0
-      ? ((summary.totalOpened / summary.totalEmailsSent) * 100).toFixed(1)
-      : '0.0';
-  const totalReplyPct =
-    summary.totalContacts > 0
-      ? ((summary.totalReplies / summary.totalContacts) * 100).toFixed(1)
-      : '0.0';
 
   const cell = 'px-3 py-2 text-sm border border-gray-300';
   const headerCell = `${cell} font-semibold text-white`;
@@ -628,7 +612,6 @@ async function downloadExcelFormatted(
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Отчёт', { views: [{ rightToLeft: false }] });
 
-  const colCount = 9;
   ws.columns = [
     { width: 42 },
     { width: 12 },
@@ -884,7 +867,7 @@ export default function AutoReportPage() {
     return campaignsList.filter((c) => normalizeForSearch(c.name || '').includes(q));
   }, [campaignsList, searchQuery]);
 
-  const { startIndex, endIndex, totalHeight, visibleCampaigns } = useMemo(() => {
+  const { startIndex, totalHeight, visibleCampaigns } = useMemo(() => {
     const list = filteredCampaigns;
     const total = list.length;
     if (total === 0) return { startIndex: 0, endIndex: 0, totalHeight: 0, visibleCampaigns: [] };

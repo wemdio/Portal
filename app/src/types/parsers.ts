@@ -10,10 +10,18 @@ export interface ParserJob {
   total_parsed?: number | null;
   progress_percent?: number | null;
   progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | null;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
   error_message?: string | null;
+}
+
+export interface PartitionProgressDetail {
+  total_subqueries: number;
+  completed_subqueries: number;
+  subquery_labels?: string[];
+  current_subquery?: string | null;
 }
 
 export interface HHSearchConfig {
@@ -36,7 +44,7 @@ export interface SearchParserJob {
   id: string;
   user_id: string;
   status: ParserJobStatus;
-  config: { queries?: string[]; brief?: string; user_query?: string };
+  config: { queries?: string[]; brief?: string; user_query?: string; search_depth?: number };
   total_queries: number;
   processed_queries: number;
   total_results: number;
@@ -61,6 +69,17 @@ export interface SearchResult {
   description?: string | null;
   email?: string | null;
   provider?: string | null;
+  created_at: string;
+}
+
+export interface SearchQueryStat {
+  id: string;
+  job_id: string;
+  query: string;
+  query_index: number;
+  provider: string | null;
+  last_google_page: number | null;
+  results_count: number;
   created_at: string;
 }
 

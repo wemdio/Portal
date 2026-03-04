@@ -3,10 +3,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import type { SearchParserJob, SearchResult } from '@/types/parsers';
+import type { SearchParserJob, SearchResult, SearchQueryStat } from '@/types/parsers';
 import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
-import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy } from 'lucide-react';
+import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy, ChevronDown, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 type Lead = {
@@ -259,6 +259,9 @@ export function SearchParserView() {
   const [copying, setCopying] = useState(false);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
+  const [queryStats, setQueryStats] = useState<SearchQueryStat[]>([]);
+  const [queryStatsOpen, setQueryStatsOpen] = useState(false);
+  const [queryStatsPage, setQueryStatsPage] = useState(0);
   const latestCreatedAtRef = useRef<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
@@ -423,6 +426,18 @@ export function SearchParserView() {
     [apiFetch],
   );
 
+  const loadQueryStats = useCallback(
+    async (jobId: string) => {
+      try {
+        const data = await apiFetch<{ stats: SearchQueryStat[] }>(`/api/parsers/search/${jobId}/query-stats`);
+        setQueryStats(data.stats ?? []);
+      } catch {
+        setQueryStats([]);
+      }
+    },
+    [apiFetch],
+  );
+
   useEffect(() => {
     refreshJobs();
   }, [refreshJobs]);
@@ -430,13 +445,18 @@ export function SearchParserView() {
   useEffect(() => {
     if (activeJobId) {
       setResults([]);
+      setQueryStats([]);
+      setQueryStatsOpen(false);
+      setQueryStatsPage(0);
       latestCreatedAtRef.current = null;
       loadResults(activeJobId, 'initial');
+      loadQueryStats(activeJobId);
     } else {
       setResults([]);
+      setQueryStats([]);
       latestCreatedAtRef.current = null;
     }
-  }, [activeJobId, loadResults]);
+  }, [activeJobId, loadResults, loadQueryStats]);
 
   // Auto-refresh active job
   useEffect(() => {
@@ -444,14 +464,14 @@ export function SearchParserView() {
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = setInterval(() => {
         refreshJobs();
-        // Only append new rows; don't flicker the table.
         loadResults(activeJobId, 'incremental');
+        loadQueryStats(activeJobId);
       }, 5000);
       return () => clearInterval(interval);
     }
-  }, [activeJob, activeJobId, refreshJobs, loadResults]);
+  }, [activeJob, activeJobId, refreshJobs, loadResults, loadQueryStats]);
 
-  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; queries_text?: string; user_query?: string }) => {
+  const handleStart = useCallback(async (payload: { brief?: string; queries?: string[]; queries_text?: string; user_query?: string; search_depth?: number }) => {
     setBusy(true);
     setError(null);
     try {
@@ -560,14 +580,15 @@ export function SearchParserView() {
   const handleRepeat = useCallback(async () => {
     if (!activeJob) return;
     const displayQuery = getUserSearchQuery(activeJob);
+    const depth = activeJob.config?.search_depth;
     const savedQueries = (activeJob.config?.queries ?? []).map((q) => String(q).trim()).filter(Boolean);
     if (savedQueries.length > 0) {
-      await handleStart({ queries: savedQueries, user_query: displayQuery });
+      await handleStart({ queries: savedQueries, user_query: displayQuery, search_depth: depth });
       return;
     }
     const brief = typeof activeJob.config?.brief === 'string' ? activeJob.config.brief.trim() : '';
     if (brief) {
-      await handleStart({ brief, user_query: displayQuery || brief });
+      await handleStart({ brief, user_query: displayQuery || brief, search_depth: depth });
       return;
     }
   }, [activeJob, handleStart]);
@@ -702,13 +723,18 @@ export function SearchParserView() {
                           ? `Прогресс: ${jobProgress.progressValue}% — ${jobProgress.stageLabel}`
                           : `Статус: ${jobProgress.stageLabel}`}
                       </span>
-                      <span>Компаний: {job.total_results ?? 0}</span>
+                      <span>Компаний: {job.id === activeJobId ? totalCompanies : (job.total_results ?? 0)}</span>
                       {job.error_message ? (
                         <span className={`${jobProgress.stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
                           {jobProgress.stoppedByUser ? 'Остановлено' : job.error_message}
                         </span>
                       ) : null}
                     </div>
+                    {(job.status === 'running' || job.status === 'pending') && (
+                      <div className="mt-1 text-xs text-amber-600">
+                        Среднее время ожидания: 30 мин — 1 час
+                      </div>
+                    )}
                   </div>
                 </button>
               );
@@ -763,6 +789,11 @@ export function SearchParserView() {
                         ? `Прогресс: ${activeProgress.progressValue}% — ${activeProgress.stageLabel}`
                         : `Статус: ${activeProgress.stageLabel}`}
                     </div>
+                    {activeJob && (activeJob.status === 'running' || activeJob.status === 'pending') && (
+                      <div className="mt-1 text-xs text-amber-600">
+                        Среднее время ожидания: 30 мин — 1 час
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -862,6 +893,99 @@ export function SearchParserView() {
               {!activeJobStoppedByUser && activeJob.status === 'failed' ? <span>{activeJob.error_message}</span> : null}
               {!activeJobStoppedByUser && activeJob.status !== 'failed' ? (
                 <span>{activeJob.error_message}</span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {activeJobId && queryStats.length > 0 ? (
+            <div className="border-b border-gray-200">
+              <button
+                type="button"
+                onClick={() => setQueryStatsOpen((v) => !v)}
+                className="w-full flex items-center gap-2 px-6 py-3.5 text-left text-sm font-medium text-gray-700 bg-gray-50/50 hover:bg-gray-100 active:bg-gray-150 transition-colors cursor-pointer"
+              >
+                <Search className="h-4 w-4 text-gray-400 flex-shrink-0" />
+                <span>Глубина поиска по запросам</span>
+                <span className="text-xs text-gray-400 font-normal">({queryStats.length})</span>
+                <ChevronDown className={`ml-auto h-4 w-4 text-gray-400 transition-transform ${queryStatsOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {queryStatsOpen ? (
+                <div className="px-6 pb-4">
+                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                    {(() => {
+                      const STATS_PER_PAGE = 5;
+                      const totalPages = Math.ceil(queryStats.length / STATS_PER_PAGE);
+                      const page = Math.min(queryStatsPage, totalPages - 1);
+                      const sliced = queryStats.slice(page * STATS_PER_PAGE, (page + 1) * STATS_PER_PAGE);
+                      return (
+                        <>
+                          <table className="min-w-full divide-y divide-gray-200 text-sm table-fixed">
+                            <colgroup>
+                              <col className="w-[60%]" />
+                              <col className="w-[20%]" />
+                              <col className="w-[20%]" />
+                            </colgroup>
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Запрос</th>
+                                <th className="px-4 py-2 text-center text-xs font-medium text-gray-500 uppercase">Глубина</th>
+                                <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Результатов</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 bg-white">
+                              {sliced.map((qs, idx) => (
+                                <tr key={qs.id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 text-gray-900 truncate" title={qs.query}>{qs.query}</td>
+                                  {idx === 0 && (
+                                    <td className="px-4 py-2 text-center text-gray-500 align-middle" rowSpan={sliced.length}>
+                                      {activeJob?.config?.search_depth ?? 5} страниц
+                                    </td>
+                                  )}
+                                  <td className="px-4 py-2 text-right font-mono tabular-nums text-gray-700">{qs.results_count}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot className="bg-gray-50">
+                              <tr className="text-xs font-medium text-gray-600">
+                                <td className="px-4 py-2">Итого</td>
+                                <td className="px-4 py-2" />
+                                <td className="px-4 py-2 text-right font-mono tabular-nums">
+                                  {queryStats.reduce((sum, s) => sum + s.results_count, 0)}
+                                </td>
+                              </tr>
+                            </tfoot>
+                          </table>
+                          {totalPages > 1 && (
+                            <div className="flex items-center justify-between border-t border-gray-200 bg-gray-50 px-3 py-2">
+                              <span className="text-xs text-gray-500">
+                                {page * STATS_PER_PAGE + 1}–{Math.min((page + 1) * STATS_PER_PAGE, queryStats.length)} из {queryStats.length}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  disabled={page === 0}
+                                  onClick={() => setQueryStatsPage((p) => Math.max(0, p - 1))}
+                                  className="inline-flex items-center justify-center rounded-md border border-gray-200 bg-white p-1.5 text-gray-600 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  <ChevronLeft className="h-3.5 w-3.5" />
+                                </button>
+                                <span className="text-xs text-gray-600 px-2 tabular-nums">{page + 1} / {totalPages}</span>
+                                <button
+                                  type="button"
+                                  disabled={page >= totalPages - 1}
+                                  onClick={() => setQueryStatsPage((p) => Math.min(totalPages - 1, p + 1))}
+                                  className="inline-flex items-center justify-center rounded-md border border-gray-200 bg-white p-1.5 text-gray-600 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  <ChevronRight className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
               ) : null}
             </div>
           ) : null}

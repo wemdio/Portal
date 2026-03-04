@@ -13,6 +13,7 @@ import {
   FileText,
   ClipboardCheck,
   Send,
+  Waves,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -28,6 +29,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   parsers: Search,
   'email-sequence': Mail,
   'auto-report': FileText,
+   'audio-transcribe': Waves,
   rdp: FileText,
   instantly: Send,
 };
@@ -52,7 +54,7 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
   return (
     <Link
       href={config.href as Route}
-      className={`group rounded-2xl p-6 transition hover:shadow-md min-w-0 flex flex-col h-full ${borderClass}`}
+      className={`group rounded-2xl p-10 transition hover:shadow-md min-w-0 flex flex-col h-full ${borderClass}`}
     >
       <div className="flex items-start justify-between gap-4">
         <div className={toolId === 'auto-report' ? 'min-w-0' : undefined}>

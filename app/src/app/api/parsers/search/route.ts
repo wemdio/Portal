@@ -10,6 +10,7 @@ type SearchJobPayload = {
   user_query?: unknown;
   queries?: unknown;
   queries_text?: unknown;
+  search_depth?: unknown;
 };
 
 function jsonError(message: string, status: number) {
@@ -67,10 +68,14 @@ export async function POST(req: NextRequest) {
       return jsonError('Missing brief or queries', 400);
     }
 
+    const rawDepth = Number(payload?.search_depth);
+    const search_depth = Number.isFinite(rawDepth) ? Math.max(1, Math.min(10, Math.round(rawDepth))) : 5;
+
     const config = {
       ...(brief ? { brief } : {}),
       ...(hasQueries ? { queries } : {}),
       ...(user_query ? { user_query } : {}),
+      search_depth,
     };
 
     const { data: job, error } = await supabase

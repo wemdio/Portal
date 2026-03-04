@@ -18,7 +18,7 @@ import {
   isMojeekBlockedError,
   mojeekSearchDetailed,
 } from './searchScraper';
-import { serperSearchDetailed } from './serperSearch';
+import { serperSearchMultiPage } from './serperSearch';
 import { extractCompanySitesFromSource } from './sourceCompanyExtractor';
 
 /** Использовать Serper API для поисковой выдачи (когда задан SERPER_API_KEY). Иначе — старый парсинг Google/DDG/Bing/Mojeek. */
@@ -53,6 +53,8 @@ const SOURCE_EXPAND_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.SOURCE_EXPAND.CONC
 const QUERY_CONCURRENCY = toPositiveInt(SEARCH_CONFIG.QUERY_CONCURRENCY, 1);
 
 const GOOGLE_RESULTS_PER_QUERY = 100;
+const SERPER_PAGES_PER_QUERY = SEARCH_CONFIG.SERPER_PAGES;
+const SERPER_RESULTS_PER_PAGE = 10;
 const BING_MAX_PAGES = 16;
 const BING_MAX_RESULTS = 400;
 const MULTI_PROVIDER_ENABLED = true;
@@ -626,9 +628,12 @@ export async function runSearchParserJob(jobId: string) {
       .eq('id', jobId);
 
     const rawConfig =
-      job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string }) : {};
+      job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string; search_depth?: number }) : {};
     const brief = typeof rawConfig.brief === 'string' ? rawConfig.brief.trim() : '';
     let queries = Array.isArray(rawConfig.queries) ? rawConfig.queries.map((q) => String(q).trim()).filter(Boolean) : [];
+    const jobSerperPages = typeof rawConfig.search_depth === 'number' && Number.isFinite(rawConfig.search_depth)
+      ? Math.max(1, Math.min(10, Math.round(rawConfig.search_depth)))
+      : SERPER_PAGES_PER_QUERY;
     let usedFallbackQueries = false;
 
     if (queries.length === 0) {
@@ -754,8 +759,13 @@ export async function runSearchParserJob(jobId: string) {
 
       let insertedCount = 0;
       let hadQueryFailures = false;
+      let statsProvider: string = 'google';
+      let statsLastGooglePage: number | null = null;
 
       try {
+        if (USE_SERPER) {
+          statsProvider = 'serper';
+        }
         const runGoogle = async (q: string) => {
           // Google has internal delays, but we still gate globally to avoid bursts
           // when query concurrency > 1.
@@ -791,14 +801,19 @@ export async function runSearchParserJob(jobId: string) {
         let provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek' = 'google';
         const simplifiedQuery = simplifySearchQuery(query);
 
-        // —— Новый подход: Serper API (поисковая выдача без парсинга HTML) ——
+        // —— Новый подход: Serper API (поисковая выдача без парсинга HTML, несколько страниц) ——
         if (USE_SERPER) {
           try {
-            const out = await serperSearchDetailed(query, { num: GOOGLE_RESULTS_PER_QUERY });
+            const out = await serperSearchMultiPage(query, {
+              num: SERPER_RESULTS_PER_PAGE,
+              pages: jobSerperPages,
+              delayMs: 150,
+            });
             results = out.results
               .filter((r) => !isBlockedSite(r.link))
               .map((r) => ({ ...r, _provider: 'serper' as const }));
             debugPrimary = out.debug;
+            statsLastGooglePage = out.lastPage;
           } catch (e) {
             debugPrimary = { error: e instanceof Error ? e.message : String(e) };
             void logWarn(
@@ -811,11 +826,16 @@ export async function runSearchParserJob(jobId: string) {
           if (results.length === 0 && simplifiedQuery && simplifiedQuery !== query) {
             usedFallback = true;
             try {
-              const outFallback = await serperSearchDetailed(simplifiedQuery, { num: GOOGLE_RESULTS_PER_QUERY });
+              const outFallback = await serperSearchMultiPage(simplifiedQuery, {
+                num: SERPER_RESULTS_PER_PAGE,
+                pages: jobSerperPages,
+                delayMs: 150,
+              });
               results = outFallback.results
                 .filter((r) => !isBlockedSite(r.link))
                 .map((r) => ({ ...r, query, _provider: 'serper' as const }));
               debugFallback = outFallback.debug;
+              statsLastGooglePage = outFallback.lastPage;
             } catch (e) {
               debugFallback = { error: e instanceof Error ? e.message : String(e) };
             }
@@ -976,6 +996,22 @@ export async function runSearchParserJob(jobId: string) {
           }
         }
         } // конец блока «старый подход» (Google/DDG/Bing/Mojeek)
+
+        if (USE_SERPER) {
+          statsProvider = 'serper';
+          // statsLastGooglePage is already set by serperSearchMultiPage above
+        } else if (MULTI_PROVIDER_ENABLED && debugPrimary && typeof debugPrimary === 'object') {
+          statsProvider = 'multi';
+          const g = (debugPrimary as Record<string, unknown>).google;
+          if (g && typeof g === 'object' && typeof (g as { last_page_fetched?: number }).last_page_fetched === 'number') {
+            statsLastGooglePage = (g as { last_page_fetched: number }).last_page_fetched;
+          }
+        } else {
+          statsProvider = provider;
+          if (provider === 'google' && debugPrimary && typeof debugPrimary === 'object' && typeof (debugPrimary as { last_page_fetched?: number }).last_page_fetched === 'number') {
+            statsLastGooglePage = (debugPrimary as { last_page_fetched: number }).last_page_fetched ?? null;
+          }
+        }
 
         // Build rows (local dedupe only)
         const rows = results
@@ -1145,6 +1181,7 @@ export async function runSearchParserJob(jobId: string) {
             inserted: insertedCount,
             fallback_used: usedFallback,
             provider,
+            ...(statsLastGooglePage != null ? { last_google_page: statsLastGooglePage } : {}),
             links: {
               ...(provider === 'google' && debugPrimary && typeof debugPrimary === 'object'
                 ? {
@@ -1238,6 +1275,21 @@ export async function runSearchParserJob(jobId: string) {
           progress_percent: progressPercent,
           progress_stage: 'searching',
         });
+        try {
+          await admin.from('search_parser_query_stats').upsert(
+            {
+              job_id: jobId,
+              query,
+              query_index: index,
+              provider: statsProvider,
+              last_google_page: statsLastGooglePage,
+              results_count: insertedCount,
+            },
+            { onConflict: 'job_id,query_index' },
+          );
+        } catch (statsErr) {
+          console.warn('search_parser_query_stats upsert failed:', statsErr);
+        }
       }
     });
 
