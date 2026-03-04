@@ -72,23 +72,53 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
   // ── Brief Upload ──
 
   async function extractPdfText(file: File): Promise<string> {
-    const pdfjsLib = await import('pdfjs-dist');
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
-
     const buffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
-    const pages: string[] = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      pages.push(
-        content.items
-          .map((item) => ('str' in item ? item.str : ''))
-          .join(' '),
-      );
+    const binary = new TextDecoder('latin1').decode(buffer);
+    const textParts: string[] = [];
+
+    const decodePdfStr = (s: string) =>
+      s.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+        .replace(/\\\\/g, '\\').replace(/\\([()])/g, '$1');
+
+    const extractTj = (content: string) => {
+      const tj = /\(([^)]*)\)\s*Tj/g;
+      let m: RegExpExecArray | null;
+      while ((m = tj.exec(content)) !== null) textParts.push(decodePdfStr(m[1]));
+      const tjArr = /\[([^\]]+)\]\s*TJ/gi;
+      while ((m = tjArr.exec(content)) !== null) {
+        const inner = /\(([^)]*)\)/g;
+        let im: RegExpExecArray | null;
+        while ((im = inner.exec(m[1])) !== null) textParts.push(decodePdfStr(im[1]));
+      }
+    };
+
+    const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let sm: RegExpExecArray | null;
+    while ((sm = streamRe.exec(binary)) !== null) {
+      try {
+        const bytes = Uint8Array.from(sm[1], (c) => c.charCodeAt(0));
+        const ds = new DecompressionStream('deflate');
+        const writer = ds.writable.getWriter();
+        writer.write(bytes);
+        writer.close();
+        const reader = ds.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const total = chunks.reduce((a, c) => a + c.length, 0);
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunks) { merged.set(c, off); off += c.length; }
+        extractTj(new TextDecoder('utf-8').decode(merged));
+      } catch {
+        extractTj(sm[1]);
+      }
     }
-    return pages.join('\n');
+    extractTj(binary);
+    return textParts.join(' ').replace(/\s+/g, ' ').trim();
   }
 
   async function handleBriefUpload(file: File) {
