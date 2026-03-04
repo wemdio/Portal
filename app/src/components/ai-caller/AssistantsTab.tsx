@@ -115,7 +115,8 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
       try {
         const ds = new DecompressionStream('deflate');
         const writer = ds.writable.getWriter();
-        writer.write(bytes).catch(() => {});
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        writer.write(bytes as any).catch(() => {});
         writer.close().catch(() => {});
         const reader = ds.readable.getReader();
         const chunks: Uint8Array[] = [];
