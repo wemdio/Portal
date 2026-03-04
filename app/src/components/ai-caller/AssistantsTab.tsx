@@ -137,7 +137,9 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
     const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
     let sm: RegExpExecArray | null;
     while ((sm = streamRe.exec(binary)) !== null) {
-      const bytes = Uint8Array.from(sm[1], (c) => c.charCodeAt(0));
+      const raw = sm[1];
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
       const decompressed = await tryDecompress(bytes);
       extractTj(decompressed ?? sm[1]);
     }
