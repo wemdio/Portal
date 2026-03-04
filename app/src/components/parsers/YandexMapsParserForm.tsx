@@ -152,11 +152,13 @@ export function YandexMapsParserForm(props: {
     return [...new Set(urls.filter(Boolean))];
   };
 
-  const canSubmit = searchUrls.length > 0 || canGenerateBulk;
+  const MAX_SEARCH_URLS = 500;
+  const totalUrlCount = collectAllUrls().length;
+  const canSubmit = totalUrlCount > 0;
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const urls = collectAllUrls();
+    const urls = collectAllUrls().slice(0, MAX_SEARCH_URLS);
     if (!urls.length) return;
     await props.onCreate({
       search_urls: urls,
@@ -241,7 +243,16 @@ export function YandexMapsParserForm(props: {
 
       {/* Settings Section */}
 
-      <div className="flex justify-end pt-4">
+      <div className="flex items-center justify-between pt-4">
+        <div className="text-sm text-gray-500">
+          {totalUrlCount > MAX_SEARCH_URLS ? (
+            <span className="text-amber-600 font-medium">
+              {totalUrlCount} URL — будут обработаны первые {MAX_SEARCH_URLS}
+            </span>
+          ) : totalUrlCount > 0 ? (
+            <span>Итого: {totalUrlCount} URL</span>
+          ) : null}
+        </div>
         <button
           type="submit"
           disabled={props.busy || !canSubmit}
