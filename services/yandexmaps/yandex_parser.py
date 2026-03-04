@@ -189,9 +189,16 @@ class YandexMapsParser:
     encoded_query = quote(search_query)
     return f"https://yandex.ru/maps/?text={encoded_query}"
 
-  def collect_organization_links(self, search_url: str, max_results: int = 5000) -> List[str]:
+  def collect_organization_links(
+    self,
+    search_url: str,
+    max_results: int = 5000,
+    max_seconds: int = 480,
+    on_links: Optional[Callable[[List[str], int], None]] = None,
+  ) -> List[str]:
     self.is_running = True
     links: list[str] = []
+    deadline = time.monotonic() + max_seconds
 
     try:
       if not self.driver:
@@ -219,7 +226,10 @@ class YandexMapsParser:
       if not sidebar_scroll:
         soup = BeautifulSoup(self.driver.page_source, "lxml")
         links = self._extract_links_from_soup(soup)
-        return links[:max_results]
+        result = links[:max_results]
+        if on_links and result:
+          on_links(result, len(result))
+        return result
 
       scroll_attempts = 0
       max_scroll_attempts = max_results * 3 + 200
@@ -227,10 +237,11 @@ class YandexMapsParser:
       no_new_results_count = 0
       last_scroll_height = 0
       consecutive_same_height = 0
+      last_reported = 0
 
       links_set: set[str] = set()
 
-      while len(links) < max_results and scroll_attempts < max_scroll_attempts and self.is_running:
+      while len(links) < max_results and scroll_attempts < max_scroll_attempts and self.is_running and time.monotonic() < deadline:
         for _ in range(3):
           self._scroll_sidebar(sidebar_scroll)
           time.sleep(0.15)
@@ -238,10 +249,19 @@ class YandexMapsParser:
         soup = BeautifulSoup(self.driver.page_source, "lxml")
         new_links = self._extract_links_from_soup(soup)
 
+        batch: list[str] = []
         for link in new_links:
           if link not in links_set:
             links_set.add(link)
             links.append(link)
+            batch.append(link)
+
+        if on_links and batch:
+          on_links(batch, len(links))
+          last_reported = len(links)
+        elif on_links and scroll_attempts % 10 == 0 and len(links) != last_reported:
+          on_links([], len(links))
+          last_reported = len(links)
 
         try:
           current_scroll_height = self.driver.execute_script("return arguments[0].scrollHeight", sidebar_scroll)
@@ -286,6 +306,9 @@ class YandexMapsParser:
 
         time.sleep(0.8 if no_new_results_count > 6 else 0.4)
         scroll_attempts += 1
+
+      if time.monotonic() >= deadline:
+        self.log(f"[!] Таймаут сбора ссылок ({max_seconds}с), собрано {len(links)}")
 
       return links[:max_results]
     except Exception as e:
@@ -428,16 +451,17 @@ class YandexMapsParser:
       return match.group(1).replace("/org/", "/maps/org/") + "/"
     return url
 
-  def parse_organizations_from_links(self, links: List[str]) -> List[Organization]:
+  def parse_organizations_from_links(self, links: List[str], max_seconds: int = 480) -> List[Organization]:
     self.is_running = True
     organizations: list[Organization] = []
+    deadline = time.monotonic() + max_seconds
 
     try:
       if not self.driver:
         self._create_driver()
 
       for i, url in enumerate(links):
-        if not self.is_running:
+        if not self.is_running or time.monotonic() > deadline:
           break
         self.update_progress(i + 1, len(links), f"Парсинг: {i + 1}/{len(links)}")
         org = self.parse_organization(url)

@@ -748,12 +748,6 @@ export function HHParserView() {
         />
       </div>
 
-      {activeJob?.status === 'running' ? (
-        <div className="text-sm text-gray-500">
-          Job в статусе running — обновите список jobs или подождите завершения.
-        </div>
-      ) : null}
-
       {deleteCandidateId ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
