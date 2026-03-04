@@ -5241,7 +5241,7 @@ export function DatabaseSpreadsheet() {
                   if (r.is_disposable) detailParts.push('Disposable');
                   if (r.is_catch_all) detailParts.push('Catch-All');
                   if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
-                  if (r.last_error && r.status === 'failed') detailParts.push(r.last_error);
+                  if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
 
                   newData[r.row_index][resultColIndex] = resultText;
                   newData[r.row_index][qualityColIndex] = qualityText;
