@@ -71,6 +71,26 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
   // ── Brief Upload ──
 
+  async function extractPdfText(file: File): Promise<string> {
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(
+        content.items
+          .map((item) => ('str' in item ? item.str : ''))
+          .join(' '),
+      );
+    }
+    return pages.join('\n');
+  }
+
   async function handleBriefUpload(file: File) {
     setParsing(true);
     setError('');
@@ -78,7 +98,19 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
     try {
       const token = await getToken();
 
-      const text = await file.text();
+      let text: string;
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        text = await extractPdfText(file);
+      } else {
+        text = await file.text();
+      }
+
+      if (!text.trim()) {
+        setError('Не удалось извлечь текст из файла. Попробуйте TXT-файл.');
+        setParsing(false);
+        return;
+      }
+
       const providerQuery = `?provider=${encodeURIComponent(provider)}`;
 
       const res = await fetch(`${apiBase}/briefs/parse${providerQuery}`, {
