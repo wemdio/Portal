@@ -19,6 +19,9 @@ const nextConfig: NextConfig = {
   experimental: {
     typedRoutes: true,
     proxyClientMaxBodySize: '25mb',
+    serverActions: {
+      bodySizeLimit: '25mb',
+    },
   },
   outputFileTracingIncludes: {
     '/api/brief-scoring/parse-pdf': [

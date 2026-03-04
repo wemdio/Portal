@@ -12,6 +12,7 @@ import {
   AudioLines,
   FileText,
   ClipboardCheck,
+  Send,
   Waves,
   type LucideIcon,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'auto-report': FileText,
    'audio-transcribe': Waves,
   rdp: FileText,
+  instantly: Send,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {

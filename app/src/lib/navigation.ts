@@ -16,6 +16,7 @@ export const navItems: NavItem[] = [
   { name: 'Доска', href: '/board', navTabId: 'nav-tasks-board' },
   { name: 'Команда', href: '/team' },
   { name: 'Финансы', href: '/finance' },
+  { name: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
   { name: 'Инструменты', href: '/tools' },
   { name: 'Оплаты', href: '/payments' },
   { name: 'Календарь почт', href: '/billing-calendar', billingCalendarOnly: true },

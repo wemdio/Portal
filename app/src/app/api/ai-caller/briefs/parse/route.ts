@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { inflateSync } from 'zlib';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
@@ -101,7 +100,7 @@ function sanitizeCompanyForSpeech(raw: string): string {
   return text;
 }
 
-function extractTextFromPdfBuffer(buffer: Buffer): string {
+async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
   const binary = buffer.toString('binary');
   const textParts: string[] = [];
 
@@ -126,16 +125,25 @@ function extractTextFromPdfBuffer(buffer: Buffer): string {
     }
   };
 
-  // Decompress FlateDecode streams and extract text operators
+  let zlibInflate: ((buf: Buffer) => Buffer) | null = null;
+  try {
+    const zlib = await import('node:zlib');
+    zlibInflate = (buf: Buffer) => zlib.inflateSync(buf);
+  } catch {
+    // zlib unavailable — skip decompression
+  }
+
   const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let sm: RegExpExecArray | null;
   while ((sm = streamRe.exec(binary)) !== null) {
-    try {
-      const decompressed = inflateSync(Buffer.from(sm[1], 'binary')).toString('utf-8');
-      extractTjText(decompressed);
-    } catch {
-      extractTjText(sm[1]);
+    if (zlibInflate) {
+      try {
+        const decompressed = zlibInflate(Buffer.from(sm[1], 'binary')).toString('utf-8');
+        extractTjText(decompressed);
+        continue;
+      } catch { /* not FlateDecode */ }
     }
+    extractTjText(sm[1]);
   }
 
   extractTjText(binary);
@@ -182,7 +190,7 @@ async function handlePost(req: NextRequest) {
       const buffer = Buffer.from(await file.arrayBuffer());
 
       if (file.name.toLowerCase().endsWith('.pdf')) {
-        briefText = extractTextFromPdfBuffer(buffer);
+        briefText = await extractTextFromPdfBuffer(buffer);
         if (!briefText || briefText.length < 20) {
           // Fallback: strip non-printable chars from raw binary
           const raw = buffer.toString('utf-8');
