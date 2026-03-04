@@ -84,7 +84,7 @@ export function JobsList({
   busy,
   refreshing,
 }: Props) {
-  const displayJobs = jobs.slice(-MAX_JOBS);
+  const displayJobs = jobs.slice(0, MAX_JOBS);
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-nowrap">
