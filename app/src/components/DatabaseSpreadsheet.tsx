@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -9,6 +9,9 @@ import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
+import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
+import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
+import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 
 type Sheet = {
   id: string;
@@ -241,6 +244,7 @@ const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 30;
 const VIRTUAL_OVERSCAN = 10;
+const GROUP_SUMMARY_PAGE_SIZE = 200;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 const COPY_NOTICE_DURATION_MS = 4000;
 
@@ -262,6 +266,8 @@ const DEFAULT_COLS = 10;
 const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 700;
+const STORAGE_SAVE_DELAY_LARGE = 10_000;
+const LARGE_DATASET_ROW_THRESHOLD = 10_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
 const BRIEF_SCORING_STORAGE_KEY_PREFIX = 'portal:brief-scoring';
@@ -396,8 +402,14 @@ const buildEnrichmentStorageKey = (userId: string | null) =>
 const buildBriefScoringStorageKey = (userId: string | null) =>
   `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
+const isStringArray = (arr: unknown[]): arr is string[] =>
+  arr.length === 0 || typeof arr[0] === 'string';
+
 const coerceRows = (rows: unknown) => {
   if (!Array.isArray(rows)) return [];
+  if (rows.length > 0 && Array.isArray(rows[0]) && isStringArray(rows[0])) {
+    return rows as string[][];
+  }
   return rows.map((row) => {
     if (!Array.isArray(row)) return [''];
     return row.map((cell) => `${cell ?? ''}`);
@@ -414,11 +426,12 @@ const coerceTabs = (value: unknown) => {
       const safeName =
         typeof name === 'string' && name.trim().length > 0 ? name : `Вкладка ${index + 1}`;
       const rows = coerceRows(data);
-      const normalized =
-        rows.length > 0
-          ? normalizeRows(rows)
-          : [Array.from({ length: DEFAULT_COLS }, () => '')];
-      return { id: safeId, name: safeName, data: normalized };
+      if (rows.length === 0) {
+        return { id: safeId, name: safeName, data: [Array.from({ length: DEFAULT_COLS }, () => '')] };
+      }
+      const maxCols = safeMaxCols(rows);
+      const needsNormalization = rows.some((row) => row.length !== maxCols);
+      return { id: safeId, name: safeName, data: needsNormalization ? normalizeRows(rows) : rows };
     })
     .filter((tab): tab is Sheet => tab !== null);
 };
@@ -734,6 +747,7 @@ export function DatabaseSpreadsheet() {
   const [normalizeEmoji, setNormalizeEmoji] = useState(true);
   const [groupByCol, setGroupByCol] = useState<number | null>(null);
   const [groupSearch, setGroupSearch] = useState('');
+  const [groupSummaryLimit, setGroupSummaryLimit] = useState(GROUP_SUMMARY_PAGE_SIZE);
   const [rightPanelTab, setRightPanelTab] = useState<'summary' | 'cleanup'>('summary');
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
   const debouncedGroupSearch = useDebouncedValue(groupSearch, 300);
@@ -786,6 +800,8 @@ export function DatabaseSpreadsheet() {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accessTokenRef = useRef<string | null>(null);
+  const hydratedStateRef = useRef<string | null>(null);
 
   const [reviewSubmit, setReviewSubmit] = useState<{
     isOpen: boolean;
@@ -830,12 +846,26 @@ export function DatabaseSpreadsheet() {
       tabCounter: deriveTabCounter(tabs, tabCounter),
       columnWidths,
     };
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
-    } catch (error) {
-      void logError('spreadsheet.state.local_save.failed', error);
+    const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    if (totalRows <= LARGE_DATASET_ROW_THRESHOLD) {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(payload));
+      } catch (error) {
+        void logError('spreadsheet.state.local_save.failed', error);
+      }
     }
     if (userId) {
+      const isLarge = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+      if (isLarge) {
+        if (accessTokenRef.current) {
+          void backgroundSave(
+            { user_id: userId, state: payload, updated_at: new Date().toISOString() },
+            accessTokenRef.current,
+            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+          );
+        }
+        return;
+      }
       void supabase
         .from('database_spreadsheet_states')
         .upsert({
@@ -1775,8 +1805,10 @@ export function DatabaseSpreadsheet() {
       name: tabName,
       data,
     };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    startTransition(() => {
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+    });
   }, [tabCounter]);
 
   useEffect(() => {
@@ -1904,18 +1936,26 @@ export function DatabaseSpreadsheet() {
         reader.readAsArrayBuffer(file);
       });
       setImportStatus({ status: 'parsing', progress: 85, filename: file.name });
-      const workbook = XLSX.read(buffer, { type: 'array' });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
-        header: 1,
-        raw: false,
-        blankrows: true,
-      });
-      const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
-      setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
-      applyRowsToNewTab(normalizedRows, file.name);
-      finalizeImport('done', file.name);
+
+      const workerRows = await parseXlsxInWorker(buffer);
+      if (workerRows) {
+        setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
+        applyRowsToNewTab(workerRows, file.name);
+        finalizeImport('done', file.name);
+      } else {
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
+          header: 1,
+          raw: false,
+          blankrows: true,
+        });
+        const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
+        setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
+        applyRowsToNewTab(normalizedRows, file.name);
+        finalizeImport('done', file.name);
+      }
     } catch (error) {
       void logError('spreadsheet.import.failed', error, { fileName: file.name });
       finalizeImport('error', file.name, 'Не удалось импортировать файл');
@@ -2607,7 +2647,8 @@ export function DatabaseSpreadsheet() {
       };
     });
 
-    for (let rowIndex = 1; rowIndex < activeTab.data.length; rowIndex += 1) {
+    const rowLimit = Math.min(activeTab.data.length, 5001);
+    for (let rowIndex = 1; rowIndex < rowLimit; rowIndex += 1) {
       const row = activeTab.data[rowIndex];
       const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
       if (!sourceValue) continue;
@@ -2652,23 +2693,74 @@ export function DatabaseSpreadsheet() {
   );
   const missingEnrichmentCount = selectedEnrichmentCandidate?.missing ?? 0;
 
-  const groupSummary = useMemo(() => {
-    if (!activeTab || groupByCol === null) return [];
-    const map = new Map<string, { label: string; count: number }>();
-    for (let i = 1; i < activeTab.data.length; i += 1) {
-      const row = activeTab.data[i];
-      if (!rowMatchesFilters(i, row, groupByCol)) continue;
-      const raw = row[groupByCol] ?? '';
-      const key = normalizeCellKey(raw);
-      const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
-      const entry = map.get(key) ?? { label, count: 0 };
-      entry.count += 1;
-      map.set(key, entry);
+  const [groupSummary, setGroupSummary] = useState<Array<{ key: string; label: string; count: number }>>([]);
+  const groupSummaryGenRef = useRef(0);
+
+  useEffect(() => {
+    if (!activeTab || groupByCol === null) {
+      setGroupSummary([]);
+      return;
     }
-    return [...map.entries()]
-      .map(([key, value]) => ({ key, label: value.label, count: value.count }))
-      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru'));
-  }, [activeTab, groupByCol, rowMatchesFilters]);
+
+    const data = activeTab.data;
+    const col = groupByCol;
+    const matchFn = rowMatchesFilters;
+
+    if (data.length <= VIRTUALIZATION_THRESHOLD) {
+      const map = new Map<string, { label: string; count: number }>();
+      for (let i = 1; i < data.length; i += 1) {
+        const row = data[i];
+        if (!matchFn(i, row, col)) continue;
+        const raw = row[col] ?? '';
+        const key = normalizeCellKey(raw);
+        const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
+        const entry = map.get(key) ?? { label, count: 0 };
+        entry.count += 1;
+        map.set(key, entry);
+      }
+      setGroupSummary(
+        [...map.entries()]
+          .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+          .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru')),
+      );
+      return;
+    }
+
+    const gen = ++groupSummaryGenRef.current;
+    const map = new Map<string, { label: string; count: number }>();
+    let cursor = 1;
+    const CHUNK = 5000;
+
+    const processChunk = () => {
+      if (groupSummaryGenRef.current !== gen) return;
+      const end = Math.min(cursor + CHUNK, data.length);
+      for (let i = cursor; i < end; i += 1) {
+        const row = data[i];
+        if (!matchFn(i, row, col)) continue;
+        const raw = row[col] ?? '';
+        const key = normalizeCellKey(raw);
+        const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
+        const entry = map.get(key) ?? { label, count: 0 };
+        entry.count += 1;
+        map.set(key, entry);
+      }
+      cursor = end;
+      if (cursor < data.length) {
+        requestAnimationFrame(processChunk);
+        return;
+      }
+      if (groupSummaryGenRef.current !== gen) return;
+      setGroupSummary(
+        [...map.entries()]
+          .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+          .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru')),
+      );
+    };
+
+    setGroupSummary([]);
+    requestAnimationFrame(processChunk);
+    return () => { groupSummaryGenRef.current++; };
+  }, [activeTabId, activeTab, groupByCol, rowMatchesFilters]);
 
   const normalizedGroupSearch = normalizeText(debouncedGroupSearch, normalizeOptions);
   const filteredGroupSummary = useMemo(() => {
@@ -2678,8 +2770,16 @@ export function DatabaseSpreadsheet() {
     );
   }, [groupSummary, normalizedGroupSearch, normalizeOptions]);
 
+  const hasActiveFilters = filterEntries.length > 0 || (searchOnlyMatches && searchTerms.length > 0);
+
   const visibleRowIndices = useMemo(() => {
     if (!activeTab) return [];
+    if (!hasActiveFilters) {
+      const len = activeTab.data.length - 1;
+      const indices = new Array<number>(len);
+      for (let i = 0; i < len; i += 1) indices[i] = i + 1;
+      return indices;
+    }
     const indices: number[] = [];
     for (let i = 1; i < activeTab.data.length; i += 1) {
       const row = activeTab.data[i];
@@ -2688,7 +2788,7 @@ export function DatabaseSpreadsheet() {
       }
     }
     return indices;
-  }, [activeTab, rowMatchesFilters]);
+  }, [activeTab, hasActiveFilters, rowMatchesFilters]);
 
   const allRowIndices = useMemo(() => {
     if (!activeTab) return [];
@@ -2707,21 +2807,22 @@ export function DatabaseSpreadsheet() {
       : 'выкл';
 
   const virtualRange = useMemo(() => {
-    if (!shouldVirtualize || allRowIndices.length === 0) {
+    if (allRowIndices.length <= VIRTUALIZATION_THRESHOLD) {
       return { start: 0, end: Math.max(0, allRowIndices.length - 1), top: 0, bottom: 0 };
     }
     const { scrollTop, height } = scrollMetrics;
+    const viewportH = Math.min(Math.max(height, 600), 4000);
     const start = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
     const end = Math.min(
       allRowIndices.length - 1,
-      Math.ceil((scrollTop + height) / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN,
+      start + Math.ceil(viewportH / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2,
     );
     const top = start * VIRTUAL_ROW_HEIGHT;
     const bottom = Math.max(0, (allRowIndices.length - end - 1) * VIRTUAL_ROW_HEIGHT);
     return { start, end, top, bottom };
-  }, [shouldVirtualize, allRowIndices.length, scrollMetrics]);
+  }, [allRowIndices.length, scrollMetrics]);
 
-  const rowIndicesToRender = shouldVirtualize
+  const rowIndicesToRender = isLargeTable
     ? allRowIndices.slice(virtualRange.start, virtualRange.end + 1)
     : allRowIndices;
 
@@ -5537,6 +5638,7 @@ export function DatabaseSpreadsheet() {
     const detected = headerLabels.findIndex((label) => COMPANY_HEADER_REGEX.test(label));
     setGroupByCol(detected >= 0 ? detected : 0);
     setGroupSearch('');
+    setGroupSummaryLimit(GROUP_SUMMARY_PAGE_SIZE);
   }, [activeTabId, headerLabels, colCount, activeTab]);
 
   useEffect(() => {
@@ -5552,7 +5654,10 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     setSelectedRows((prev) => {
-      if (!activeTab) return new Set();
+      if (!activeTab || prev.size === 0) return prev;
+      if (visibleRowIndices.length > VIRTUALIZATION_THRESHOLD) {
+        return new Set();
+      }
       const visibleSet = new Set(visibleRowIndices);
       const next = new Set<number>();
       prev.forEach((index) => {
@@ -5568,11 +5673,12 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     let isMounted = true;
-    const applySession = (session: { user: { id: string } } | null) => {
+    const applySession = (session: { user: { id: string }; access_token?: string } | null) => {
       if (!isMounted) return;
       const userId = session?.user?.id ?? null;
       setUserId(userId);
       setStorageKey(buildStorageKey(userId));
+      accessTokenRef.current = (session as { access_token?: string } | null)?.access_token ?? null;
     };
 
     void (async () => {
@@ -5587,6 +5693,7 @@ export function DatabaseSpreadsheet() {
     return () => {
       isMounted = false;
       subscription?.unsubscribe();
+      cancelBackgroundSave();
     };
   }, []);
 
@@ -5629,24 +5736,27 @@ export function DatabaseSpreadsheet() {
 
     const applyState = (state: PersistedSpreadsheetState | null) => {
       if (!isMounted) return;
-      if (state) {
-        setTabs(state.tabs);
-        setActiveTabId(state.activeTabId);
-        setTabCounter(state.tabCounter);
-        setColumnWidths(state.columnWidths ?? []);
-      } else {
-        const fallbackTab = createSheet('Вкладка 1');
-        setTabs([fallbackTab]);
-        setActiveTabId(fallbackTab.id);
-        setTabCounter(1);
-        setColumnWidths([]);
-      }
-      setIsHydrated(true);
+      startTransition(() => {
+        if (state) {
+          setTabs(state.tabs);
+          setActiveTabId(state.activeTabId);
+          setTabCounter(state.tabCounter);
+          setColumnWidths(state.columnWidths ?? []);
+          hydratedStateRef.current = state.activeTabId;
+        } else {
+          const fallbackTab = createSheet('Вкладка 1');
+          setTabs([fallbackTab]);
+          setActiveTabId(fallbackTab.id);
+          setTabCounter(1);
+          setColumnWidths([]);
+          hydratedStateRef.current = null;
+        }
+        setIsHydrated(true);
+      });
     };
 
-    const localState = readPersistedState(window.localStorage.getItem(storageKey));
-
     if (!userId) {
+      const localState = readPersistedState(window.localStorage.getItem(storageKey));
       applyState(localState);
       return () => {
         isMounted = false;
@@ -5655,30 +5765,42 @@ export function DatabaseSpreadsheet() {
 
     void (async () => {
       let remoteState: PersistedSpreadsheetState | null = null;
-      try {
-        const { data, error } = await supabase
-          .from('database_spreadsheet_states')
-          .select('state')
-          .eq('user_id', userId)
-          .limit(1);
-        if (!error && data?.[0]?.state) {
-          remoteState = readPersistedState(data[0].state);
-        }
-      } catch (error) {
-        void logError('spreadsheet.state.load.failed', error);
-      }
 
-      const nextState = remoteState ?? localState;
-      if (nextState) {
+      const token = accessTokenRef.current;
+      if (token) {
         try {
-          window.localStorage.setItem(storageKey, JSON.stringify(nextState));
-        } catch (error) {
-          void logError('spreadsheet.state.local_save.failed', error);
+          const raw = await loadStateViaWorker(userId, token);
+          if (raw) remoteState = readPersistedState(raw);
+        } catch {
+          /* worker failed, try supabase client below */
         }
       }
-      applyState(nextState);
 
-      if (!remoteState && localState) {
+      if (!remoteState) {
+        try {
+          const { data, error } = await supabase
+            .from('database_spreadsheet_states')
+            .select('state')
+            .eq('user_id', userId)
+            .limit(1);
+          if (!error && data?.[0]?.state) {
+            remoteState = readPersistedState(data[0].state);
+          }
+        } catch (error) {
+          void logError('spreadsheet.state.load.failed', error);
+        }
+      }
+
+      if (remoteState) {
+        if (isMounted) applyState(remoteState);
+        try { window.localStorage.removeItem(storageKey); } catch { /* noop */ }
+        return;
+      }
+
+      const localState = readPersistedState(window.localStorage.getItem(storageKey));
+      if (isMounted) applyState(localState);
+
+      if (localState) {
         try {
           await supabase.from('database_spreadsheet_states').upsert({
             user_id: userId,
@@ -5704,6 +5826,12 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     if (!storageKey || !isHydrated) return;
+
+    if (hydratedStateRef.current !== null) {
+      hydratedStateRef.current = null;
+      return;
+    }
+
     const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
     const payload: PersistedSpreadsheetState = {
       version: STORAGE_VERSION,
@@ -5717,13 +5845,28 @@ export function DatabaseSpreadsheet() {
     }
     const userIdSnapshot = userId;
     const storageKeySnapshot = storageKey;
+    const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+    const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
     saveTimeoutRef.current = setTimeout(() => {
-      try {
-        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-      } catch (error) {
-        void logError('spreadsheet.state.local_save.failed', error);
+      if (!isLargeDataset) {
+        try {
+          window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+        } catch (error) {
+          void logError('spreadsheet.state.local_save.failed', error);
+        }
       }
       if (!userIdSnapshot) return;
+      if (isLargeDataset) {
+        if (accessTokenRef.current) {
+          void backgroundSave(
+            { user_id: userIdSnapshot, state: payload, updated_at: new Date().toISOString() },
+            accessTokenRef.current,
+            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+          );
+        }
+        return;
+      }
       void supabase
         .from('database_spreadsheet_states')
         .upsert({
@@ -5736,14 +5879,23 @@ export function DatabaseSpreadsheet() {
           void logError('spreadsheet.state.remote_save.failed', error);
           }
         });
-    }, STORAGE_SAVE_DELAY);
+    }, delay);
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
       }
+      cancelBackgroundSave();
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      flushSave();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  });
 
   useEffect(() => {
     if (!isHydrated || !activeTab || websiteEnrichment.isGenerating) return;
@@ -5839,7 +5991,7 @@ export function DatabaseSpreadsheet() {
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
   return (
-    <div className="h-full min-h-0 space-y-0.5 flex flex-col">
+    <div className="flex-1 min-h-0 space-y-0.5 flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
         <Link
           href="/tools"
@@ -6309,7 +6461,7 @@ export function DatabaseSpreadsheet() {
                 </tr>
               </thead>
               <tbody>
-                {shouldVirtualize && virtualRange.top > 0 && (
+                {isLargeTable && virtualRange.top > 0 && (
                   <tr aria-hidden>
                     <td colSpan={colCount + 2} style={{ height: virtualRange.top }} />
                   </tr>
@@ -6323,7 +6475,7 @@ export function DatabaseSpreadsheet() {
                     <tr
                       key={`row-${rowIndex}`}
                       className="group"
-                      style={shouldVirtualize ? { height: VIRTUAL_ROW_HEIGHT } : undefined}
+                      style={isLargeTable ? { height: VIRTUAL_ROW_HEIGHT } : undefined}
                     >
                       <th
                         draggable={!isHeaderRow}
@@ -6443,14 +6595,14 @@ export function DatabaseSpreadsheet() {
                                 value={value}
                                 onChange={(event) => {
                                   handleValueChange(rowIndex, colIndex, event.target.value);
-                                  if (!shouldVirtualize) {
+                                  if (!isLargeTable) {
                                     event.target.style.height = 'auto';
                                     event.target.style.height = `${event.target.scrollHeight}px`;
                                   }
                                 }}
                                 onFocus={(e) => {
                                   handleCellFocus(rowIndex, colIndex);
-                                  if (!shouldVirtualize) {
+                                  if (!isLargeTable) {
                                     e.target.style.height = 'auto';
                                     e.target.style.height = `${e.target.scrollHeight}px`;
                                   }
@@ -6489,7 +6641,7 @@ export function DatabaseSpreadsheet() {
                     </tr>
                   );
                 })}
-                {shouldVirtualize && virtualRange.bottom > 0 && (
+                {isLargeTable && virtualRange.bottom > 0 && (
                   <tr aria-hidden>
                     <td colSpan={colCount + 2} style={{ height: virtualRange.bottom }} />
                   </tr>
@@ -6601,7 +6753,7 @@ export function DatabaseSpreadsheet() {
                         Нет данных
                       </div>
                     )}
-                    {filteredGroupSummary.map((item) => {
+                    {filteredGroupSummary.slice(0, groupSummaryLimit).map((item) => {
                       const activeKeys =
                         groupByCol !== null ? columnFilters[groupByCol] : undefined;
                       const isActive = activeKeys?.length === 1 && activeKeys[0] === item.key;
@@ -6621,6 +6773,15 @@ export function DatabaseSpreadsheet() {
                         </button>
                       );
                     })}
+                    {filteredGroupSummary.length > groupSummaryLimit && (
+                      <button
+                        type="button"
+                        onClick={() => setGroupSummaryLimit((prev) => prev + GROUP_SUMMARY_PAGE_SIZE)}
+                        className="w-full rounded-md px-3 py-2 text-[11px] text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-all"
+                      >
+                        Показать ещё ({filteredGroupSummary.length - groupSummaryLimit})
+                      </button>
+                    )}
                   </div>
                 </>
               )}
