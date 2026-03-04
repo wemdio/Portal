@@ -6471,6 +6471,29 @@ export function DatabaseSpreadsheet() {
 
       <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
         <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
+          {activeReviewReq && (() => {
+            const cfg: Record<string, { bg: string; border: string; text: string; icon: string; label: string }> = {
+              submitted: { bg: 'bg-gray-50', border: 'border-gray-200', text: 'text-gray-700', icon: '⏳', label: 'База на проверке у ревьюера' },
+              needs_rework: { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-800', icon: '🔄', label: 'Ревьюер отправил на доработку' },
+              review_approved: { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', icon: '✅', label: 'Ревьюер одобрил базу — отправьте клиенту на согласование' },
+              sent_to_client: { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-800', icon: '📨', label: 'Отправлено клиенту, ожидаем ответ' },
+              client_approved: { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-800', icon: '🎉', label: 'Клиент согласовал базу' },
+              client_requested_changes: { bg: 'bg-red-50', border: 'border-red-200', text: 'text-red-800', icon: '✏️', label: 'Клиент запросил правки' },
+            };
+            const s = cfg[activeReviewReq.status];
+            if (!s) return null;
+            return (
+              <div className={`flex items-center gap-2 px-3 py-2 ${s.bg} ${s.border} border-b text-xs ${s.text}`}>
+                <span>{s.icon}</span>
+                <span className="font-medium">{s.label}</span>
+                {activeReviewReq.reviewer_comment && reworkStatuses.has(activeReviewReq.status) && (
+                  <span className="ml-2 text-[11px] opacity-80">
+                    — «{activeReviewReq.reviewer_comment}»
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           <div
             ref={tableWrapperRef}
             className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
