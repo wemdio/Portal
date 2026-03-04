@@ -2,28 +2,29 @@ import { createHmac, timingSafeEqual } from 'crypto';
 
 export type CallbackAction = 'approve' | 'request_changes';
 
-const CALLBACK_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const ACTION_CHAR: Record<CallbackAction, string> = { approve: 'a', request_changes: 'r' };
+const CHAR_ACTION: Record<string, CallbackAction> = { a: 'approve', r: 'request_changes' };
+
+const SIG_LEN = 25;
 
 export type CallbackPayload = {
   rid: string;
   act: CallbackAction;
-  exp: number;
 };
 
+/**
+ * Compact format: `{a|r}.{uuid}.{sig25}` — fits in Telegram's 64-byte callback_data limit.
+ * a.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.SSSSSSSSSSSSSSSSSSSSSSSSS = 63 chars
+ */
 export function signCallbackData(
   requestId: string,
   action: CallbackAction,
   secret: string,
-  ttlMs: number = CALLBACK_TTL_MS,
 ): string {
-  const payload: CallbackPayload = {
-    rid: requestId,
-    act: action,
-    exp: Date.now() + ttlMs,
-  };
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = createHmac('sha256', secret).update(payloadB64).digest('base64url');
-  return `${payloadB64}.${sig}`;
+  const act = ACTION_CHAR[action];
+  const body = `${act}.${requestId}`;
+  const sig = createHmac('sha256', secret).update(body).digest('base64url').slice(0, SIG_LEN);
+  return `${body}.${sig}`;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -42,35 +43,37 @@ export function verifyCallbackData(data: string, secret: string): CallbackVerify
     return { ok: false, error: 'Missing callback data' };
   }
 
-  const [payloadB64, sig] = data.split('.');
-  if (!payloadB64 || !sig) {
+  const lastDot = data.lastIndexOf('.');
+  if (lastDot < 2) {
     return { ok: false, error: 'Invalid callback format' };
   }
 
-  const expectedSig = createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  const body = data.slice(0, lastDot);
+  const sig = data.slice(lastDot + 1);
+  if (!body || !sig) {
+    return { ok: false, error: 'Invalid callback format' };
+  }
+
+  const expectedSig = createHmac('sha256', secret).update(body).digest('base64url').slice(0, SIG_LEN);
   if (!safeEqual(sig, expectedSig)) {
     return { ok: false, error: 'Invalid callback signature' };
   }
 
-  let payload: CallbackPayload;
-  try {
-    const json = Buffer.from(payloadB64, 'base64url').toString('utf8');
-    payload = JSON.parse(json) as CallbackPayload;
-  } catch {
-    return { ok: false, error: 'Invalid callback payload' };
+  const firstDot = body.indexOf('.');
+  if (firstDot < 0) {
+    return { ok: false, error: 'Invalid callback format' };
   }
 
-  if (!payload?.rid || !payload?.act || !payload?.exp) {
+  const actChar = body.slice(0, firstDot);
+  const rid = body.slice(firstDot + 1);
+  const act = CHAR_ACTION[actChar];
+
+  if (!act) {
+    return { ok: false, error: 'Unknown callback action' };
+  }
+  if (!rid) {
     return { ok: false, error: 'Incomplete callback payload' };
   }
 
-  if (payload.act !== 'approve' && payload.act !== 'request_changes') {
-    return { ok: false, error: 'Unknown callback action' };
-  }
-
-  if (Date.now() > payload.exp) {
-    return { ok: false, error: 'Callback expired' };
-  }
-
-  return { ok: true, payload };
+  return { ok: true, payload: { rid, act } };
 }

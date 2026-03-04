@@ -10,9 +10,10 @@ const REQUEST_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('Telegram callback data', () => {
   describe('signCallbackData', () => {
-    it('returns a string with dot separator', () => {
+    it('returns a compact string fitting 64-byte limit', () => {
       const data = signCallbackData(REQUEST_ID, 'approve', SECRET);
       expect(typeof data).toBe('string');
+      expect(data.length).toBeLessThanOrEqual(64);
       expect(data).toContain('.');
     });
 
@@ -20,6 +21,11 @@ describe('Telegram callback data', () => {
       const approve = signCallbackData(REQUEST_ID, 'approve', SECRET);
       const changes = signCallbackData(REQUEST_ID, 'request_changes', SECRET);
       expect(approve).not.toBe(changes);
+    });
+
+    it('request_changes also fits 64-byte limit', () => {
+      const data = signCallbackData(REQUEST_ID, 'request_changes', SECRET);
+      expect(data.length).toBeLessThanOrEqual(64);
     });
   });
 
@@ -31,7 +37,6 @@ describe('Telegram callback data', () => {
       if (result.ok) {
         expect(result.payload.rid).toBe(REQUEST_ID);
         expect(result.payload.act).toBe('approve');
-        expect(result.payload.exp).toBeGreaterThan(Date.now());
       }
     });
 
@@ -58,8 +63,8 @@ describe('Telegram callback data', () => {
 
     it('rejects forged signature', () => {
       const data = signCallbackData(REQUEST_ID, 'approve', SECRET);
-      const [payload] = data.split('.');
-      const forged = `${payload}.forged`;
+      const lastDot = data.lastIndexOf('.');
+      const forged = data.slice(0, lastDot + 1) + 'forged0000000000000000000';
       const result = verifyCallbackData(forged, SECRET);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toBe('Invalid callback signature');
@@ -70,13 +75,6 @@ describe('Telegram callback data', () => {
       const result = verifyCallbackData(data, SECRET);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toBe('Invalid callback signature');
-    });
-
-    it('rejects expired callback', () => {
-      const data = signCallbackData(REQUEST_ID, 'approve', SECRET, -1000);
-      const result = verifyCallbackData(data, SECRET);
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toBe('Callback expired');
     });
   });
 });
