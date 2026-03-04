@@ -5843,15 +5843,14 @@ export function DatabaseSpreadsheet() {
           setActiveTabId(state.activeTabId);
           setTabCounter(state.tabCounter);
           setColumnWidths(state.columnWidths ?? []);
-          hydratedStateRef.current = state.activeTabId;
         } else {
           const fallbackTab = createSheet('Вкладка 1');
           setTabs([fallbackTab]);
           setActiveTabId(fallbackTab.id);
           setTabCounter(1);
           setColumnWidths([]);
-          hydratedStateRef.current = null;
         }
+        hydratedStateRef.current = '__hydrated__';
         setIsHydrated(true);
       });
     };
