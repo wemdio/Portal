@@ -5128,40 +5128,54 @@ export function DatabaseSpreadsheet() {
     );
 
     try {
-      const startRes = await fetch('/api/email-validation/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
-        body: JSON.stringify({ rows: rowsToProcess }),
-        signal: emailValidationAbortRef.current?.signal,
-      });
+      const CHUNK_SIZE = 5000;
+      const signal = emailValidationAbortRef.current?.signal;
+      let jobId: string | undefined;
+      let totalFromServer = 0;
 
-      const startData = await parseJsonResponse<{
-        job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
-      }>(startRes, 'email_validation.start');
+      for (let chunkStart = 0; chunkStart < rowsToProcess.length; chunkStart += CHUNK_SIZE) {
+        if (signal?.aborted) throw new Error('AbortError');
 
-      if (!startRes.ok || !startData.job_id) {
-        throw new Error(startData.error ?? 'Не удалось создать задачу валидации');
+        const chunk = rowsToProcess.slice(chunkStart, chunkStart + CHUNK_SIZE);
+        const payload: { rows: typeof chunk; job_id?: string } = { rows: chunk };
+        if (jobId) payload.job_id = jobId;
+
+        const chunkRes = await fetch('/api/email-validation/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+          body: JSON.stringify(payload),
+          signal,
+        });
+
+        const chunkData = await parseJsonResponse<{
+          job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
+        }>(chunkRes, 'email_validation.start');
+
+        if (!chunkRes.ok || !chunkData.job_id) {
+          throw new Error(chunkData.error ?? 'Не удалось создать задачу валидации');
+        }
+
+        jobId = chunkData.job_id;
+        totalFromServer = chunkData.total ?? rowsToProcess.length;
+
+        setEmailValidation((prev) => ({
+          ...prev,
+          isOpen: false,
+          isValidating: true,
+          jobId: jobId!,
+          totalRows: totalFromServer,
+          currentRow: chunkData.processed ?? 0,
+          progress: 0,
+        }));
       }
 
-      const jobId = startData.job_id;
-      const total = startData.total ?? rowsToProcess.length;
-
-      setEmailValidation((prev) => ({
-        ...prev,
-        isOpen: false,
-        isValidating: true,
-        jobId,
-        totalRows: total,
-        currentRow: startData.processed ?? 0,
-        progress: total > 0 ? Math.round(((startData.processed ?? 0) / total) * 100) : 0,
-      }));
+      const total = totalFromServer;
 
       // Poll for results
       let resultCursor: string | null = null;
       let consecutiveErrors = 0;
       let lastProgressTime = Date.now();
       let token = currentToken;
-      const signal = emailValidationAbortRef.current?.signal;
 
       const RESULT_LABELS: Record<string, string> = {
         ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
