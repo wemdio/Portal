@@ -77,15 +77,21 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
     try {
       const token = await getToken();
-      const formData = new FormData();
-      formData.append('file', file);
-      if (selectedPreset) formData.append('presetId', selectedPreset);
+
+      const text = await file.text();
       const providerQuery = `?provider=${encodeURIComponent(provider)}`;
 
       const res = await fetch(`${apiBase}/briefs/parse${providerQuery}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          fileName: file.name,
+          presetId: selectedPreset || undefined,
+        }),
       });
 
       const contentType = res.headers.get('content-type') ?? '';

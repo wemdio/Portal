@@ -181,26 +181,37 @@ async function handlePost(req: NextRequest) {
   let briefText = '';
   let presetId = '';
   try {
-    const formData = await req.formData();
-    const file = formData.get('file') as File | null;
-    const text = formData.get('text') as string | null;
-    presetId = (formData.get('presetId') as string | null) ?? '';
+    const contentType = req.headers.get('content-type') ?? '';
 
-    if (file) {
-      const buffer = Buffer.from(await file.arrayBuffer());
+    if (contentType.includes('application/json')) {
+      const body = await req.json();
+      briefText = (body.text as string) ?? '';
+      presetId = (body.presetId as string) ?? '';
 
-      if (file.name.toLowerCase().endsWith('.pdf')) {
-        briefText = await extractTextFromPdfBuffer(buffer);
-        if (!briefText || briefText.length < 20) {
-          // Fallback: strip non-printable chars from raw binary
-          const raw = buffer.toString('utf-8');
-          briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
-        }
-      } else {
-        briefText = buffer.toString('utf-8');
+      if (body.fileName?.toLowerCase().endsWith('.pdf') && briefText) {
+        briefText = briefText.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
       }
-    } else if (text) {
-      briefText = text;
+    } else {
+      const formData = await req.formData();
+      const file = formData.get('file') as File | null;
+      const text = formData.get('text') as string | null;
+      presetId = (formData.get('presetId') as string | null) ?? '';
+
+      if (file) {
+        const buffer = Buffer.from(await file.arrayBuffer());
+
+        if (file.name.toLowerCase().endsWith('.pdf')) {
+          briefText = await extractTextFromPdfBuffer(buffer);
+          if (!briefText || briefText.length < 20) {
+            const raw = buffer.toString('utf-8');
+            briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
+          }
+        } else {
+          briefText = buffer.toString('utf-8');
+        }
+      } else if (text) {
+        briefText = text;
+      }
     }
   } catch (err) {
     console.error('[briefs/parse] file read error:', err);
