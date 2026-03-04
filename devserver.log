@@ -1,0 +1,887 @@
+
+> app@0.1.0 dev
+> next dev --webpack -p 3000
+
+[dotenv@17.2.3] injecting env (2) from .env.local -- tip: 🔑 add access controls to secrets: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+▲ Next.js 16.1.1 (webpack)
+- Local:         http://localhost:3000
+- Network:       http://172.16.0.2:3000
+- Environments: .env.local
+
+✓ Starting...
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+✓ Ready in 2.3s
+○ Compiling /login ...
+ GET /login 200 in 4.4s (compile: 4.1s, proxy.ts: 10ms, render: 317ms)
+ GET / 200 in 1813ms (compile: 1099ms, proxy.ts: 494ms, render: 220ms)
+ GET /projects/new 200 in 1040ms (compile: 709ms, proxy.ts: 290ms, render: 41ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 1411ms (compile: 954ms, proxy.ts: 420ms, render: 37ms)
+ GET / 200 in 425ms (compile: 13ms, proxy.ts: 390ms, render: 21ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 413ms (compile: 15ms, proxy.ts: 374ms, render: 24ms)
+ GET / 200 in 158ms (compile: 4ms, proxy.ts: 134ms, render: 20ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 177ms (compile: 16ms, proxy.ts: 139ms, render: 22ms)
+ GET / 200 in 159ms (compile: 6ms, proxy.ts: 135ms, render: 19ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 436ms (compile: 20ms, proxy.ts: 392ms, render: 25ms)
+ GET / 200 in 157ms (compile: 4ms, proxy.ts: 137ms, render: 16ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 430ms (compile: 17ms, proxy.ts: 385ms, render: 27ms)
+ GET / 200 in 159ms (compile: 5ms, proxy.ts: 134ms, render: 20ms)
+ GET / 200 in 504ms (compile: 5ms, proxy.ts: 477ms, render: 23ms)
+ GET / 200 in 592ms (compile: 101ms, proxy.ts: 438ms, render: 53ms)
+ GET / 200 in 427ms (compile: 87ms, proxy.ts: 297ms, render: 44ms)
+ GET / 200 in 558ms (compile: 52ms, proxy.ts: 468ms, render: 38ms)
+ GET / 200 in 447ms (compile: 45ms, proxy.ts: 368ms, render: 34ms)
+ GET / 200 in 469ms (compile: 50ms, proxy.ts: 381ms, render: 38ms)
+ GET / 200 in 376ms (compile: 49ms, proxy.ts: 294ms, render: 33ms)
+ GET / 200 in 489ms (compile: 52ms, proxy.ts: 398ms, render: 39ms)
+ GET / 200 in 514ms (compile: 51ms, proxy.ts: 431ms, render: 32ms)
+ GET / 200 in 563ms (compile: 28ms, proxy.ts: 512ms, render: 22ms)
+⨯ ./src/app/projects/[id]/page.tsx
+Error:   x Unterminated regexp literal
+     ,-[C:\Users\wemd1\Desktop\Portal\app\src\app\projects\[id]\page.tsx:483:1]
+ 480 |            </div>
+ 481 |         </div>
+ 482 |       </form>
+ 483 |     </div>
+     :      ^^^^^
+ 484 |   );
+ 485 | }
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/projects/[id]/page.tsx
+○ Compiling /_error ...
+⨯ ./src/app/projects/[id]/page.tsx
+Error:   x Unterminated regexp literal
+     ,-[C:\Users\wemd1\Desktop\Portal\app\src\app\projects\[id]\page.tsx:483:1]
+ 480 |            </div>
+ 481 |         </div>
+ 482 |       </form>
+ 483 |     </div>
+     :      ^^^^^
+ 484 |   );
+ 485 | }
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/projects/[id]/page.tsx
+ GET / 500 in 10.5s (compile: 9.7s, proxy.ts: 375ms, render: 466ms)
+ GET / 500 in 1176ms (compile: 211ms, proxy.ts: 841ms, render: 124ms)
+ GET / 500 in 1275ms (compile: 197ms, proxy.ts: 959ms, render: 120ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ GET / 200 in 658ms (compile: 11ms, proxy.ts: 595ms, render: 52ms)
+ GET / 200 in 234ms (compile: 6ms, proxy.ts: 143ms, render: 85ms)
+ GET / 200 in 709ms (compile: 131ms, proxy.ts: 515ms, render: 63ms)
+ GET / 200 in 354ms (compile: 5ms, proxy.ts: 322ms, render: 27ms)
+ GET / 200 in 495ms (compile: 5ms, proxy.ts: 457ms, render: 33ms)
+ GET / 200 in 343ms (compile: 5ms, proxy.ts: 312ms, render: 27ms)
+ GET / 200 in 631ms (compile: 181ms, proxy.ts: 387ms, render: 63ms)
+ GET / 200 in 589ms (compile: 47ms, proxy.ts: 514ms, render: 28ms)
+ GET / 200 in 310ms (compile: 5ms, proxy.ts: 129ms, render: 176ms)
+ GET /analytics/projects 200 in 1376ms (compile: 960ms, proxy.ts: 378ms, render: 37ms)
+ GET / 200 in 164ms (compile: 10ms, proxy.ts: 133ms, render: 21ms)
+ GET /analytics/projects 200 in 233ms (compile: 8ms, proxy.ts: 205ms, render: 20ms)
+ GET / 200 in 177ms (compile: 4ms, proxy.ts: 154ms, render: 19ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 450ms (compile: 30ms, proxy.ts: 393ms, render: 26ms)
+ GET / 200 in 542ms (compile: 6ms, proxy.ts: 515ms, render: 20ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 216ms (compile: 16ms, proxy.ts: 177ms, render: 22ms)
+ GET / 200 in 469ms (compile: 4ms, proxy.ts: 448ms, render: 17ms)
+ GET / 200 in 571ms (compile: 70ms, proxy.ts: 471ms, render: 30ms)
+ GET / 200 in 441ms (compile: 26ms, proxy.ts: 397ms, render: 18ms)
+ GET / 200 in 660ms (compile: 7ms, proxy.ts: 472ms, render: 182ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 418ms (compile: 29ms, proxy.ts: 362ms, render: 26ms)
+ GET / 200 in 386ms (compile: 5ms, proxy.ts: 360ms, render: 20ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 165ms (compile: 15ms, proxy.ts: 129ms, render: 22ms)
+ GET / 200 in 471ms (compile: 4ms, proxy.ts: 446ms, render: 20ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 162ms (compile: 14ms, proxy.ts: 127ms, render: 21ms)
+ GET / 200 in 148ms (compile: 4ms, proxy.ts: 126ms, render: 19ms)
+ GET / 200 in 331ms (compile: 6ms, proxy.ts: 283ms, render: 43ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 402ms (compile: 14ms, proxy.ts: 365ms, render: 23ms)
+ GET / 200 in 394ms (compile: 4ms, proxy.ts: 374ms, render: 16ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 167ms (compile: 15ms, proxy.ts: 129ms, render: 23ms)
+ GET / 200 in 472ms (compile: 4ms, proxy.ts: 450ms, render: 19ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 175ms (compile: 17ms, proxy.ts: 135ms, render: 23ms)
+ GET / 200 in 482ms (compile: 4ms, proxy.ts: 457ms, render: 20ms)
+ GET /analytics/projects 200 in 2.0s (compile: 1570ms, proxy.ts: 374ms, render: 76ms)
+ GET /analytics/projects 200 in 253ms (compile: 7ms, proxy.ts: 214ms, render: 32ms)
+ GET /tasks 200 in 1672ms (compile: 1427ms, proxy.ts: 206ms, render: 38ms)
+ GET /tasks 200 in 169ms (compile: 5ms, proxy.ts: 142ms, render: 22ms)
+ GET /team 200 in 1499ms (compile: 1318ms, proxy.ts: 138ms, render: 42ms)
+ GET /tools 200 in 1624ms (compile: 1169ms, proxy.ts: 397ms, render: 58ms)
+ GET /payments 404 in 1733ms (compile: 1542ms, proxy.ts: 134ms, render: 56ms)
+ GET /payments 404 in 361ms (compile: 8ms, proxy.ts: 137ms, render: 216ms)
+○ Compiling /reglament ...
+ GET /reglament 200 in 4.7s (compile: 4.5s, proxy.ts: 206ms, render: 54ms)
+ GET /reglament 200 in 423ms (compile: 12ms, proxy.ts: 387ms, render: 24ms)
+ GET /reglament 200 in 159ms (compile: 12ms, proxy.ts: 127ms, render: 20ms)
+ GET /admin 200 in 2.4s (compile: 2.0s, proxy.ts: 342ms, render: 60ms)
+ GET /admin 200 in 280ms (compile: 5ms, proxy.ts: 252ms, render: 23ms)
+ GET / 200 in 176ms (compile: 19ms, proxy.ts: 129ms, render: 28ms)
+ GET / 200 in 513ms (compile: 86ms, proxy.ts: 377ms, render: 50ms)
+ GET / 200 in 241ms (compile: 71ms, proxy.ts: 134ms, render: 36ms)
+ GET / 200 in 408ms (compile: 5ms, proxy.ts: 376ms, render: 27ms)
+ GET / 200 in 402ms (compile: 5ms, proxy.ts: 375ms, render: 22ms)
+ GET / 200 in 582ms (compile: 5ms, proxy.ts: 383ms, render: 193ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 1269ms (compile: 1078ms, proxy.ts: 132ms, render: 59ms)
+ GET / 200 in 501ms (compile: 17ms, proxy.ts: 458ms, render: 26ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 158ms (compile: 14ms, proxy.ts: 124ms, render: 19ms)
+ GET / 200 in 148ms (compile: 4ms, proxy.ts: 126ms, render: 19ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011 200 in 169ms (compile: 14ms, proxy.ts: 134ms, render: 20ms)
+ GET / 200 in 240ms (compile: 4ms, proxy.ts: 217ms, render: 19ms)
+ GET / 200 in 469ms (compile: 5ms, proxy.ts: 304ms, render: 160ms)
+ GET / 200 in 1114ms (compile: 526ms, proxy.ts: 451ms, render: 137ms)
+ GET / 200 in 1592ms (compile: 518ms, proxy.ts: 912ms, render: 162ms)
+ GET / 200 in 944ms (compile: 363ms, proxy.ts: 474ms, render: 108ms)
+ GET / 200 in 827ms (compile: 5ms, proxy.ts: 790ms, render: 31ms)
+ GET / 200 in 425ms (compile: 9ms, proxy.ts: 400ms, render: 15ms)
+ GET / 200 in 352ms (compile: 6ms, proxy.ts: 325ms, render: 21ms)
+ GET / 200 in 714ms (compile: 164ms, proxy.ts: 494ms, render: 56ms)
+ GET / 200 in 541ms (compile: 66ms, proxy.ts: 420ms, render: 55ms)
+ GET / 200 in 576ms (compile: 61ms, proxy.ts: 464ms, render: 51ms)
+ GET / 200 in 500ms (compile: 57ms, proxy.ts: 402ms, render: 41ms)
+ GET / 200 in 587ms (compile: 64ms, proxy.ts: 475ms, render: 48ms)
+ GET / 200 in 1631ms (compile: 723ms, proxy.ts: 487ms, render: 420ms)
+ GET / 200 in 1159ms (compile: 645ms, proxy.ts: 334ms, render: 181ms)
+ GET / 200 in 747ms (compile: 49ms, proxy.ts: 612ms, render: 85ms)
+ GET / 200 in 1172ms (compile: 279ms, proxy.ts: 628ms, render: 265ms)
+ GET / 200 in 616ms (compile: 90ms, proxy.ts: 354ms, render: 171ms)
+ GET / 200 in 1718ms (compile: 511ms, proxy.ts: 1079ms, render: 128ms)
+ GET / 200 in 1113ms (compile: 202ms, proxy.ts: 727ms, render: 184ms)
+ GET / 200 in 858ms (compile: 147ms, proxy.ts: 485ms, render: 226ms)
+ GET / 200 in 1196ms (compile: 172ms, proxy.ts: 351ms, render: 673ms)
+ GET / 200 in 844ms (compile: 147ms, proxy.ts: 507ms, render: 190ms)
+ GET / 200 in 731ms (compile: 63ms, proxy.ts: 464ms, render: 204ms)
+ GET / 200 in 721ms (compile: 47ms, proxy.ts: 474ms, render: 201ms)
+ GET / 200 in 738ms (compile: 166ms, proxy.ts: 411ms, render: 161ms)
+ GET / 200 in 902ms (compile: 43ms, proxy.ts: 697ms, render: 162ms)
+ GET / 200 in 474ms (compile: 31ms, proxy.ts: 407ms, render: 35ms)
+ GET / 200 in 976ms (compile: 60ms, proxy.ts: 486ms, render: 430ms)
+ GET / 200 in 643ms (compile: 44ms, proxy.ts: 518ms, render: 81ms)
+ GET / 200 in 544ms (compile: 32ms, proxy.ts: 370ms, render: 142ms)
+ GET / 200 in 796ms (compile: 98ms, proxy.ts: 580ms, render: 118ms)
+ GET / 200 in 709ms (compile: 102ms, proxy.ts: 535ms, render: 71ms)
+ GET / 200 in 674ms (compile: 4ms, proxy.ts: 371ms, render: 299ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011?mode=edit 200 in 583ms (compile: 136ms, proxy.ts: 394ms, render: 53ms)
+ GET / 200 in 410ms (compile: 4ms, proxy.ts: 387ms, render: 19ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011?mode=edit 200 in 489ms (compile: 132ms, proxy.ts: 312ms, render: 44ms)
+ GET / 200 in 394ms (compile: 4ms, proxy.ts: 376ms, render: 14ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011?mode=edit 200 in 519ms (compile: 106ms, proxy.ts: 385ms, render: 28ms)
+ GET / 200 in 464ms (compile: 3ms, proxy.ts: 447ms, render: 14ms)
+ GET /projects/2e5ee8ad-50e8-448a-90ee-d88dcf769011?mode=edit 200 in 592ms (compile: 97ms, proxy.ts: 466ms, render: 29ms)
+ GET / 200 in 381ms (compile: 4ms, proxy.ts: 360ms, render: 17ms)
+ GET /admin 200 in 581ms (compile: 21ms, proxy.ts: 531ms, render: 29ms)
+ GET /tasks 200 in 1693ms (compile: 1468ms, proxy.ts: 127ms, render: 98ms)
+ GET /analytics/projects 200 in 935ms (compile: 522ms, proxy.ts: 380ms, render: 33ms)
+ GET / 200 in 398ms (compile: 10ms, proxy.ts: 373ms, render: 15ms)
+ GET /team 200 in 850ms (compile: 456ms, proxy.ts: 362ms, render: 33ms)
+ GET / 200 in 497ms (compile: 13ms, proxy.ts: 471ms, render: 13ms)
+ GET / 200 in 593ms (compile: 125ms, proxy.ts: 400ms, render: 68ms)
+ GET / 200 in 480ms (compile: 96ms, proxy.ts: 335ms, render: 49ms)
+ GET / 200 in 450ms (compile: 33ms, proxy.ts: 378ms, render: 38ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 666ms (compile: 36ms, proxy.ts: 298ms, render: 331ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 647ms (compile: 30ms, proxy.ts: 459ms, render: 158ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 550ms (compile: 35ms, proxy.ts: 387ms, render: 128ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 562ms (compile: 56ms, proxy.ts: 388ms, render: 118ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 700ms (compile: 35ms, proxy.ts: 564ms, render: 100ms)
+ GET / 200 in 348ms (compile: 29ms, proxy.ts: 296ms, render: 23ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 606ms (compile: 51ms, proxy.ts: 395ms, render: 159ms)
+ GET / 200 in 560ms (compile: 56ms, proxy.ts: 326ms, render: 177ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 532ms (compile: 33ms, proxy.ts: 375ms, render: 124ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 609ms (compile: 35ms, proxy.ts: 385ms, render: 189ms)
+ GET / 200 in 601ms (compile: 36ms, proxy.ts: 527ms, render: 39ms)
+ GET / 200 in 428ms (compile: 26ms, proxy.ts: 376ms, render: 26ms)
+ GET / 200 in 447ms (compile: 33ms, proxy.ts: 381ms, render: 34ms)
+ GET / 200 in 466ms (compile: 43ms, proxy.ts: 386ms, render: 36ms)
+ GET / 200 in 454ms (compile: 37ms, proxy.ts: 384ms, render: 33ms)
+ GET / 200 in 451ms (compile: 27ms, proxy.ts: 402ms, render: 22ms)
+ GET / 200 in 614ms (compile: 3ms, proxy.ts: 432ms, render: 179ms)
+ GET /team 200 in 461ms (compile: 10ms, proxy.ts: 433ms, render: 19ms)
+ GET /team 200 in 211ms (compile: 4ms, proxy.ts: 138ms, render: 68ms)
+ GET /analytics/projects 200 in 155ms (compile: 16ms, proxy.ts: 125ms, render: 14ms)
+ GET / 200 in 147ms (compile: 4ms, proxy.ts: 131ms, render: 12ms)
+ GET / 200 in 528ms (compile: 38ms, proxy.ts: 470ms, render: 20ms)
+ GET / 200 in 514ms (compile: 45ms, proxy.ts: 433ms, render: 36ms)
+ GET / 200 in 466ms (compile: 51ms, proxy.ts: 373ms, render: 43ms)
+ GET / 200 in 504ms (compile: 29ms, proxy.ts: 456ms, render: 19ms)
+ GET / 200 in 580ms (compile: 30ms, proxy.ts: 528ms, render: 22ms)
+ GET / 200 in 1037ms (compile: 12ms, proxy.ts: 717ms, render: 308ms)
+ GET / 200 in 425ms (compile: 4ms, proxy.ts: 361ms, render: 60ms)
+ GET /analytics/projects 200 in 541ms (compile: 43ms, proxy.ts: 379ms, render: 119ms)
+ GET /team 200 in 275ms (compile: 10ms, proxy.ts: 217ms, render: 47ms)
+ GET /team 200 in 794ms (compile: 209ms, proxy.ts: 476ms, render: 109ms)
+ GET /team 200 in 433ms (compile: 67ms, proxy.ts: 320ms, render: 45ms)
+ GET /analytics/projects 200 in 360ms (compile: 16ms, proxy.ts: 314ms, render: 30ms)
+ GET / 200 in 198ms (compile: 26ms, proxy.ts: 141ms, render: 31ms)
+ GET / 200 in 495ms (compile: 32ms, proxy.ts: 423ms, render: 40ms)
+ GET / 200 in 366ms (compile: 34ms, proxy.ts: 296ms, render: 36ms)
+ GET / 200 in 595ms (compile: 33ms, proxy.ts: 438ms, render: 125ms)
+ GET / 200 in 473ms (compile: 26ms, proxy.ts: 426ms, render: 21ms)
+ GET / 200 in 787ms (compile: 111ms, proxy.ts: 621ms, render: 55ms)
+ GET / 200 in 632ms (compile: 56ms, proxy.ts: 486ms, render: 89ms)
+ GET / 200 in 621ms (compile: 4ms, proxy.ts: 313ms, render: 304ms)
+ GET / 200 in 690ms (compile: 190ms, proxy.ts: 427ms, render: 73ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 1125ms (compile: 18ms, proxy.ts: 928ms, render: 180ms)
+ GET / 200 in 1033ms (compile: 83ms, proxy.ts: 320ms, render: 631ms)
+ GET / 200 in 605ms (compile: 106ms, proxy.ts: 428ms, render: 71ms)
+ GET / 200 in 600ms (compile: 126ms, proxy.ts: 404ms, render: 70ms)
+ GET / 200 in 699ms (compile: 65ms, proxy.ts: 582ms, render: 52ms)
+ GET / 200 in 541ms (compile: 34ms, proxy.ts: 487ms, render: 20ms)
+ GET / 200 in 628ms (compile: 4ms, proxy.ts: 363ms, render: 262ms)
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1023:1]
+ 1020 |                 </button>
+ 1021 |              </div>
+ 1022 |           </div>
+ 1023 |         </div>
+      :          ^^^^^
+ 1024 |       )}
+ 1025 |     </div>
+ 1026 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1023:1]
+ 1020 |                 </button>
+ 1021 |              </div>
+ 1022 |           </div>
+ 1023 |         </div>
+      :          ^^^^^
+ 1024 |       )}
+ 1025 |     </div>
+ 1026 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 2.5s (compile: 2.0s, proxy.ts: 348ms, render: 106ms)
+ GET / 500 in 165ms (compile: 4ms, proxy.ts: 153ms, render: 8ms)
+○ Compiling /_error ...
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1023:1]
+ 1020 |                 </button>
+ 1021 |              </div>
+ 1022 |           </div>
+ 1023 |         </div>
+      :          ^^^^^
+ 1024 |       )}
+ 1025 |     </div>
+ 1026 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 322ms (compile: 9ms, proxy.ts: 298ms, render: 16ms)
+ GET / 500 in 520ms (compile: 4ms, proxy.ts: 503ms, render: 12ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1022:1]
+ 1019 |                 </button>
+ 1020 |              </div>
+ 1021 |           </div>
+ 1022 |         </div>
+      :          ^^^^^
+ 1023 |       )}
+ 1024 |     </div>
+ 1025 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 2.5s (proxy.ts: 2.4s)
+ GET / 500 in 276ms (compile: 4ms, proxy.ts: 262ms, render: 10ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1020:1]
+ 1017 |                 </button>
+ 1018 |              </div>
+ 1019 |           </div>
+ 1020 |         </div>
+      :          ^^^^^
+ 1021 |       )}
+ 1022 |     </div>
+ 1023 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 349ms (compile: 9ms, proxy.ts: 328ms, render: 12ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1019:1]
+ 1016 |                 </button>
+ 1017 |              </div>
+ 1018 |           </div>
+ 1019 |         </div>
+      :          ^^^^^
+ 1020 |       )}
+ 1021 |     </div>
+ 1022 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 184ms (compile: 7ms, proxy.ts: 162ms, render: 15ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1018:1]
+ 1015 |                 </button>
+ 1016 |              </div>
+ 1017 |           </div>
+ 1018 |         </div>
+      :          ^^^^^
+ 1019 |       )}
+ 1020 |     </div>
+ 1021 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 432ms (compile: 6ms, proxy.ts: 407ms, render: 19ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1017:1]
+ 1014 |                 </button>
+ 1015 |              </div>
+ 1016 |           </div>
+ 1017 |         </div>
+      :          ^^^^^
+ 1018 |       )}
+ 1019 |     </div>
+ 1020 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 361ms (compile: 7ms, proxy.ts: 343ms, render: 11ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1016:1]
+ 1013 |                 </button>
+ 1014 |              </div>
+ 1015 |           </div>
+ 1016 |         </div>
+      :          ^^^^^
+ 1017 |       )}
+ 1018 |     </div>
+ 1019 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 153ms (compile: 5ms, proxy.ts: 141ms, render: 8ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1015:1]
+ 1012 |                 </button>
+ 1013 |              </div>
+ 1014 |           </div>
+ 1015 |         </div>
+      :          ^^^^^
+ 1016 |       )}
+ 1017 |     </div>
+ 1018 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 246ms (compile: 4ms, proxy.ts: 233ms, render: 10ms)
+⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+⨯ ./src/components/ProjectList.tsx
+Error:   x Unterminated regexp literal
+      ,-[C:\Users\wemd1\Desktop\Portal\app\src\components\ProjectList.tsx:1015:1]
+ 1012 |                 </button>
+ 1013 |              </div>
+ 1014 |           </div>
+ 1015 |         </div>
+      :          ^^^^^
+ 1016 |       )}
+ 1017 |     </div>
+ 1018 |   );
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ProjectList.tsx
+./src/app/page.tsx
+ GET / 500 in 316ms (compile: 5ms, proxy.ts: 299ms, render: 12ms)
+ GET / 500 in 441ms (compile: 4ms, proxy.ts: 430ms, render: 7ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 1048ms (compile: 275ms, proxy.ts: 507ms, render: 266ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 385ms (compile: 5ms, proxy.ts: 337ms, render: 43ms)
+ GET / 200 in 620ms (compile: 70ms, proxy.ts: 503ms, render: 47ms)
+ GET / 200 in 583ms (compile: 43ms, proxy.ts: 482ms, render: 59ms)
+ GET / 200 in 532ms (compile: 31ms, proxy.ts: 467ms, render: 34ms)
+ GET / 200 in 656ms (compile: 42ms, proxy.ts: 402ms, render: 212ms)
+ GET / 200 in 525ms (compile: 32ms, proxy.ts: 458ms, render: 35ms)
+ GET / 200 in 456ms (compile: 45ms, proxy.ts: 377ms, render: 33ms)
+ GET / 200 in 503ms (compile: 3ms, proxy.ts: 308ms, render: 193ms)
+ GET / 200 in 637ms (compile: 94ms, proxy.ts: 494ms, render: 49ms)
+ GET / 200 in 445ms (compile: 34ms, proxy.ts: 376ms, render: 35ms)
+ GET /team 200 in 479ms (compile: 43ms, proxy.ts: 398ms, render: 38ms)
+ GET /team 200 in 1011ms (compile: 84ms, proxy.ts: 513ms, render: 414ms)
+ GET /analytics/projects 200 in 197ms (compile: 37ms, proxy.ts: 137ms, render: 23ms)
+ GET / 200 in 172ms (compile: 17ms, proxy.ts: 131ms, render: 24ms)
+ GET / 200 in 742ms (compile: 15ms, proxy.ts: 630ms, render: 98ms)
+ GET / 200 in 598ms (compile: 51ms, proxy.ts: 506ms, render: 41ms)
+ GET / 200 in 521ms (compile: 31ms, proxy.ts: 452ms, render: 37ms)
+ GET / 200 in 490ms (compile: 6ms, proxy.ts: 374ms, render: 110ms)
+ GET /tools 200 in 2.8s (compile: 2.3s, proxy.ts: 396ms, render: 78ms)
+ GET /tools 200 in 161ms (compile: 3ms, proxy.ts: 145ms, render: 13ms)
+ GET /tools 200 in 139ms (compile: 2ms, proxy.ts: 124ms, render: 13ms)
+ GET /tools/databases 200 in 2.3s (compile: 2.1s, proxy.ts: 126ms, render: 63ms)
+ GET /tools/databases 200 in 161ms (compile: 5ms, proxy.ts: 130ms, render: 26ms)
+ GET / 200 in 463ms (compile: 15ms, proxy.ts: 423ms, render: 25ms)
+ GET /analytics/projects 200 in 234ms (compile: 13ms, proxy.ts: 203ms, render: 17ms)
+ GET / 200 in 228ms (compile: 5ms, proxy.ts: 208ms, render: 15ms)
+ GET / 200 in 709ms (compile: 245ms, proxy.ts: 398ms, render: 66ms)
+ GET / 200 in 542ms (compile: 71ms, proxy.ts: 404ms, render: 67ms)
+ GET / 200 in 554ms (compile: 28ms, proxy.ts: 490ms, render: 36ms)
+ GET / 200 in 609ms (compile: 4ms, proxy.ts: 428ms, render: 177ms)
+ GET / 200 in 545ms (compile: 93ms, proxy.ts: 394ms, render: 58ms)
+ GET / 200 in 346ms (compile: 3ms, proxy.ts: 218ms, render: 125ms)
+ GET / 200 in 756ms (compile: 145ms, proxy.ts: 489ms, render: 122ms)
+ GET / 200 in 490ms (compile: 25ms, proxy.ts: 438ms, render: 27ms)
+ GET / 200 in 515ms (compile: 30ms, proxy.ts: 451ms, render: 34ms)
+ GET / 200 in 622ms (compile: 24ms, proxy.ts: 364ms, render: 234ms)
+ GET / 200 in 682ms (compile: 170ms, proxy.ts: 441ms, render: 71ms)
+ GET / 200 in 642ms (compile: 30ms, proxy.ts: 469ms, render: 144ms)
+ GET / 200 in 443ms (compile: 30ms, proxy.ts: 390ms, render: 23ms)
+ GET / 200 in 523ms (compile: 34ms, proxy.ts: 445ms, render: 44ms)
+ GET / 200 in 570ms (compile: 40ms, proxy.ts: 469ms, render: 61ms)
+ GET / 200 in 532ms (compile: 33ms, proxy.ts: 466ms, render: 33ms)
+ GET / 200 in 687ms (compile: 123ms, proxy.ts: 528ms, render: 36ms)
+ GET /tools 200 in 1975ms (compile: 1585ms, proxy.ts: 332ms, render: 58ms)
+ GET /tools/databases 200 in 228ms (compile: 10ms, proxy.ts: 204ms, render: 14ms)
+ GET /tools/databases 200 in 691ms (compile: 188ms, proxy.ts: 433ms, render: 70ms)
+ GET /tools/databases 200 in 507ms (compile: 36ms, proxy.ts: 451ms, render: 20ms)
+ GET /tools/databases 200 in 401ms (compile: 28ms, proxy.ts: 328ms, render: 45ms)
+ GET /tools/databases 200 in 630ms (compile: 77ms, proxy.ts: 489ms, render: 64ms)
+ GET /tools/databases 200 in 493ms (compile: 47ms, proxy.ts: 400ms, render: 46ms)
+ GET /tools/databases 200 in 442ms (compile: 34ms, proxy.ts: 383ms, render: 24ms)
+ GET /tools/databases 200 in 460ms (compile: 30ms, proxy.ts: 378ms, render: 52ms)
+ GET /tools/databases 200 in 795ms (compile: 30ms, proxy.ts: 742ms, render: 24ms)
+ GET /tools/databases 200 in 648ms (compile: 110ms, proxy.ts: 368ms, render: 170ms)
+ GET /tools/databases 200 in 636ms (compile: 52ms, proxy.ts: 540ms, render: 44ms)
+ GET /tools/databases 200 in 836ms (compile: 242ms, proxy.ts: 500ms, render: 94ms)
+ GET /tools/databases 200 in 544ms (compile: 77ms, proxy.ts: 409ms, render: 58ms)
+ GET /tools/databases 200 in 485ms (compile: 54ms, proxy.ts: 378ms, render: 53ms)
+ GET /tools/databases 200 in 439ms (compile: 70ms, proxy.ts: 320ms, render: 48ms)
+ GET /tools/databases 200 in 556ms (compile: 75ms, proxy.ts: 417ms, render: 65ms)
+ GET /tools/databases 200 in 574ms (compile: 60ms, proxy.ts: 447ms, render: 68ms)
+ GET /tools/databases 200 in 552ms (compile: 38ms, proxy.ts: 469ms, render: 44ms)
+ GET /tools/databases 200 in 672ms (compile: 138ms, proxy.ts: 424ms, render: 110ms)
+ GET /tools/databases 200 in 856ms (compile: 71ms, proxy.ts: 721ms, render: 64ms)
+ GET /tools/databases 200 in 532ms (compile: 56ms, proxy.ts: 391ms, render: 86ms)
+ GET /tools/databases 200 in 594ms (compile: 75ms, proxy.ts: 436ms, render: 83ms)
+ GET /tools/databases 200 in 552ms (compile: 68ms, proxy.ts: 402ms, render: 82ms)
+ GET /tools/databases 200 in 2.4s (compile: 70ms, proxy.ts: 875ms, render: 1422ms)
+ GET /tools/databases 200 in 717ms (compile: 203ms, proxy.ts: 419ms, render: 95ms)
+ GET /analytics/projects 200 in 476ms (compile: 14ms, proxy.ts: 446ms, render: 16ms)
+ GET / 200 in 214ms (compile: 69ms, proxy.ts: 125ms, render: 21ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⨯ ReferenceError: LayoutDashboard is not defined
+    at Sidebar (src\components\Sidebar.tsx:84:10)
+  82 |     <div className="flex h-screen w-64 flex-col border-r bg-gray-900 text-white">
+  83 |       <div className="flex h-16 items-center px-6">
+> 84 |         <LayoutDashboard className="h-6 w-6 text-blue-400 mr-2" />
+     |          ^
+  85 |         <span className="text-xl font-bold">Portal</span>
+  86 |       </div>
+  87 |       <nav className="flex-1 space-y-1 px-2 py-4"> {
+  digest: '540899115'
+}
+ GET / 200 in 1091ms (compile: 197ms, proxy.ts: 489ms, render: 405ms)
+ GET / 500 in 1018ms (compile: 8ms, proxy.ts: 659ms, render: 351ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET / 200 in 807ms (compile: 66ms, proxy.ts: 520ms, render: 222ms)
+ GET / 200 in 529ms (compile: 29ms, proxy.ts: 455ms, render: 46ms)
+ GET / 200 in 510ms (compile: 25ms, proxy.ts: 468ms, render: 17ms)
+ GET / 200 in 437ms (compile: 22ms, proxy.ts: 389ms, render: 25ms)
+ GET / 200 in 548ms (compile: 3ms, proxy.ts: 382ms, render: 163ms)
+ GET / 200 in 1812ms (compile: 82ms, proxy.ts: 1508ms, render: 222ms)
+ GET / 200 in 424ms (compile: 74ms, proxy.ts: 303ms, render: 47ms)
+ GET / 200 in 1481ms (compile: 168ms, proxy.ts: 1226ms, render: 86ms)
+ GET / 200 in 194ms (compile: 8ms, proxy.ts: 150ms, render: 36ms)
+ GET / 200 in 602ms (compile: 38ms, proxy.ts: 544ms, render: 20ms)
+ GET / 200 in 522ms (compile: 34ms, proxy.ts: 417ms, render: 71ms)
+ GET / 200 in 560ms (compile: 34ms, proxy.ts: 474ms, render: 52ms)
+ GET / 200 in 506ms (compile: 50ms, proxy.ts: 409ms, render: 47ms)
+ GET / 200 in 514ms (compile: 58ms, proxy.ts: 418ms, render: 38ms)
+ GET / 200 in 611ms (compile: 3ms, proxy.ts: 449ms, render: 159ms)
+ GET /tools 200 in 3.2s (compile: 2.8s, proxy.ts: 353ms, render: 79ms)
+ GET /tools 200 in 190ms (compile: 14ms, proxy.ts: 146ms, render: 30ms)
+ GET /tools 200 in 238ms (compile: 3ms, proxy.ts: 220ms, render: 14ms)
+ GET /tools/databases 200 in 362ms (compile: 12ms, proxy.ts: 332ms, render: 18ms)
+ GET /tools/databases 200 in 1019ms (compile: 501ms, proxy.ts: 418ms, render: 100ms)
+ GET /tools/databases 200 in 521ms (compile: 63ms, proxy.ts: 406ms, render: 52ms)
+ GET /tools/databases 200 in 438ms (compile: 25ms, proxy.ts: 390ms, render: 23ms)
+ GET /tools 200 in 2.1s (compile: 1630ms, proxy.ts: 435ms, render: 56ms)
+ GET /tools/databases 200 in 432ms (compile: 14ms, proxy.ts: 392ms, render: 25ms)
+ GET /tools/databases 200 in 587ms (compile: 75ms, proxy.ts: 437ms, render: 74ms)
+ GET /tools/databases 200 in 551ms (compile: 31ms, proxy.ts: 476ms, render: 44ms)
+ GET /tools/databases 200 in 841ms (compile: 5ms, proxy.ts: 333ms, render: 503ms)
+ GET /tools/databases 200 in 483ms (compile: 34ms, proxy.ts: 401ms, render: 48ms)
+ GET /tools/databases 200 in 519ms (compile: 31ms, proxy.ts: 448ms, render: 39ms)
+ GET /tools/databases 200 in 479ms (compile: 55ms, proxy.ts: 385ms, render: 38ms)
+ GET /tools/databases 200 in 487ms (compile: 59ms, proxy.ts: 392ms, render: 35ms)
+ GET /tools/databases 200 in 445ms (compile: 33ms, proxy.ts: 378ms, render: 34ms)
+ GET /tools/databases 200 in 461ms (compile: 31ms, proxy.ts: 400ms, render: 30ms)
+ GET /tools/databases 200 in 492ms (compile: 23ms, proxy.ts: 446ms, render: 23ms)
+ GET /tools/databases 200 in 1864ms (compile: 61ms, proxy.ts: 672ms, render: 1132ms)
+ GET /tools/databases 200 in 538ms (compile: 130ms, proxy.ts: 341ms, render: 67ms)
+ GET / 200 in 359ms (compile: 23ms, proxy.ts: 316ms, render: 20ms)
+ GET /projects/new 200 in 2.9s (compile: 2.5s, proxy.ts: 395ms, render: 71ms)
+ GET /projects/new 200 in 164ms (compile: 3ms, proxy.ts: 149ms, render: 12ms)
+ GET /projects/82685c5c-28ba-40fe-9441-c18b5295a115 200 in 2.9s (compile: 2.6s, proxy.ts: 319ms, render: 52ms)
+ GET / 200 in 489ms (compile: 9ms, proxy.ts: 466ms, render: 14ms)
+ GET / 200 in 539ms (compile: 36ms, proxy.ts: 467ms, render: 37ms)
+ GET / 200 in 441ms (compile: 30ms, proxy.ts: 385ms, render: 27ms)
+ GET / 200 in 515ms (compile: 31ms, proxy.ts: 454ms, render: 31ms)
+ GET / 200 in 472ms (compile: 35ms, proxy.ts: 393ms, render: 44ms)
+ GET / 200 in 701ms (compile: 103ms, proxy.ts: 551ms, render: 48ms)
+ GET / 200 in 769ms (compile: 5ms, proxy.ts: 499ms, render: 264ms)
+ GET / 200 in 621ms (compile: 77ms, proxy.ts: 490ms, render: 53ms)
+ GET / 200 in 712ms (compile: 36ms, proxy.ts: 628ms, render: 48ms)
+ GET /analytics/projects 200 in 3.2s (compile: 2.4s, proxy.ts: 546ms, render: 292ms)
+ GET /analytics/projects 200 in 1779ms (compile: 1265ms, proxy.ts: 476ms, render: 38ms)
+ GET /analytics/projects 200 in 240ms (compile: 6ms, proxy.ts: 179ms, render: 54ms)
+ GET /analytics/projects 200 in 213ms (compile: 5ms, proxy.ts: 179ms, render: 29ms)
+ GET /analytics/projects 200 in 206ms (compile: 3ms, proxy.ts: 189ms, render: 13ms)
+ GET /analytics/projects 200 in 652ms (compile: 24ms, proxy.ts: 604ms, render: 24ms)
+ GET /tasks 200 in 2.2s (compile: 1775ms, proxy.ts: 423ms, render: 35ms)
+ GET /tasks 200 in 193ms (compile: 3ms, proxy.ts: 174ms, render: 16ms)
+ GET /analytics/projects 200 in 690ms (compile: 9ms, proxy.ts: 665ms, render: 16ms)
+ GET / 200 in 196ms (compile: 10ms, proxy.ts: 171ms, render: 15ms)
+ GET /team 200 in 3.2s (compile: 2.6s, proxy.ts: 529ms, render: 45ms)
+ GET /tasks 200 in 1663ms (compile: 1299ms, proxy.ts: 323ms, render: 41ms)
+ GET /analytics/projects 200 in 844ms (compile: 666ms, proxy.ts: 144ms, render: 34ms)
+ GET / 200 in 153ms (compile: 9ms, proxy.ts: 130ms, render: 13ms)
+ GET / 200 in 420ms (compile: 3ms, proxy.ts: 401ms, render: 16ms)
+ GET / 200 in 407ms (compile: 3ms, proxy.ts: 392ms, render: 13ms)
+ GET /tasks 200 in 350ms (compile: 11ms, proxy.ts: 314ms, render: 25ms)
+ GET /analytics/projects 200 in 230ms (compile: 4ms, proxy.ts: 204ms, render: 22ms)
+ GET /team 200 in 2.2s (compile: 1976ms, proxy.ts: 158ms, render: 67ms)
+ GET /team 200 in 1276ms (compile: 818ms, proxy.ts: 380ms, render: 77ms)
+○ Compiling /_not-found ...
+ GET /payments 404 in 6.6s (compile: 6.1s, proxy.ts: 432ms, render: 41ms)
+ GET /payments 404 in 470ms (compile: 4ms, proxy.ts: 301ms, render: 164ms)
+ GET /payments 404 in 498ms (compile: 68ms, proxy.ts: 376ms, render: 54ms)
+ GET /payments 404 in 925ms (compile: 5ms, proxy.ts: 133ms, render: 787ms)
+ GET /payments 404 in 477ms (compile: 37ms, proxy.ts: 402ms, render: 38ms)
+ GET /payments 404 in 197ms (compile: 4ms, proxy.ts: 136ms, render: 57ms)
+ GET /payments 404 in 444ms (compile: 25ms, proxy.ts: 380ms, render: 39ms)
+ GET /payments 404 in 329ms (compile: 6ms, proxy.ts: 262ms, render: 61ms)
+ GET /team 200 in 1951ms (compile: 1546ms, proxy.ts: 358ms, render: 47ms)
+ GET / 200 in 1767ms (compile: 1209ms, proxy.ts: 508ms, render: 49ms)
+○ Compiling /admin ...
+ GET /admin 200 in 4.2s (compile: 3.9s, proxy.ts: 250ms, render: 85ms)
+ GET /admin 200 in 470ms (compile: 6ms, proxy.ts: 444ms, render: 19ms)
+ GET /admin 200 in 334ms (compile: 3ms, proxy.ts: 320ms, render: 11ms)
+ GET / 200 in 403ms (compile: 10ms, proxy.ts: 379ms, render: 14ms)
+ GET / 200 in 3.5s (compile: 2.7s, proxy.ts: 710ms, render: 147ms)
+ GET / 200 in 164ms (compile: 3ms, proxy.ts: 144ms, render: 17ms)
+ GET / 200 in 399ms (compile: 3ms, proxy.ts: 385ms, render: 12ms)
+ GET / 200 in 390ms (compile: 4ms, proxy.ts: 367ms, render: 19ms)
+ GET / 200 in 339ms (compile: 3ms, proxy.ts: 322ms, render: 14ms)
+ GET / 200 in 581ms (compile: 101ms, proxy.ts: 406ms, render: 74ms)
+ GET / 200 in 501ms (compile: 48ms, proxy.ts: 404ms, render: 49ms)
+ GET / 200 in 480ms (compile: 62ms, proxy.ts: 379ms, render: 38ms)
+ GET /finance 200 in 2.1s (compile: 1592ms, proxy.ts: 487ms, render: 34ms)
+ GET /team 200 in 494ms (compile: 9ms, proxy.ts: 471ms, render: 14ms)
+ GET /tasks 200 in 2.9s (compile: 2.7s, proxy.ts: 130ms, render: 55ms)
+ GET /tasks 200 in 253ms (compile: 3ms, proxy.ts: 234ms, render: 16ms)
+ GET /analytics/projects 200 in 1222ms (compile: 1060ms, proxy.ts: 132ms, render: 30ms)
+ GET /analytics/projects 200 in 144ms (compile: 3ms, proxy.ts: 131ms, render: 10ms)
+ GET /tasks 200 in 194ms (compile: 6ms, proxy.ts: 175ms, render: 13ms)
+ GET /analytics/projects 200 in 454ms (compile: 3ms, proxy.ts: 436ms, render: 15ms)
+ GET / 200 in 166ms (compile: 12ms, proxy.ts: 140ms, render: 14ms)
+ GET /payments 404 in 1280ms (compile: 722ms, proxy.ts: 524ms, render: 33ms)
+ GET /payments 404 in 334ms (compile: 4ms, proxy.ts: 199ms, render: 130ms)
+ GET /finance 200 in 198ms (compile: 9ms, proxy.ts: 176ms, render: 13ms)
+○ Compiling /tools ...
+ GET /tools 200 in 5.1s (compile: 4.6s, proxy.ts: 406ms, render: 63ms)
+ GET /tools 200 in 428ms (compile: 3ms, proxy.ts: 405ms, render: 20ms)
+ GET /tools 200 in 302ms (compile: 3ms, proxy.ts: 287ms, render: 12ms)
+ GET /tools/databases 200 in 2.3s (compile: 2.1s, proxy.ts: 130ms, render: 57ms)
+ GET /tools/databases 200 in 163ms (compile: 6ms, proxy.ts: 131ms, render: 25ms)
+ GET /tools 200 in 436ms (compile: 10ms, proxy.ts: 393ms, render: 32ms)
+ GET /tools/databases 200 in 165ms (compile: 5ms, proxy.ts: 144ms, render: 16ms)
+ GET / 200 in 387ms (compile: 27ms, proxy.ts: 335ms, render: 25ms)
+○ Compiling /projects/new ...
+ GET /projects/new 200 in 5.1s (compile: 4.7s, proxy.ts: 305ms, render: 73ms)
+ GET / 200 in 382ms (compile: 10ms, proxy.ts: 359ms, render: 14ms)
+ GET /tools 200 in 2.2s (compile: 1642ms, proxy.ts: 453ms, render: 55ms)
+ GET /tools/databases 200 in 374ms (compile: 38ms, proxy.ts: 306ms, render: 30ms)
+ GET / 200 in 350ms (compile: 16ms, proxy.ts: 317ms, render: 17ms)
+ GET /tasks 200 in 415ms (compile: 18ms, proxy.ts: 368ms, render: 30ms)
+ GET / 200 in 396ms (compile: 4ms, proxy.ts: 377ms, render: 16ms)
+○ Compiling /team ...
+ GET /team 200 in 4.4s (compile: 3.8s, proxy.ts: 497ms, render: 49ms)
+ GET / 200 in 380ms (compile: 18ms, proxy.ts: 334ms, render: 28ms)
+ GET /team 200 in 426ms (compile: 6ms, proxy.ts: 403ms, render: 18ms)
+○ Compiling /finance ...
+ GET /finance 200 in 5.5s (compile: 5.1s, proxy.ts: 335ms, render: 83ms)
+ GET /finance 200 in 616ms (compile: 3ms, proxy.ts: 600ms, render: 13ms)
+ GET /finance 200 in 154ms (compile: 3ms, proxy.ts: 133ms, render: 19ms)
+ GET /finance 200 in 154ms (compile: 5ms, proxy.ts: 126ms, render: 23ms)
+ GET / 200 in 436ms (compile: 12ms, proxy.ts: 403ms, render: 20ms)
+○ Compiling /_not-found ...
+ GET /admin 200 in 7.8s (compile: 7.3s, proxy.ts: 475ms, render: 84ms)
+ GET /settings 404 in 6.8s (compile: 5.9s, proxy.ts: 812ms, render: 25ms)
+ GET /admin 200 in 469ms (compile: 3ms, proxy.ts: 449ms, render: 16ms)
+ GET /admin 200 in 268ms (compile: 3ms, proxy.ts: 253ms, render: 13ms)
+ GET /admin 200 in 335ms (compile: 4ms, proxy.ts: 312ms, render: 19ms)
+ GET /admin/users 200 in 3.4s (compile: 2.5s, proxy.ts: 260ms, render: 592ms)
+ GET /team 200 in 350ms (compile: 18ms, proxy.ts: 303ms, render: 28ms)
+ GET / 200 in 662ms (compile: 123ms, proxy.ts: 431ms, render: 108ms)
+○ Compiling /analytics/projects ...
+ GET /analytics/projects 200 in 11.2s (compile: 10.7s, proxy.ts: 427ms, render: 69ms)
+⨯ ./src/app/reglament/page.tsx
+Error:   x Expression expected
+   ,-[C:\Users\wemd1\Desktop\Portal\app\src\app\reglament\page.tsx:1:1]
+ 1 | ?'use client';
+   : ^
+ 2 | /* eslint-disable react/no-unescaped-entities, @next/next/no-img-element */
+ 3 | 
+ 3 | 
+   `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/reglament/page.tsx
+ GET / 200 in 2.5s (compile: 537ms, proxy.ts: 1029ms, render: 925ms)
+○ Compiling /projects/new ...
+ GET /projects/new 200 in 7.4s (compile: 6.9s, proxy.ts: 409ms, render: 136ms)
+ GET /projects/new 200 in 397ms (compile: 5ms, proxy.ts: 362ms, render: 30ms)
+ GET /projects/new 200 in 264ms (compile: 5ms, proxy.ts: 235ms, render: 25ms)
+ GET /analytics/projects 200 in 3.0s (compile: 2.3s, proxy.ts: 604ms, render: 64ms)
+ GET /analytics/projects 200 in 233ms (compile: 6ms, proxy.ts: 197ms, render: 30ms)
+○ Compiling /tasks ...
+ GET /tasks 200 in 4.1s (compile: 3.6s, proxy.ts: 475ms, render: 57ms)
+ GET /tasks 200 in 195ms (compile: 4ms, proxy.ts: 169ms, render: 22ms)
+ GET /team 200 in 1138ms (compile: 655ms, proxy.ts: 448ms, render: 35ms)
+ GET /finance 200 in 1078ms (compile: 665ms, proxy.ts: 376ms, render: 37ms)
+ GET /tools 200 in 2.5s (compile: 2.0s, proxy.ts: 427ms, render: 56ms)
+ GET /tools 200 in 174ms (compile: 3ms, proxy.ts: 151ms, render: 20ms)
+ GET /tools/databases 200 in 2.0s (compile: 1748ms, proxy.ts: 235ms, render: 59ms)
+ GET /tools/databases 200 in 255ms (compile: 10ms, proxy.ts: 209ms, render: 37ms)
+ GET /reglament 200 in 3.3s (compile: 2.8s, proxy.ts: 496ms, render: 36ms)
+ GET /reglament 200 in 197ms (compile: 7ms, proxy.ts: 169ms, render: 20ms)
+ GET /tools/databases 200 in 462ms (compile: 10ms, proxy.ts: 438ms, render: 15ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET /tools/databases 200 in 5.0s (compile: 1136ms, proxy.ts: 3.0s, render: 845ms)
+ GET /tools/databases 200 in 1394ms (compile: 3ms, proxy.ts: 1368ms, render: 23ms)
+ GET /tools/databases 200 in 991ms (compile: 291ms, proxy.ts: 528ms, render: 171ms)
+ GET /tools/databases 200 in 942ms (compile: 6ms, proxy.ts: 409ms, render: 526ms)
+ GET /reglament 200 in 552ms (compile: 92ms, proxy.ts: 437ms, render: 24ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET /tools/databases 200 in 795ms (compile: 68ms, proxy.ts: 399ms, render: 328ms)
+ GET /tools/databases 200 in 536ms (compile: 35ms, proxy.ts: 469ms, render: 31ms)
+ GET /tools/databases 200 in 558ms (compile: 33ms, proxy.ts: 486ms, render: 39ms)
+ GET /tools/databases 200 in 449ms (compile: 47ms, proxy.ts: 365ms, render: 37ms)
+ GET /tools/databases 200 in 580ms (compile: 9ms, proxy.ts: 361ms, render: 210ms)
+ GET /team 200 in 413ms (compile: 23ms, proxy.ts: 365ms, render: 25ms)
+ GET /finance 200 in 176ms (compile: 17ms, proxy.ts: 145ms, render: 14ms)
+○ Compiling /tools ...
+ GET /tools 200 in 5.3s (compile: 5.0s, proxy.ts: 160ms, render: 71ms)
+ GET /tools 200 in 395ms (compile: 3ms, proxy.ts: 377ms, render: 15ms)
+ GET /tools 200 in 214ms (compile: 3ms, proxy.ts: 198ms, render: 13ms)
+○ Compiling /_not-found ...
+ GET /payments 404 in 5.2s (compile: 5.1s, proxy.ts: 121ms, render: 29ms)
+ GET /tools 200 in 2.6s (compile: 1531ms, proxy.ts: 770ms, render: 263ms)
+ GET /finance 200 in 1765ms (compile: 1096ms, proxy.ts: 396ms, render: 273ms)
+ GET /tools 200 in 245ms (compile: 4ms, proxy.ts: 229ms, render: 12ms)
+ GET /payments 404 in 229ms (compile: 5ms, proxy.ts: 206ms, render: 19ms)
+ GET /payments 404 in 175ms (compile: 4ms, proxy.ts: 143ms, render: 27ms)
+ GET /reglament 200 in 468ms (compile: 45ms, proxy.ts: 408ms, render: 15ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⨯ ReferenceError: useState is not defined
+    at ReglamentPage (src\app\reglament\page.tsx:27:41)
+  25 |
+  26 | export default function ReglamentPage() {
+> 27 |   const [searchQuery, setSearchQuery] = useState('');
+     |                                         ^
+  28 |   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  29 |   const [showResults, setShowResults] = useState(false);
+  30 |   const searchInputRef = useRef<HTMLInputElement>(null); {
+  digest: '2232370800'
+}
+ GET /reglament 500 in 1235ms (compile: 141ms, proxy.ts: 538ms, render: 557ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⨯ ReferenceError: useState is not defined
+    at ReglamentPage (src\app\reglament\page.tsx:27:41)
+  25 |
+  26 | export default function ReglamentPage() {
+> 27 |   const [searchQuery, setSearchQuery] = useState('');
+     |                                         ^
+  28 |   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  29 |   const [showResults, setShowResults] = useState(false);
+  30 |   const searchInputRef = useRef<HTMLInputElement>(null); {
+  digest: '2232370800'
+}
+ GET /reglament 500 in 1370ms (compile: 749ms, proxy.ts: 340ms, render: 281ms)
+⨯ ReferenceError: useState is not defined
+    at ReglamentPage (src\app\reglament\page.tsx:27:41)
+  25 |
+  26 | export default function ReglamentPage() {
+> 27 |   const [searchQuery, setSearchQuery] = useState('');
+     |                                         ^
+  28 |   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  29 |   const [showResults, setShowResults] = useState(false);
+  30 |   const searchInputRef = useRef<HTMLInputElement>(null); {
+  digest: '2232370800'
+}
+ GET /reglament 500 in 424ms (compile: 6ms, proxy.ts: 367ms, render: 51ms)
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET /reglament 200 in 1129ms (compile: 143ms, proxy.ts: 438ms, render: 548ms)
+ GET /reglament 200 in 406ms (compile: 42ms, proxy.ts: 337ms, render: 27ms)
+○ Compiling /admin ...
+ GET /admin 200 in 6.0s (compile: 5.3s, proxy.ts: 706ms, render: 58ms)
+ GET /admin 200 in 510ms (compile: 3ms, proxy.ts: 497ms, render: 10ms)
+ GET / 200 in 3.5s (compile: 3.0s, proxy.ts: 396ms, render: 53ms)
+ GET / 200 in 144ms (compile: 3ms, proxy.ts: 131ms, render: 10ms)
+ GET / 200 in 446ms (compile: 3ms, proxy.ts: 427ms, render: 16ms)
+ GET /analytics/projects 200 in 1644ms (compile: 1232ms, proxy.ts: 371ms, render: 41ms)
+ GET /analytics/projects 200 in 262ms (compile: 5ms, proxy.ts: 235ms, render: 23ms)
+○ Compiling /team ...
+ GET /team 200 in 1885ms (compile: 1491ms, proxy.ts: 339ms, render: 56ms)
+ GET /tasks 200 in 4.3s (compile: 3.7s, proxy.ts: 533ms, render: 57ms)
+ GET /finance 200 in 749ms (compile: 547ms, proxy.ts: 174ms, render: 27ms)
+ GET / 200 in 480ms (compile: 19ms, proxy.ts: 439ms, render: 22ms)
+ GET / 200 in 3.5s (compile: 147ms, proxy.ts: 1478ms, render: 1914ms)
+ GET / 200 in 1075ms (compile: 238ms, proxy.ts: 770ms, render: 68ms)
+ GET /finance 200 in 1314ms (compile: 222ms, proxy.ts: 630ms, render: 462ms)
+ GET /finance 200 in 536ms (compile: 83ms, proxy.ts: 397ms, render: 57ms)
+ GET /finance 200 in 867ms (compile: 6ms, proxy.ts: 668ms, render: 193ms)
+ GET /finance 200 in 257ms (compile: 3ms, proxy.ts: 214ms, render: 39ms)
+ GET /finance 200 in 1258ms (compile: 40ms, proxy.ts: 1122ms, render: 95ms)
+ GET /finance 200 in 1259ms (compile: 10ms, proxy.ts: 1153ms, render: 97ms)
+ GET /finance 200 in 372ms (compile: 117ms, proxy.ts: 144ms, render: 111ms)
+ GET /finance 200 in 375ms (compile: 192ms, proxy.ts: 148ms, render: 34ms)
+ GET /finance 200 in 145ms (compile: 4ms, proxy.ts: 128ms, render: 14ms)
+ GET /finance 200 in 229ms (compile: 4ms, proxy.ts: 211ms, render: 13ms)
+ GET /finance 200 in 156ms (compile: 4ms, proxy.ts: 136ms, render: 17ms)
+ GET /finance 200 in 226ms (compile: 3ms, proxy.ts: 208ms, render: 15ms)
+ GET /finance 200 in 410ms (compile: 13ms, proxy.ts: 242ms, render: 154ms)
+ GET /finance 200 in 420ms (compile: 12ms, proxy.ts: 244ms, render: 164ms)
+ GET /finance 200 in 261ms (compile: 34ms, proxy.ts: 138ms, render: 88ms)
+ GET /finance 200 in 221ms (compile: 11ms, proxy.ts: 175ms, render: 34ms)
+ GET /finance 200 in 344ms (compile: 46ms, proxy.ts: 146ms, render: 151ms)
+ GET /finance 200 in 348ms (compile: 9ms, proxy.ts: 296ms, render: 42ms)
+ GET /finance 200 in 160ms (compile: 3ms, proxy.ts: 138ms, render: 18ms)
+ GET /finance 200 in 234ms (compile: 7ms, proxy.ts: 205ms, render: 22ms)
+ GET /finance 200 in 199ms (compile: 5ms, proxy.ts: 145ms, render: 49ms)
+ GET /finance 200 in 264ms (compile: 9ms, proxy.ts: 220ms, render: 35ms)
+ GET /finance 200 in 276ms (compile: 4ms, proxy.ts: 227ms, render: 45ms)
+ GET /finance 200 in 279ms (compile: 4ms, proxy.ts: 250ms, render: 24ms)
+ GET /finance 200 in 701ms (compile: 160ms, proxy.ts: 461ms, render: 80ms)
+ GET /finance 200 in 702ms (compile: 151ms, proxy.ts: 471ms, render: 81ms)
+ GET /finance 200 in 247ms (compile: 6ms, proxy.ts: 207ms, render: 34ms)
+ GET /finance 200 in 164ms (compile: 17ms, proxy.ts: 124ms, render: 23ms)
+ GET /finance 200 in 471ms (compile: 3ms, proxy.ts: 444ms, render: 23ms)
+ GET /finance 200 in 504ms (compile: 11ms, proxy.ts: 461ms, render: 32ms)
+ GET /finance 200 in 603ms (compile: 9ms, proxy.ts: 558ms, render: 36ms)
+ GET /finance 200 in 605ms (compile: 8ms, proxy.ts: 559ms, render: 37ms)
+ GET /finance 200 in 159ms (compile: 3ms, proxy.ts: 145ms, render: 11ms)
+ GET /finance 200 in 242ms (compile: 4ms, proxy.ts: 226ms, render: 12ms)
+ GET /finance 200 in 554ms (compile: 6ms, proxy.ts: 323ms, render: 225ms)
+ GET /finance 200 in 301ms (compile: 5ms, proxy.ts: 252ms, render: 44ms)
+○ Compiling /tools ...
+ GET /tools 200 in 7.8s (compile: 7.4s, proxy.ts: 356ms, render: 85ms)
+ GET /tools 200 in 889ms (compile: 14ms, proxy.ts: 794ms, render: 81ms)
+ GET /finance 200 in 1268ms (compile: 44ms, proxy.ts: 1071ms, render: 154ms)
+ GET /tools 200 in 405ms (compile: 101ms, proxy.ts: 197ms, render: 107ms)
+ GET /finance 200 in 601ms (compile: 24ms, proxy.ts: 494ms, render: 84ms)
+ GET /finance 200 in 427ms (compile: 5ms, proxy.ts: 399ms, render: 23ms)
+ GET /tools 200 in 359ms (compile: 5ms, proxy.ts: 326ms, render: 29ms)
+ GET /tools 200 in 631ms (compile: 14ms, proxy.ts: 482ms, render: 135ms)
+ GET /finance 200 in 639ms (compile: 13ms, proxy.ts: 565ms, render: 61ms)
+ GET /tools 200 in 429ms (compile: 10ms, proxy.ts: 324ms, render: 96ms)
+ GET /finance 200 in 632ms (compile: 32ms, proxy.ts: 509ms, render: 92ms)
+ GET /finance 200 in 445ms (compile: 7ms, proxy.ts: 395ms, render: 43ms)
+ GET /tools 200 in 2.2s (compile: 50ms, proxy.ts: 559ms, render: 1620ms)
+ GET /finance 200 in 536ms (compile: 6ms, proxy.ts: 504ms, render: 25ms)
+ GET /tools 200 in 802ms (compile: 40ms, proxy.ts: 519ms, render: 243ms)
+ GET /tools 200 in 809ms (compile: 21ms, proxy.ts: 454ms, render: 334ms)
+ GET /finance 200 in 849ms (compile: 42ms, proxy.ts: 671ms, render: 136ms)
