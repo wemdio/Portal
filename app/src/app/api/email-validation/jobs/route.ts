@@ -7,7 +7,7 @@ import { normalizeEmail, checkSyntax } from '@/lib/emailValidation/shared';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const token = getBearerToken(req);
+  const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return jsonError('Unauthorized', 401);
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
