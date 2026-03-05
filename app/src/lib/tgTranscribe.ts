@@ -32,22 +32,22 @@ export async function ensureTgApiReady(): Promise<void> {
   await checkLocalApi();
 }
 
-function useLocalApi(): boolean {
+function isLocalApi(): boolean {
   return localApiAvailable === true;
 }
 
 export function tgApiBase(): string {
-  if (useLocalApi()) return `${TG_LOCAL_API_URL}/bot${TG_TOKEN}`;
+  if (isLocalApi()) return `${TG_LOCAL_API_URL}/bot${TG_TOKEN}`;
   return `https://api.telegram.org/bot${TG_TOKEN}`;
 }
 
 function tgFileBase(): string {
-  if (useLocalApi()) return `${TG_LOCAL_API_URL}/file/bot${TG_TOKEN}`;
+  if (isLocalApi()) return `${TG_LOCAL_API_URL}/file/bot${TG_TOKEN}`;
   return `https://api.telegram.org/file/bot${TG_TOKEN}`;
 }
 
 function fileSizeLimit(): number {
-  return useLocalApi() ? TG_FILE_SIZE_LIMIT_LOCAL : TG_FILE_SIZE_LIMIT_CLOUD;
+  return isLocalApi() ? TG_FILE_SIZE_LIMIT_LOCAL : TG_FILE_SIZE_LIMIT_CLOUD;
 }
 
 export { TG_TOKEN };
@@ -197,7 +197,7 @@ export async function processVideoMessage(
   const sizeLimit = fileSizeLimit();
   if (videoInfo.fileSize && videoInfo.fileSize > sizeLimit) {
     const limitMb = Math.round(sizeLimit / (1024 * 1024));
-    const errorText = `Файл слишком большой (${(videoInfo.fileSize / (1024 * 1024)).toFixed(1)} МБ). Лимит — ${limitMb} МБ${useLocalApi() ? '' : ' (Bot API). Настройте TG_LOCAL_API_URL для снятия лимита.'}`;
+    const errorText = `Файл слишком большой (${(videoInfo.fileSize / (1024 * 1024)).toFixed(1)} МБ). Лимит — ${limitMb} МБ${isLocalApi() ? '' : ' (Bot API). Настройте TG_LOCAL_API_URL для снятия лимита.'}`;
     await supabaseAdmin.from('tg_video_transcripts').insert({
       tg_chat_id: msg.chat.id,
       tg_message_id: msg.message_id,

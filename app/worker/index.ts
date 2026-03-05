@@ -17,7 +17,6 @@ import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/li
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
-const DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '15') * 60 * 1000;
 const HH_DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
