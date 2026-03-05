@@ -67,8 +67,8 @@ export async function checkDomain(domain: string): Promise<boolean> {
 
 // ─── 7. SMTP Verification ──────────────────────────────────────────────────
 
-const SMTP_CONNECT_TIMEOUT_MS = 10_000;
-const SMTP_COMMAND_TIMEOUT_MS = 10_000;
+const SMTP_CONNECT_TIMEOUT_MS = 8_000;
+const SMTP_COMMAND_TIMEOUT_MS = 8_000;
 
 import { HELO_DOMAINS } from './heloDomains';
 
