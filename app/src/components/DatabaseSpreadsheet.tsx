@@ -212,6 +212,50 @@ type EmailValidationState = {
   detectedJob: { id: string; total: number; processed: number; progress: number } | null;
 };
 
+type DadataFieldOption = {
+  key: string;
+  label: string;
+};
+
+type DadataEnrichmentState = {
+  isOpen: boolean;
+  sourceCol: number;
+  mode: 'inn' | 'name';
+  selectedFields: string[];
+  isProcessing: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
+const DADATA_FIELDS: DadataFieldOption[] = [
+  { key: 'full_name', label: 'Полное название' },
+  { key: 'short_name', label: 'Краткое название' },
+  { key: 'inn', label: 'ИНН' },
+  { key: 'kpp', label: 'КПП' },
+  { key: 'ogrn', label: 'ОГРН' },
+  { key: 'address', label: 'Адрес' },
+  { key: 'city', label: 'Город' },
+  { key: 'region', label: 'Регион' },
+  { key: 'postal_code', label: 'Индекс' },
+  { key: 'manager_name', label: 'Руководитель' },
+  { key: 'manager_post', label: 'Должность руководителя' },
+  { key: 'status', label: 'Статус' },
+  { key: 'okved', label: 'ОКВЭД (код)' },
+  { key: 'opf', label: 'ОПФ (ООО, ПАО...)' },
+  { key: 'org_type', label: 'Тип (ЮЛ/ИП)' },
+  { key: 'registration_date', label: 'Дата регистрации' },
+  { key: 'branch_count', label: 'Кол-во филиалов' },
+];
+
+const DADATA_DEFAULT_FIELDS = [
+  'full_name', 'inn', 'kpp', 'ogrn', 'address', 'city',
+  'manager_name', 'manager_post', 'status', 'okved', 'opf', 'registration_date',
+];
+
+const DADATA_BATCH_SIZE = 20;
+
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
@@ -985,6 +1029,18 @@ export function DatabaseSpreadsheet() {
     detectedJob: null,
   });
   const emailValidationAbortRef = useRef<AbortController | null>(null);
+  const [dadataEnrichment, setDadataEnrichment] = useState<DadataEnrichmentState>({
+    isOpen: false,
+    sourceCol: 0,
+    mode: 'inn',
+    selectedFields: DADATA_DEFAULT_FIELDS,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const dadataAbortRef = useRef<AbortController | null>(null);
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -5832,6 +5888,216 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // --- DaData Enrichment ---
+
+  const openDadataModal = () => {
+    setDadataEnrichment({
+      isOpen: true,
+      sourceCol: 0,
+      mode: 'inn',
+      selectedFields: DADATA_DEFAULT_FIELDS,
+      isProcessing: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeDadataModal = () => {
+    if (dadataAbortRef.current) {
+      dadataAbortRef.current.abort();
+      dadataAbortRef.current = null;
+    }
+    setDadataEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartDadataEnrichment = async () => {
+    if (!activeTab || dadataEnrichment.isProcessing) return;
+    flushSave();
+
+    const selectedFields = dadataEnrichment.selectedFields;
+    if (selectedFields.length === 0) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Выберите хотя бы одно поле' }));
+      return;
+    }
+
+    const rowsToProcess: { rowIndex: number; query: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      const sourceValue = String(row?.[dadataEnrichment.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      rowsToProcess.push({ rowIndex: i, query: sourceValue });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    dadataAbortRef.current = new AbortController();
+
+    setDadataEnrichment((prev) => ({
+      ...prev,
+      isProcessing: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('DaData обогащение');
+
+    const fieldLabels = DADATA_FIELDS.filter((f) => selectedFields.includes(f.key));
+    const startCol = dadataEnrichment.sourceCol + 1;
+
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
+
+    let firstNewCol = startCol;
+    while (!isColumnEmpty(firstNewCol)) {
+      firstNewCol += 1;
+    }
+
+    const colMap: Record<string, number> = {};
+    fieldLabels.forEach((field, idx) => {
+      colMap[field.key] = firstNewCol + idx;
+    });
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      const maxCol = firstNewCol + fieldLabels.length - 1;
+      while (nextRow.length <= maxCol) nextRow.push('');
+      if (rowIndex === 0) {
+        fieldLabels.forEach((field, idx) => {
+          nextRow[firstNewCol + idx] = field.label;
+        });
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(firstNewCol);
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), ENRICHMENT_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => {
+        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
+      });
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += DADATA_BATCH_SIZE) {
+        if (dadataAbortRef.current?.signal.aborted) {
+          throw new Error('Отменено пользователем');
+        }
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + DADATA_BATCH_SIZE);
+
+        let token = currentToken;
+        try {
+          const refreshed = await getFreshToken();
+          if (refreshed) token = refreshed;
+        } catch { /* use current */ }
+
+        const res = await fetch('/api/enrich/dadata', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            rows: batch,
+            mode: dadataEnrichment.mode,
+          }),
+          signal: dadataAbortRef.current?.signal,
+        });
+
+        const data = await parseJsonResponse<{
+          results?: Array<{
+            rowIndex: number;
+            found: boolean;
+            data: Record<string, string | number | null> | null;
+            error?: string;
+          }>;
+          error?: string;
+        }>(res, 'dadata_enrichment');
+
+        if (!res.ok) {
+          throw new Error(data.error ?? `HTTP ${res.status}`);
+        }
+
+        const batchResults = data.results ?? [];
+
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.map((row) => [...row]);
+            for (const result of batchResults) {
+              if (!result.found || !result.data) {
+                errorCount += 1;
+                continue;
+              }
+              const ri = result.rowIndex;
+              if (ri < 1 || ri >= nextData.length) continue;
+              for (const field of fieldLabels) {
+                const colIdx = colMap[field.key];
+                const val = result.data[field.key];
+                if (val !== null && val !== undefined) {
+                  nextData[ri][colIdx] = String(val);
+                }
+              }
+            }
+            return { ...tab, data: nextData };
+          }),
+        );
+
+        processedCount += batch.length;
+        setDadataEnrichment((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+      }
+
+      const successCount = processedCount - errorCount;
+      setLastAction({
+        message: errorCount > 0
+          ? `DaData: ${successCount} найдено, ${errorCount} не найдено`
+          : `DaData обогащение завершено: ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setDadataEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `DaData отменено (обработано: ${processedCount})`, time: Date.now() });
+        setDadataEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      } else {
+        setDadataEnrichment((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isProcessing: false,
+        }));
+      }
+    } finally {
+      dadataAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -6426,6 +6692,25 @@ export function DatabaseSpreadsheet() {
         >
           Чистка названий
         </button>
+
+        {dadataEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeDadataModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            DaData... {dadataEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openDadataModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            DaData
+          </button>
+        )}
 
         <button
           type="button"
@@ -8987,6 +9272,204 @@ export function DatabaseSpreadsheet() {
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {/* DaData enrichment modal */}
+      {dadataEnrichment.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm font-bold text-lg">
+                  D
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">DaData — обогащение</h3>
+                  <p className="text-xs text-gray-500 font-medium">Поиск компаний по ИНН или названию</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeDadataModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-5 px-6 py-5 max-h-[70vh] overflow-y-auto">
+              {dadataEnrichment.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {dadataEnrichment.error}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">Режим поиска</label>
+                <div className="flex gap-2">
+                  {(['inn', 'name'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, mode: m, error: null }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className={`flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition-all ${
+                        dadataEnrichment.mode === m
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700 shadow-sm'
+                          : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                      } disabled:opacity-60`}
+                    >
+                      {m === 'inn' ? 'По ИНН' : 'По названию'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Столбец с {dadataEnrichment.mode === 'inn' ? 'ИНН' : 'названиями'}
+                </label>
+                <div className="relative">
+                  <select
+                    value={dadataEnrichment.sourceCol}
+                    onChange={(e) =>
+                      setDadataEnrichment((prev) => ({
+                        ...prev,
+                        sourceCol: Number(e.target.value),
+                        error: null,
+                      }))
+                    }
+                    disabled={dadataEnrichment.isProcessing}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={`dadata-col-${index}`} value={index}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                    ▼
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-sm font-semibold text-gray-700">Поля для обогащения</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, selectedFields: DADATA_FIELDS.map((f) => f.key) }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className="text-[10px] font-medium text-emerald-600 hover:text-emerald-800 disabled:opacity-60"
+                    >
+                      Все
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, selectedFields: [] }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className="text-[10px] font-medium text-gray-500 hover:text-gray-700 disabled:opacity-60"
+                    >
+                      Сбросить
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-3">
+                  {DADATA_FIELDS.map((field) => (
+                    <label
+                      key={field.key}
+                      className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-white transition cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={dadataEnrichment.selectedFields.includes(field.key)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setDadataEnrichment((prev) => ({
+                            ...prev,
+                            selectedFields: checked
+                              ? [...prev.selectedFields, field.key]
+                              : prev.selectedFields.filter((k) => k !== field.key),
+                          }));
+                        }}
+                        disabled={dadataEnrichment.isProcessing}
+                        className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-60"
+                      />
+                      {field.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {dadataEnrichment.mode === 'name' && (
+                <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    При поиске по названию берётся первый результат из подсказок DaData. Для точного поиска используйте режим «По ИНН».
+                  </p>
+                </div>
+              )}
+
+              {!dadataEnrichment.isProcessing && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Лимит: 10 000 запросов в день. Если запросы закончились — попробуйте завтра, лимит обновляется в полночь.
+                  </p>
+                </div>
+              )}
+
+              {dadataEnrichment.isProcessing && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Обогащение...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {dadataEnrichment.currentRow} / {dadataEnrichment.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-emerald-600 transition-all duration-300 ease-out"
+                      style={{ width: `${dadataEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {dadataEnrichment.isProcessing ? (
+                  <>Обработано: {dadataEnrichment.currentRow} / {dadataEnrichment.totalRows}</>
+                ) : (
+                  <>Полей: <span className="text-gray-900">{dadataEnrichment.selectedFields.length}</span> · Строк: <span className="text-gray-900">{visibleRowIndices.length}</span></>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeDadataModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  {dadataEnrichment.isProcessing ? 'Стоп' : 'Закрыть'}
+                </button>
+                {!dadataEnrichment.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartDadataEnrichment()}
+                    disabled={dadataEnrichment.selectedFields.length === 0}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Запустить
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
