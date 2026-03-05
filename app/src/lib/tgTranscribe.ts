@@ -287,5 +287,5 @@ export async function saveErrorRecord(
     length: 0,
     status: 'error',
     error_text: errorText,
-  }).catch(() => {});
+  });
 }
