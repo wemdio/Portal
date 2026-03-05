@@ -40,11 +40,11 @@ type JobRow = {
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-const WORKER_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? '8');
-const WORKER_BATCH_SIZE = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? '50');
+const WORKER_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? '20');
+const WORKER_BATCH_SIZE = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? '100');
 const MAX_ATTEMPTS = Number(process.env.EMAIL_VALIDATION_MAX_ATTEMPTS ?? '3');
 const STALE_PROCESSING_MINUTES = Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? '5');
-const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? '1');
+const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? '3');
 const DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL_MS ?? String(24 * 60 * 60 * 1000));
 const JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? '2000');
 const SUPABASE_QUERY_TIMEOUT_MS = 30_000;
