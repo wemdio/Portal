@@ -11,6 +11,7 @@ services:
     container_name: portal
     depends_on:
       - yandexmaps
+      - telegram-bot-api
     ports:
       - "3000:3000"
     environment:
@@ -20,6 +21,8 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TG_TRANSCRIBE_BOT_TOKEN=${TG_TRANSCRIBE_BOT_TOKEN}
+      - TG_LOCAL_API_URL=http://telegram-bot-api:8081
       - HH_PROXY_URL=${HH_PROXY_URL}
       - SEARCH_PROXY_URL=${SEARCH_PROXY_URL}
       - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
@@ -74,6 +77,21 @@ services:
     networks:
       - portal-network
 
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: portal-telegram-bot-api
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
+      TELEGRAM_LOCAL: "true"
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   guacd:
     image: guacamole/guacd:1.5.5
     container_name: portal-guacd
@@ -105,6 +123,9 @@ services:
     restart: unless-stopped
     networks:
       - portal-network
+
+volumes:
+  telegram-bot-api-data:
 
 networks:
   portal-network:
