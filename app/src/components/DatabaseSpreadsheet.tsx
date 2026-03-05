@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -9,6 +9,9 @@ import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
+import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
+import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
+import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 
 type Sheet = {
   id: string;
@@ -241,6 +244,7 @@ const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 30;
 const VIRTUAL_OVERSCAN = 10;
+const GROUP_SUMMARY_PAGE_SIZE = 200;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
 const COPY_NOTICE_DURATION_MS = 4000;
 
@@ -262,6 +266,8 @@ const DEFAULT_COLS = 10;
 const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 700;
+const STORAGE_SAVE_DELAY_LARGE = 10_000;
+const LARGE_DATASET_ROW_THRESHOLD = 10_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
 const BRIEF_SCORING_STORAGE_KEY_PREFIX = 'portal:brief-scoring';
@@ -396,8 +402,14 @@ const buildEnrichmentStorageKey = (userId: string | null) =>
 const buildBriefScoringStorageKey = (userId: string | null) =>
   `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
+const isStringArray = (arr: unknown[]): arr is string[] =>
+  arr.length === 0 || typeof arr[0] === 'string';
+
 const coerceRows = (rows: unknown) => {
   if (!Array.isArray(rows)) return [];
+  if (rows.length > 0 && Array.isArray(rows[0]) && isStringArray(rows[0])) {
+    return rows as string[][];
+  }
   return rows.map((row) => {
     if (!Array.isArray(row)) return [''];
     return row.map((cell) => `${cell ?? ''}`);
@@ -414,11 +426,12 @@ const coerceTabs = (value: unknown) => {
       const safeName =
         typeof name === 'string' && name.trim().length > 0 ? name : `Вкладка ${index + 1}`;
       const rows = coerceRows(data);
-      const normalized =
-        rows.length > 0
-          ? normalizeRows(rows)
-          : [Array.from({ length: DEFAULT_COLS }, () => '')];
-      return { id: safeId, name: safeName, data: normalized };
+      if (rows.length === 0) {
+        return { id: safeId, name: safeName, data: [Array.from({ length: DEFAULT_COLS }, () => '')] };
+      }
+      const maxCols = safeMaxCols(rows);
+      const needsNormalization = rows.some((row) => row.length !== maxCols);
+      return { id: safeId, name: safeName, data: needsNormalization ? normalizeRows(rows) : rows };
     })
     .filter((tab): tab is Sheet => tab !== null);
 };
@@ -734,6 +747,7 @@ export function DatabaseSpreadsheet() {
   const [normalizeEmoji, setNormalizeEmoji] = useState(true);
   const [groupByCol, setGroupByCol] = useState<number | null>(null);
   const [groupSearch, setGroupSearch] = useState('');
+  const [groupSummaryLimit, setGroupSummaryLimit] = useState(GROUP_SUMMARY_PAGE_SIZE);
   const [rightPanelTab, setRightPanelTab] = useState<'summary' | 'cleanup'>('summary');
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
   const debouncedGroupSearch = useDebouncedValue(groupSearch, 300);
@@ -786,6 +800,8 @@ export function DatabaseSpreadsheet() {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accessTokenRef = useRef<string | null>(null);
+  const hydratedStateRef = useRef<string | null>(null);
 
   const [reviewSubmit, setReviewSubmit] = useState<{
     isOpen: boolean;
@@ -814,7 +830,15 @@ export function DatabaseSpreadsheet() {
   const [tgChats, setTgChats] = useState<Array<{ id: number; title: string }>>([]);
   const [myReviewRequests, setMyReviewRequests] = useState<Array<{
     id: string; tab_id: string; tab_name: string; status: string; project_name?: string;
+    reviewer_comment?: string;
   }>>([]);
+  const [reviewMarks, setReviewMarks] = useState<Array<{
+    row_index: number; color: string; comment: string; author_type: string;
+  }>>([]);
+  const [reviewMarksPopup, setReviewMarksPopup] = useState<{
+    rowIndex: number; marks: Array<{ color: string; comment: string; author_type: string }>;
+    top: number; left: number;
+  } | null>(null);
 
   const flushSave = () => {
     if (saveTimeoutRef.current) {
@@ -830,12 +854,26 @@ export function DatabaseSpreadsheet() {
       tabCounter: deriveTabCounter(tabs, tabCounter),
       columnWidths,
     };
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
-    } catch (error) {
-      void logError('spreadsheet.state.local_save.failed', error);
+    const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    if (totalRows <= LARGE_DATASET_ROW_THRESHOLD) {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(payload));
+      } catch (error) {
+        void logError('spreadsheet.state.local_save.failed', error);
+      }
     }
     if (userId) {
+      const isLarge = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+      if (isLarge) {
+        if (accessTokenRef.current) {
+          void backgroundSave(
+            { user_id: userId, state: payload, updated_at: new Date().toISOString() },
+            accessTokenRef.current,
+            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+          );
+        }
+        return;
+      }
       void supabase
         .from('database_spreadsheet_states')
         .upsert({
@@ -1775,8 +1813,10 @@ export function DatabaseSpreadsheet() {
       name: tabName,
       data,
     };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    startTransition(() => {
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+    });
   }, [tabCounter]);
 
   useEffect(() => {
@@ -1904,18 +1944,26 @@ export function DatabaseSpreadsheet() {
         reader.readAsArrayBuffer(file);
       });
       setImportStatus({ status: 'parsing', progress: 85, filename: file.name });
-      const workbook = XLSX.read(buffer, { type: 'array' });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
-        header: 1,
-        raw: false,
-        blankrows: true,
-      });
-      const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
-      setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
-      applyRowsToNewTab(normalizedRows, file.name);
-      finalizeImport('done', file.name);
+
+      const workerRows = await parseXlsxInWorker(buffer);
+      if (workerRows) {
+        setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
+        applyRowsToNewTab(workerRows, file.name);
+        finalizeImport('done', file.name);
+      } else {
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
+          header: 1,
+          raw: false,
+          blankrows: true,
+        });
+        const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
+        setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
+        applyRowsToNewTab(normalizedRows, file.name);
+        finalizeImport('done', file.name);
+      }
     } catch (error) {
       void logError('spreadsheet.import.failed', error, { fileName: file.name });
       finalizeImport('error', file.name, 'Не удалось импортировать файл');
@@ -2607,7 +2655,8 @@ export function DatabaseSpreadsheet() {
       };
     });
 
-    for (let rowIndex = 1; rowIndex < activeTab.data.length; rowIndex += 1) {
+    const rowLimit = Math.min(activeTab.data.length, 5001);
+    for (let rowIndex = 1; rowIndex < rowLimit; rowIndex += 1) {
       const row = activeTab.data[rowIndex];
       const sourceValue = String(row?.[websiteEnrichment.sourceCol] ?? '').trim();
       if (!sourceValue) continue;
@@ -2652,23 +2701,74 @@ export function DatabaseSpreadsheet() {
   );
   const missingEnrichmentCount = selectedEnrichmentCandidate?.missing ?? 0;
 
-  const groupSummary = useMemo(() => {
-    if (!activeTab || groupByCol === null) return [];
-    const map = new Map<string, { label: string; count: number }>();
-    for (let i = 1; i < activeTab.data.length; i += 1) {
-      const row = activeTab.data[i];
-      if (!rowMatchesFilters(i, row, groupByCol)) continue;
-      const raw = row[groupByCol] ?? '';
-      const key = normalizeCellKey(raw);
-      const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
-      const entry = map.get(key) ?? { label, count: 0 };
-      entry.count += 1;
-      map.set(key, entry);
+  const [groupSummary, setGroupSummary] = useState<Array<{ key: string; label: string; count: number }>>([]);
+  const groupSummaryGenRef = useRef(0);
+
+  useEffect(() => {
+    if (!activeTab || groupByCol === null) {
+      setGroupSummary([]);
+      return;
     }
-    return [...map.entries()]
-      .map(([key, value]) => ({ key, label: value.label, count: value.count }))
-      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru'));
-  }, [activeTab, groupByCol, rowMatchesFilters]);
+
+    const data = activeTab.data;
+    const col = groupByCol;
+    const matchFn = rowMatchesFilters;
+
+    if (data.length <= VIRTUALIZATION_THRESHOLD) {
+      const map = new Map<string, { label: string; count: number }>();
+      for (let i = 1; i < data.length; i += 1) {
+        const row = data[i];
+        if (!matchFn(i, row, col)) continue;
+        const raw = row[col] ?? '';
+        const key = normalizeCellKey(raw);
+        const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
+        const entry = map.get(key) ?? { label, count: 0 };
+        entry.count += 1;
+        map.set(key, entry);
+      }
+      setGroupSummary(
+        [...map.entries()]
+          .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+          .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru')),
+      );
+      return;
+    }
+
+    const gen = ++groupSummaryGenRef.current;
+    const map = new Map<string, { label: string; count: number }>();
+    let cursor = 1;
+    const CHUNK = 5000;
+
+    const processChunk = () => {
+      if (groupSummaryGenRef.current !== gen) return;
+      const end = Math.min(cursor + CHUNK, data.length);
+      for (let i = cursor; i < end; i += 1) {
+        const row = data[i];
+        if (!matchFn(i, row, col)) continue;
+        const raw = row[col] ?? '';
+        const key = normalizeCellKey(raw);
+        const label = raw.trim().length > 0 ? raw.trim() : BLANK_FILTER_LABEL;
+        const entry = map.get(key) ?? { label, count: 0 };
+        entry.count += 1;
+        map.set(key, entry);
+      }
+      cursor = end;
+      if (cursor < data.length) {
+        requestAnimationFrame(processChunk);
+        return;
+      }
+      if (groupSummaryGenRef.current !== gen) return;
+      setGroupSummary(
+        [...map.entries()]
+          .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+          .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ru')),
+      );
+    };
+
+    setGroupSummary([]);
+    requestAnimationFrame(processChunk);
+    return () => { groupSummaryGenRef.current++; };
+  }, [activeTabId, activeTab, groupByCol, rowMatchesFilters]);
 
   const normalizedGroupSearch = normalizeText(debouncedGroupSearch, normalizeOptions);
   const filteredGroupSummary = useMemo(() => {
@@ -2678,8 +2778,16 @@ export function DatabaseSpreadsheet() {
     );
   }, [groupSummary, normalizedGroupSearch, normalizeOptions]);
 
+  const hasActiveFilters = filterEntries.length > 0 || (searchOnlyMatches && searchTerms.length > 0);
+
   const visibleRowIndices = useMemo(() => {
     if (!activeTab) return [];
+    if (!hasActiveFilters) {
+      const len = activeTab.data.length - 1;
+      const indices = new Array<number>(len);
+      for (let i = 0; i < len; i += 1) indices[i] = i + 1;
+      return indices;
+    }
     const indices: number[] = [];
     for (let i = 1; i < activeTab.data.length; i += 1) {
       const row = activeTab.data[i];
@@ -2688,7 +2796,7 @@ export function DatabaseSpreadsheet() {
       }
     }
     return indices;
-  }, [activeTab, rowMatchesFilters]);
+  }, [activeTab, hasActiveFilters, rowMatchesFilters]);
 
   const allRowIndices = useMemo(() => {
     if (!activeTab) return [];
@@ -2707,21 +2815,22 @@ export function DatabaseSpreadsheet() {
       : 'выкл';
 
   const virtualRange = useMemo(() => {
-    if (!shouldVirtualize || allRowIndices.length === 0) {
+    if (allRowIndices.length <= VIRTUALIZATION_THRESHOLD) {
       return { start: 0, end: Math.max(0, allRowIndices.length - 1), top: 0, bottom: 0 };
     }
     const { scrollTop, height } = scrollMetrics;
+    const viewportH = Math.min(Math.max(height, 600), 4000);
     const start = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
     const end = Math.min(
       allRowIndices.length - 1,
-      Math.ceil((scrollTop + height) / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN,
+      start + Math.ceil(viewportH / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2,
     );
     const top = start * VIRTUAL_ROW_HEIGHT;
     const bottom = Math.max(0, (allRowIndices.length - end - 1) * VIRTUAL_ROW_HEIGHT);
     return { start, end, top, bottom };
-  }, [shouldVirtualize, allRowIndices.length, scrollMetrics]);
+  }, [allRowIndices.length, scrollMetrics]);
 
-  const rowIndicesToRender = shouldVirtualize
+  const rowIndicesToRender = isLargeTable
     ? allRowIndices.slice(virtualRange.start, virtualRange.end + 1)
     : allRowIndices;
 
@@ -4998,10 +5107,11 @@ export function DatabaseSpreadsheet() {
     setUndoSnapshot('Валидация почт');
 
     const sourceLabel = headerLabels[emailValidation.sourceCol] || toColumnLabel(emailValidation.sourceCol);
-    const startCol = activeTab.data[0].length;
-    const resultColIndex = startCol;
-    const qualityColIndex = startCol + 1;
-    const detailsColIndex = startCol + 2;
+    const headerRow = activeTab.data[0] ?? [];
+    let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
+    if (resultColIndex < 0) resultColIndex = headerRow.length;
+    const qualityColIndex = resultColIndex + 1;
+    const detailsColIndex = resultColIndex + 2;
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -5010,6 +5120,10 @@ export function DatabaseSpreadsheet() {
         extended[resultColIndex] = `Результат (${sourceLabel})`;
         extended[qualityColIndex] = `Качество`;
         extended[detailsColIndex] = `Детали`;
+      } else {
+        extended[resultColIndex] = '';
+        extended[qualityColIndex] = '';
+        extended[detailsColIndex] = '';
       }
       return extended;
     });
@@ -5019,40 +5133,54 @@ export function DatabaseSpreadsheet() {
     );
 
     try {
-      const startRes = await fetch('/api/email-validation/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
-        body: JSON.stringify({ rows: rowsToProcess }),
-        signal: emailValidationAbortRef.current?.signal,
-      });
+      const CHUNK_SIZE = 5000;
+      const signal = emailValidationAbortRef.current?.signal;
+      let jobId: string | undefined;
+      let totalFromServer = 0;
 
-      const startData = await parseJsonResponse<{
-        job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
-      }>(startRes, 'email_validation.start');
+      for (let chunkStart = 0; chunkStart < rowsToProcess.length; chunkStart += CHUNK_SIZE) {
+        if (signal?.aborted) throw new Error('AbortError');
 
-      if (!startRes.ok || !startData.job_id) {
-        throw new Error(startData.error ?? 'Не удалось создать задачу валидации');
+        const chunk = rowsToProcess.slice(chunkStart, chunkStart + CHUNK_SIZE);
+        const payload: { rows: typeof chunk; job_id?: string } = { rows: chunk };
+        if (jobId) payload.job_id = jobId;
+
+        const chunkRes = await fetch('/api/email-validation/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+          body: JSON.stringify(payload),
+          signal,
+        });
+
+        const chunkData = await parseJsonResponse<{
+          job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
+        }>(chunkRes, 'email_validation.start');
+
+        if (!chunkRes.ok || !chunkData.job_id) {
+          throw new Error(chunkData.error ?? 'Не удалось создать задачу валидации');
+        }
+
+        jobId = chunkData.job_id;
+        totalFromServer = chunkData.total ?? rowsToProcess.length;
+
+        setEmailValidation((prev) => ({
+          ...prev,
+          isOpen: false,
+          isValidating: true,
+          jobId: jobId!,
+          totalRows: totalFromServer,
+          currentRow: chunkData.processed ?? 0,
+          progress: 0,
+        }));
       }
 
-      const jobId = startData.job_id;
-      const total = startData.total ?? rowsToProcess.length;
-
-      setEmailValidation((prev) => ({
-        ...prev,
-        isOpen: false,
-        isValidating: true,
-        jobId,
-        totalRows: total,
-        currentRow: startData.processed ?? 0,
-        progress: total > 0 ? Math.round(((startData.processed ?? 0) / total) * 100) : 0,
-      }));
+      const total = totalFromServer;
 
       // Poll for results
       let resultCursor: string | null = null;
       let consecutiveErrors = 0;
       let lastProgressTime = Date.now();
       let token = currentToken;
-      const signal = emailValidationAbortRef.current?.signal;
 
       const RESULT_LABELS: Record<string, string> = {
         ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
@@ -5118,7 +5246,7 @@ export function DatabaseSpreadsheet() {
                   if (r.is_disposable) detailParts.push('Disposable');
                   if (r.is_catch_all) detailParts.push('Catch-All');
                   if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
-                  if (r.last_error && r.status === 'failed') detailParts.push(r.last_error);
+                  if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
 
                   newData[r.row_index][resultColIndex] = resultText;
                   newData[r.row_index][qualityColIndex] = qualityText;
@@ -5180,20 +5308,50 @@ export function DatabaseSpreadsheet() {
       const token = session?.access_token;
       if (!token) { setReviewSubmitToast('Не авторизован'); return; }
       flushSave();
-      const res = await fetch('/api/database-review/submit', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tabId: activeTab.id,
-          tabName: activeTab.name,
-          projectId: reviewSubmit.projectId || undefined,
-          comment: reviewSubmit.comment || undefined,
-        }),
-      });
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+      const existingReq = activeReviewReq && reworkStatuses.has(activeReviewReq.status) ? activeReviewReq : null;
+
+      let res: Response;
+      if (existingReq) {
+        res = await fetch(`/api/database-review/submit`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            tabId: activeTab.id,
+            tabName: activeTab.name,
+            projectId: reviewSubmit.projectId || undefined,
+            comment: reviewSubmit.comment || undefined,
+            existingRequestId: existingReq.id,
+          }),
+        });
+      } else {
+        res = await fetch('/api/database-review/submit', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            tabId: activeTab.id,
+            tabName: activeTab.name,
+            projectId: reviewSubmit.projectId || undefined,
+            comment: reviewSubmit.comment || undefined,
+          }),
+        });
+      }
       const d = await res.json();
       if (!res.ok) { setReviewSubmitToast(d.error || 'Ошибка отправки'); return; }
-      setReviewSubmitToast('Отправлено на проверку!');
+      setReviewSubmitToast(existingReq ? 'Переотправлено на проверку!' : 'Отправлено на проверку!');
       setReviewSubmit({ isOpen: false, comment: '', projectId: '', submitting: false });
+      setMyReviewRequests((prev) => {
+        if (existingReq) {
+          return prev.map((r) => r.id === existingReq.id ? { ...r, status: 'submitted', reviewer_comment: '' } : r);
+        }
+        return [...prev, {
+          id: d.request?.id || '',
+          tab_id: activeTab.id,
+          tab_name: activeTab.name,
+          status: 'submitted',
+        }];
+      });
+      setReviewMarks([]);
     } catch {
       setReviewSubmitToast('Ошибка сети');
     } finally {
@@ -5206,6 +5364,16 @@ export function DatabaseSpreadsheet() {
     const t = setTimeout(() => setReviewSubmitToast(''), 3000);
     return () => clearTimeout(t);
   }, [reviewSubmitToast]);
+
+  useEffect(() => {
+    if (!reviewMarksPopup) return;
+    const handler = (e: Event) => {
+      const el = document.getElementById('review-marks-popup');
+      if (el && !el.contains(e.target as Node)) setReviewMarksPopup(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [reviewMarksPopup]);
 
   const openPublishModal = async (requestId: string) => {
     setReviewPublish({ isOpen: true, requestId, chatId: null, message: '', publishing: false });
@@ -5537,6 +5705,7 @@ export function DatabaseSpreadsheet() {
     const detected = headerLabels.findIndex((label) => COMPANY_HEADER_REGEX.test(label));
     setGroupByCol(detected >= 0 ? detected : 0);
     setGroupSearch('');
+    setGroupSummaryLimit(GROUP_SUMMARY_PAGE_SIZE);
   }, [activeTabId, headerLabels, colCount, activeTab]);
 
   useEffect(() => {
@@ -5552,7 +5721,10 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     setSelectedRows((prev) => {
-      if (!activeTab) return new Set();
+      if (!activeTab || prev.size === 0) return prev;
+      if (visibleRowIndices.length > VIRTUALIZATION_THRESHOLD) {
+        return new Set();
+      }
       const visibleSet = new Set(visibleRowIndices);
       const next = new Set<number>();
       prev.forEach((index) => {
@@ -5568,11 +5740,12 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     let isMounted = true;
-    const applySession = (session: { user: { id: string } } | null) => {
+    const applySession = (session: { user: { id: string }; access_token?: string } | null) => {
       if (!isMounted) return;
       const userId = session?.user?.id ?? null;
       setUserId(userId);
       setStorageKey(buildStorageKey(userId));
+      accessTokenRef.current = (session as { access_token?: string } | null)?.access_token ?? null;
     };
 
     void (async () => {
@@ -5587,6 +5760,7 @@ export function DatabaseSpreadsheet() {
     return () => {
       isMounted = false;
       subscription?.unsubscribe();
+      cancelBackgroundSave();
     };
   }, []);
 
@@ -5612,11 +5786,50 @@ export function DatabaseSpreadsheet() {
           tab_name: (r.tab_name as string) || '',
           status: r.status as string,
           project_name: (r.project_name as string) || '',
+          reviewer_comment: (r.reviewer_comment as string) || '',
         })),
       );
     })();
     return () => { cancelled = true; };
   }, [userId]);
+
+  const activeReviewReq = activeTab ? myReviewRequests.find((r) => r.tab_id === activeTab.id) : null;
+  const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
+  const hasRework = activeReviewReq && reworkStatuses.has(activeReviewReq.status);
+  const reviewMarksMap = useMemo(() => {
+    const map = new Map<number, typeof reviewMarks>();
+    for (const m of reviewMarks) {
+      const arr = map.get(m.row_index) ?? [];
+      arr.push(m);
+      map.set(m.row_index, arr);
+    }
+    return map;
+  }, [reviewMarks]);
+
+  useEffect(() => {
+    if (!hasRework || !activeReviewReq) { setReviewMarks([]); return; }
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      const res = await fetch(`/api/database-review/requests/${activeReviewReq.id}/marks`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const d = await res.json();
+      if (cancelled) return;
+      setReviewMarks(
+        (d.marks ?? []).map((m: Record<string, unknown>) => ({
+          row_index: m.row_index as number,
+          color: (m.color as string) || '',
+          comment: (m.comment as string) || '',
+          author_type: (m.author_type as string) || 'reviewer',
+        })),
+      );
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasRework, activeReviewReq?.id]);
 
   useEffect(() => {
     if (!storageKey) return;
@@ -5629,24 +5842,26 @@ export function DatabaseSpreadsheet() {
 
     const applyState = (state: PersistedSpreadsheetState | null) => {
       if (!isMounted) return;
-      if (state) {
-        setTabs(state.tabs);
-        setActiveTabId(state.activeTabId);
-        setTabCounter(state.tabCounter);
-        setColumnWidths(state.columnWidths ?? []);
-      } else {
-        const fallbackTab = createSheet('Вкладка 1');
-        setTabs([fallbackTab]);
-        setActiveTabId(fallbackTab.id);
-        setTabCounter(1);
-        setColumnWidths([]);
-      }
-      setIsHydrated(true);
+      startTransition(() => {
+        if (state) {
+          setTabs(state.tabs);
+          setActiveTabId(state.activeTabId);
+          setTabCounter(state.tabCounter);
+          setColumnWidths(state.columnWidths ?? []);
+        } else {
+          const fallbackTab = createSheet('Вкладка 1');
+          setTabs([fallbackTab]);
+          setActiveTabId(fallbackTab.id);
+          setTabCounter(1);
+          setColumnWidths([]);
+        }
+        hydratedStateRef.current = '__hydrated__';
+        setIsHydrated(true);
+      });
     };
 
-    const localState = readPersistedState(window.localStorage.getItem(storageKey));
-
     if (!userId) {
+      const localState = readPersistedState(window.localStorage.getItem(storageKey));
       applyState(localState);
       return () => {
         isMounted = false;
@@ -5655,30 +5870,42 @@ export function DatabaseSpreadsheet() {
 
     void (async () => {
       let remoteState: PersistedSpreadsheetState | null = null;
-      try {
-        const { data, error } = await supabase
-          .from('database_spreadsheet_states')
-          .select('state')
-          .eq('user_id', userId)
-          .limit(1);
-        if (!error && data?.[0]?.state) {
-          remoteState = readPersistedState(data[0].state);
-        }
-      } catch (error) {
-        void logError('spreadsheet.state.load.failed', error);
-      }
 
-      const nextState = remoteState ?? localState;
-      if (nextState) {
+      const token = accessTokenRef.current;
+      if (token) {
         try {
-          window.localStorage.setItem(storageKey, JSON.stringify(nextState));
-        } catch (error) {
-          void logError('spreadsheet.state.local_save.failed', error);
+          const raw = await loadStateViaWorker(userId, token);
+          if (raw) remoteState = readPersistedState(raw);
+        } catch {
+          /* worker failed, try supabase client below */
         }
       }
-      applyState(nextState);
 
-      if (!remoteState && localState) {
+      if (!remoteState) {
+        try {
+          const { data, error } = await supabase
+            .from('database_spreadsheet_states')
+            .select('state')
+            .eq('user_id', userId)
+            .limit(1);
+          if (!error && data?.[0]?.state) {
+            remoteState = readPersistedState(data[0].state);
+          }
+        } catch (error) {
+          void logError('spreadsheet.state.load.failed', error);
+        }
+      }
+
+      if (remoteState) {
+        if (isMounted) applyState(remoteState);
+        try { window.localStorage.removeItem(storageKey); } catch { /* noop */ }
+        return;
+      }
+
+      const localState = readPersistedState(window.localStorage.getItem(storageKey));
+      if (isMounted) applyState(localState);
+
+      if (localState) {
         try {
           await supabase.from('database_spreadsheet_states').upsert({
             user_id: userId,
@@ -5704,6 +5931,12 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     if (!storageKey || !isHydrated) return;
+
+    if (hydratedStateRef.current !== null) {
+      hydratedStateRef.current = null;
+      return;
+    }
+
     const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
     const payload: PersistedSpreadsheetState = {
       version: STORAGE_VERSION,
@@ -5717,13 +5950,28 @@ export function DatabaseSpreadsheet() {
     }
     const userIdSnapshot = userId;
     const storageKeySnapshot = storageKey;
+    const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+    const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+    const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
     saveTimeoutRef.current = setTimeout(() => {
-      try {
-        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-      } catch (error) {
-        void logError('spreadsheet.state.local_save.failed', error);
+      if (!isLargeDataset) {
+        try {
+          window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+        } catch (error) {
+          void logError('spreadsheet.state.local_save.failed', error);
+        }
       }
       if (!userIdSnapshot) return;
+      if (isLargeDataset) {
+        if (accessTokenRef.current) {
+          void backgroundSave(
+            { user_id: userIdSnapshot, state: payload, updated_at: new Date().toISOString() },
+            accessTokenRef.current,
+            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+          );
+        }
+        return;
+      }
       void supabase
         .from('database_spreadsheet_states')
         .upsert({
@@ -5736,14 +5984,23 @@ export function DatabaseSpreadsheet() {
           void logError('spreadsheet.state.remote_save.failed', error);
           }
         });
-    }, STORAGE_SAVE_DELAY);
+    }, delay);
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
       }
+      cancelBackgroundSave();
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      flushSave();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  });
 
   useEffect(() => {
     if (!isHydrated || !activeTab || websiteEnrichment.isGenerating) return;
@@ -5839,7 +6096,7 @@ export function DatabaseSpreadsheet() {
     'inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
 
   return (
-    <div className="h-full min-h-0 space-y-0.5 flex flex-col">
+    <div className="flex-1 min-h-0 space-y-0.5 flex flex-col">
       <div className="flex flex-wrap items-center gap-1.5 pb-1 flex-shrink-0">
         <Link
           href="/tools"
@@ -5935,23 +6192,43 @@ export function DatabaseSpreadsheet() {
           Обогатить
         </button>
 
-        <button
-          type="button"
-          onClick={openEmailScrapingModal}
-          disabled={colCount === 0 || emailScraping.isGenerating}
-          className={toolbarMonochromeButtonClass}
-        >
-          {emailScraping.isGenerating ? `Почты... ${emailScraping.progress}%` : 'Найти почты'}
-        </button>
+        {emailScraping.isGenerating ? (
+          <button
+            type="button"
+            onClick={() => void handleStopEmailScraping()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Почты... {emailScraping.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openEmailScrapingModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Найти почты
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={openEmailValidationModal}
-          disabled={colCount === 0 || emailValidation.isValidating}
-          className={toolbarMonochromeButtonClass}
-        >
-          {emailValidation.isValidating ? `Валидация... ${emailValidation.progress}%` : 'Валидация почт'}
-        </button>
+        {emailValidation.isValidating ? (
+          <button
+            type="button"
+            onClick={() => void handleStopEmailValidation()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Валидация... {emailValidation.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openEmailValidationModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Валидация почт
+          </button>
+        )}
 
         <button
           type="button"
@@ -5962,16 +6239,24 @@ export function DatabaseSpreadsheet() {
           Проверка сайтов
         </button>
 
-        <button
-          type="button"
-          onClick={openBriefScoringModal}
-          disabled={colCount === 0}
-          className={toolbarMonochromeButtonClass}
-        >
-          {briefScoring.isScoring
-            ? `Оценка ЦА: ${briefScoring.progress}% (${briefScoring.currentRow}/${briefScoring.totalRows})`
-            : 'Оценка ЦА'}
-        </button>
+        {briefScoring.isScoring ? (
+          <button
+            type="button"
+            onClick={() => void handleStopBriefScoring()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Оценка ЦА: {briefScoring.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openBriefScoringModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Оценка ЦА
+          </button>
+        )}
 
         <button
           type="button"
@@ -5994,14 +6279,41 @@ export function DatabaseSpreadsheet() {
 
         <div className="h-4 w-px bg-gray-200 mx-0.5" />
 
-        <button
-          type="button"
-          onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
-          disabled={!activeTab || rowCount === 0}
-          className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          ✓ На проверку
-        </button>
+        {activeReviewReq && (() => {
+          const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+            submitted: { label: 'На проверке', cls: 'border-gray-300 bg-gray-50 text-gray-600' },
+            needs_rework: { label: 'На доработке', cls: 'border-orange-300 bg-orange-50 text-orange-700' },
+            review_approved: { label: 'Одобрено', cls: 'border-green-300 bg-green-50 text-green-700' },
+            sent_to_client: { label: 'У клиента', cls: 'border-blue-300 bg-blue-50 text-blue-700' },
+            client_approved: { label: 'Клиент согласовал', cls: 'border-green-300 bg-green-50 text-green-700' },
+            client_requested_changes: { label: 'Клиент: правки', cls: 'border-red-300 bg-red-50 text-red-700' },
+          };
+          const badge = STATUS_BADGE[activeReviewReq.status];
+          return badge ? (
+            <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium ${badge.cls}`}>
+              {badge.label}
+              {activeReviewReq.reviewer_comment && reworkStatuses.has(activeReviewReq.status) && (
+                <span
+                  className="cursor-help underline decoration-dotted"
+                  title={activeReviewReq.reviewer_comment}
+                >
+                  💬
+                </span>
+              )}
+            </span>
+          ) : null;
+        })()}
+
+        {(!activeReviewReq || reworkStatuses.has(activeReviewReq.status)) && (
+          <button
+            type="button"
+            onClick={() => setReviewSubmit({ isOpen: true, comment: '', projectId: '', submitting: false })}
+            disabled={!activeTab || rowCount === 0}
+            className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {activeReviewReq ? '↻ Переотправить' : '✓ На проверку'}
+          </button>
+        )}
 
         <button
           type="button"
@@ -6205,6 +6517,29 @@ export function DatabaseSpreadsheet() {
 
       <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
         <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
+          {activeReviewReq && (() => {
+            const cfg: Record<string, { bg: string; border: string; text: string; icon: string; label: string }> = {
+              submitted: { bg: 'bg-gray-50', border: 'border-gray-200', text: 'text-gray-700', icon: '⏳', label: 'База на проверке у ревьюера' },
+              needs_rework: { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-800', icon: '🔄', label: 'Ревьюер отправил на доработку' },
+              review_approved: { bg: 'bg-green-50', border: 'border-green-200', text: 'text-green-800', icon: '✅', label: 'Ревьюер одобрил базу — отправьте клиенту на согласование' },
+              sent_to_client: { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-800', icon: '📨', label: 'Отправлено клиенту, ожидаем ответ' },
+              client_approved: { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-800', icon: '🎉', label: 'Клиент согласовал базу' },
+              client_requested_changes: { bg: 'bg-red-50', border: 'border-red-200', text: 'text-red-800', icon: '✏️', label: 'Клиент запросил правки' },
+            };
+            const s = cfg[activeReviewReq.status];
+            if (!s) return null;
+            return (
+              <div className={`flex items-center gap-2 px-3 py-2 ${s.bg} ${s.border} border-b text-xs ${s.text}`}>
+                <span>{s.icon}</span>
+                <span className="font-medium">{s.label}</span>
+                {activeReviewReq.reviewer_comment && reworkStatuses.has(activeReviewReq.status) && (
+                  <span className="ml-2 text-[11px] opacity-80">
+                    — «{activeReviewReq.reviewer_comment}»
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           <div
             ref={tableWrapperRef}
             className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
@@ -6309,7 +6644,7 @@ export function DatabaseSpreadsheet() {
                 </tr>
               </thead>
               <tbody>
-                {shouldVirtualize && virtualRange.top > 0 && (
+                {isLargeTable && virtualRange.top > 0 && (
                   <tr aria-hidden>
                     <td colSpan={colCount + 2} style={{ height: virtualRange.top }} />
                   </tr>
@@ -6319,11 +6654,17 @@ export function DatabaseSpreadsheet() {
                   if (!row) return null;
                   const isChecked = selectedRows.has(rowIndex);
                   const isHeaderRow = rowIndex === 0;
+                  const rowMarks = reviewMarksMap.get(rowIndex);
+                  const rowMarkColor = rowMarks?.[0]?.color || '';
+                  const rowHasComment = rowMarks?.some((m) => m.comment);
                   return (
                     <tr
                       key={`row-${rowIndex}`}
                       className="group"
-                      style={shouldVirtualize ? { height: VIRTUAL_ROW_HEIGHT } : undefined}
+                      style={{
+                        ...(isLargeTable ? { height: VIRTUAL_ROW_HEIGHT } : {}),
+                        ...(rowMarkColor ? { backgroundColor: rowMarkColor } : {}),
+                      }}
                     >
                       <th
                         draggable={!isHeaderRow}
@@ -6355,7 +6696,9 @@ export function DatabaseSpreadsheet() {
                               ? 'bg-blue-100 text-blue-900'
                               : isChecked 
                                 ? 'bg-blue-50 text-blue-800'
-                                : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
+                                : rowMarkColor
+                                  ? 'text-gray-600'
+                                  : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
                         }`}
                       >
                         <div className="flex items-center justify-center gap-1 h-full">
@@ -6369,6 +6712,25 @@ export function DatabaseSpreadsheet() {
                             aria-label={`Выбрать строку ${rowIndex + 1}`}
                           />
                           <span className="min-w-[1.5rem] text-center">{rowIndex + 1}</span>
+                          {rowHasComment && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                setReviewMarksPopup({
+                                  rowIndex,
+                                  marks: rowMarks!.filter((m) => m.comment),
+                                  top: rect.bottom + 4,
+                                  left: rect.right + 4,
+                                });
+                              }}
+                              className="text-[9px] leading-none opacity-70 hover:opacity-100"
+                              title="Комментарии к строке"
+                            >
+                              💬
+                            </button>
+                          )}
                         </div>
                       </th>
                       {row.map((value, colIndex) => {
@@ -6391,7 +6753,7 @@ export function DatabaseSpreadsheet() {
                             ? 'bg-amber-50'
                             : isHighlighted
                               ? 'bg-purple-50'
-                              : 'bg-white';
+                              : rowMarkColor ? '' : 'bg-white';
 
                         return (
                           <td
@@ -6443,14 +6805,14 @@ export function DatabaseSpreadsheet() {
                                 value={value}
                                 onChange={(event) => {
                                   handleValueChange(rowIndex, colIndex, event.target.value);
-                                  if (!shouldVirtualize) {
+                                  if (!isLargeTable) {
                                     event.target.style.height = 'auto';
                                     event.target.style.height = `${event.target.scrollHeight}px`;
                                   }
                                 }}
                                 onFocus={(e) => {
                                   handleCellFocus(rowIndex, colIndex);
-                                  if (!shouldVirtualize) {
+                                  if (!isLargeTable) {
                                     e.target.style.height = 'auto';
                                     e.target.style.height = `${e.target.scrollHeight}px`;
                                   }
@@ -6489,7 +6851,7 @@ export function DatabaseSpreadsheet() {
                     </tr>
                   );
                 })}
-                {shouldVirtualize && virtualRange.bottom > 0 && (
+                {isLargeTable && virtualRange.bottom > 0 && (
                   <tr aria-hidden>
                     <td colSpan={colCount + 2} style={{ height: virtualRange.bottom }} />
                   </tr>
@@ -6601,7 +6963,7 @@ export function DatabaseSpreadsheet() {
                         Нет данных
                       </div>
                     )}
-                    {filteredGroupSummary.map((item) => {
+                    {filteredGroupSummary.slice(0, groupSummaryLimit).map((item) => {
                       const activeKeys =
                         groupByCol !== null ? columnFilters[groupByCol] : undefined;
                       const isActive = activeKeys?.length === 1 && activeKeys[0] === item.key;
@@ -6621,6 +6983,15 @@ export function DatabaseSpreadsheet() {
                         </button>
                       );
                     })}
+                    {filteredGroupSummary.length > groupSummaryLimit && (
+                      <button
+                        type="button"
+                        onClick={() => setGroupSummaryLimit((prev) => prev + GROUP_SUMMARY_PAGE_SIZE)}
+                        className="w-full rounded-md px-3 py-2 text-[11px] text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-all"
+                      >
+                        Показать ещё ({filteredGroupSummary.length - groupSummaryLimit})
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -8417,6 +8788,32 @@ export function DatabaseSpreadsheet() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Review marks popup */}
+      {reviewMarksPopup && (
+        <div
+          id="review-marks-popup"
+          className="fixed z-[9999] bg-white border border-gray-200 rounded-xl shadow-2xl p-3 max-w-xs"
+          style={{ top: reviewMarksPopup.top, left: reviewMarksPopup.left }}
+        >
+          <div className="text-[10px] font-medium text-gray-400 mb-2">Строка {reviewMarksPopup.rowIndex + 1}</div>
+          {reviewMarksPopup.marks.map((m, i) => (
+            <div key={i} className="mb-2 last:mb-0">
+              <span className="text-[9px] font-medium text-gray-400 uppercase">
+                {m.author_type === 'client' ? 'Клиент' : 'Ревьюер'}
+              </span>
+              <p className="text-xs text-gray-800 mt-0.5">{m.comment}</p>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => setReviewMarksPopup(null)}
+            className="absolute top-1 right-2 text-gray-400 hover:text-gray-600 text-xs"
+          >
+            ✕
+          </button>
         </div>
       )}
 

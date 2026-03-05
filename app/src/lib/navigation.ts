@@ -17,6 +17,8 @@ export const navItems: NavItem[] = [
   { name: 'Команда', href: '/team' },
   { name: 'Финансы', href: '/finance' },
   { name: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
+  { name: 'Работа с базами', href: '/tools/databases', requiresTool: 'databases', badgeId: 'rework-count' },
+  { name: 'Проверка баз', href: '/tools/databases/review', requiresTool: 'database-review', badgeId: 'review-count' },
   { name: 'Инструменты', href: '/tools' },
   { name: 'Оплаты', href: '/payments' },
   { name: 'Календарь почт', href: '/billing-calendar', billingCalendarOnly: true },

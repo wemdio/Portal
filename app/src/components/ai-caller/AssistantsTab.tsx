@@ -71,21 +71,124 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
   // ── Brief Upload ──
 
+  async function extractPdfText(file: File): Promise<string> {
+    const buffer = await file.arrayBuffer();
+    const binary = new TextDecoder('latin1').decode(buffer);
+    const textParts: string[] = [];
+
+    const decodePdfStr = (s: string) =>
+      s.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+        .replace(/\\\\/g, '\\').replace(/\\([()])/g, '$1');
+
+    const decodeHex16BE = (hex: string) => {
+      let s = '';
+      for (let i = 0; i + 3 < hex.length; i += 4) {
+        const cp = parseInt(hex.substring(i, i + 4), 16);
+        if (cp > 0) s += String.fromCodePoint(cp);
+      }
+      return s;
+    };
+
+    const extractTj = (content: string) => {
+      let m: RegExpExecArray | null;
+      const tj = /\(([^)]*)\)\s*Tj/g;
+      while ((m = tj.exec(content)) !== null) textParts.push(decodePdfStr(m[1]));
+      const hexTj = /<([0-9A-Fa-f]+)>\s*Tj/g;
+      while ((m = hexTj.exec(content)) !== null) {
+        const decoded = decodeHex16BE(m[1]);
+        if (decoded) textParts.push(decoded);
+      }
+      const tjArr = /\[([^\]]+)\]\s*TJ/gi;
+      while ((m = tjArr.exec(content)) !== null) {
+        const inner = /\(([^)]*)\)/g;
+        let im: RegExpExecArray | null;
+        while ((im = inner.exec(m[1])) !== null) textParts.push(decodePdfStr(im[1]));
+        const hexInner = /<([0-9A-Fa-f]+)>/g;
+        while ((im = hexInner.exec(m[1])) !== null) {
+          const decoded = decodeHex16BE(im[1]);
+          if (decoded) textParts.push(decoded);
+        }
+      }
+    };
+
+    async function tryDecompress(bytes: Uint8Array): Promise<string | null> {
+      try {
+        const ds = new DecompressionStream('deflate');
+        const writer = ds.writable.getWriter();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        writer.write(bytes as any).catch(() => {});
+        writer.close().catch(() => {});
+        const reader = ds.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const total = chunks.reduce((a, c) => a + c.length, 0);
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunks) { merged.set(c, off); off += c.length; }
+        return new TextDecoder('utf-8').decode(merged);
+      } catch {
+        return null;
+      }
+    }
+
+    const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let sm: RegExpExecArray | null;
+    while ((sm = streamRe.exec(binary)) !== null) {
+      const raw = sm[1];
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      const decompressed = await tryDecompress(bytes);
+      extractTj(decompressed ?? sm[1]);
+    }
+    extractTj(binary);
+
+    let result = textParts.join(' ').replace(/\s+/g, ' ').trim();
+
+    if (!result || result.length < 30) {
+      const raw = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+      result = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    return result;
+  }
+
   async function handleBriefUpload(file: File) {
     setParsing(true);
     setError('');
 
     try {
       const token = await getToken();
-      const formData = new FormData();
-      formData.append('file', file);
-      if (selectedPreset) formData.append('presetId', selectedPreset);
+
+      let text: string;
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        text = await extractPdfText(file);
+      } else {
+        text = await file.text();
+      }
+
+      if (!text.trim()) {
+        setError('Не удалось извлечь текст из файла. Попробуйте TXT-файл.');
+        setParsing(false);
+        return;
+      }
+
       const providerQuery = `?provider=${encodeURIComponent(provider)}`;
 
       const res = await fetch(`${apiBase}/briefs/parse${providerQuery}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          fileName: file.name,
+          presetId: selectedPreset || undefined,
+        }),
       });
 
       const contentType = res.headers.get('content-type') ?? '';
