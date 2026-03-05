@@ -1,18 +1,22 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractOrConvertToMp3, callOpenRouterTranscription } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
+import { isMtprotoAvailable, downloadFileByFileId } from '@/lib/tgMtprotoDownload';
 
 const TG_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN ?? '';
 const TG_LOCAL_API_URL = process.env.TG_LOCAL_API_URL || '';
 
 const TG_FILE_SIZE_LIMIT_CLOUD = 20 * 1024 * 1024;
-const TG_FILE_SIZE_LIMIT_LOCAL = 2000 * 1024 * 1024;
 
 let localApiAvailable: boolean | null = null;
+let localApiCheckedAt = 0;
+const LOCAL_API_RECHECK_MS = 30_000;
 
 async function checkLocalApi(): Promise<boolean> {
   if (!TG_LOCAL_API_URL) return false;
-  if (localApiAvailable !== null) return localApiAvailable;
+  if (localApiAvailable === true) return true;
+  const now = Date.now();
+  if (localApiAvailable === false && now - localApiCheckedAt < LOCAL_API_RECHECK_MS) return false;
   try {
     const res = await fetch(`${TG_LOCAL_API_URL}/bot${TG_TOKEN}/getMe`, {
       signal: AbortSignal.timeout(3000),
@@ -22,6 +26,7 @@ async function checkLocalApi(): Promise<boolean> {
   } catch {
     localApiAvailable = false;
   }
+  localApiCheckedAt = now;
   if (!localApiAvailable) {
     console.warn('[tg-bot-api] Local API недоступен, используем api.telegram.org');
   }
@@ -44,10 +49,6 @@ export function tgApiBase(): string {
 function tgFileBase(): string {
   if (isLocalApi()) return `${TG_LOCAL_API_URL}/file/bot${TG_TOKEN}`;
   return `https://api.telegram.org/file/bot${TG_TOKEN}`;
-}
-
-function fileSizeLimit(): number {
-  return isLocalApi() ? TG_FILE_SIZE_LIMIT_LOCAL : TG_FILE_SIZE_LIMIT_CLOUD;
 }
 
 export { TG_TOKEN };
@@ -183,6 +184,12 @@ function getExtFromPath(filePath: string): string {
   return filePath.slice(idx).toLowerCase();
 }
 
+function getExtFromFilename(filename: string): string {
+  const idx = filename.lastIndexOf('.');
+  if (idx === -1) return '.mp4';
+  return filename.slice(idx).toLowerCase();
+}
+
 export async function processVideoMessage(
   msg: TgMessage,
   videoInfo: VideoInfo,
@@ -194,28 +201,40 @@ export async function processVideoMessage(
   const senderName = getSenderName(msg);
   const senderId = getSenderId(msg);
 
-  const sizeLimit = fileSizeLimit();
-  if (videoInfo.fileSize && videoInfo.fileSize > sizeLimit) {
-    const limitMb = Math.round(sizeLimit / (1024 * 1024));
-    const errorText = `Файл слишком большой (${(videoInfo.fileSize / (1024 * 1024)).toFixed(1)} МБ). Лимит — ${limitMb} МБ${isLocalApi() ? '' : ' (Bot API). Настройте TG_LOCAL_API_URL для снятия лимита.'}`;
-    await supabaseAdmin.from('tg_video_transcripts').insert({
-      tg_chat_id: msg.chat.id,
-      tg_message_id: msg.message_id,
-      tg_sender_id: senderId,
-      sender_name: senderName,
-      filename: videoInfo.filename,
-      file_size_bytes: videoInfo.fileSize,
-      duration_seconds: videoInfo.duration ?? null,
-      text: '',
-      length: 0,
-      status: 'error',
-      error_text: errorText,
-    });
-    return { status: 'skipped_size', error: errorText };
-  }
+  const needsMtproto = !isLocalApi()
+    && videoInfo.fileSize != null
+    && videoInfo.fileSize > TG_FILE_SIZE_LIMIT_CLOUD;
 
-  const { bytes, filePath } = await downloadTelegramFile(videoInfo.fileId);
-  const ext = getExtFromPath(filePath);
+  let bytes: Buffer;
+  let ext: string;
+
+  if (needsMtproto) {
+    if (!isMtprotoAvailable()) {
+      const sizeMb = ((videoInfo.fileSize ?? 0) / (1024 * 1024)).toFixed(1);
+      const errorText = `Файл слишком большой (${sizeMb} МБ). Лимит Bot API — 20 МБ. Настройте TELEGRAM_API_ID/TELEGRAM_API_HASH или TG_LOCAL_API_URL.`;
+      await supabaseAdmin.from('tg_video_transcripts').insert({
+        tg_chat_id: msg.chat.id,
+        tg_message_id: msg.message_id,
+        tg_sender_id: senderId,
+        sender_name: senderName,
+        filename: videoInfo.filename,
+        file_size_bytes: videoInfo.fileSize ?? null,
+        duration_seconds: videoInfo.duration ?? null,
+        text: '',
+        length: 0,
+        status: 'error',
+        error_text: errorText,
+      });
+      return { status: 'skipped_size', error: errorText };
+    }
+
+    bytes = await downloadFileByFileId(videoInfo.fileId, videoInfo.fileSize);
+    ext = getExtFromFilename(videoInfo.filename);
+  } else {
+    const result = await downloadTelegramFile(videoInfo.fileId);
+    bytes = result.bytes;
+    ext = getExtFromPath(result.filePath);
+  }
 
   const mp3 = await extractOrConvertToMp3({ bytes, inputExt: ext });
   const text = await callOpenRouterTranscription({ audioMp3: mp3 });

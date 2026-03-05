@@ -126,7 +126,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Автоматическая расшифровка видео из Telegram-группы с разделением по авторам.',
     href: '/tools/tg-transcribe',
     accentColor: 'blue',
-    disabled: true,
   },
   rdp: {
     id: 'rdp',

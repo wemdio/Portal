@@ -355,73 +355,79 @@ export default function TgTranscribePage() {
             <Search className="h-4 w-4 text-indigo-500" />
             Сканировать видео из группы
           </summary>
-          <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+          <div className="border-t border-gray-100 px-4 py-4 space-y-4">
             <p className="text-xs text-gray-500">
               Выберите группу и укажите сколько последних видео нужно найти и транскрибировать.
               Бот сам пройдётся по сообщениям от новых к старым.
             </p>
-            <div className="flex items-end gap-3 flex-wrap">
-              <label className="space-y-1 min-w-[200px] flex-1 max-w-xs">
-                <span className="text-[11px] font-medium text-gray-500">Группа</span>
-                <div className="flex items-center gap-1.5">
-                  <select
-                    value={selectedChatId ?? ''}
-                    onChange={(e) => setSelectedChatId(e.target.value ? Number(e.target.value) : null)}
-                    disabled={chatsLoading}
-                    className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                  >
-                    {botChats.length === 0 && (
-                      <option value="">{chatsLoading ? 'Загрузка...' : 'Нет групп — добавьте бота в группу'}</option>
-                    )}
-                    {botChats.map((c) => (
-                      <option key={c.chatId} value={c.chatId}>
-                        {c.title || `Chat ${c.chatId}`}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => void fetchChats()}
-                    disabled={chatsLoading}
-                    className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-1.5 text-gray-500 hover:text-indigo-600 hover:border-indigo-300 transition"
-                    title="Обновить список групп"
-                  >
-                    <RefreshCw className={`h-3.5 w-3.5 ${chatsLoading ? 'animate-spin' : ''}`} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddChat(!showAddChat)}
-                    className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-[10px] font-medium text-gray-500 hover:text-indigo-600 hover:border-indigo-300 transition"
-                  >
-                    + Добавить
-                  </button>
-                </div>
-                {showAddChat && (
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <input
-                      type="text"
-                      value={addChatId}
-                      onChange={(e) => setAddChatId(e.target.value)}
-                      placeholder="-1001234567890"
-                      className="block w-40 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                    />
-                    <input
-                      type="text"
-                      value={addChatTitle}
-                      onChange={(e) => setAddChatTitle(e.target.value)}
-                      placeholder="Название (необяз.)"
-                      className="block w-36 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void onAddChat()}
-                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 transition"
-                    >
-                      OK
-                    </button>
-                  </div>
-                )}
-              </label>
+
+            {/* Row 1: Group selector */}
+            <div className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Группа</span>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedChatId ?? ''}
+                  onChange={(e) => setSelectedChatId(e.target.value ? Number(e.target.value) : null)}
+                  disabled={chatsLoading}
+                  className="block w-full max-w-xs rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                >
+                  {botChats.length === 0 && (
+                    <option value="">{chatsLoading ? 'Загрузка...' : 'Нет групп — добавьте бота в группу'}</option>
+                  )}
+                  {botChats.map((c) => (
+                    <option key={c.chatId} value={c.chatId}>
+                      {c.title || `Chat ${c.chatId}`}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void fetchChats()}
+                  disabled={chatsLoading}
+                  className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-1.5 text-gray-500 hover:text-indigo-600 hover:border-indigo-300 transition"
+                  title="Обновить список групп"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${chatsLoading ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddChat(!showAddChat)}
+                  className="shrink-0 text-xs text-indigo-600 hover:text-indigo-800 transition font-medium"
+                >
+                  {showAddChat ? 'Отмена' : '+ Добавить'}
+                </button>
+              </div>
+            </div>
+
+            {/* Inline add-chat form */}
+            {showAddChat && (
+              <div className="flex items-center gap-2 pl-0.5">
+                <input
+                  type="text"
+                  value={addChatId}
+                  onChange={(e) => setAddChatId(e.target.value)}
+                  placeholder="ID чата, напр. -1001234567890"
+                  className="block w-48 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                />
+                <input
+                  type="text"
+                  value={addChatTitle}
+                  onChange={(e) => setAddChatTitle(e.target.value)}
+                  placeholder="Название (необяз.)"
+                  className="block w-40 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void onAddChat()}
+                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 transition"
+                >
+                  Добавить
+                </button>
+              </div>
+            )}
+
+            {/* Row 2: Video count + Scan button */}
+            <div className="flex items-end gap-3">
               <label className="space-y-1">
                 <span className="text-[11px] font-medium text-gray-500">Кол-во видео</span>
                 <input
@@ -430,7 +436,7 @@ export default function TgTranscribePage() {
                   max={50}
                   value={videoCount}
                   onChange={(e) => setVideoCount(e.target.value)}
-                  className="block w-24 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                  className="block w-20 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
                 />
               </label>
               <button

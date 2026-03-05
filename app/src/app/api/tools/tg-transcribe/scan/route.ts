@@ -114,10 +114,15 @@ export async function POST(req: NextRequest) {
 
   const { data: existing } = await supabaseAdmin
     .from('tg_video_transcripts')
-    .select('tg_message_id')
+    .select('tg_message_id, status')
     .eq('tg_chat_id', chatId);
 
-  const alreadyProcessed = new Set((existing ?? []).map((r) => Number(r.tg_message_id)));
+  const alreadyProcessed = new Set(
+    (existing ?? []).filter((r) => r.status !== 'error').map((r) => Number(r.tg_message_id)),
+  );
+  const errorMessageIds = new Set(
+    (existing ?? []).filter((r) => r.status === 'error').map((r) => Number(r.tg_message_id)),
+  );
 
   const { data: chatRow } = await supabaseAdmin
     .from('tg_bot_chats')
@@ -201,6 +206,14 @@ export async function POST(req: NextRequest) {
         };
 
         const senderName = getSenderName(syntheticMsg);
+
+        if (errorMessageIds.has(msgId)) {
+          await supabaseAdmin
+            .from('tg_video_transcripts')
+            .delete()
+            .eq('tg_chat_id', chatId)
+            .eq('tg_message_id', msgId);
+        }
 
         try {
           const result = await processVideoMessage(syntheticMsg, videoInfo);

@@ -42,9 +42,11 @@ if (inspect !== null) {
 }
 
 console.log(`[tg-bot-api] Creating container ${CONTAINER}...`);
+const hostPort = process.env.TG_LOCAL_API_PORT || '8082';
 const result = run(
   `docker run -d --name ${CONTAINER}` +
-  ` -p 8081:8081` +
+  ` -p ${hostPort}:8081` +
+  ` --dns 1.1.1.1 --dns 8.8.8.8` +
   ` -e TELEGRAM_API_ID=${apiId}` +
   ` -e TELEGRAM_API_HASH=${apiHash}` +
   ` -e TELEGRAM_LOCAL=true` +
