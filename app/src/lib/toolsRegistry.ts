@@ -48,6 +48,7 @@ export interface ToolConfig {
   badge?: string;
   badgeVariant?: 'amber' | 'emerald';
   accentColor?: 'blue' | 'emerald';
+  disabled?: boolean;
 }
 
 export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
@@ -125,6 +126,7 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Автоматическая расшифровка видео из Telegram-группы с разделением по авторам.',
     href: '/tools/tg-transcribe',
     accentColor: 'blue',
+    disabled: true,
   },
   rdp: {
     id: 'rdp',
