@@ -5107,10 +5107,11 @@ export function DatabaseSpreadsheet() {
     setUndoSnapshot('Валидация почт');
 
     const sourceLabel = headerLabels[emailValidation.sourceCol] || toColumnLabel(emailValidation.sourceCol);
-    const startCol = activeTab.data[0].length;
-    const resultColIndex = startCol;
-    const qualityColIndex = startCol + 1;
-    const detailsColIndex = startCol + 2;
+    const headerRow = activeTab.data[0] ?? [];
+    let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
+    if (resultColIndex < 0) resultColIndex = headerRow.length;
+    const qualityColIndex = resultColIndex + 1;
+    const detailsColIndex = resultColIndex + 2;
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -5119,6 +5120,10 @@ export function DatabaseSpreadsheet() {
         extended[resultColIndex] = `Результат (${sourceLabel})`;
         extended[qualityColIndex] = `Качество`;
         extended[detailsColIndex] = `Детали`;
+      } else {
+        extended[resultColIndex] = '';
+        extended[qualityColIndex] = '';
+        extended[detailsColIndex] = '';
       }
       return extended;
     });
