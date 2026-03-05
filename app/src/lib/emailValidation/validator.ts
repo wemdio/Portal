@@ -350,6 +350,7 @@ export async function validateEmail(
       is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: isCatchAll,
       did_you_mean: didYouMean, mx_found: mxFound, smtp_code: 0,
       details: { step: 'smtp', error: 'Не удалось подключиться ни к одному MX-серверу' },
+      error: 'Не удалось подключиться ни к одному MX-серверу',
     };
   }
 
@@ -398,5 +399,6 @@ export async function validateEmail(
     is_free: freeFlag, is_role: roleFlag, is_disposable: false, is_catch_all: isCatchAll,
     did_you_mean: didYouMean, mx_found: mxFound, smtp_code: smtpResult.code,
     details: { ...details, step: 'unknown' },
+    error: smtpResult.error ?? 'Неопределённый ответ SMTP-сервера',
   };
 }

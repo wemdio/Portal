@@ -6187,23 +6187,43 @@ export function DatabaseSpreadsheet() {
           Обогатить
         </button>
 
-        <button
-          type="button"
-          onClick={openEmailScrapingModal}
-          disabled={colCount === 0 || emailScraping.isGenerating}
-          className={toolbarMonochromeButtonClass}
-        >
-          {emailScraping.isGenerating ? `Почты... ${emailScraping.progress}%` : 'Найти почты'}
-        </button>
+        {emailScraping.isGenerating ? (
+          <button
+            type="button"
+            onClick={() => void handleStopEmailScraping()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Почты... {emailScraping.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openEmailScrapingModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Найти почты
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={openEmailValidationModal}
-          disabled={colCount === 0 || emailValidation.isValidating}
-          className={toolbarMonochromeButtonClass}
-        >
-          {emailValidation.isValidating ? `Валидация... ${emailValidation.progress}%` : 'Валидация почт'}
-        </button>
+        {emailValidation.isValidating ? (
+          <button
+            type="button"
+            onClick={() => void handleStopEmailValidation()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Валидация... {emailValidation.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openEmailValidationModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Валидация почт
+          </button>
+        )}
 
         <button
           type="button"
@@ -6214,16 +6234,24 @@ export function DatabaseSpreadsheet() {
           Проверка сайтов
         </button>
 
-        <button
-          type="button"
-          onClick={openBriefScoringModal}
-          disabled={colCount === 0}
-          className={toolbarMonochromeButtonClass}
-        >
-          {briefScoring.isScoring
-            ? `Оценка ЦА: ${briefScoring.progress}% (${briefScoring.currentRow}/${briefScoring.totalRows})`
-            : 'Оценка ЦА'}
-        </button>
+        {briefScoring.isScoring ? (
+          <button
+            type="button"
+            onClick={() => void handleStopBriefScoring()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Оценка ЦА: {briefScoring.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openBriefScoringModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Оценка ЦА
+          </button>
+        )}
 
         <button
           type="button"
