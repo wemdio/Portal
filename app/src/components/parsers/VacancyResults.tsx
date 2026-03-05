@@ -64,7 +64,10 @@ function LoadingEmptyState() {
   );
 }
 
-const SEARCH_BASE_URL = 'https://hh.ru/search/vacancy';
+function getSearchBaseUrl(subdomain?: string) {
+  if (subdomain) return `https://${subdomain}.hh.ru/search/vacancy`;
+  return 'https://hh.ru/search/vacancy';
+}
 const KNOWN_PARAM_KEYS = new Set([
   'text',
   'area',
@@ -129,7 +132,7 @@ function buildSearchUrl(config?: HHSearchConfig | null) {
 
   const query = params.toString();
   if (!query) return null;
-  return `${SEARCH_BASE_URL}?${query}`;
+  return `${getSearchBaseUrl(config.subdomain)}?${query}`;
 }
 
 function formatArea(area?: string | string[]) {

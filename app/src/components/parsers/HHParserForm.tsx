@@ -83,6 +83,11 @@ function paramsToRecord(params: URLSearchParams): Record<string, string | string
   return Object.keys(record).length > 0 ? record : undefined;
 }
 
+function extractHhSubdomain(hostname: string): string | undefined {
+  const match = hostname.match(/^(.+)\.hh\.ru$/i);
+  return match ? match[1].toLowerCase() : undefined;
+}
+
 function parseHhSearchLink(value: string): LinkParseResult {
   const raw = value.trim();
   if (!raw) return {};
@@ -105,6 +110,7 @@ function parseHhSearchLink(value: string): LinkParseResult {
 
   const params = url.searchParams;
   const text = (params.get('text') ?? '').trim();
+  const subdomain = extractHhSubdomain(url.hostname);
 
   const area = parseAreaParams(params);
   const salaryFrom = parseNumberParam(params.get('salary') ?? params.get('salary_from'));
@@ -137,6 +143,7 @@ function parseHhSearchLink(value: string): LinkParseResult {
       date_from,
       date_to,
       per_page,
+      subdomain,
       params: paramsRecord,
     },
     extraKeys: extraKeys.length > 0 ? extraKeys : undefined,
@@ -235,7 +242,7 @@ export function HHParserForm({ onStart, busy }: Props) {
                   value={searchLink}
                   onChange={(e) => setSearchLink(e.target.value)}
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-9 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                  placeholder="https://hh.ru/search/vacancy?text=маркетолог&area=1"
+                  placeholder="https://spb.hh.ru/search/vacancy?text=маркетолог&area=2"
                 />
                 <button
                   type="button"
