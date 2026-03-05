@@ -209,6 +209,7 @@ type EmailValidationState = {
   currentRow: number;
   error: string | null;
   jobId: string | null;
+  detectedJob: { id: string; total: number; processed: number; progress: number } | null;
 };
 
 const PERSONALIZATION_BATCH_SIZE = 2;
@@ -981,6 +982,7 @@ export function DatabaseSpreadsheet() {
     currentRow: 0,
     error: null,
     jobId: null,
+    detectedJob: null,
   });
   const emailValidationAbortRef = useRef<AbortController | null>(null);
 
@@ -5044,8 +5046,19 @@ export function DatabaseSpreadsheet() {
 
   // ── Email Validation (Валидация почт) ──────────────────────────────
 
-  const openEmailValidationModal = () => {
-    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null }));
+  const openEmailValidationModal = async () => {
+    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null, detectedJob: null }));
+    const token = await getFreshToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/email-validation/jobs', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json() as { active_job?: { id: string; total: number; processed: number; progress: number } | null };
+        if (data.active_job) {
+          setEmailValidation((prev) => ({ ...prev, detectedJob: data.active_job! }));
+        }
+      }
+    } catch { /* ignore */ }
   };
 
   const closeEmailValidationModal = () => {
@@ -5070,6 +5083,153 @@ export function DatabaseSpreadsheet() {
     }
     setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
     setLastAction({ message: 'Валидация почт остановлена', time: Date.now() });
+  };
+
+  const handleResumeEmailValidation = async () => {
+    if (!activeTab || emailValidation.isValidating || !emailValidation.detectedJob) return;
+
+    const detected = emailValidation.detectedJob;
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setEmailValidation((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    emailValidationAbortRef.current = new AbortController();
+    const signal = emailValidationAbortRef.current.signal;
+
+    const headerRow = activeTab.data[0] ?? [];
+    let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
+    if (resultColIndex < 0) resultColIndex = headerRow.length;
+    const qualityColIndex = resultColIndex + 1;
+    const detailsColIndex = resultColIndex + 2;
+
+    const baseData = activeTab.data.map((row, rowIdx) => {
+      const extended = [...row];
+      while (extended.length <= detailsColIndex) extended.push('');
+      if (rowIdx === 0 && !String(extended[resultColIndex]).startsWith('Результат')) {
+        extended[resultColIndex] = 'Результат (email)';
+        extended[qualityColIndex] = 'Качество';
+        extended[detailsColIndex] = 'Детали';
+      }
+      return extended;
+    });
+
+    setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? { ...t, data: baseData } : t)));
+    setEmailValidation((prev) => ({
+      ...prev,
+      isOpen: false,
+      isValidating: true,
+      jobId: detected.id,
+      totalRows: detected.total,
+      currentRow: detected.processed,
+      progress: detected.progress,
+      error: null,
+      detectedJob: null,
+    }));
+
+    const RESULT_LABELS: Record<string, string> = {
+      ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
+      catch_all: 'Catch-All', unknown: 'Неизвестно',
+    };
+    const QUALITY_LABELS: Record<string, string> = {
+      good: 'Хороший', bad: 'Плохой', risky: 'Рискованный',
+    };
+
+    try {
+      let resultCursor: string | null = null;
+      let consecutiveErrors = 0;
+      let lastProgressTime = Date.now();
+      let token = currentToken;
+
+      while (true) {
+        if (signal?.aborted) throw new Error('AbortError');
+        await new Promise((r) => setTimeout(r, EMAIL_VALIDATION_PROGRESS_INTERVAL_MS));
+
+        const fetchResults = (tkn: string) =>
+          fetch(
+            `/api/email-validation/jobs/${detected.id}/results?cursor=${encodeURIComponent(resultCursor ?? '')}&limit=500`,
+            { headers: { Authorization: `Bearer ${tkn}` }, signal },
+          );
+
+        let res = await fetchResults(token);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) { token = refreshed; res = await fetchResults(token); }
+          else throw new Error('Сессия истекла. Войдите заново.');
+        }
+
+        if (!res.ok) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES) throw new Error('Слишком много ошибок API подряд');
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        consecutiveErrors = 0;
+
+        const data = await parseJsonResponse<{
+          job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+          results: Array<{
+            row_index: number; result: string | null; quality: string | null;
+            is_free: boolean; is_role: boolean; is_disposable: boolean; is_catch_all: boolean;
+            did_you_mean: string | null; status: string; last_error: string | null;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'email_validation.results');
+
+        if (data.results && data.results.length > 0) {
+          lastProgressTime = Date.now();
+          setTabs((prev) =>
+            prev.map((t) => {
+              if (t.id !== activeTab.id) return t;
+              const newData = t.data.map((row) => [...row]);
+              for (const r of data.results) {
+                if (r.row_index >= 0 && r.row_index < newData.length) {
+                  while (newData[r.row_index].length <= detailsColIndex) newData[r.row_index].push('');
+                  newData[r.row_index][resultColIndex] = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
+                  newData[r.row_index][qualityColIndex] = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
+                  const detailParts: string[] = [];
+                  if (r.is_free) detailParts.push('Free');
+                  if (r.is_role) detailParts.push('Role');
+                  if (r.is_disposable) detailParts.push('Disposable');
+                  if (r.is_catch_all) detailParts.push('Catch-All');
+                  if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
+                  if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
+                  newData[r.row_index][detailsColIndex] = detailParts.join('; ');
+                }
+              }
+              return { ...t, data: newData };
+            }),
+          );
+        }
+
+        if (data.next_cursor) resultCursor = data.next_cursor;
+
+        const processed = data.job?.processed ?? 0;
+        const jobTotal = data.job?.total ?? detected.total;
+        setEmailValidation((prev) => ({
+          ...prev,
+          currentRow: Math.min(processed, jobTotal),
+          progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+        }));
+
+        const jobStatus = data.job?.status;
+        if (jobStatus === 'completed' || jobStatus === 'failed' || jobStatus === 'cancelled') break;
+
+        if (Date.now() - lastProgressTime > EMAIL_VALIDATION_STALL_TIMEOUT_MS) throw new Error('Валидация зависла: нет прогресса');
+      }
+
+      setEmailValidation((prev) => ({ ...prev, isValidating: false, jobId: null }));
+      setLastAction({ message: 'Валидация почт завершена', time: Date.now() });
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'AbortError')) {
+        setLastAction({ message: 'Валидация почт отменена', time: Date.now() });
+        setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Произошла ошибка';
+        setEmailValidation((prev) => ({ ...prev, error: errorMsg, isValidating: false, isOpen: true, jobId: null }));
+      }
+    }
   };
 
   const handleStartEmailValidation = async () => {
@@ -7813,6 +7973,19 @@ export function DatabaseSpreadsheet() {
             </div>
 
             <div className="space-y-6 px-6 py-6">
+              {emailValidation.detectedJob && !emailValidation.isValidating && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium space-y-2">
+                  <p>Найдена незавершённая валидация ({emailValidation.detectedJob.progress}% — {emailValidation.detectedJob.processed}/{emailValidation.detectedJob.total}).</p>
+                  <button
+                    type="button"
+                    onClick={() => void handleResumeEmailValidation()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white shadow transition hover:bg-amber-700"
+                  >
+                    Продолжить валидацию
+                  </button>
+                </div>
+              )}
+
               {emailValidation.error && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
                   {emailValidation.error}

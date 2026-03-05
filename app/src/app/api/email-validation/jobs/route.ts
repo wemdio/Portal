@@ -6,6 +6,32 @@ import { normalizeEmail, checkSyntax } from '@/lib/emailValidation/shared';
 
 export const dynamic = 'force-dynamic';
 
+export async function GET(req: NextRequest) {
+  const token = getBearerToken(req);
+  if (!token) return jsonError('Unauthorized', 401);
+  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+
+  const supabase = createAuthedSupabaseClient(token);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return jsonError('Unauthorized', 401);
+
+  const { data } = await supabaseAdmin
+    .from('email_validation_jobs')
+    .select('id, status, total, processed, success_count, error_count, created_at')
+    .eq('user_id', user.id)
+    .in('status', ['pending', 'running'])
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  const job = (data ?? [])[0];
+  if (!job) return NextResponse.json({ active_job: null });
+
+  const progress = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0;
+  return NextResponse.json({
+    active_job: { id: job.id, status: job.status, total: job.total, processed: job.processed, progress },
+  });
+}
+
 type EnqueueRow = { rowIndex: number; email: string };
 
 function jsonError(message: string, status: number) {
