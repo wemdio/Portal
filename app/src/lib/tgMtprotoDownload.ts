@@ -51,8 +51,8 @@ export async function downloadFileByFileId(
     : Buffer.alloc(0);
 
   const inputLocation = new Api.InputDocumentFileLocation({
-    id: BigInt(decoded.id),
-    accessHash: BigInt(decoded.access_hash),
+    id: bigInt(decoded.id),
+    accessHash: bigInt(decoded.access_hash),
     fileReference: fileRef,
     thumbSize: '',
   });
@@ -65,16 +65,20 @@ export async function downloadFileByFileId(
   const buf = await c.downloadFile(inputLocation, {
     dcId: decoded.dcId,
     fileSize: fileSize ? bigInt(fileSize) : undefined,
-    workers: 4,
   });
 
+  if (!buf) {
+    throw new Error('MTProto downloadFile returned empty result');
+  }
+
+  const result = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as string);
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  const sizeMb = (buf.byteLength / (1024 * 1024)).toFixed(1);
+  const sizeMb = (result.byteLength / (1024 * 1024)).toFixed(1);
   await logInfo('mtproto.download.done', `Downloaded ${sizeMb} MB in ${elapsed}s`, {
-    bytes: buf.byteLength, elapsed,
+    bytes: result.byteLength, elapsed,
   });
 
-  return Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  return result;
 }
 
 /**
@@ -95,8 +99,8 @@ export async function downloadFileByFileIdToPath(
     : Buffer.alloc(0);
 
   const inputLocation = new Api.InputDocumentFileLocation({
-    id: BigInt(decoded.id),
-    accessHash: BigInt(decoded.access_hash),
+    id: bigInt(decoded.id),
+    accessHash: bigInt(decoded.access_hash),
     fileReference: fileRef,
     thumbSize: '',
   });
@@ -254,8 +258,8 @@ async function resolvePeer(c: TelegramClient, chatId: number): Promise<Api.TypeI
     const entity = await c.getEntity(chatId);
     if ('accessHash' in entity && entity.accessHash) {
       return new Api.InputPeerChannel({
-        channelId: BigInt(channelId),
-        accessHash: BigInt(entity.accessHash.toString()),
+        channelId: bigInt(channelId),
+        accessHash: bigInt(entity.accessHash.toString()),
       });
     }
     throw new Error(`Не удалось получить доступ к каналу ${chatId}. Убедитесь что бот добавлен в группу.`);
