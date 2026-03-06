@@ -75,6 +75,8 @@
     "react-dom": "^19.2.3",
     "server-only": "^0.0.1",
     "tailwind-merge": "^3.4.0",
+    "telegram": "^2.26.22",
+    "tg-file-id": "^1.1.2",
     "undici": "^7.20.0",
     "xlsx": "^0.18.5"
   },

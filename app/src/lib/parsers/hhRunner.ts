@@ -251,6 +251,7 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
           message: 'Загрузка вакансий с HH API',
         });
 
+        let incrementalSaved = 0;
         const { found, vacancies } = await fetchVacancies(fetchParam, {
           jobId,
           logMeta,
@@ -271,6 +272,15 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
           onPartitionProgress: (info) => {
             void updatePartitionProgress(info);
           },
+          onBatch: async (batch) => {
+            const rows = batch.map((v) => toDbRow(jobId, v));
+            const { error } = await db.from('hh_vacancies').upsert(rows, { onConflict: 'job_id,vacancy_id' });
+            if (error) {
+              await logError('parser.hh.incremental_upsert.failed', error, { jobId, searchText, batchSize: rows.length }, logMeta);
+            } else {
+              incrementalSaved += rows.length;
+            }
+          },
         });
 
         const employersTotal = new Set(
@@ -286,13 +296,13 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
         await updateStage('saving');
         const saveSpan = await trace?.startChild({
           name: 'hh.save_to_db',
-          input: { rows: vacancies.length },
-          message: 'Сохранение в базу данных',
+          input: { rows: vacancies.length, incrementalSaved },
+          message: 'Сохранение в базу данных (финальный upsert с деталями работодателей)',
         });
 
         const rows = vacancies.map((v) => toDbRow(jobId, v));
         await updateProgress({ savedTotal: rows.length, savedDone: 0 }, true);
-        await logInfo('parser.hh.upsert.start', 'HH vacancies upsert started', { jobId, searchText, rows: rows.length }, logMeta);
+        await logInfo('parser.hh.upsert.start', 'HH vacancies upsert started', { jobId, searchText, rows: rows.length, incrementalSaved }, logMeta);
         await upsertInBatches(db, rows, (saved, total) =>
           updateProgress({ savedTotal: total, savedDone: saved }, saved === total),
         );
