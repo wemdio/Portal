@@ -209,7 +209,52 @@ type EmailValidationState = {
   currentRow: number;
   error: string | null;
   jobId: string | null;
+  detectedJob: { id: string; total: number; processed: number; progress: number } | null;
 };
+
+type DadataFieldOption = {
+  key: string;
+  label: string;
+};
+
+type DadataEnrichmentState = {
+  isOpen: boolean;
+  sourceCol: number;
+  mode: 'inn' | 'name';
+  selectedFields: string[];
+  isProcessing: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
+const DADATA_FIELDS: DadataFieldOption[] = [
+  { key: 'full_name', label: 'Полное название' },
+  { key: 'short_name', label: 'Краткое название' },
+  { key: 'inn', label: 'ИНН' },
+  { key: 'kpp', label: 'КПП' },
+  { key: 'ogrn', label: 'ОГРН' },
+  { key: 'address', label: 'Адрес' },
+  { key: 'city', label: 'Город' },
+  { key: 'region', label: 'Регион' },
+  { key: 'postal_code', label: 'Индекс' },
+  { key: 'manager_name', label: 'Руководитель' },
+  { key: 'manager_post', label: 'Должность руководителя' },
+  { key: 'status', label: 'Статус' },
+  { key: 'okved', label: 'ОКВЭД (код)' },
+  { key: 'opf', label: 'ОПФ (ООО, ПАО...)' },
+  { key: 'org_type', label: 'Тип (ЮЛ/ИП)' },
+  { key: 'registration_date', label: 'Дата регистрации' },
+  { key: 'branch_count', label: 'Кол-во филиалов' },
+];
+
+const DADATA_DEFAULT_FIELDS = [
+  'full_name', 'inn', 'kpp', 'ogrn', 'address', 'city',
+  'manager_name', 'manager_post', 'status', 'okved', 'opf', 'registration_date',
+];
+
+const DADATA_BATCH_SIZE = 20;
 
 const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
@@ -981,8 +1026,40 @@ export function DatabaseSpreadsheet() {
     currentRow: 0,
     error: null,
     jobId: null,
+    detectedJob: null,
   });
   const emailValidationAbortRef = useRef<AbortController | null>(null);
+  const [dadataEnrichment, setDadataEnrichment] = useState<DadataEnrichmentState>({
+    isOpen: false,
+    sourceCol: 0,
+    mode: 'inn',
+    selectedFields: DADATA_DEFAULT_FIELDS,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const dadataAbortRef = useRef<AbortController | null>(null);
+
+  const [fnsEnrichment, setFnsEnrichment] = useState<{
+    isOpen: boolean;
+    sourceCol: number;
+    isProcessing: boolean;
+    progress: number;
+    totalRows: number;
+    currentRow: number;
+    found: number;
+  }>({
+    isOpen: false,
+    sourceCol: 0,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    found: 0,
+  });
+  const fnsAbortRef = useRef<AbortController | null>(null);
 
   const readEnrichmentStorage = useCallback(() => {
     try {
@@ -2200,29 +2277,7 @@ export function DatabaseSpreadsheet() {
       }
     }
 
-    const afterEmailDedup = [...emailMap.values().map((item) => item.row), ...rowsWithoutEmail];
-    if (emailColumns.length === 0) {
-      applyRows(header ? [header, ...afterEmailDedup] : afterEmailDedup);
-      return;
-    }
-
-    const ignoreSet = new Set(emailColumns);
-    const rowMap = new Map<string, { row: string[]; score: number }>();
-
-    for (const row of afterEmailDedup) {
-      const keyParts = row
-        .filter((_, index) => !ignoreSet.has(index))
-        .map((cell) => cell.trim());
-      const hasNonEmail = keyParts.some((value) => value.length > 0);
-      const key = hasNonEmail ? keyParts.join('\u0001') : row.join('\u0001');
-      const score = countFilledCells(row);
-      const existing = rowMap.get(key);
-      if (!existing || score > existing.score) {
-        rowMap.set(key, { row, score });
-      }
-    }
-
-    const nextRows = [...rowMap.values()].map((item) => item.row);
+    const nextRows = [...emailMap.values().map((item) => item.row), ...rowsWithoutEmail];
     const removed = body.length - nextRows.length;
     if (removed === 0) {
       setLastAction({ message: 'Дубликатов по почте не найдено', time: Date.now() });
@@ -4763,7 +4818,7 @@ export function DatabaseSpreadsheet() {
       }
 
       const emails = cellValue
-        .split(/[,;\n]+/)
+        .split(/[,;\s]+/)
         .map((e) => e.trim())
         .filter((e) => e.length > 0);
 
@@ -5044,8 +5099,19 @@ export function DatabaseSpreadsheet() {
 
   // ── Email Validation (Валидация почт) ──────────────────────────────
 
-  const openEmailValidationModal = () => {
-    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null }));
+  const openEmailValidationModal = async () => {
+    setEmailValidation((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null, detectedJob: null }));
+    const token = await getFreshToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/email-validation/jobs', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json() as { active_job?: { id: string; total: number; processed: number; progress: number } | null };
+        if (data.active_job) {
+          setEmailValidation((prev) => ({ ...prev, detectedJob: data.active_job! }));
+        }
+      }
+    } catch { /* ignore */ }
   };
 
   const closeEmailValidationModal = () => {
@@ -5070,6 +5136,153 @@ export function DatabaseSpreadsheet() {
     }
     setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
     setLastAction({ message: 'Валидация почт остановлена', time: Date.now() });
+  };
+
+  const handleResumeEmailValidation = async () => {
+    if (!activeTab || emailValidation.isValidating || !emailValidation.detectedJob) return;
+
+    const detected = emailValidation.detectedJob;
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setEmailValidation((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    emailValidationAbortRef.current = new AbortController();
+    const signal = emailValidationAbortRef.current.signal;
+
+    const headerRow = activeTab.data[0] ?? [];
+    let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
+    if (resultColIndex < 0) resultColIndex = headerRow.length;
+    const qualityColIndex = resultColIndex + 1;
+    const detailsColIndex = resultColIndex + 2;
+
+    const baseData = activeTab.data.map((row, rowIdx) => {
+      const extended = [...row];
+      while (extended.length <= detailsColIndex) extended.push('');
+      if (rowIdx === 0 && !String(extended[resultColIndex]).startsWith('Результат')) {
+        extended[resultColIndex] = 'Результат (email)';
+        extended[qualityColIndex] = 'Качество';
+        extended[detailsColIndex] = 'Детали';
+      }
+      return extended;
+    });
+
+    setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? { ...t, data: baseData } : t)));
+    setEmailValidation((prev) => ({
+      ...prev,
+      isOpen: false,
+      isValidating: true,
+      jobId: detected.id,
+      totalRows: detected.total,
+      currentRow: detected.processed,
+      progress: detected.progress,
+      error: null,
+      detectedJob: null,
+    }));
+
+    const RESULT_LABELS: Record<string, string> = {
+      ok: 'OK', invalid: 'Невалидный', disposable: 'Одноразовый',
+      catch_all: 'Catch-All', unknown: 'Неизвестно',
+    };
+    const QUALITY_LABELS: Record<string, string> = {
+      good: 'Хороший', bad: 'Плохой', risky: 'Рискованный',
+    };
+
+    try {
+      let resultCursor: string | null = null;
+      let consecutiveErrors = 0;
+      let lastProgressTime = Date.now();
+      let token = currentToken;
+
+      while (true) {
+        if (signal?.aborted) throw new Error('AbortError');
+        await new Promise((r) => setTimeout(r, EMAIL_VALIDATION_PROGRESS_INTERVAL_MS));
+
+        const fetchResults = (tkn: string) =>
+          fetch(
+            `/api/email-validation/jobs/${detected.id}/results?cursor=${encodeURIComponent(resultCursor ?? '')}&limit=500`,
+            { headers: { Authorization: `Bearer ${tkn}` }, signal },
+          );
+
+        let res = await fetchResults(token);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) { token = refreshed; res = await fetchResults(token); }
+          else throw new Error('Сессия истекла. Войдите заново.');
+        }
+
+        if (!res.ok) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES) throw new Error('Слишком много ошибок API подряд');
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        consecutiveErrors = 0;
+
+        const data = await parseJsonResponse<{
+          job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+          results: Array<{
+            row_index: number; result: string | null; quality: string | null;
+            is_free: boolean; is_role: boolean; is_disposable: boolean; is_catch_all: boolean;
+            did_you_mean: string | null; status: string; last_error: string | null;
+          }>;
+          next_cursor?: string | null;
+        }>(res, 'email_validation.results');
+
+        if (data.results && data.results.length > 0) {
+          lastProgressTime = Date.now();
+          setTabs((prev) =>
+            prev.map((t) => {
+              if (t.id !== activeTab.id) return t;
+              const newData = t.data.map((row) => [...row]);
+              for (const r of data.results) {
+                if (r.row_index >= 0 && r.row_index < newData.length) {
+                  while (newData[r.row_index].length <= detailsColIndex) newData[r.row_index].push('');
+                  newData[r.row_index][resultColIndex] = r.result ? (RESULT_LABELS[r.result] || r.result) : (r.last_error ?? 'Ошибка');
+                  newData[r.row_index][qualityColIndex] = r.quality ? (QUALITY_LABELS[r.quality] || r.quality) : '';
+                  const detailParts: string[] = [];
+                  if (r.is_free) detailParts.push('Free');
+                  if (r.is_role) detailParts.push('Role');
+                  if (r.is_disposable) detailParts.push('Disposable');
+                  if (r.is_catch_all) detailParts.push('Catch-All');
+                  if (r.did_you_mean) detailParts.push(`→ ${r.did_you_mean}`);
+                  if (r.last_error && (r.status === 'failed' || r.result === 'unknown')) detailParts.push(r.last_error);
+                  newData[r.row_index][detailsColIndex] = detailParts.join('; ');
+                }
+              }
+              return { ...t, data: newData };
+            }),
+          );
+        }
+
+        if (data.next_cursor) resultCursor = data.next_cursor;
+
+        const processed = data.job?.processed ?? 0;
+        const jobTotal = data.job?.total ?? detected.total;
+        setEmailValidation((prev) => ({
+          ...prev,
+          currentRow: Math.min(processed, jobTotal),
+          progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+        }));
+
+        const jobStatus = data.job?.status;
+        if (jobStatus === 'completed' || jobStatus === 'failed' || jobStatus === 'cancelled') break;
+
+        if (Date.now() - lastProgressTime > EMAIL_VALIDATION_STALL_TIMEOUT_MS) throw new Error('Валидация зависла: нет прогресса');
+      }
+
+      setEmailValidation((prev) => ({ ...prev, isValidating: false, jobId: null }));
+      setLastAction({ message: 'Валидация почт завершена', time: Date.now() });
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'AbortError')) {
+        setLastAction({ message: 'Валидация почт отменена', time: Date.now() });
+        setEmailValidation((prev) => ({ ...prev, isValidating: false, isOpen: false, jobId: null }));
+      } else {
+        const errorMsg = err instanceof Error ? err.message : 'Произошла ошибка';
+        setEmailValidation((prev) => ({ ...prev, error: errorMsg, isValidating: false, isOpen: true, jobId: null }));
+      }
+    }
   };
 
   const handleStartEmailValidation = async () => {
@@ -5672,6 +5885,346 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // --- DaData Enrichment ---
+
+  const openDadataModal = () => {
+    setDadataEnrichment({
+      isOpen: true,
+      sourceCol: 0,
+      mode: 'inn',
+      selectedFields: DADATA_DEFAULT_FIELDS,
+      isProcessing: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeDadataModal = () => {
+    if (dadataAbortRef.current) {
+      dadataAbortRef.current.abort();
+      dadataAbortRef.current = null;
+    }
+    setDadataEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartDadataEnrichment = async () => {
+    if (!activeTab || dadataEnrichment.isProcessing) return;
+    flushSave();
+
+    const selectedFields = dadataEnrichment.selectedFields;
+    if (selectedFields.length === 0) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Выберите хотя бы одно поле' }));
+      return;
+    }
+
+    const rowsToProcess: { rowIndex: number; query: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      const sourceValue = String(row?.[dadataEnrichment.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      rowsToProcess.push({ rowIndex: i, query: sourceValue });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setDadataEnrichment((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    dadataAbortRef.current = new AbortController();
+
+    setDadataEnrichment((prev) => ({
+      ...prev,
+      isProcessing: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('DaData обогащение');
+
+    const fieldLabels = DADATA_FIELDS.filter((f) => selectedFields.includes(f.key));
+    const startCol = dadataEnrichment.sourceCol + 1;
+
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
+
+    let firstNewCol = startCol;
+    while (!isColumnEmpty(firstNewCol)) {
+      firstNewCol += 1;
+    }
+
+    const colMap: Record<string, number> = {};
+    fieldLabels.forEach((field, idx) => {
+      colMap[field.key] = firstNewCol + idx;
+    });
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      const maxCol = firstNewCol + fieldLabels.length - 1;
+      while (nextRow.length <= maxCol) nextRow.push('');
+      if (rowIndex === 0) {
+        fieldLabels.forEach((field, idx) => {
+          nextRow[firstNewCol + idx] = field.label;
+        });
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(firstNewCol);
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), ENRICHMENT_HIGHLIGHT_DURATION);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => {
+        wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' });
+      });
+    }
+
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += DADATA_BATCH_SIZE) {
+        if (dadataAbortRef.current?.signal.aborted) {
+          throw new Error('Отменено пользователем');
+        }
+
+        const batch = rowsToProcess.slice(batchStart, batchStart + DADATA_BATCH_SIZE);
+
+        let token = currentToken;
+        try {
+          const refreshed = await getFreshToken();
+          if (refreshed) token = refreshed;
+        } catch { /* use current */ }
+
+        const res = await fetch('/api/enrich/dadata', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            rows: batch,
+            mode: dadataEnrichment.mode,
+          }),
+          signal: dadataAbortRef.current?.signal,
+        });
+
+        const data = await parseJsonResponse<{
+          results?: Array<{
+            rowIndex: number;
+            found: boolean;
+            data: Record<string, string | number | null> | null;
+            error?: string;
+          }>;
+          error?: string;
+        }>(res, 'dadata_enrichment');
+
+        if (!res.ok) {
+          throw new Error(data.error ?? `HTTP ${res.status}`);
+        }
+
+        const batchResults = data.results ?? [];
+
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTabId) return tab;
+            const nextData = tab.data.map((row) => [...row]);
+            for (const result of batchResults) {
+              if (!result.found || !result.data) {
+                errorCount += 1;
+                continue;
+              }
+              const ri = result.rowIndex;
+              if (ri < 1 || ri >= nextData.length) continue;
+              for (const field of fieldLabels) {
+                const colIdx = colMap[field.key];
+                const val = result.data[field.key];
+                if (val !== null && val !== undefined) {
+                  nextData[ri][colIdx] = String(val);
+                }
+              }
+            }
+            return { ...tab, data: nextData };
+          }),
+        );
+
+        processedCount += batch.length;
+        setDadataEnrichment((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+        }));
+      }
+
+      const successCount = processedCount - errorCount;
+      setLastAction({
+        message: errorCount > 0
+          ? `DaData: ${successCount} найдено, ${errorCount} не найдено`
+          : `DaData обогащение завершено: ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setDadataEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `DaData отменено (обработано: ${processedCount})`, time: Date.now() });
+        setDadataEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+      } else {
+        setDadataEnrichment((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isProcessing: false,
+        }));
+      }
+    } finally {
+      dadataAbortRef.current = null;
+    }
+  };
+
+  const openFnsModal = () => {
+    setFnsEnrichment({ isOpen: true, sourceCol: 0, isProcessing: false, progress: 0, totalRows: 0, currentRow: 0, found: 0 });
+  };
+  const closeFnsModal = () => {
+    if (fnsAbortRef.current) { fnsAbortRef.current.abort(); fnsAbortRef.current = null; }
+    setFnsEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartFnsEnrichment = async () => {
+    if (!activeTab || fnsEnrichment.isProcessing) return;
+    flushSave();
+
+    const sourceCol = fnsEnrichment.sourceCol;
+    const headerRow = activeTab.data[0];
+    if (!headerRow) return;
+
+    const innColHeader = headerRow[sourceCol]?.toLowerCase().trim() ?? '';
+    if (!innColHeader) return;
+
+    const incomeLabel = 'Доход (ФНС)';
+    const expenseLabel = 'Расход (ФНС)';
+    const fields = [incomeLabel, expenseLabel];
+
+    const existingHeaders = headerRow.map((h) => String(h ?? '').trim());
+    const colMap: Record<string, number> = {};
+    for (const f of fields) {
+      const idx = existingHeaders.indexOf(f);
+      if (idx !== -1) {
+        colMap[f] = idx;
+      }
+    }
+    const missingFields = fields.filter((f) => !(f in colMap));
+
+    const rowsToProcess = visibleRowIndices.filter((ri) => {
+      const val = String(activeTab.data[ri]?.[sourceCol] ?? '').trim();
+      return /^\d{10,12}$/.test(val);
+    });
+
+    if (rowsToProcess.length === 0) {
+      setLastAction({ message: 'ФНС: не найдены строки с ИНН', time: Date.now() });
+      return;
+    }
+
+    const abortCtrl = new AbortController();
+    fnsAbortRef.current = abortCtrl;
+    setFnsEnrichment((prev) => ({ ...prev, isProcessing: true, progress: 0, totalRows: rowsToProcess.length, currentRow: 0, found: 0 }));
+
+    let processedCount = 0;
+    let foundCount = 0;
+    const BATCH = 500;
+
+    try {
+      if (missingFields.length > 0) {
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTab.id) return tab;
+          const nextData = tab.data.map((row) => [...row]);
+          let nextCols = nextData[0].length;
+          for (const f of missingFields) {
+            nextData[0][nextCols] = f;
+            colMap[f] = nextCols;
+            nextCols++;
+          }
+          for (let r = 1; r < nextData.length; r++) {
+            while (nextData[r].length < nextCols) nextData[r].push('');
+          }
+          return { ...tab, data: nextData };
+        }));
+      }
+
+      for (let i = 0; i < rowsToProcess.length; i += BATCH) {
+        if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
+
+        const batchIndices = rowsToProcess.slice(i, i + BATCH);
+        const inns = batchIndices.map((ri) => String(activeTab.data[ri]?.[sourceCol] ?? '').trim());
+
+        const res = await fetch('/api/enrich/fns-revenue', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+          },
+          body: JSON.stringify({ inns }),
+          signal: abortCtrl.signal,
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as { results: Record<string, { income: number; expense: number }> };
+        const results = json.results;
+
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTab.id) return tab;
+          const nextData = tab.data.map((row) => [...row]);
+          for (const ri of batchIndices) {
+            const inn = String(nextData[ri]?.[sourceCol] ?? '').trim();
+            const match = results[inn];
+            if (match) {
+              const incCol = colMap[incomeLabel];
+              const expCol = colMap[expenseLabel];
+              if (incCol !== undefined) nextData[ri][incCol] = match.income > 0 ? String(match.income) : '0';
+              if (expCol !== undefined) nextData[ri][expCol] = match.expense > 0 ? String(match.expense) : '0';
+              foundCount++;
+            }
+          }
+          return { ...tab, data: nextData };
+        }));
+
+        processedCount += batchIndices.length;
+        setFnsEnrichment((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+          found: foundCount,
+        }));
+      }
+
+      setLastAction({
+        message: `ФНС: ${foundCount} найдено из ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `ФНС отменено (обработано: ${processedCount})`, time: Date.now() });
+      }
+      setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } finally {
+      fnsAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -6267,6 +6820,44 @@ export function DatabaseSpreadsheet() {
           Чистка названий
         </button>
 
+        {dadataEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeDadataModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            DaData... {dadataEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openDadataModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            DaData
+          </button>
+        )}
+
+        {fnsEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeFnsModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            ФНС... {fnsEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openFnsModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Доходы ФНС
+          </button>
+        )}
+
         <button
           type="button"
           onClick={handleCleanInvisibleWhitespace}
@@ -6542,7 +7133,7 @@ export function DatabaseSpreadsheet() {
           })()}
           <div
             ref={tableWrapperRef}
-            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
+            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
             tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
@@ -7147,7 +7738,7 @@ export function DatabaseSpreadsheet() {
           className="pointer-events-none fixed bottom-2 z-40"
           style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
         >
-          <div className="rounded-md border border-gray-300 bg-white/95 px-2 py-1 shadow-lg backdrop-blur">
+          <div className="rounded border border-gray-300 bg-white/90 px-1 py-0.5 shadow-md backdrop-blur">
             <input
               type="range"
               min={0}
@@ -7162,7 +7753,7 @@ export function DatabaseSpreadsheet() {
                 setHorizontalScrollLeft(next);
               }}
               disabled={horizontalScrollMax <= 0}
-              className="pointer-events-auto block h-4 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
+              className="pointer-events-auto block h-2 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
               aria-label="Горизонтальный скролл таблицы"
             />
           </div>
@@ -7813,6 +8404,19 @@ export function DatabaseSpreadsheet() {
             </div>
 
             <div className="space-y-6 px-6 py-6">
+              {emailValidation.detectedJob && !emailValidation.isValidating && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium space-y-2">
+                  <p>Найдена незавершённая валидация ({emailValidation.detectedJob.progress}% — {emailValidation.detectedJob.processed}/{emailValidation.detectedJob.total}).</p>
+                  <button
+                    type="button"
+                    onClick={() => void handleResumeEmailValidation()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white shadow transition hover:bg-amber-700"
+                  >
+                    Продолжить валидацию
+                  </button>
+                </div>
+              )}
+
               {emailValidation.error && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
                   {emailValidation.error}
@@ -8814,6 +9418,286 @@ export function DatabaseSpreadsheet() {
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {/* DaData enrichment modal */}
+      {dadataEnrichment.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm font-bold text-lg">
+                  D
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">DaData — обогащение</h3>
+                  <p className="text-xs text-gray-500 font-medium">Поиск компаний по ИНН или названию</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeDadataModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-5 px-6 py-5 max-h-[70vh] overflow-y-auto">
+              {dadataEnrichment.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
+                  {dadataEnrichment.error}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">Режим поиска</label>
+                <div className="flex gap-2">
+                  {(['inn', 'name'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, mode: m, error: null }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className={`flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition-all ${
+                        dadataEnrichment.mode === m
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700 shadow-sm'
+                          : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                      } disabled:opacity-60`}
+                    >
+                      {m === 'inn' ? 'По ИНН' : 'По названию'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">
+                  Столбец с {dadataEnrichment.mode === 'inn' ? 'ИНН' : 'названиями'}
+                </label>
+                <div className="relative">
+                  <select
+                    value={dadataEnrichment.sourceCol}
+                    onChange={(e) =>
+                      setDadataEnrichment((prev) => ({
+                        ...prev,
+                        sourceCol: Number(e.target.value),
+                        error: null,
+                      }))
+                    }
+                    disabled={dadataEnrichment.isProcessing}
+                    className="w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition-all hover:bg-gray-100 focus:border-gray-400 focus:bg-white disabled:opacity-60"
+                  >
+                    {headerLabels.map((label, index) => (
+                      <option key={`dadata-col-${index}`} value={index}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 text-xs">
+                    ▼
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-sm font-semibold text-gray-700">Поля для обогащения</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, selectedFields: DADATA_FIELDS.map((f) => f.key) }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className="text-[10px] font-medium text-emerald-600 hover:text-emerald-800 disabled:opacity-60"
+                    >
+                      Все
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, selectedFields: [] }))}
+                      disabled={dadataEnrichment.isProcessing}
+                      className="text-[10px] font-medium text-gray-500 hover:text-gray-700 disabled:opacity-60"
+                    >
+                      Сбросить
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-gray-200 bg-gray-50 p-3">
+                  {DADATA_FIELDS.map((field) => (
+                    <label
+                      key={field.key}
+                      className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-white transition cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={dadataEnrichment.selectedFields.includes(field.key)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setDadataEnrichment((prev) => ({
+                            ...prev,
+                            selectedFields: checked
+                              ? [...prev.selectedFields, field.key]
+                              : prev.selectedFields.filter((k) => k !== field.key),
+                          }));
+                        }}
+                        disabled={dadataEnrichment.isProcessing}
+                        className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-60"
+                      />
+                      {field.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {dadataEnrichment.mode === 'name' && (
+                <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    При поиске по названию берётся первый результат из подсказок DaData. Для точного поиска используйте режим «По ИНН».
+                  </p>
+                </div>
+              )}
+
+              {!dadataEnrichment.isProcessing && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Лимит: 10 000 запросов в день. Если запросы закончились — попробуйте завтра, лимит обновляется в полночь.
+                  </p>
+                </div>
+              )}
+
+              {dadataEnrichment.isProcessing && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Обогащение...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {dadataEnrichment.currentRow} / {dadataEnrichment.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-emerald-600 transition-all duration-300 ease-out"
+                      style={{ width: `${dadataEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {dadataEnrichment.isProcessing ? (
+                  <>Обработано: {dadataEnrichment.currentRow} / {dadataEnrichment.totalRows}</>
+                ) : (
+                  <>Полей: <span className="text-gray-900">{dadataEnrichment.selectedFields.length}</span> · Строк: <span className="text-gray-900">{visibleRowIndices.length}</span></>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeDadataModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  {dadataEnrichment.isProcessing ? 'Стоп' : 'Закрыть'}
+                </button>
+                {!dadataEnrichment.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartDadataEnrichment()}
+                    disabled={dadataEnrichment.selectedFields.length === 0}
+                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Запустить
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FNS Revenue modal */}
+      {fnsEnrichment.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-4">
+              <h3 className="text-base font-semibold text-gray-900">Доходы и расходы (ФНС)</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Данные из открытой бухгалтерской отчётности ФНС за 2024 год</p>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1.5">Колонка с ИНН</label>
+                <select
+                  value={fnsEnrichment.sourceCol}
+                  onChange={(e) => setFnsEnrichment((prev) => ({ ...prev, sourceCol: Number(e.target.value) }))}
+                  disabled={fnsEnrichment.isProcessing}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:opacity-60"
+                >
+                  {(activeTab?.data[0] ?? []).map((h, i) => (
+                    <option key={i} value={i}>{String(h || `Колонка ${i + 1}`)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
+                <p className="text-xs text-emerald-700 leading-relaxed">
+                  Будут добавлены колонки «Доход (ФНС)» и «Расход (ФНС)». Данные из ~2 млн организаций. Без лимитов, мгновенно.
+                </p>
+              </div>
+
+              {fnsEnrichment.isProcessing && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Обогащение...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {fnsEnrichment.currentRow} / {fnsEnrichment.totalRows} (найдено: {fnsEnrichment.found})
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                      style={{ width: `${fnsEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {fnsEnrichment.isProcessing ? (
+                  <>Обработано: {fnsEnrichment.currentRow} / {fnsEnrichment.totalRows}</>
+                ) : (
+                  <>Строк с ИНН: <span className="text-gray-900">{visibleRowIndices.filter((ri) => /^\d{10,12}$/.test(String(activeTab?.data[ri]?.[fnsEnrichment.sourceCol] ?? '').trim())).length}</span></>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeFnsModal}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+                >
+                  {fnsEnrichment.isProcessing ? 'Стоп' : 'Закрыть'}
+                </button>
+                {!fnsEnrichment.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartFnsEnrichment()}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-blue-700 transition"
+                  >
+                    Запустить
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

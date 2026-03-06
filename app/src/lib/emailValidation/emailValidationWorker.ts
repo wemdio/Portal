@@ -40,11 +40,11 @@ type JobRow = {
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-const WORKER_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? '8');
-const WORKER_BATCH_SIZE = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? '50');
+const WORKER_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_CONCURRENCY ?? '20');
+const WORKER_BATCH_SIZE = Number(process.env.EMAIL_VALIDATION_BATCH_SIZE ?? '100');
 const MAX_ATTEMPTS = Number(process.env.EMAIL_VALIDATION_MAX_ATTEMPTS ?? '3');
 const STALE_PROCESSING_MINUTES = Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? '5');
-const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? '1');
+const DOMAIN_CONCURRENCY = Number(process.env.EMAIL_VALIDATION_DOMAIN_CONCURRENCY ?? '3');
 const DOMAIN_CACHE_TTL_MS = Number(process.env.EMAIL_VALIDATION_DOMAIN_CACHE_TTL_MS ?? String(24 * 60 * 60 * 1000));
 const JOB_PROGRESS_FLUSH_INTERVAL = Number(process.env.EMAIL_VALIDATION_PROGRESS_FLUSH_MS ?? '2000');
 const SUPABASE_QUERY_TIMEOUT_MS = 30_000;
@@ -79,6 +79,31 @@ async function mapWithConcurrency<T, R>(
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
   return results;
+}
+
+const CLEANUP_BATCH_SIZE = 5000;
+
+async function cleanupQueue(jobId: string): Promise<void> {
+  const db = supabaseAdmin;
+  if (!db) return;
+  workerLog('info', `Cleaning up queue for job ${jobId}...`);
+  let totalDeleted = 0;
+  while (true) {
+    const { data, error } = await db
+      .from('email_validation_queue')
+      .delete()
+      .eq('job_id', jobId)
+      .limit(CLEANUP_BATCH_SIZE)
+      .select('id');
+    if (error) {
+      workerLog('warn', `Cleanup error for job ${jobId}`, error);
+      break;
+    }
+    const deleted = data?.length ?? 0;
+    totalDeleted += deleted;
+    if (deleted < CLEANUP_BATCH_SIZE) break;
+  }
+  workerLog('info', `Cleaned up ${totalDeleted} queue items for job ${jobId}`);
 }
 
 // ─── Per-domain slot limiter ────────────────────────────────────────────────
@@ -415,6 +440,8 @@ export async function runEmailValidationJob(jobId: string) {
       jobId, processed: completedCount + failedCount, success: completedCount, errors: failedCount,
     });
 
+    await cleanupQueue(jobId);
+
   } catch (err) {
     workerLog('error', `Job ${jobId} CRASHED`, err);
     await logError('email.validation.worker.failed', err, { jobId });
@@ -426,6 +453,7 @@ export async function runEmailValidationJob(jobId: string) {
         error_message: err instanceof Error ? err.message : 'Worker error',
       })
       .eq('id', jobId);
+    await cleanupQueue(jobId);
   }
 }
 
