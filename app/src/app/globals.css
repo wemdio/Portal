@@ -438,6 +438,28 @@ html.tma-mobile .tma-card {
   background: #9ca3af;
 }
 
+.dark-scrollbar::-webkit-scrollbar {
+  width: 10px;
+}
+
+.dark-scrollbar::-webkit-scrollbar-track {
+  background: #f3f4f6;
+}
+
+.dark-scrollbar::-webkit-scrollbar-thumb {
+  background: #1f2937;
+  border-radius: 5px;
+  border: 2px solid #f3f4f6;
+}
+
+.dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #111827;
+}
+
+.dark-scrollbar {
+  scrollbar-color: #1f2937 #f3f4f6;
+}
+
 /* Remove spin buttons from number inputs */
 input[type=number]::-webkit-inner-spin-button, 
 input[type=number]::-webkit-outer-spin-button { 
