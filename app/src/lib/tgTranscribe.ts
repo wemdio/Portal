@@ -1,7 +1,10 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractOrConvertToMp3, callOpenRouterTranscription } from '@/lib/transcription';
+import { extractOrConvertToMp3, extractMp3FromFile, callOpenRouterTranscription } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { isMtprotoAvailable, downloadFileByFileId } from '@/lib/tgMtprotoDownload';
+import { isMtprotoAvailable, downloadFileByFileId, downloadFileByFileIdToPath } from '@/lib/tgMtprotoDownload';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const TG_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN ?? '';
 const TG_LOCAL_API_URL = process.env.TG_LOCAL_API_URL || '';
@@ -76,6 +79,7 @@ export interface TgForwardOrigin {
 
 export interface TgMessage {
   message_id: number;
+  message_thread_id?: number;
   chat: { id: number };
   from?: TgUser;
   forward_origin?: TgForwardOrigin;
@@ -153,7 +157,7 @@ export function extractVideoInfo(msg: TgMessage): VideoInfo | null {
   return null;
 }
 
-export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buffer; filePath: string }> {
+async function resolveTelegramFilePath(fileId: string): Promise<string> {
   const getFileRes = await fetch(
     `${tgApiBase()}/getFile?file_id=${encodeURIComponent(fileId)}`,
   );
@@ -167,7 +171,11 @@ export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buf
     throw new Error(`Telegram getFile failed: ${getFileJson.description ?? 'unknown error'}`);
   }
 
-  const filePath = getFileJson.result.file_path;
+  return getFileJson.result.file_path;
+}
+
+export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buffer; filePath: string }> {
+  const filePath = await resolveTelegramFilePath(fileId);
   const downloadUrl = `${tgFileBase()}/${filePath}`;
   const downloadRes = await fetch(downloadUrl);
   if (!downloadRes.ok) {
@@ -176,6 +184,36 @@ export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buf
 
   const arrayBuffer = await downloadRes.arrayBuffer();
   return { bytes: Buffer.from(arrayBuffer), filePath };
+}
+
+/**
+ * Stream a file from Telegram Bot API (cloud or local) directly to disk.
+ */
+async function downloadTelegramFileToDisk(fileId: string, destPath: string): Promise<string> {
+  const filePath = await resolveTelegramFilePath(fileId);
+  const downloadUrl = `${tgFileBase()}/${filePath}`;
+  const downloadRes = await fetch(downloadUrl);
+  if (!downloadRes.ok) {
+    throw new Error(`Telegram file download failed: ${downloadRes.status} ${downloadRes.statusText}`);
+  }
+
+  if (!downloadRes.body) {
+    throw new Error('Telegram file download returned no body');
+  }
+
+  const fileHandle = await fs.open(destPath, 'w');
+  try {
+    const reader = (downloadRes.body as ReadableStream<Uint8Array>).getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await fileHandle.write(value);
+    }
+  } finally {
+    await fileHandle.close();
+  }
+
+  return filePath;
 }
 
 function getExtFromPath(filePath: string): string {
@@ -190,9 +228,19 @@ function getExtFromFilename(filename: string): string {
   return filename.slice(idx).toLowerCase();
 }
 
+export type VideoPhase = 'downloading' | 'converting' | 'transcribing' | 'done' | 'error';
+
+export interface VideoProgressEvent {
+  phase: VideoPhase;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  error?: string;
+}
+
 export async function processVideoMessage(
   msg: TgMessage,
   videoInfo: VideoInfo,
+  onProgress?: (event: VideoProgressEvent) => void,
 ): Promise<{ status: 'completed' | 'error' | 'skipped_size'; text?: string; error?: string }> {
   if (!supabaseAdmin) {
     throw new Error('Supabase admin client not configured');
@@ -201,42 +249,76 @@ export async function processVideoMessage(
   const senderName = getSenderName(msg);
   const senderId = getSenderId(msg);
 
-  const needsMtproto = !isLocalApi()
-    && videoInfo.fileSize != null
-    && videoInfo.fileSize > TG_FILE_SIZE_LIMIT_CLOUD;
+  const isLargeFile = videoInfo.fileSize != null && videoInfo.fileSize > TG_FILE_SIZE_LIMIT_CLOUD;
+  const canUseMtproto = isMtprotoAvailable();
 
-  let bytes: Buffer;
-  let ext: string;
+  let mp3: Buffer;
+  let fileSizeBytes = videoInfo.fileSize ?? 0;
 
-  if (needsMtproto) {
-    if (!isMtprotoAvailable()) {
-      const sizeMb = ((videoInfo.fileSize ?? 0) / (1024 * 1024)).toFixed(1);
-      const errorText = `Файл слишком большой (${sizeMb} МБ). Лимит Bot API — 20 МБ. Настройте TELEGRAM_API_ID/TELEGRAM_API_HASH или TG_LOCAL_API_URL.`;
-      await supabaseAdmin.from('tg_video_transcripts').insert({
-        tg_chat_id: msg.chat.id,
-        tg_message_id: msg.message_id,
-        tg_sender_id: senderId,
-        sender_name: senderName,
-        filename: videoInfo.filename,
-        file_size_bytes: videoInfo.fileSize ?? null,
-        duration_seconds: videoInfo.duration ?? null,
-        text: '',
-        length: 0,
-        status: 'error',
-        error_text: errorText,
-      });
-      return { status: 'skipped_size', error: errorText };
-    }
-
-    bytes = await downloadFileByFileId(videoInfo.fileId, videoInfo.fileSize);
-    ext = getExtFromFilename(videoInfo.filename);
-  } else {
-    const result = await downloadTelegramFile(videoInfo.fileId);
-    bytes = result.bytes;
-    ext = getExtFromPath(result.filePath);
+  if (isLargeFile && !canUseMtproto && !isLocalApi()) {
+    const sizeMb = ((videoInfo.fileSize ?? 0) / (1024 * 1024)).toFixed(1);
+    const errorText = `Файл слишком большой (${sizeMb} МБ). Лимит Bot API — 20 МБ. Настройте TELEGRAM_API_ID/TELEGRAM_API_HASH или TG_LOCAL_API_URL.`;
+    await supabaseAdmin.from('tg_video_transcripts').insert({
+      tg_chat_id: msg.chat.id,
+      tg_message_id: msg.message_id,
+      tg_sender_id: senderId,
+      sender_name: senderName,
+      filename: videoInfo.filename,
+      file_size_bytes: videoInfo.fileSize ?? null,
+      duration_seconds: videoInfo.duration ?? null,
+      text: '',
+      length: 0,
+      status: 'error',
+      error_text: errorText,
+    });
+    return { status: 'skipped_size', error: errorText };
   }
 
-  const mp3 = await extractOrConvertToMp3({ bytes, inputExt: ext });
+  onProgress?.({ phase: 'downloading', downloadedBytes: 0, totalBytes: videoInfo.fileSize });
+
+  if (canUseMtproto && isLargeFile) {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+    const ext = getExtFromFilename(videoInfo.filename);
+    const videoPath = path.join(tmpDir, `video${ext}`);
+    try {
+      await downloadFileByFileIdToPath(videoInfo.fileId, videoPath, videoInfo.fileSize, (downloaded, total) => {
+        onProgress?.({ phase: 'downloading', downloadedBytes: downloaded, totalBytes: total });
+      });
+      const stat = await fs.stat(videoPath);
+      fileSizeBytes = stat.size;
+      onProgress?.({ phase: 'converting' });
+      mp3 = await extractMp3FromFile(videoPath);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else if (canUseMtproto) {
+    const bytes = await downloadFileByFileId(videoInfo.fileId, videoInfo.fileSize);
+    fileSizeBytes = bytes.byteLength;
+    onProgress?.({ phase: 'converting' });
+    const ext = getExtFromFilename(videoInfo.filename);
+    mp3 = await extractOrConvertToMp3({ bytes, inputExt: ext });
+  } else if (isLocalApi() && isLargeFile) {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-tg-dl-'));
+    const ext = getExtFromFilename(videoInfo.filename);
+    const videoPath = path.join(tmpDir, `video${ext}`);
+    try {
+      await downloadTelegramFileToDisk(videoInfo.fileId, videoPath);
+      const stat = await fs.stat(videoPath);
+      fileSizeBytes = stat.size;
+      onProgress?.({ phase: 'converting' });
+      mp3 = await extractMp3FromFile(videoPath);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else {
+    const result = await downloadTelegramFile(videoInfo.fileId);
+    fileSizeBytes = result.bytes.byteLength;
+    onProgress?.({ phase: 'converting' });
+    const ext = getExtFromPath(result.filePath);
+    mp3 = await extractOrConvertToMp3({ bytes: result.bytes, inputExt: ext });
+  }
+
+  onProgress?.({ phase: 'transcribing' });
   const text = await callOpenRouterTranscription({ audioMp3: mp3 });
 
   await supabaseAdmin.from('tg_video_transcripts').insert({
@@ -245,7 +327,7 @@ export async function processVideoMessage(
     tg_sender_id: senderId,
     sender_name: senderName,
     filename: videoInfo.filename,
-    file_size_bytes: bytes.byteLength,
+    file_size_bytes: fileSizeBytes,
     duration_seconds: videoInfo.duration ?? null,
     text,
     length: text.length,
@@ -263,7 +345,15 @@ export async function processVideoMessage(
   return { status: 'completed', text };
 }
 
-export async function upsertBotChat(chatId: number, title: string, chatType: string, lastMessageId?: number): Promise<void> {
+export async function upsertBotChat(
+  chatId: number,
+  title: string,
+  chatType: string,
+  lastMessageId?: number,
+  isForum?: boolean,
+  topicId?: number | null,
+  topicName?: string | null,
+): Promise<void> {
   if (!supabaseAdmin) return;
   const row: Record<string, unknown> = {
     chat_id: chatId,
@@ -272,6 +362,9 @@ export async function upsertBotChat(chatId: number, title: string, chatType: str
     updated_at: new Date().toISOString(),
   };
   if (lastMessageId != null) row.last_message_id = lastMessageId;
+  if (isForum != null) row.is_forum = isForum;
+  if (topicId !== undefined) row.topic_id = topicId;
+  if (topicName !== undefined) row.topic_name = topicName;
 
   try {
     await supabaseAdmin.from('tg_bot_chats').upsert(row, { onConflict: 'chat_id' });

@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let body: { chatId?: number; title?: string };
+  let body: { chatId?: number; title?: string; topicId?: number; topicName?: string };
   try {
     body = await req.json();
   } catch {
@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
 
   let title = body.title ?? '';
   let chatType = 'group';
+  let isForum = false;
 
   try {
     const res = await fetch(`${tgApiBase()}/getChat`, {
@@ -37,21 +38,30 @@ export async function POST(req: NextRequest) {
       signal: AbortSignal.timeout(5000),
     });
 
-    const json = (await res.json()) as { ok: boolean; result?: { id: number; title?: string; type?: string }; description?: string };
+    const json = (await res.json()) as {
+      ok: boolean;
+      result?: { id: number; title?: string; type?: string; is_forum?: boolean };
+    };
 
     if (json.ok && json.result) {
       title = json.result.title ?? title;
       chatType = json.result.type ?? chatType;
+      isForum = json.result.is_forum ?? false;
     }
   } catch {
-    // Telegram API недоступен — сохраняем с тем что есть
+    // Telegram API unavailable — save with what we have
   }
 
   if (!title) title = `Chat ${chatId}`;
 
-  await upsertBotChat(chatId, title, chatType);
+  const topicId = body.topicId ?? null;
+  const topicName = body.topicName ?? null;
+
+  const displayTitle = topicName ? `${title} → ${topicName}` : title;
+
+  await upsertBotChat(chatId, displayTitle, chatType, undefined, isForum, topicId, topicName);
 
   return NextResponse.json({
-    chat: { chatId, title, chatType },
+    chat: { chatId, title: displayTitle, chatType, isForum, topicId, topicName },
   });
 }

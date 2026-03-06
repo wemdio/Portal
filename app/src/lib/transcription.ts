@@ -109,6 +109,33 @@ export async function extractOrConvertToMp3(input: {
   }
 }
 
+/**
+ * Extract audio from a video file already on disk.
+ * Avoids loading the full video into memory — only the resulting MP3 is read.
+ */
+export async function extractMp3FromFile(inputPath: string): Promise<Buffer> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-'));
+  const outPath = path.join(tmpDir, 'out.mp3');
+  try {
+    await runFfmpeg([
+      '-y',
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-b:a',
+      '48k',
+      outPath,
+    ]);
+    return await fs.readFile(outPath);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 function extractTextFromOpenRouterContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
