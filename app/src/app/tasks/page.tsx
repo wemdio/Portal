@@ -194,6 +194,7 @@ export default function TasksPage() {
   const [editingProjectId, setEditingProjectId] = useState('');
   const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
   const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
+  const [showDeleteTaskConfirm, setShowDeleteTaskConfirm] = useState(false);
 
   const userIsLead = checkIsLead(currentUserRole);
 
@@ -214,7 +215,10 @@ export default function TasksPage() {
   }, [boards, selectedBoardId]);
 
   useEffect(() => {
-    if (!taskModalTaskId) setIsModalInEditMode(false);
+    if (!taskModalTaskId) {
+      setIsModalInEditMode(false);
+      setShowDeleteTaskConfirm(false);
+    }
   }, [taskModalTaskId]);
 
   async function loadData() {
@@ -302,6 +306,11 @@ export default function TasksPage() {
   const updateTaskProject = useCallback(async (taskId: string, projectId: string | null) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, project_id: projectId } : t)));
     await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
+  }, []);
+
+  const deleteTask = useCallback(async (taskId: string) => {
+    setDbTasks((prev) => prev.filter((t) => t.id !== taskId));
+    await supabase.from('tasks').delete().eq('id', taskId);
   }, []);
 
   const uploadTaskImage = useCallback(async (file: File): Promise<string> => {
@@ -1843,44 +1852,78 @@ export default function TasksPage() {
               </div>
 
               {userIsLead && (
-                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100">
-                  {isModalInEditMode ? (
-                    <>
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isModalInEditMode ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await updateTaskTitle(modalTask.id, editingTitleValue);
+                            await updateTaskProject(modalTask.id, editingProjectId || null);
+                            await updateTaskSpecialist(modalTask.id, editingSpecialists.join(', ').trim() || '');
+                            await updateTaskDescriptionAndImage(modalTask.id, editingDescriptionValue, editingImageUrlValue);
+                            setIsModalInEditMode(false);
+                          }}
+                          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                        >
+                          Сохранить
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsModalInEditMode(false)}
+                          className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+                        >
+                          Отмена
+                        </button>
+                      </>
+                    ) : (
                       <button
                         type="button"
-                        onClick={async () => {
-                          await updateTaskTitle(modalTask.id, editingTitleValue);
-                          await updateTaskProject(modalTask.id, editingProjectId || null);
-                          await updateTaskSpecialist(modalTask.id, editingSpecialists.join(', ').trim() || '');
-                          await updateTaskDescriptionAndImage(modalTask.id, editingDescriptionValue, editingImageUrlValue);
-                          setIsModalInEditMode(false);
+                        onClick={() => {
+                          setIsModalInEditMode(true);
+                          setEditingTitleValue(modalTask.title);
+                          setEditingProjectId(modalTask.project_id ?? '');
+                          setEditingSpecialists((modalTask.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+                          setEditingDescriptionValue(modalTask.description || '');
+                          setEditingImageUrlValue(modalTask.image_url || '');
                         }}
                         className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
                       >
-                        Сохранить
+                        Редактировать
+                      </button>
+                    )}
+                  </div>
+                  {showDeleteTaskConfirm ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-red-600">Удалить задачу?</span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await deleteTask(modalTask.id);
+                          setTaskModalTaskId(null);
+                          setShowDeleteTaskConfirm(false);
+                        }}
+                        className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
+                      >
+                        Да
                       </button>
                       <button
                         type="button"
-                        onClick={() => setIsModalInEditMode(false)}
-                        className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+                        onClick={() => setShowDeleteTaskConfirm(false)}
+                        className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
                       >
-                        Отмена
+                        Нет
                       </button>
-                    </>
+                    </div>
                   ) : (
                     <button
                       type="button"
-                      onClick={() => {
-                        setIsModalInEditMode(true);
-                        setEditingTitleValue(modalTask.title);
-                        setEditingProjectId(modalTask.project_id ?? '');
-                        setEditingSpecialists((modalTask.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
-                        setEditingDescriptionValue(modalTask.description || '');
-                        setEditingImageUrlValue(modalTask.image_url || '');
-                      }}
-                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                      onClick={() => setShowDeleteTaskConfirm(true)}
+                      className="flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
                     >
-                      Редактировать
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5 4V3a1 1 0 011-1h2a1 1 0 011 1v1M6 6.5v3.5M8 6.5v3.5M4 4l.5 7a1 1 0 001 1h3a1 1 0 001-1L10 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                      Удалить
                     </button>
                   )}
                 </div>

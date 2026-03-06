@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Project, ProjectStatus, Task, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
@@ -155,6 +155,8 @@ export function ProjectList() {
   const [taskPopoverId, setTaskPopoverId] = useState<string | null>(null);
   const [taskPopoverPos, setTaskPopoverPos] = useState<{ top: number; right: number; openUp: boolean } | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [deleteConfirmTaskId, setDeleteConfirmTaskId] = useState<string | null>(null);
+  const taskPopoverRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void fetchProjects();
@@ -167,7 +169,11 @@ export function ProjectList() {
 
   useEffect(() => {
     if (!taskPopoverId) return;
-    const close = () => { setTaskPopoverId(null); setTaskPopoverPos(null); };
+    const close = (e: Event) => {
+      if (taskPopoverRef.current?.contains(e.target as Node)) return;
+      setTaskPopoverId(null);
+      setTaskPopoverPos(null);
+    };
     window.addEventListener('scroll', close, true);
     return () => window.removeEventListener('scroll', close, true);
   }, [taskPopoverId]);
@@ -1156,30 +1162,44 @@ export function ProjectList() {
                               </div>
                               {isOpen && taskPopoverPos && (
                                 <div
-                                  className="fixed z-50 w-72 bg-white rounded-xl border border-zinc-200 shadow-xl p-3 space-y-2"
-                                  style={taskPopoverPos.openUp
-                                    ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
-                                    : { top: `${taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
-                                  }
+                                  ref={taskPopoverRef}
+                                  className="fixed z-50 w-96 bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
+                                  style={{
+                                    maxHeight: '70vh',
+                                    ...(taskPopoverPos.openUp
+                                      ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
+                                      : { top: `${taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }),
+                                  }}
                                 >
-                                  <div className="flex items-center justify-between mb-1">
-                                    <span className="text-xs font-medium text-zinc-700">Задачи</span>
-                                    <button type="button" onClick={() => { setTaskPopoverId(null); setTaskPopoverPos(null); }} className="text-zinc-400 hover:text-zinc-600 text-sm">✕</button>
+                                  <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100">
+                                    <span className="text-sm font-semibold text-zinc-800">Задачи</span>
+                                    <button type="button" onClick={() => { setTaskPopoverId(null); setTaskPopoverPos(null); }} className="flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
+                                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                                    </button>
                                   </div>
-                                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                                  <div className="flex-1 overflow-y-auto overscroll-contain px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
                                     {tasks.map((t) => (
-                                      <div key={t.id} className="flex items-start gap-2 rounded-lg bg-zinc-50 p-2 text-xs group">
-                                        <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
-                                        <span className={`flex-1 ${t.status === 'done' ? 'line-through text-zinc-400' : 'text-zinc-800'}`}>{t.title}</span>
+                                      <div key={t.id} className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${t.status === 'done' ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'}`}>
+                                        <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-400' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
+                                        <span className={`flex-1 break-words leading-relaxed ${t.status === 'done' ? 'line-through text-zinc-400' : 'text-zinc-700'}`}>{t.title}</span>
                                         {canEdit && (
-                                          <button type="button" onClick={() => void deleteTask(t.id, project.id)} className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 text-[10px] transition-opacity">✕</button>
+                                          deleteConfirmTaskId === t.id ? (
+                                            <div className="flex items-center gap-1 flex-shrink-0">
+                                              <button type="button" onClick={() => { void deleteTask(t.id, project.id); setDeleteConfirmTaskId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">Да</button>
+                                              <button type="button" onClick={() => setDeleteConfirmTaskId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">Нет</button>
+                                            </div>
+                                          ) : (
+                                            <button type="button" onClick={() => setDeleteConfirmTaskId(t.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title="Удалить задачу">
+                                              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 3.5h7M4.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M5 5.5v3M7 5.5v3M3.5 3.5l.5 6a1 1 0 001 1h2a1 1 0 001-1l.5-6" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                            </button>
+                                          )
                                         )}
                                       </div>
                                     ))}
-                                    {tasks.length === 0 && <p className="text-xs text-zinc-400 text-center py-2">Нет задач</p>}
+                                    {tasks.length === 0 && <p className="text-[13px] text-zinc-400 text-center py-4">Нет задач</p>}
                                   </div>
                                   {canEdit && (
-                                    <div className="flex gap-1.5 pt-1 border-t border-zinc-100">
+                                    <div className="flex gap-1.5 px-3 py-2.5 border-t border-zinc-100">
                                       <input
                                         type="text"
                                         value={newTaskTitle}
@@ -1188,12 +1208,12 @@ export function ProjectList() {
                                           if (e.key === 'Enter') void addTask(project.id, newTaskTitle, project.specialist);
                                         }}
                                         placeholder="Новая задача..."
-                                        className="flex-1 text-xs border border-zinc-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20"
+                                        className="flex-1 text-[13px] border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20 transition-all"
                                       />
                                       <button
                                         type="button"
                                         onClick={() => void addTask(project.id, newTaskTitle, project.specialist)}
-                                        className="text-xs bg-zinc-900 text-white px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors font-medium"
+                                        className="text-[13px] bg-zinc-900 text-white px-3 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors font-medium"
                                       >
                                         +
                                       </button>
