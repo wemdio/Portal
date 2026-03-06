@@ -951,6 +951,10 @@ type FetchVacanciesOptions = {
   progressIntervalMs?: number;
   onStage?: (stage: ParserProgressStage) => void;
   onPartitionProgress?: (info: PartitionProgress) => void;
+  /** Called with a batch of new vacancies ready to be persisted. */
+  onBatch?: (vacancies: HHVacancy[]) => Promise<void>;
+  /** Minimum number of new vacancies to accumulate before calling onBatch. Default 1000. */
+  batchFlushSize?: number;
   trace?: Span | null;
   logMeta?: {
     userId?: string | null;
@@ -1087,6 +1091,26 @@ export async function fetchVacancies(
   let fetchedCount = 0;
   let completedPartitions = 0;
 
+  const batchFlushSize = options?.batchFlushSize ?? 1000;
+  const flushedIds = new Set<string>();
+  let pendingNewCount = 0;
+
+  const flushBatch = async (force = false) => {
+    if (!options?.onBatch) return;
+    if (!force && pendingNewCount < batchFlushSize) return;
+    const batch: HHVacancy[] = [];
+    for (const [id, v] of uniqueVacancies) {
+      if (!flushedIds.has(id)) {
+        batch.push(v);
+        flushedIds.add(id);
+      }
+    }
+    pendingNewCount = 0;
+    if (batch.length > 0) {
+      await options.onBatch(batch);
+    }
+  };
+
   const registerItems = (items?: HHApiVacancyItem[]) => {
     if (!items || items.length === 0) return;
     for (const item of items) {
@@ -1095,6 +1119,7 @@ export async function fetchVacancies(
       const existing = uniqueVacancies.get(vacancy.vacancy_id);
       if (!existing) {
         uniqueVacancies.set(vacancy.vacancy_id, vacancy);
+        pendingNewCount += 1;
       } else {
         uniqueVacancies.set(vacancy.vacancy_id, { ...existing, ...vacancy });
       }
@@ -1215,6 +1240,7 @@ export async function fetchVacancies(
           },
           options?.logMeta,
         );
+        await flushBatch();
         await partSpan?.end(
           { found: partFoundCapped, found_raw: partFound, fetched: partitionCollected, pages: totalPages },
           `Разбиение ${index + 1}: ${partitionCollected} вакансий`,
@@ -1259,6 +1285,8 @@ export async function fetchVacancies(
       }
     },
   );
+
+  await flushBatch(true);
 
   // If ALL partitions failed and we got nothing, throw the error
   if (uniqueVacancies.size === 0 && partitionErrors > 0) {

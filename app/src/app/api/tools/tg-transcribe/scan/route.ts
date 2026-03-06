@@ -1,99 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import {
-  TG_TOKEN,
-  tgApiBase,
-  ensureTgApiReady,
-  upsertBotChat,
-  type TgMessage,
-  extractVideoInfo,
-  processVideoMessage,
-  saveErrorRecord,
-  getSenderName,
-} from '@/lib/tgTranscribe';
-import { logInfo } from '@/lib/loggerServer';
+import { runTgScanJob, markStaleJobs } from '@/lib/tgScanWorker';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300;
+
+const admin = supabaseAdmin!;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-interface TgChatFull {
-  id: number;
-  title?: string;
-  type?: string;
-}
-
-async function getChatInfo(chatId: number): Promise<TgChatFull | null> {
-  try {
-    const res = await fetch(`${tgApiBase()}/getChat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId }),
-      signal: AbortSignal.timeout(5000),
-    });
-    const json = (await res.json()) as { ok: boolean; result?: TgChatFull; description?: string };
-    return json.ok ? (json.result ?? null) : null;
-  } catch {
-    return null;
-  }
-}
-
-async function forwardAndInspect(
-  chatId: number,
-  messageId: number,
-): Promise<TgMessage | null> {
-  const res = await fetch(`${tgApiBase()}/forwardMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      from_chat_id: chatId,
-      message_id: messageId,
-    }),
-  });
-
-  const json = (await res.json()) as { ok: boolean; result?: TgMessage; description?: string };
-  if (!json.ok || !json.result) return null;
-
-  const forwarded = json.result;
-
-  void fetch(`${tgApiBase()}/deleteMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: forwarded.message_id,
-    }),
-  }).catch(() => {});
-
-  return forwarded;
+async function getUser(req: NextRequest) {
+  const token = getBearerToken(req.headers.get('authorization'));
+  if (!token) return null;
+  const supabase = createAuthedSupabaseClient(token);
+  const { data: { user } } = await supabase.auth.getUser();
+  return user;
 }
 
 /**
  * POST /api/tools/tg-transcribe/scan
- *
- * Body: { chatId: number, videoCount: number }
- * Scans backwards from the latest message to find `videoCount` videos.
- * Streams NDJSON progress.
+ * Creates a background scan job and returns immediately.
  */
 export async function POST(req: NextRequest) {
-  const token = getBearerToken(req.headers.get('authorization'));
-  if (!token) return jsonError('Необходима авторизация', 401);
-
-  const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = await getUser(req);
   if (!user) return jsonError('Необходима авторизация', 401);
 
-  if (!TG_TOKEN) return jsonError('TG_TRANSCRIBE_BOT_TOKEN не настроен', 500);
-  if (!supabaseAdmin) return jsonError('Supabase admin не настроен', 500);
-
-  await ensureTgApiReady();
-
-  let body: { chatId?: number; videoCount?: number };
+  let body: { chatId?: number; videoCount?: number; topicId?: number | null };
   try {
     body = await req.json();
   } catch {
@@ -102,155 +36,125 @@ export async function POST(req: NextRequest) {
 
   const chatId = body.chatId;
   const videoCount = Math.min(Math.max(body.videoCount ?? 5, 1), 50);
+  const topicId = body.topicId ?? null;
 
-  if (!chatId) {
-    return jsonError('Необходим chatId', 400);
-  }
+  if (!chatId) return jsonError('Необходим chatId', 400);
 
-  const chatInfo = await getChatInfo(chatId);
-  if (chatInfo) {
-    void upsertBotChat(chatInfo.id, chatInfo.title ?? '', chatInfo.type ?? 'group');
-  }
-
-  const { data: existing } = await supabaseAdmin
-    .from('tg_video_transcripts')
-    .select('tg_message_id')
-    .eq('tg_chat_id', chatId);
-
-  const alreadyProcessed = new Set((existing ?? []).map((r) => Number(r.tg_message_id)));
-
-  const { data: chatRow } = await supabaseAdmin
-    .from('tg_bot_chats')
-    .select('last_message_id')
-    .eq('chat_id', chatId)
+  // Check for existing active job for this chat
+  const { data: active } = await admin
+    .from('tg_scan_jobs')
+    .select('id, status')
+    .eq('tg_chat_id', chatId)
+    .in('status', ['pending', 'running'])
+    .limit(1)
     .single();
 
-  let startMsgId = (chatRow?.last_message_id as number | null) ?? 0;
-
-  if (!startMsgId) {
-    try {
-      const probe = await fetch(`${tgApiBase()}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: '🔍 Сканирование...' }),
-        signal: AbortSignal.timeout(10000),
-      });
-      const probeJson = (await probe.json()) as { ok: boolean; result?: { message_id: number } };
-      if (probeJson.ok && probeJson.result) {
-        startMsgId = probeJson.result.message_id;
-        void fetch(`${tgApiBase()}/deleteMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, message_id: startMsgId }),
-        }).catch(() => {});
-      }
-    } catch {
-      // Telegram API недоступен
-    }
+  if (active) {
+    return NextResponse.json(
+      { error: 'Для этого чата уже запущено сканирование', jobId: active.id },
+      { status: 409 },
+    );
   }
 
-  if (!startMsgId) {
-    return jsonError('Не удалось определить последнее сообщение. Telegram API недоступен. Попробуйте позже или включите VPN.', 500);
+  // Create job
+  const { data: job, error } = await admin
+    .from('tg_scan_jobs')
+    .insert({
+      tg_chat_id: chatId,
+      topic_id: topicId,
+      video_count: videoCount,
+      user_id: user.id,
+    })
+    .select()
+    .single();
+
+  if (error || !job) {
+    return jsonError(error?.message || 'Не удалось создать задачу', 500);
   }
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder();
-      const send = (obj: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
-      };
+  // Fire-and-forget
+  runTgScanJob(job.id).catch((err) => console.error('[tg-scan] Worker error:', err));
 
-      let videosFound = 0;
-      let completed = 0;
-      let errors = 0;
-      let scanned = 0;
-      const maxScan = 2000;
+  return NextResponse.json({ job });
+}
 
-      await logInfo('tg-transcribe.scan.start', `Scanning for ${videoCount} videos from msg#${startMsgId} in chat ${chatId}`, {
-        chatId, startMsgId, videoCount, userId: user!.id,
-      });
+/**
+ * GET /api/tools/tg-transcribe/scan
+ * Returns the latest active or recently finished job for recovery on page load.
+ */
+export async function GET(req: NextRequest) {
+  const user = await getUser(req);
+  if (!user) return jsonError('Необходима авторизация', 401);
 
-      for (let msgId = startMsgId; msgId > 0 && videosFound < videoCount && scanned < maxScan; msgId--) {
-        scanned++;
+  // Clean up stale jobs
+  await markStaleJobs();
 
-        if (alreadyProcessed.has(msgId)) {
-          videosFound++;
-          completed++;
-          send({ type: 'progress', scanned, videosFound, videoCount, completed, errors });
-          continue;
-        }
+  // Return any active job first
+  const { data: active } = await admin
+    .from('tg_scan_jobs')
+    .select('*')
+    .eq('user_id', user.id)
+    .in('status', ['pending', 'running'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
 
-        let forwarded: TgMessage | null;
-        try {
-          forwarded = await forwardAndInspect(chatId, msgId);
-        } catch {
-          continue;
-        }
+  if (active) {
+    return NextResponse.json({ job: active });
+  }
 
-        if (!forwarded) continue;
+  // Return the last finished job (within 5 minutes) for showing result
+  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const { data: recent } = await admin
+    .from('tg_scan_jobs')
+    .select('*')
+    .eq('user_id', user.id)
+    .in('status', ['completed', 'failed', 'stopped'])
+    .gte('finished_at', fiveMinAgo)
+    .order('finished_at', { ascending: false })
+    .limit(1)
+    .single();
 
-        const videoInfo = extractVideoInfo(forwarded);
-        if (!videoInfo) continue;
+  return NextResponse.json({ job: recent ?? null });
+}
 
-        videosFound++;
+/**
+ * PATCH /api/tools/tg-transcribe/scan
+ * Stop a running scan job. The worker checks `isStopped()` cooperatively.
+ */
+export async function PATCH(req: NextRequest) {
+  const user = await getUser(req);
+  if (!user) return jsonError('Необходима авторизация', 401);
 
-        const syntheticMsg: TgMessage = {
-          ...forwarded,
-          chat: { id: chatId },
-          message_id: msgId,
-        };
+  let body: { jobId?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError('Неверный JSON', 400);
+  }
 
-        const senderName = getSenderName(syntheticMsg);
+  if (!body.jobId) return jsonError('Необходим jobId', 400);
 
-        try {
-          const result = await processVideoMessage(syntheticMsg, videoInfo);
-          if (result.status === 'completed') {
-            completed++;
-          } else {
-            errors++;
-          }
-          send({
-            type: 'progress',
-            scanned,
-            videosFound,
-            videoCount,
-            completed,
-            errors,
-            lastSender: senderName,
-            lastStatus: result.status,
-          });
-        } catch (err) {
-          await saveErrorRecord(syntheticMsg, videoInfo, err);
-          errors++;
-          send({
-            type: 'progress',
-            scanned,
-            videosFound,
-            videoCount,
-            completed,
-            errors,
-            lastSender: senderName,
-            lastStatus: 'error',
-            lastError: err instanceof Error ? err.message : 'Неизвестная ошибка',
-          });
-        }
+  const { data: job } = await admin
+    .from('tg_scan_jobs')
+    .select('id, status, user_id')
+    .eq('id', body.jobId)
+    .single();
 
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
+  if (!job) return jsonError('Задача не найдена', 404);
+  if (job.user_id !== user.id) return jsonError('Нет доступа', 403);
+  if (!['pending', 'running'].includes(job.status)) {
+    return jsonError('Задача уже завершена', 400);
+  }
 
-      await logInfo('tg-transcribe.scan.done', `Scan complete: ${completed} transcribed, ${errors} errors, scanned ${scanned} messages`, {
-        chatId, completed, errors, scanned, videosFound,
-      });
+  await admin
+    .from('tg_scan_jobs')
+    .update({
+      status: 'stopped',
+      finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', body.jobId);
 
-      send({ type: 'done', completed, errors, videosFound, scanned });
-      controller.close();
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'application/x-ndjson',
-      'Cache-Control': 'no-cache',
-    },
-  });
+  return NextResponse.json({ ok: true });
 }

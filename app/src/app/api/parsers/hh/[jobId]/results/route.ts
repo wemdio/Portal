@@ -44,7 +44,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const { jobId } = await ctx.params;
 
   const sp = req.nextUrl.searchParams;
-  const limit = Math.min(200, Math.max(1, Number(sp.get('limit') ?? '50')));
+  const limit = Math.min(1000, Math.max(1, Number(sp.get('limit') ?? '50')));
   const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
 
   const { data, error, count } = await supabase
