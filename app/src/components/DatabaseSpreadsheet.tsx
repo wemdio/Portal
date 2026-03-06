@@ -2277,29 +2277,7 @@ export function DatabaseSpreadsheet() {
       }
     }
 
-    const afterEmailDedup = [...emailMap.values().map((item) => item.row), ...rowsWithoutEmail];
-    if (emailColumns.length === 0) {
-      applyRows(header ? [header, ...afterEmailDedup] : afterEmailDedup);
-      return;
-    }
-
-    const ignoreSet = new Set(emailColumns);
-    const rowMap = new Map<string, { row: string[]; score: number }>();
-
-    for (const row of afterEmailDedup) {
-      const keyParts = row
-        .filter((_, index) => !ignoreSet.has(index))
-        .map((cell) => cell.trim());
-      const hasNonEmail = keyParts.some((value) => value.length > 0);
-      const key = hasNonEmail ? keyParts.join('\u0001') : row.join('\u0001');
-      const score = countFilledCells(row);
-      const existing = rowMap.get(key);
-      if (!existing || score > existing.score) {
-        rowMap.set(key, { row, score });
-      }
-    }
-
-    const nextRows = [...rowMap.values()].map((item) => item.row);
+    const nextRows = [...emailMap.values().map((item) => item.row), ...rowsWithoutEmail];
     const removed = body.length - nextRows.length;
     if (removed === 0) {
       setLastAction({ message: 'Дубликатов по почте не найдено', time: Date.now() });
