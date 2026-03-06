@@ -887,6 +887,7 @@ export default function TasksPage() {
               <textarea
                 value={newDescription}
                 onChange={(e) => setNewDescription(e.target.value)}
+                onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
                 placeholder="Текст описания задачи..."
                 rows={2}
                 className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
@@ -1513,6 +1514,7 @@ export default function TasksPage() {
                 <textarea
                   value={newDescription}
                   onChange={(e) => setNewDescription(e.target.value)}
+                  onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
                   placeholder="Текст описания задачи..."
                   rows={2}
                   className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
@@ -1762,9 +1764,10 @@ export default function TasksPage() {
                     <textarea
                       value={editingDescriptionValue}
                       onChange={(e) => setEditingDescriptionValue(e.target.value)}
+                      onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
                       placeholder="Описание..."
                       rows={3}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
                     />
                     <p className="mt-2 text-xs font-medium text-gray-500">Картинка</p>
                     <div

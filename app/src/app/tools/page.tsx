@@ -14,6 +14,7 @@ import {
   ClipboardCheck,
   Send,
   Waves,
+  Video,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -30,6 +31,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'email-sequence': Mail,
   'auto-report': FileText,
    'audio-transcribe': Waves,
+  'tg-transcribe': Video,
   rdp: FileText,
   instantly: Send,
 };
@@ -38,6 +40,24 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
   const isEmerald = config.accentColor === 'emerald';
+
+  if (config.disabled) {
+    return (
+      <div className="rounded-2xl p-10 min-w-0 flex flex-col h-full border border-gray-200 bg-gray-50 opacity-50 cursor-not-allowed select-none">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="text-base font-semibold text-gray-400">{config.title}</p>
+            </div>
+            <p className="text-sm text-gray-400">{config.description}</p>
+          </div>
+          <Icon className="h-8 w-8 shrink-0 text-gray-300" />
+        </div>
+        <div className="mt-4 text-sm font-medium text-gray-400">Недоступно</div>
+      </div>
+    );
+  }
+
   const borderClass = config.badge
     ? isEmerald
       ? 'border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white hover:border-emerald-300'

@@ -13,6 +13,8 @@ export type HHSearchConfig = {
   date_to?: string;
   per_page?: number;
   params?: Record<string, string | string[]>;
+  /** Regional subdomain extracted from URL, e.g. "spb" from spb.hh.ru */
+  subdomain?: string;
   /**
    * Fetch employer details (site/description/industries).
    * When false, parsing is significantly faster.
@@ -433,6 +435,11 @@ function normalizeExtraParams(params?: HHSearchParams): HHSearchParams | undefin
   return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
+function extractHhSubdomain(hostname: string): string | undefined {
+  const match = hostname.match(/^(.+)\.hh\.ru$/i);
+  return match ? match[1].toLowerCase() : undefined;
+}
+
 export function parseHhSearchUrl(url: string): HHSearchConfig {
   const urlObj = new URL(url);
   const params = urlObj.searchParams;
@@ -442,7 +449,7 @@ export function parseHhSearchUrl(url: string): HHSearchConfig {
     area: params.getAll('area'),
     date_from: params.get('date_from') || undefined,
     date_to: params.get('date_to') || undefined,
-    // Add any other parameters you want to extract from the URL
+    subdomain: extractHhSubdomain(urlObj.hostname),
     params: {},
   };
 

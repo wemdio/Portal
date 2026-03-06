@@ -33,6 +33,8 @@ export interface HHSearchConfig {
   date_to?: string;
   per_page?: number;
   params?: Record<string, string | string[]>;
+  /** Regional subdomain extracted from URL, e.g. "spb" from spb.hh.ru */
+  subdomain?: string;
   /**
    * Fetch employer details (site/description/industries).
    * When false, parsing is significantly faster.
