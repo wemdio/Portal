@@ -1042,6 +1042,25 @@ export function DatabaseSpreadsheet() {
   });
   const dadataAbortRef = useRef<AbortController | null>(null);
 
+  const [fnsEnrichment, setFnsEnrichment] = useState<{
+    isOpen: boolean;
+    sourceCol: number;
+    isProcessing: boolean;
+    progress: number;
+    totalRows: number;
+    currentRow: number;
+    found: number;
+  }>({
+    isOpen: false,
+    sourceCol: 0,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    found: 0,
+  });
+  const fnsAbortRef = useRef<AbortController | null>(null);
+
   const readEnrichmentStorage = useCallback(() => {
     try {
       return readPersistedEnrichment(window.localStorage.getItem(enrichmentStorageKey));
@@ -6098,6 +6117,136 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const openFnsModal = () => {
+    setFnsEnrichment({ isOpen: true, sourceCol: 0, isProcessing: false, progress: 0, totalRows: 0, currentRow: 0, found: 0 });
+  };
+  const closeFnsModal = () => {
+    if (fnsAbortRef.current) { fnsAbortRef.current.abort(); fnsAbortRef.current = null; }
+    setFnsEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartFnsEnrichment = async () => {
+    if (!activeTab || fnsEnrichment.isProcessing) return;
+    flushSave();
+
+    const sourceCol = fnsEnrichment.sourceCol;
+    const headerRow = activeTab.data[0];
+    if (!headerRow) return;
+
+    const innColHeader = headerRow[sourceCol]?.toLowerCase().trim() ?? '';
+    if (!innColHeader) return;
+
+    const incomeLabel = 'Доход (ФНС)';
+    const expenseLabel = 'Расход (ФНС)';
+    const fields = [incomeLabel, expenseLabel];
+
+    const existingHeaders = headerRow.map((h) => String(h ?? '').trim());
+    const colMap: Record<string, number> = {};
+    for (const f of fields) {
+      const idx = existingHeaders.indexOf(f);
+      if (idx !== -1) {
+        colMap[f] = idx;
+      }
+    }
+    const missingFields = fields.filter((f) => !(f in colMap));
+
+    const rowsToProcess = visibleRowIndices.filter((ri) => {
+      const val = String(activeTab.data[ri]?.[sourceCol] ?? '').trim();
+      return /^\d{10,12}$/.test(val);
+    });
+
+    if (rowsToProcess.length === 0) {
+      setLastAction({ message: 'ФНС: не найдены строки с ИНН', time: Date.now() });
+      return;
+    }
+
+    const abortCtrl = new AbortController();
+    fnsAbortRef.current = abortCtrl;
+    setFnsEnrichment((prev) => ({ ...prev, isProcessing: true, progress: 0, totalRows: rowsToProcess.length, currentRow: 0, found: 0 }));
+
+    let processedCount = 0;
+    let foundCount = 0;
+    const BATCH = 500;
+
+    try {
+      if (missingFields.length > 0) {
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTab.id) return tab;
+          const nextData = tab.data.map((row) => [...row]);
+          let nextCols = nextData[0].length;
+          for (const f of missingFields) {
+            nextData[0][nextCols] = f;
+            colMap[f] = nextCols;
+            nextCols++;
+          }
+          for (let r = 1; r < nextData.length; r++) {
+            while (nextData[r].length < nextCols) nextData[r].push('');
+          }
+          return { ...tab, data: nextData };
+        }));
+      }
+
+      for (let i = 0; i < rowsToProcess.length; i += BATCH) {
+        if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
+
+        const batchIndices = rowsToProcess.slice(i, i + BATCH);
+        const inns = batchIndices.map((ri) => String(activeTab.data[ri]?.[sourceCol] ?? '').trim());
+
+        const res = await fetch('/api/enrich/fns-revenue', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+          },
+          body: JSON.stringify({ inns }),
+          signal: abortCtrl.signal,
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as { results: Record<string, { income: number; expense: number }> };
+        const results = json.results;
+
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTab.id) return tab;
+          const nextData = tab.data.map((row) => [...row]);
+          for (const ri of batchIndices) {
+            const inn = String(nextData[ri]?.[sourceCol] ?? '').trim();
+            const match = results[inn];
+            if (match) {
+              const incCol = colMap[incomeLabel];
+              const expCol = colMap[expenseLabel];
+              if (incCol !== undefined) nextData[ri][incCol] = match.income > 0 ? String(match.income) : '0';
+              if (expCol !== undefined) nextData[ri][expCol] = match.expense > 0 ? String(match.expense) : '0';
+              foundCount++;
+            }
+          }
+          return { ...tab, data: nextData };
+        }));
+
+        processedCount += batchIndices.length;
+        setFnsEnrichment((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+          found: foundCount,
+        }));
+      }
+
+      setLastAction({
+        message: `ФНС: ${foundCount} найдено из ${processedCount} строк`,
+        time: Date.now(),
+      });
+      setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `ФНС отменено (обработано: ${processedCount})`, time: Date.now() });
+      }
+      setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } finally {
+      fnsAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -6709,6 +6858,25 @@ export function DatabaseSpreadsheet() {
             className={toolbarMonochromeButtonClass}
           >
             DaData
+          </button>
+        )}
+
+        {fnsEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeFnsModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            ФНС... {fnsEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openFnsModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Доходы ФНС
           </button>
         )}
 
@@ -9463,6 +9631,88 @@ export function DatabaseSpreadsheet() {
                     onClick={() => void handleStartDadataEnrichment()}
                     disabled={dadataEnrichment.selectedFields.length === 0}
                     className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Запустить
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FNS Revenue modal */}
+      {fnsEnrichment.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-4">
+              <h3 className="text-base font-semibold text-gray-900">Доходы и расходы (ФНС)</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Данные из открытой бухгалтерской отчётности ФНС за 2024 год</p>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1.5">Колонка с ИНН</label>
+                <select
+                  value={fnsEnrichment.sourceCol}
+                  onChange={(e) => setFnsEnrichment((prev) => ({ ...prev, sourceCol: Number(e.target.value) }))}
+                  disabled={fnsEnrichment.isProcessing}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:opacity-60"
+                >
+                  {(activeTab?.data[0] ?? []).map((h, i) => (
+                    <option key={i} value={i}>{String(h || `Колонка ${i + 1}`)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
+                <p className="text-xs text-emerald-700 leading-relaxed">
+                  Будут добавлены колонки «Доход (ФНС)» и «Расход (ФНС)». Данные из ~2 млн организаций. Без лимитов, мгновенно.
+                </p>
+              </div>
+
+              {fnsEnrichment.isProcessing && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Обогащение...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {fnsEnrichment.currentRow} / {fnsEnrichment.totalRows} (найдено: {fnsEnrichment.found})
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                      style={{ width: `${fnsEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {fnsEnrichment.isProcessing ? (
+                  <>Обработано: {fnsEnrichment.currentRow} / {fnsEnrichment.totalRows}</>
+                ) : (
+                  <>Строк с ИНН: <span className="text-gray-900">{visibleRowIndices.filter((ri) => /^\d{10,12}$/.test(String(activeTab?.data[ri]?.[fnsEnrichment.sourceCol] ?? '').trim())).length}</span></>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeFnsModal}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+                >
+                  {fnsEnrichment.isProcessing ? 'Стоп' : 'Закрыть'}
+                </button>
+                {!fnsEnrichment.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartFnsEnrichment()}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-blue-700 transition"
                   >
                     Запустить
                   </button>
