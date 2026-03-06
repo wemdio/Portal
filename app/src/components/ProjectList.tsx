@@ -153,7 +153,7 @@ export function ProjectList() {
   const [editingContactsValue, setEditingContactsValue] = useState('');
   const [projectTasks, setProjectTasks] = useState<Record<string, Task[]>>({});
   const [taskPopoverId, setTaskPopoverId] = useState<string | null>(null);
-  const [taskPopoverPos, setTaskPopoverPos] = useState<{ top: number; right: number; openUp: boolean } | null>(null);
+  const [taskPopoverPos, setTaskPopoverPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [deleteConfirmTaskId, setDeleteConfirmTaskId] = useState<string | null>(null);
   const taskPopoverRef = useRef<HTMLDivElement>(null);
@@ -1139,11 +1139,15 @@ export function ProjectList() {
                                     setTaskPopoverPos(null);
                                   } else {
                                     const rect = e.currentTarget.getBoundingClientRect();
+                                    const popoverW = 384;
                                     const openUp = rect.bottom + 300 > window.innerHeight;
+                                    let left = rect.left;
+                                    if (left + popoverW > window.innerWidth - 8) left = window.innerWidth - popoverW - 8;
+                                    if (left < 8) left = 8;
                                     setTaskPopoverId(project.id);
                                     setTaskPopoverPos({
                                       top: openUp ? rect.top : rect.bottom,
-                                      right: window.innerWidth - rect.right,
+                                      left,
                                       openUp,
                                     });
                                   }
@@ -1167,8 +1171,8 @@ export function ProjectList() {
                                   style={{
                                     maxHeight: '70vh',
                                     ...(taskPopoverPos.openUp
-                                      ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }
-                                      : { top: `${taskPopoverPos.top + 4}px`, right: `${taskPopoverPos.right}px` }),
+                                      ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, left: `${taskPopoverPos.left}px` }
+                                      : { top: `${taskPopoverPos.top + 4}px`, left: `${taskPopoverPos.left}px` }),
                                   }}
                                 >
                                   <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100">

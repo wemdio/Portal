@@ -4840,7 +4840,7 @@ export function DatabaseSpreadsheet() {
       }
 
       const emails = cellValue
-        .split(/[,;\n]+/)
+        .split(/[,;\s]+/)
         .map((e) => e.trim())
         .filter((e) => e.length > 0);
 
