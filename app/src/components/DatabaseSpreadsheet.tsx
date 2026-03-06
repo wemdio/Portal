@@ -7133,7 +7133,7 @@ export function DatabaseSpreadsheet() {
           })()}
           <div
             ref={tableWrapperRef}
-            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6"
+            className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
             tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
@@ -7738,7 +7738,7 @@ export function DatabaseSpreadsheet() {
           className="pointer-events-none fixed bottom-2 z-40"
           style={{ left: fixedScrollbarViewport.left, width: fixedScrollbarViewport.width }}
         >
-          <div className="rounded-md border border-gray-300 bg-white/95 px-2 py-1 shadow-lg backdrop-blur">
+          <div className="rounded border border-gray-300 bg-white/90 px-1 py-0.5 shadow-md backdrop-blur">
             <input
               type="range"
               min={0}
@@ -7753,7 +7753,7 @@ export function DatabaseSpreadsheet() {
                 setHorizontalScrollLeft(next);
               }}
               disabled={horizontalScrollMax <= 0}
-              className="pointer-events-auto block h-4 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
+              className="pointer-events-auto block h-2 w-full cursor-ew-resize accent-gray-700 disabled:cursor-default"
               aria-label="Горизонтальный скролл таблицы"
             />
           </div>
