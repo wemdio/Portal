@@ -92,6 +92,7 @@ type PersistedSpreadsheetState = {
   activeTabId: string;
   tabCounter: number;
   columnWidths?: number[];
+  savedAt?: number;
 };
 
 type PersistedEnrichmentRun = {
@@ -527,7 +528,8 @@ const readPersistedState = (raw: unknown): PersistedSpreadsheetState | null => {
   const activeTabId = resolveActiveTabId(tabs, candidate.activeTabId);
   const tabCounter = deriveTabCounter(tabs, candidate.tabCounter);
   const columnWidths = sanitizeColumnWidths(candidate.columnWidths);
-  return { version: STORAGE_VERSION, tabs, activeTabId, tabCounter, columnWidths };
+  const savedAt = typeof candidate.savedAt === 'number' ? candidate.savedAt : 0;
+  return { version: STORAGE_VERSION, tabs, activeTabId, tabCounter, columnWidths, savedAt };
 };
 
 const readPersistedEnrichment = (raw: unknown): PersistedEnrichmentState => {
@@ -898,6 +900,7 @@ export function DatabaseSpreadsheet() {
       activeTabId: safeActiveTabId,
       tabCounter: deriveTabCounter(tabs, tabCounter),
       columnWidths,
+      savedAt: Date.now(),
     };
     const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
     if (totalRows <= LARGE_DATASET_ROW_THRESHOLD) {
@@ -6449,20 +6452,17 @@ export function DatabaseSpreadsheet() {
         }
       }
 
-      if (remoteState) {
-        if (isMounted) applyState(remoteState);
-        try { window.localStorage.removeItem(storageKey); } catch { /* noop */ }
-        return;
-      }
-
       const localState = readPersistedState(window.localStorage.getItem(storageKey));
-      if (isMounted) applyState(localState);
+      const localIsNewer = localState && (localState.savedAt ?? 0) > (remoteState?.savedAt ?? 0);
+      const bestState = localIsNewer ? localState : (remoteState ?? localState);
 
-      if (localState) {
+      if (isMounted) applyState(bestState);
+
+      if (bestState && bestState !== remoteState) {
         try {
           await supabase.from('database_spreadsheet_states').upsert({
             user_id: userId,
-            state: localState,
+            state: bestState,
             updated_at: new Date().toISOString(),
           });
         } catch (error) {
@@ -6491,12 +6491,14 @@ export function DatabaseSpreadsheet() {
     }
 
     const safeActiveTabId = resolveActiveTabId(tabs, activeTabId);
+    const now = Date.now();
     const payload: PersistedSpreadsheetState = {
       version: STORAGE_VERSION,
       tabs,
       activeTabId: safeActiveTabId,
       tabCounter: deriveTabCounter(tabs, tabCounter),
       columnWidths,
+      savedAt: now,
     };
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -6506,14 +6508,16 @@ export function DatabaseSpreadsheet() {
     const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
     const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
     const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
-    saveTimeoutRef.current = setTimeout(() => {
-      if (!isLargeDataset) {
-        try {
-          window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-        } catch (error) {
-          void logError('spreadsheet.state.local_save.failed', error);
-        }
+
+    if (!isLargeDataset) {
+      try {
+        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+      } catch (error) {
+        void logError('spreadsheet.state.local_save.failed', error);
       }
+    }
+
+    saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
       if (isLargeDataset) {
         if (accessTokenRef.current) {
