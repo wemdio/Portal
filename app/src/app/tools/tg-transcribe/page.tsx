@@ -16,6 +16,9 @@ import {
   FileText,
   Search,
   RefreshCw,
+  Trash2,
+  Square,
+  X,
 } from 'lucide-react';
 
 interface TranscriptItem {
@@ -39,6 +42,38 @@ interface BotChat {
   title: string;
   chatType: string;
   lastMessageId: number | null;
+  isForum?: boolean;
+  topicId?: number | null;
+  topicName?: string | null;
+}
+
+interface ScanVideoInfo {
+  idx: number;
+  sender: string;
+  filename: string;
+  fileSize: number | null;
+  duration: number | null;
+  phase: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  error?: string;
+}
+
+interface ScanJob {
+  id: string;
+  status: string;
+  tg_chat_id: number;
+  topic_id: number | null;
+  video_count: number;
+  scanned: number;
+  videos_found: number;
+  completed: number;
+  errors: number;
+  videos: ScanVideoInfo[];
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 async function getToken() {
@@ -74,6 +109,153 @@ function formatDate(iso: string) {
   });
 }
 
+function phaseLabel(phase: string): { text: string; color: string } {
+  switch (phase) {
+    case 'found':
+      return { text: 'Ожидание…', color: 'text-gray-400' };
+    case 'downloading':
+      return { text: 'Скачивание', color: 'text-blue-600' };
+    case 'converting':
+      return { text: 'Извлечение аудио', color: 'text-amber-600' };
+    case 'transcribing':
+      return { text: 'Транскрибация', color: 'text-violet-600' };
+    case 'done':
+      return { text: 'Готово', color: 'text-emerald-600' };
+    case 'error':
+      return { text: 'Ошибка', color: 'text-rose-600' };
+    default:
+      return { text: phase, color: 'text-gray-500' };
+  }
+}
+
+function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
+  const { text: statusText, color: statusColor } = phaseLabel(video.phase);
+  const isDownloading = video.phase === 'downloading';
+  const dlPercent =
+    isDownloading && video.totalBytes && video.totalBytes > 0
+      ? Math.round(((video.downloadedBytes ?? 0) / video.totalBytes) * 100)
+      : null;
+
+  const isActive = ['downloading', 'converting', 'transcribing'].includes(video.phase);
+
+  return (
+    <div
+      className={[
+        'rounded-lg border px-3 py-2 text-xs transition-all',
+        video.phase === 'error'
+          ? 'border-rose-200 bg-rose-50/50'
+          : video.phase === 'done'
+            ? 'border-emerald-200 bg-emerald-50/50'
+            : 'border-gray-150 bg-gray-50/50',
+      ].join(' ')}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          {isActive && <Loader2 className="h-3 w-3 animate-spin text-indigo-500 shrink-0" />}
+          {video.phase === 'done' && <Check className="h-3 w-3 text-emerald-500 shrink-0" />}
+          {video.phase === 'error' && <AlertTriangle className="h-3 w-3 text-rose-500 shrink-0" />}
+          <span className="font-medium text-gray-800 truncate">{video.sender}</span>
+          <span className="text-gray-400 truncate">{video.filename}</span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {video.fileSize != null && (
+            <span className="text-gray-400">{formatBytes(video.fileSize)}</span>
+          )}
+          {video.duration != null && (
+            <span className="text-gray-400">{formatDuration(video.duration)}</span>
+          )}
+          <span className={`font-medium ${statusColor}`}>
+            {statusText}
+            {dlPercent != null && ` ${dlPercent}%`}
+          </span>
+        </div>
+      </div>
+      {isDownloading && (
+        <div className="mt-1.5 h-1 w-full rounded-full bg-gray-200 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-blue-500 transition-all duration-500"
+            style={{ width: dlPercent != null ? `${dlPercent}%` : '0%' }}
+          />
+        </div>
+      )}
+      {video.phase === 'error' && video.error && (
+        <p className="mt-1 text-[10px] text-rose-500 truncate">{video.error}</p>
+      )}
+    </div>
+  );
+}
+
+function StopConfirmDialog({
+  open,
+  onConfirm,
+  onCancel,
+  stopping,
+}: {
+  open: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  stopping: boolean;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="relative w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-6 shadow-xl">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={stopping}
+          className="absolute right-3 top-3 rounded-lg p-1 text-gray-400 hover:text-gray-600 transition"
+        >
+          <X className="h-4 w-4" />
+        </button>
+
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 rounded-full bg-amber-100 p-2">
+            <AlertTriangle className="h-5 w-5 text-amber-600" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold text-gray-900">Остановить транскрибацию?</h3>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Транскрибация будет остановлена. Возобновить с того же места будет <strong>невозможно</strong> — 
+              только запустить заново. Уже обработанные видео сохранятся.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={stopping}
+            className="rounded-full border border-gray-200 bg-white px-4 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={stopping}
+            className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 transition disabled:opacity-60"
+          >
+            {stopping ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Останавливаем…
+              </>
+            ) : (
+              <>
+                <Square className="h-3 w-3" />
+                Остановить
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TgTranscribePage() {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [senders, setSenders] = useState<string[]>([]);
@@ -87,27 +269,100 @@ export default function TgTranscribePage() {
   const [botChats, setBotChats] = useState<BotChat[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null);
+  const [selectedChatTopicId, setSelectedChatTopicId] = useState<number | null>(null);
+  const [isForum, setIsForum] = useState(false);
+  const [topicsLoading, setTopicsLoading] = useState(false);
+  const [fetchedTopics, setFetchedTopics] = useState<{ topicId: number; name: string }[]>([]);
+  const [selectedTopicId, setSelectedTopicId] = useState<number | null>(null);
+  const [manualTopicId, setManualTopicId] = useState('');
+  const [topicNameInput, setTopicNameInput] = useState('');
   const [videoCount, setVideoCount] = useState('5');
-  const [scanning, setScanning] = useState(false);
-  const [scanProgress, setScanProgress] = useState<{
-    scanned: number;
-    videosFound: number;
-    videoCount: number;
-    completed: number;
-    errors: number;
-    lastSender?: string;
-  } | null>(null);
-  const [scanResult, setScanResult] = useState<{
-    completed: number;
-    errors: number;
-    videosFound: number;
-    scanned: number;
-  } | null>(null);
+
+  const [activeJob, setActiveJob] = useState<ScanJob | null>(null);
+  const [scanResult, setScanResult] = useState<ScanJob | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
-  const scanAbort = useRef<AbortController | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [showStopDialog, setShowStopDialog] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
   const [showAddChat, setShowAddChat] = useState(false);
   const [addChatId, setAddChatId] = useState('');
   const [addChatTitle, setAddChatTitle] = useState('');
+
+  const isJobActive = activeJob && ['pending', 'running'].includes(activeJob.status);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const fetchJobStatus = useCallback(async (): Promise<ScanJob | null> => {
+    try {
+      const token = await getToken();
+      if (!token) return null;
+      const res = await fetch('/api/tools/tg-transcribe/scan', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { job: ScanJob | null };
+      return json.job;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      const job = await fetchJobStatus();
+      if (!job) return;
+
+      if (['pending', 'running'].includes(job.status)) {
+        setActiveJob(job);
+      } else {
+        setActiveJob(null);
+        stopPolling();
+
+        if (job.status === 'completed') {
+          setScanResult(job);
+        } else if (job.status === 'stopped') {
+          setScanResult(job);
+        } else if (job.status === 'failed') {
+          setScanError(job.error_message ?? 'Ошибка сканирования');
+          setScanResult(job);
+        }
+      }
+    }, 2000);
+  }, [fetchJobStatus, stopPolling]);
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, [stopPolling]);
+
+  // On mount: check for active/recent job
+  const initialCheckDone = useRef(false);
+  useEffect(() => {
+    if (initialCheckDone.current) return;
+    initialCheckDone.current = true;
+
+    (async () => {
+      const job = await fetchJobStatus();
+      if (!job) return;
+
+      if (['pending', 'running'].includes(job.status)) {
+        setActiveJob(job);
+        startPolling();
+      } else if (['completed', 'failed', 'stopped'].includes(job.status)) {
+        setScanResult(job);
+        if (job.status === 'failed') {
+          setScanError(job.error_message ?? 'Ошибка сканирования');
+        }
+      }
+    })();
+  }, [fetchJobStatus, startPolling]);
 
   const fetchChats = useCallback(async () => {
     setChatsLoading(true);
@@ -122,6 +377,7 @@ export default function TgTranscribePage() {
       setBotChats(json.chats ?? []);
       if (json.chats?.length && !selectedChatId) {
         setSelectedChatId(json.chats[0].chatId);
+        setSelectedChatTopicId(json.chats[0].topicId ?? null);
       }
     } catch {
       /* ignore */
@@ -129,6 +385,66 @@ export default function TgTranscribePage() {
       setChatsLoading(false);
     }
   }, [selectedChatId]);
+
+  const fetchTopics = useCallback(async (chatId: number) => {
+    setTopicsLoading(true);
+    setIsForum(false);
+    setFetchedTopics([]);
+    setSelectedTopicId(null);
+    setManualTopicId('');
+    setTopicNameInput('');
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`/api/tools/tg-transcribe/chats/topics?chatId=${chatId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        isForum: boolean;
+        topics?: { topicId: number; name: string }[];
+      };
+      setIsForum(json.isForum);
+      if (json.topics?.length) {
+        setFetchedTopics(json.topics);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setTopicsLoading(false);
+    }
+  }, []);
+
+  const [deleting, setDeleting] = useState(false);
+  const onDeleteChat = async () => {
+    if (!selectedChatId || deleting) return;
+    const chat = botChats.find(
+      (c) => c.chatId === selectedChatId && (c.topicId ?? null) === selectedChatTopicId,
+    );
+    if (!chat) return;
+    setDeleting(true);
+    try {
+      const token = await getToken();
+      const params = new URLSearchParams({ chatId: String(chat.chatId) });
+      if (chat.topicId != null) params.set('topicId', String(chat.topicId));
+      const res = await fetch(`/api/tools/tg-transcribe/chats?${params}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setSelectedChatId(null);
+        setSelectedChatTopicId(null);
+        void fetchChats();
+      } else {
+        const json = await res.json().catch(() => ({})) as { error?: string };
+        setScanError(json.error ?? 'Не удалось удалить');
+      }
+    } catch {
+      setScanError('Ошибка при удалении');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const onAddChat = async () => {
     const id = parseInt(addChatId, 10);
@@ -138,11 +454,22 @@ export default function TgTranscribePage() {
       const res = await fetch('/api/tools/tg-transcribe/chats/add', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatId: id, title: addChatTitle || undefined }),
+        body: JSON.stringify({
+          chatId: id,
+          title: addChatTitle || undefined,
+          topicId: selectedTopicId ?? (manualTopicId ? parseInt(manualTopicId, 10) : undefined) ?? undefined,
+          topicName: isForum
+            ? ((fetchedTopics.find((t) => t.topicId === selectedTopicId)?.name ?? topicNameInput) || undefined)
+            : undefined,
+        }),
       });
       if (res.ok) {
         setAddChatId('');
         setAddChatTitle('');
+        setManualTopicId('');
+        setTopicNameInput('');
+        setFetchedTopics([]);
+        setSelectedTopicId(null);
         setShowAddChat(false);
         void fetchChats();
       } else {
@@ -167,9 +494,7 @@ export default function TgTranscribePage() {
 
     setScanError(null);
     setScanResult(null);
-    setScanProgress(null);
-    setScanning(true);
-    scanAbort.current = new AbortController();
+    setActiveJob(null);
 
     try {
       const token = await getToken();
@@ -179,8 +504,11 @@ export default function TgTranscribePage() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ chatId: selectedChatId, videoCount: count }),
-        signal: scanAbort.current.signal,
+        body: JSON.stringify({
+          chatId: selectedChatId,
+          videoCount: count,
+          topicId: selectedChatTopicId,
+        }),
       });
 
       if (!res.ok) {
@@ -191,57 +519,41 @@ export default function TgTranscribePage() {
         return;
       }
 
-      const reader = res.body?.getReader();
-      if (!reader) {
-        setScanError('Нет потока данных');
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'progress') {
-              setScanProgress({
-                scanned: obj.scanned,
-                videosFound: obj.videosFound,
-                videoCount: obj.videoCount,
-                completed: obj.completed,
-                errors: obj.errors,
-                lastSender: obj.lastSender,
-              });
-            } else if (obj.type === 'done') {
-              setScanResult({
-                completed: obj.completed,
-                errors: obj.errors,
-                videosFound: obj.videosFound,
-                scanned: obj.scanned,
-              });
-              void fetchItems(activeSender, offset);
-              void fetchSenders();
-            }
-          } catch {
-            /* skip malformed line */
-          }
-        }
-      }
+      const json = (await res.json()) as { job: ScanJob };
+      setActiveJob(json.job);
+      startPolling();
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return;
       setScanError(err instanceof Error ? err.message : 'Ошибка');
+    }
+  };
+
+  const onStopScan = async () => {
+    if (!activeJob) return;
+    setStopping(true);
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/tools/tg-transcribe/scan', {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ jobId: activeJob.id }),
+      });
+
+      if (res.ok) {
+        setShowStopDialog(false);
+        // Polling will pick up the stopped status and clean up
+      } else {
+        const json = await res.json().catch(() => ({})) as { error?: string };
+        setScanError(json.error ?? 'Не удалось остановить');
+        setShowStopDialog(false);
+      }
+    } catch {
+      setScanError('Ошибка при остановке');
+      setShowStopDialog(false);
     } finally {
-      setScanning(false);
-      setScanProgress(null);
+      setStopping(false);
     }
   };
 
@@ -302,6 +614,18 @@ export default function TgTranscribePage() {
     void fetchItems(activeSender, offset);
   }, [activeSender, offset, fetchItems]);
 
+  // Refresh transcript list when a job finishes
+  const prevJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeJob) {
+      prevJobRef.current = activeJob.id;
+    } else if (prevJobRef.current && scanResult) {
+      void fetchItems(activeSender, offset);
+      void fetchSenders();
+      prevJobRef.current = null;
+    }
+  }, [activeJob, scanResult, activeSender, offset, fetchItems, fetchSenders]);
+
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
     setOffset(0);
@@ -355,73 +679,170 @@ export default function TgTranscribePage() {
             <Search className="h-4 w-4 text-indigo-500" />
             Сканировать видео из группы
           </summary>
-          <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+          <div className="border-t border-gray-100 px-4 py-4 space-y-4">
             <p className="text-xs text-gray-500">
               Выберите группу и укажите сколько последних видео нужно найти и транскрибировать.
               Бот сам пройдётся по сообщениям от новых к старым.
             </p>
-            <div className="flex items-end gap-3 flex-wrap">
-              <label className="space-y-1 min-w-[200px] flex-1 max-w-xs">
-                <span className="text-[11px] font-medium text-gray-500">Группа</span>
-                <div className="flex items-center gap-1.5">
-                  <select
-                    value={selectedChatId ?? ''}
-                    onChange={(e) => setSelectedChatId(e.target.value ? Number(e.target.value) : null)}
-                    disabled={chatsLoading}
-                    className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                  >
-                    {botChats.length === 0 && (
-                      <option value="">{chatsLoading ? 'Загрузка...' : 'Нет групп — добавьте бота в группу'}</option>
-                    )}
-                    {botChats.map((c) => (
-                      <option key={c.chatId} value={c.chatId}>
-                        {c.title || `Chat ${c.chatId}`}
-                      </option>
-                    ))}
-                  </select>
+
+            {/* Row 1: Group selector */}
+            <div className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Группа</span>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedChatId != null ? `${selectedChatId}:${selectedChatTopicId ?? ''}` : ''}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (!val) {
+                      setSelectedChatId(null);
+                      setSelectedChatTopicId(null);
+                      return;
+                    }
+                    const [cid, tid] = val.split(':');
+                    setSelectedChatId(Number(cid));
+                    setSelectedChatTopicId(tid ? Number(tid) : null);
+                  }}
+                  disabled={chatsLoading}
+                  className="block w-full max-w-xs rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                >
+                  {botChats.length === 0 && (
+                    <option value="">{chatsLoading ? 'Загрузка...' : 'Нет групп — добавьте бота в группу'}</option>
+                  )}
+                  {botChats.map((c, i) => (
+                    <option key={`${c.chatId}-${c.topicId ?? 'all'}-${i}`} value={`${c.chatId}:${c.topicId ?? ''}`}>
+                      {c.title || `Chat ${c.chatId}`}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void fetchChats()}
+                  disabled={chatsLoading}
+                  className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-2 text-gray-500 hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Обновить список групп"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${chatsLoading ? 'animate-spin' : ''}`} />
+                </button>
+                {selectedChatId && (
                   <button
                     type="button"
-                    onClick={() => void fetchChats()}
-                    disabled={chatsLoading}
-                    className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-1.5 text-gray-500 hover:text-indigo-600 hover:border-indigo-300 transition"
-                    title="Обновить список групп"
+                    onClick={() => void onDeleteChat()}
+                    className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 p-2 text-gray-400 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 cursor-pointer transition"
+                    title="Удалить группу из списка"
                   >
-                    <RefreshCw className={`h-3.5 w-3.5 ${chatsLoading ? 'animate-spin' : ''}`} />
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAddChat(!showAddChat)}
+                  className="shrink-0 text-xs text-indigo-600 hover:text-indigo-800 cursor-pointer transition font-medium"
+                >
+                  {showAddChat ? 'Отмена' : '+ Добавить'}
+                </button>
+              </div>
+            </div>
+
+            {/* Inline add-chat form */}
+            {showAddChat && (
+              <div className="space-y-2 pl-0.5">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={addChatId}
+                    onChange={(e) => {
+                      setAddChatId(e.target.value);
+                      setIsForum(false);
+                      setFetchedTopics([]);
+                      setSelectedTopicId(null);
+                      setManualTopicId('');
+                      setTopicNameInput('');
+                    }}
+                    placeholder="ID чата, напр. -1001234567890"
+                    className="block w-48 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                  />
+                  <input
+                    type="text"
+                    value={addChatTitle}
+                    onChange={(e) => setAddChatTitle(e.target.value)}
+                    placeholder="Название (необяз.)"
+                    className="block w-40 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const id = parseInt(addChatId, 10);
+                      if (id) void fetchTopics(id);
+                    }}
+                    disabled={!addChatId || topicsLoading}
+                    className="shrink-0 inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {topicsLoading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      'Проверить подчаты'
+                    )}
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowAddChat(!showAddChat)}
-                    className="shrink-0 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-[10px] font-medium text-gray-500 hover:text-indigo-600 hover:border-indigo-300 transition"
+                    onClick={() => void onAddChat()}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-indigo-700 cursor-pointer transition"
                   >
-                    + Добавить
+                    Добавить
                   </button>
                 </div>
-                {showAddChat && (
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <input
-                      type="text"
-                      value={addChatId}
-                      onChange={(e) => setAddChatId(e.target.value)}
-                      placeholder="-1001234567890"
-                      className="block w-40 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                    />
-                    <input
-                      type="text"
-                      value={addChatTitle}
-                      onChange={(e) => setAddChatTitle(e.target.value)}
-                      placeholder="Название (необяз.)"
-                      className="block w-36 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void onAddChat()}
-                      className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 transition"
-                    >
-                      OK
-                    </button>
+                {isForum && (
+                  <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2">
+                    <span className="text-[11px] font-medium text-amber-700">
+                      Это форум-группа с подчатами
+                    </span>
+                    {fetchedTopics.length > 0 ? (
+                      <select
+                        value={selectedTopicId ?? ''}
+                        onChange={(e) => setSelectedTopicId(e.target.value ? Number(e.target.value) : null)}
+                        className="block w-full max-w-xs rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                      >
+                        <option value="">Все подчаты (General)</option>
+                        {fetchedTopics.map((t) => (
+                          <option key={t.topicId} value={t.topicId}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <>
+                        <p className="text-[10px] text-gray-500">
+                          Не удалось автоматически загрузить подчаты. Укажите ID и название вручную.
+                          ID можно найти в URL Telegram Web (например, t.me/c/…/<strong>2420</strong> → ID = 2420).
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={manualTopicId}
+                            onChange={(e) => setManualTopicId(e.target.value)}
+                            placeholder="ID подчата"
+                            className="block w-28 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={topicNameInput}
+                            onChange={(e) => setTopicNameInput(e.target.value)}
+                            placeholder="Название подчата"
+                            className="block w-44 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
-              </label>
+                {!isForum && !topicsLoading && addChatId && (
+                  <p className="text-[10px] text-gray-400">Обычная группа (без подчатов)</p>
+                )}
+              </div>
+            )}
+
+            {/* Row 2: Video count + Scan button + Stop button */}
+            <div className="flex items-end gap-3">
               <label className="space-y-1">
                 <span className="text-[11px] font-medium text-gray-500">Кол-во видео</span>
                 <input
@@ -430,32 +851,35 @@ export default function TgTranscribePage() {
                   max={50}
                   value={videoCount}
                   onChange={(e) => setVideoCount(e.target.value)}
-                  className="block w-24 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                  disabled={!!isJobActive}
+                  className="block w-20 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none disabled:opacity-50"
                 />
               </label>
-              <button
-                type="button"
-                onClick={onScan}
-                disabled={scanning || !selectedChatId}
-                className={[
-                  'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
-                  scanning || !selectedChatId
-                    ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                    : 'bg-indigo-600 text-white hover:bg-indigo-700',
-                ].join(' ')}
-              >
-                {scanning ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Сканирование...
-                  </>
-                ) : (
-                  <>
-                    <Search className="h-3.5 w-3.5" />
-                    Сканировать
-                  </>
-                )}
-              </button>
+              {isJobActive ? (
+                <button
+                  type="button"
+                  onClick={() => setShowStopDialog(true)}
+                  className="inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition bg-rose-600 text-white hover:bg-rose-700"
+                >
+                  <Square className="h-3 w-3" />
+                  Остановить
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onScan}
+                  disabled={!selectedChatId}
+                  className={[
+                    'inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold shadow-sm transition',
+                    !selectedChatId
+                      ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer',
+                  ].join(' ')}
+                >
+                  <Search className="h-3.5 w-3.5" />
+                  Сканировать
+                </button>
+              )}
             </div>
 
             {scanError && (
@@ -465,41 +889,106 @@ export default function TgTranscribePage() {
               </div>
             )}
 
-            {scanning && scanProgress && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-gray-600">
-                  <span>
-                    Найдено видео: {scanProgress.videosFound} из {scanProgress.videoCount}
-                    {scanProgress.lastSender && (
-                      <span className="text-gray-400"> — {scanProgress.lastSender}</span>
+            {/* Active job progress */}
+            {isJobActive && activeJob && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2">
+                  <div className="flex items-center gap-2 text-xs text-indigo-700">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span className="font-medium">Транскрибация выполняется в фоне</span>
+                  </div>
+                  <span className="text-[10px] text-indigo-500">
+                    Можно закрыть страницу — процесс продолжится
+                  </span>
+                </div>
+
+                {activeJob.videos_found > 0 || activeJob.scanned > 0 ? (
+                  <>
+                    <div className="flex items-center justify-between text-xs text-gray-600">
+                      {activeJob.videos_found > 0 ? (
+                        <span>
+                          Найдено видео: {activeJob.videos_found} из {activeJob.video_count}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500">
+                          Поиск видео… проверено {activeJob.scanned} сообщ.
+                        </span>
+                      )}
+                      {activeJob.scanned > 0 && (
+                        <span className="text-gray-400">
+                          проверено {activeJob.scanned} сообщ.
+                        </span>
+                      )}
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-gray-200 overflow-hidden">
+                      {activeJob.videos_found > 0 ? (
+                        <div
+                          className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                          style={{ width: `${Math.round((activeJob.videos_found / activeJob.video_count) * 100)}%` }}
+                        />
+                      ) : (
+                        <div className="h-full rounded-full bg-indigo-300 animate-pulse" style={{ width: '30%' }} />
+                      )}
+                    </div>
+                    {activeJob.videos_found > 0 && (
+                      <div className="flex gap-3 text-[10px] text-gray-400">
+                        <span className="text-emerald-600">{activeJob.completed} транскрибировано</span>
+                        {activeJob.errors > 0 && (
+                          <span className="text-rose-500">{activeJob.errors} ошибок</span>
+                        )}
+                      </div>
                     )}
-                  </span>
-                  <span className="text-gray-400">
-                    проверено {scanProgress.scanned} сообщ.
-                  </span>
-                </div>
-                <div className="h-1.5 w-full rounded-full bg-gray-200 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-indigo-500 transition-all duration-300"
-                    style={{ width: `${Math.round((scanProgress.videosFound / scanProgress.videoCount) * 100)}%` }}
-                  />
-                </div>
-                <div className="flex gap-3 text-[10px] text-gray-400">
-                  <span className="text-emerald-600">{scanProgress.completed} транскрибировано</span>
-                  {scanProgress.errors > 0 && (
-                    <span className="text-rose-500">{scanProgress.errors} ошибок</span>
-                  )}
-                </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-gray-400">Запуск сканирования…</p>
+                )}
+
+                {activeJob.videos && activeJob.videos.length > 0 && (
+                  <div className="space-y-1.5">
+                    {activeJob.videos.map((v) => (
+                      <ScanVideoRow key={v.idx} video={v} />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
-            {scanResult && (
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
-                Готово: <strong>{scanResult.completed}</strong> транскрибировано
-                {scanResult.errors > 0 && (
-                  <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
+            {/* Finished job result */}
+            {!isJobActive && scanResult && (
+              <div
+                className={[
+                  'rounded-lg border px-3 py-2 text-xs',
+                  scanResult.status === 'stopped'
+                    ? 'border-amber-200 bg-amber-50 text-amber-800'
+                    : scanResult.status === 'failed'
+                      ? 'border-rose-200 bg-rose-50 text-rose-800'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-800',
+                ].join(' ')}
+              >
+                {scanResult.status === 'stopped' ? (
+                  <>
+                    Остановлено. <strong>{scanResult.completed}</strong> транскрибировано
+                    {scanResult.errors > 0 && (
+                      <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
+                    )}
+                    . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
+                  </>
+                ) : scanResult.status === 'failed' ? (
+                  <>
+                    Ошибка: {scanResult.error_message ?? 'Неизвестная ошибка'}
+                    {scanResult.completed > 0 && (
+                      <>. <strong>{scanResult.completed}</strong> транскрибировано до ошибки.</>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    Готово: <strong>{scanResult.completed}</strong> транскрибировано
+                    {scanResult.errors > 0 && (
+                      <>, <strong className="text-rose-600">{scanResult.errors}</strong> ошибок</>
+                    )}
+                    . Найдено {scanResult.videos_found} видео среди {scanResult.scanned} сообщений.
+                  </>
                 )}
-                . Найдено {scanResult.videosFound} видео среди {scanResult.scanned} сообщений.
               </div>
             )}
           </div>
@@ -733,6 +1222,14 @@ export default function TgTranscribePage() {
           </div>
         )}
       </div>
+
+      {/* Stop confirmation dialog */}
+      <StopConfirmDialog
+        open={showStopDialog}
+        onConfirm={() => void onStopScan()}
+        onCancel={() => setShowStopDialog(false)}
+        stopping={stopping}
+      />
     </div>
   );
 }

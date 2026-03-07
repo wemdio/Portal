@@ -11,6 +11,7 @@ type Props = {
   offset: number;
   loading: boolean;
   actionsBusy: boolean;
+  exportProgress?: string | null;
   addToDatabaseDisabled?: boolean;
   jobId?: string | null;
   jobStatus?: ParserJobStatus | null;
@@ -188,6 +189,7 @@ export function VacancyResults({
   offset,
   loading,
   actionsBusy,
+  exportProgress,
   addToDatabaseDisabled,
   jobId,
   jobStatus,
@@ -295,7 +297,13 @@ export function VacancyResults({
             </p>
           </div>
 
-          <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2">
+          <div className="grid grid-cols-4 gap-2 w-full sm:flex sm:w-auto sm:flex-wrap sm:justify-end sm:gap-2 sm:items-center">
+            {exportProgress ? (
+              <div className="col-span-4 flex items-center justify-center gap-2 text-xs text-gray-500 sm:col-span-1 sm:mr-1">
+                <div className="h-3.5 w-3.5 rounded-full border-2 border-gray-300 border-t-transparent animate-spin flex-shrink-0" />
+                <span className="whitespace-nowrap">{exportProgress}</span>
+              </div>
+            ) : null}
             <button
               type="button"
               onClick={onAddToDatabase}

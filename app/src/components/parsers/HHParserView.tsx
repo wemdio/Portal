@@ -83,7 +83,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-const exportLimit = 200;
+const exportLimit = 1000;
 
 function exportRow(v: HHVacancyRow) {
   return [
@@ -226,7 +226,7 @@ function downloadBlob(content: string, mime: string, filename: string) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 function toUiError(error: unknown, fallback: string): UiError {
@@ -268,6 +268,7 @@ export function HHParserView() {
   const [exporting, setExporting] = useState(false);
   const [copying, setCopying] = useState(false);
   const [addingToDb, setAddingToDb] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
   const [jobActionId, setJobActionId] = useState<string | null>(null);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
@@ -330,8 +331,12 @@ export function HHParserView() {
       all.push(...chunk);
       if (chunk.length === 0) break;
       offset += chunk.length;
+      if (total > 0) {
+        setExportProgress(`${Math.min(offset, total)} / ${total}`);
+      }
     }
 
+    setExportProgress(null);
     return all;
   }, []);
 
@@ -418,21 +423,22 @@ export function HHParserView() {
     if (activeJob?.status !== 'running') return;
     const interval = setInterval(() => {
       void refreshJobs();
+      const offset = Math.max(0, (resultsPage - 1) * resultsLimit);
+      void loadResults(activeJobId, offset, false);
     }, 5000);
     return () => clearInterval(interval);
-  }, [activeJobId, activeJob?.status, refreshJobs]);
+  }, [activeJobId, activeJob?.status, refreshJobs, loadResults, resultsPage, resultsLimit]);
 
   useEffect(() => {
     if (!activeJob) return;
-    if (activeJob.status === 'completed') {
+    if (activeJob.status === 'completed' || activeJob.status === 'failed') {
       const offset = Math.max(0, (resultsPage - 1) * resultsLimit);
       void loadResults(activeJob.id, offset, false);
-      return;
     }
     if (activeJob.status === 'failed' && activeJob.error_message) {
       setError({ message: activeJob.error_message });
     }
-  }, [activeJob, loadResults, resultsLimit, resultsPage]);
+  }, [activeJob?.id, activeJob?.status, loadResults, resultsLimit, resultsPage]);
 
   const totalPages = Math.max(1, Math.ceil(resultsCount / resultsLimit));
 
@@ -540,9 +546,13 @@ export function HHParserView() {
     setError(null);
     try {
       const items = await resolveExportItems();
-      if (items.length === 0) return;
-      const csv = buildCsv(items);
+      if (items.length === 0) {
+        setToast({ tone: 'error', message: 'Нет данных для экспорта' });
+        return;
+      }
+      const csv = '\uFEFF' + buildCsv(items);
       downloadBlob(csv, 'text/csv;charset=utf-8', `hh_results_${activeJobId ?? 'job'}.csv`);
+      setToast({ tone: 'success', message: `CSV: скачано ${items.length} строк` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка экспорта CSV'));
     } finally {
@@ -555,9 +565,13 @@ export function HHParserView() {
     setError(null);
     try {
       const items = await resolveExportItems();
-      if (items.length === 0) return;
+      if (items.length === 0) {
+        setToast({ tone: 'error', message: 'Нет данных для экспорта' });
+        return;
+      }
       const html = buildExcelHtml(items);
       downloadBlob(html, 'application/vnd.ms-excel;charset=utf-8', `hh_results_${activeJobId ?? 'job'}.xls`);
+      setToast({ tone: 'success', message: `Excel: скачано ${items.length} строк` });
     } catch (e: unknown) {
       setError(toUiError(e, 'Ошибка экспорта Excel'));
     } finally {
@@ -731,6 +745,7 @@ export function HHParserView() {
           offset={resultsOffset}
           loading={resultsLoading}
           actionsBusy={actionsBusy}
+          exportProgress={exportProgress}
           addToDatabaseDisabled={addingToDb}
           jobId={activeJob?.id ?? null}
           jobStatus={activeJob?.status ?? null}
