@@ -902,36 +902,35 @@ export function DatabaseSpreadsheet() {
       columnWidths,
       savedAt: Date.now(),
     };
-    const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
-    if (totalRows <= LARGE_DATASET_ROW_THRESHOLD) {
-      try {
-        window.localStorage.setItem(storageKey, JSON.stringify(payload));
-      } catch (error) {
-        void logError('spreadsheet.state.local_save.failed', error);
-      }
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch {
+      /* quota exceeded — acceptable for very large datasets */
     }
     if (userId) {
-      const isLarge = totalRows > LARGE_DATASET_ROW_THRESHOLD;
-      if (isLarge) {
-        if (accessTokenRef.current) {
-          void backgroundSave(
-            { user_id: userId, state: payload, updated_at: new Date().toISOString() },
-            accessTokenRef.current,
-            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
-          );
+      const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const sbKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      if (sbUrl && sbKey && accessTokenRef.current) {
+        try {
+          void fetch(`${sbUrl}/rest/v1/database_spreadsheet_states`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Prefer': 'resolution=merge-duplicates,return=minimal',
+              'apikey': sbKey,
+              'Authorization': `Bearer ${accessTokenRef.current}`,
+            },
+            body: JSON.stringify({
+              user_id: userId,
+              state: payload,
+              updated_at: new Date().toISOString(),
+            }),
+            keepalive: true,
+          });
+        } catch {
+          /* best-effort during unload */
         }
-        return;
       }
-      void supabase
-        .from('database_spreadsheet_states')
-        .upsert({
-          user_id: userId,
-          state: payload,
-          updated_at: new Date().toISOString(),
-        })
-        .then(({ error }) => {
-          if (error) void logError('spreadsheet.state.remote_save.failed', error);
-        });
     }
   };
 
@@ -6509,12 +6508,10 @@ export function DatabaseSpreadsheet() {
     const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
     const delay = isLargeDataset ? STORAGE_SAVE_DELAY_LARGE : STORAGE_SAVE_DELAY;
 
-    if (!isLargeDataset) {
-      try {
-        window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
-      } catch (error) {
-        void logError('spreadsheet.state.local_save.failed', error);
-      }
+    try {
+      window.localStorage.setItem(storageKeySnapshot, JSON.stringify(payload));
+    } catch {
+      /* quota exceeded — acceptable for very large datasets */
     }
 
     saveTimeoutRef.current = setTimeout(() => {
