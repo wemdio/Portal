@@ -79,6 +79,13 @@ export interface Task {
   column_id?: string | null;
 }
 
+export interface ProjectNote {
+  id: string;
+  project_id: string;
+  title: string;
+  created_at?: string;
+}
+
 export interface TaskBoard {
   id: string;
   name: string;
