@@ -9,4 +9,5 @@ CREATE INDEX IF NOT EXISTS idx_project_notes_project_id ON public.project_notes(
 
 ALTER TABLE public.project_notes ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "project_notes_all" ON public.project_notes;
 CREATE POLICY "project_notes_all" ON public.project_notes FOR ALL USING (true) WITH CHECK (true);
