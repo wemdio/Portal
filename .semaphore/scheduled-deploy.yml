@@ -80,6 +80,17 @@ blocks:
                 sudo -n docker volume prune -f;
                 echo '--- Deploy complete ---'"
 
+              echo "--- Waiting 15s for container to stabilize ---"
+              sleep 15
+
+              echo "--- Docker container status ---"
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+                "sudo -n docker ps -a --filter name=portal --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
+
+              echo "--- Portal container logs (last 200 lines) ---"
+              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+                "sudo -n docker logs portal --tail 200 2>&1" || true
+
               sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"
               echo "[scheduled] Saved last_deploy_sha on server."
