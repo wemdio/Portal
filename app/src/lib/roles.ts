@@ -15,7 +15,7 @@ export const ALL_ROLES: UserRole[] = ['technician', 'manager', 'director', 'admi
 
 const ROLES_CAN_CREATE_PROJECTS: UserRole[] = ['admin', 'manager', 'technician', 'director', 'lead'];
 const ROLES_CAN_EDIT_PROJECTS: UserRole[] = ['admin', 'manager', 'technician', 'director', 'sales', 'marketer', 'lead'];
-const ROLES_CAN_DELETE_PROJECTS: UserRole[] = ['admin', 'manager', 'director'];
+const ROLES_CAN_DELETE_PROJECTS: UserRole[] = ['admin', 'manager', 'director', 'lead'];
 const ROLES_CAN_MANAGE_USERS: UserRole[] = ['admin'];
 const ROLES_CAN_ACCESS_BILLING_CALENDAR: UserRole[] = ['technician', 'lead', 'admin', 'director'];
 
