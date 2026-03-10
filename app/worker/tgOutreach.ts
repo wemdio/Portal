@@ -1,5 +1,6 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep, pollLoop } from './_shared';
 import { runCampaignLoop } from '@/lib/tgOutreach/campaignLoop';
+import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
@@ -60,13 +61,43 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
   let stopRequested = false;
   const stopFn = () => { stopRequested = true; };
 
-  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested)
+  const { data: campaign } = await db
+    .from('tg_outreach_campaigns')
+    .select('name, user_id')
+    .eq('id', campaignId)
+    .single();
+
+  const trace = await startTrace({
+    name: 'tg-outreach.campaign.run',
+    input: {
+      campaignId,
+      campaignName: campaign?.name,
+      route: 'tg_outreach_worker',
+      userId: campaign?.user_id,
+    },
+    message: `TG Аутрич: ${campaign?.name ?? campaignId}`,
+    userId: campaign?.user_id ?? null,
+  });
+
+  const requestId = trace?.traceId ?? crypto.randomUUID();
+  if (trace) {
+    await db
+      .from('trace_spans')
+      .update({ input: { campaignId, campaignName: campaign?.name, requestId, route: 'tg_outreach_worker', userId: campaign?.user_id } })
+      .eq('id', trace.id);
+  }
+
+  const traceContext = trace ? { requestId } : undefined;
+
+  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested, traceContext)
     .then(() => {
       log('info', `Campaign ${campaignId} loop finished`);
+      void trace?.end({ status: 'stopped' });
     })
     .catch((err) => {
       log('error', `Campaign ${campaignId} loop error: ${err instanceof Error ? err.message : String(err)}`);
       void db.from('tg_outreach_campaigns').update({ status: 'error', updated_at: new Date().toISOString() }).eq('id', campaignId);
+      void trace?.fail(err);
     })
     .finally(() => {
       runningCampaigns.delete(campaignId);

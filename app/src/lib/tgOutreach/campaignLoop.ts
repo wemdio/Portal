@@ -12,6 +12,7 @@ import { DEFAULT_FOLLOW_UP } from './types';
 import type { ActiveClient } from './gramClient';
 import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
+import { truncateMessage } from '@/lib/logger';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -99,8 +100,30 @@ async function upsertDialog(
   }
 }
 
-async function writeLog(db: SupabaseClient, campaignId: string, level: string, message: string) {
+async function writeLog(
+  db: SupabaseClient,
+  campaignId: string,
+  level: string,
+  message: string,
+  traceContext?: { requestId: string },
+) {
   await db.from('tg_outreach_logs').insert({ campaign_id: campaignId, level, message }).then(() => {});
+
+  if (traceContext) {
+    const appLevel = level === 'warning' ? 'warn' : level;
+    await db
+      .from('application_logs')
+      .insert({
+        level: appLevel,
+        source: 'server',
+        event: 'tg-outreach.campaign.log',
+        message: truncateMessage(message),
+        context: { campaign_id: campaignId },
+        request_id: traceContext.requestId,
+        route: 'tg_outreach_worker',
+      })
+      .then(() => {});
+  }
 }
 
 async function forwardToTargetChat(
@@ -299,14 +322,17 @@ async function handleFollowUp(
   }
 }
 
+export type TraceContext = { requestId: string };
+
 export async function runCampaignLoop(
   campaignId: string,
   db: SupabaseClient,
   shouldStop: () => boolean,
+  traceContext?: TraceContext,
 ) {
   const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
     console.log(`[tg-outreach][${campaignId.slice(0, 8)}][${level}] ${msg}`);
-    await writeLog(db, campaignId, level, msg);
+    await writeLog(db, campaignId, level, msg, traceContext);
   };
 
   const log: LogFn = (level, msg) => { void logToDb(level, msg); };
