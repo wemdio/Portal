@@ -7131,7 +7131,7 @@ export function DatabaseSpreadsheet() {
         onChange={(e) => void handleBriefFileUpload(e)}
       />
 
-      <div className={`grid gap-1 ${rightPanelOpen ? 'lg:grid-cols-[minmax(0,1fr)_220px]' : 'grid-cols-1'} flex-1 min-h-0`}>
+      <div className={`grid gap-1 ${rightPanelOpen ? 'lg:grid-cols-[minmax(0,1fr)_220px]' : 'grid-cols-1'} flex-1 min-h-0 overflow-hidden`}>
         <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
           {activeReviewReq && (() => {
             const cfg: Record<string, { bg: string; border: string; text: string; icon: string; label: string }> = {
