@@ -1,4 +1,5 @@
 import { Api } from 'telegram';
+import type { Dialog } from 'telegram/tl/custom/dialog';
 import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
@@ -151,7 +152,7 @@ interface HandleChatResult {
 async function handleChat(
   client: TelegramClient,
   account: OutreachAccount,
-  dialog: Api.Dialog,
+  dialog: Dialog,
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
@@ -311,7 +312,8 @@ async function handleFollowUp(
       if (!reply) continue;
 
       await sleep(randomRange(tg.read_reply_delay_range) * 1000);
-      await client.sendMessage(BigInt(tgUserId), { message: reply });
+      const entity = await client.getEntity(tgUserId);
+      await client.sendMessage(entity, { message: reply });
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       await upsertDialog(db, campaign.id, account.id, tgUserId, dialog.tg_username as string | null, messages);
@@ -413,7 +415,7 @@ export async function runCampaignLoop(
             if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
             try {
-              await handleChat(client, account, dialog, campaign as unknown as OutreachCampaign, db, log);
+              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log);
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
 

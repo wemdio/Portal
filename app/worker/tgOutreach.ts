@@ -53,7 +53,7 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
 
   if (runningCampaigns.has(campaignId)) {
-    log('warning', `Campaign ${campaignId} already running, skipping start`);
+    log('warn', `Campaign ${campaignId} already running, skipping start`);
     await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
     return;
   }
@@ -146,7 +146,7 @@ async function pollOnce(): Promise<boolean> {
         await handleRestartJob(job);
         break;
       default:
-        log('warning', `Unknown action: ${job.action}`);
+        log('warn', `Unknown action: ${job.action}`);
         await db.from('tg_outreach_jobs').update({
           status: 'failed',
           error_message: `Unknown action: ${job.action}`,

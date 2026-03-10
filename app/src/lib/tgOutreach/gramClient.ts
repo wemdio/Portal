@@ -32,10 +32,14 @@ export async function createGramClient(
 ): Promise<TelegramClient> {
   const session = new StringSession(account.session_data);
   const proxyConfig = proxy ? parseProxyUrl(proxy.url) : undefined;
+  const proxyParams =
+    proxyConfig && (proxyConfig.socksType === 4 || proxyConfig.socksType === 5)
+      ? { proxy: { ...proxyConfig, socksType: proxyConfig.socksType } }
+      : {};
 
   const client = new TelegramClient(session, account.api_id, account.api_hash, {
     connectionRetries: 3,
-    ...(proxyConfig ? { proxy: proxyConfig } : {}),
+    ...proxyParams,
   });
 
   await client.connect();
