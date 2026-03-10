@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Project, ProjectStatus, Task, UserProfile } from '@/types';
+import { useState, useEffect, useRef } from 'react';
+import { Project, ProjectNote, ProjectStatus, Task, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
@@ -128,6 +128,86 @@ function getCommentValue(project: Project) {
   return project.comments || project.comment_elvira || project.comment_anya || '';
 }
 
+type PopoverItem = { id: string; title: string; status?: string };
+
+type ItemPopoverProps = {
+  items: PopoverItem[];
+  title: string;
+  popoverRef: React.RefObject<HTMLDivElement | null>;
+  pos: { top: number; left: number; openUp: boolean };
+  canEdit: boolean;
+  deleteConfirmId: string | null;
+  setDeleteConfirmId: (id: string | null) => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+  newValue: string;
+  setNewValue: (v: string) => void;
+  onAdd: () => void;
+  placeholder: string;
+  showStatusDot?: boolean;
+};
+
+function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot }: ItemPopoverProps) {
+  return (
+    <div
+      ref={popoverRef}
+      className="fixed z-50 w-[480px] bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
+      style={{
+        maxHeight: '80vh',
+        ...(pos.openUp
+          ? { bottom: `${window.innerHeight - pos.top + 4}px`, left: `${pos.left}px` }
+          : { top: `${pos.top + 4}px`, left: `${pos.left}px` }),
+      }}
+    >
+      <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100">
+        <span className="text-sm font-semibold text-zinc-800">{title}</span>
+        <button type="button" onClick={onClose} className="flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto overscroll-contain px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
+        {items.map((item) => {
+          const isDone = item.status === 'done';
+          return (
+            <div key={item.id} className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${isDone ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'}`}>
+              {showStatusDot && (
+                <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${isDone ? 'bg-emerald-400' : item.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
+              )}
+              <span className={`flex-1 break-words leading-relaxed ${isDone ? 'line-through text-zinc-400' : 'text-zinc-700'}`}>{item.title}</span>
+              {canEdit && (
+                deleteConfirmId === item.id ? (
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button type="button" onClick={() => { onDelete(item.id); setDeleteConfirmId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">Да</button>
+                    <button type="button" onClick={() => setDeleteConfirmId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">Нет</button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => setDeleteConfirmId(item.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title="Удалить">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 3.5h7M4.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M5 5.5v3M7 5.5v3M3.5 3.5l.5 6a1 1 0 001 1h2a1 1 0 001-1l.5-6" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  </button>
+                )
+              )}
+            </div>
+          );
+        })}
+        {items.length === 0 && <p className="text-[13px] text-zinc-400 text-center py-4">Пусто</p>}
+      </div>
+      {canEdit && (
+        <div className="flex gap-1.5 px-3 py-2.5 border-t border-zinc-100">
+          <input
+            type="text"
+            value={newValue}
+            onChange={(e) => setNewValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') onAdd(); }}
+            placeholder={placeholder}
+            className="flex-1 text-[13px] border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20 transition-all"
+          />
+          <button type="button" onClick={onAdd} className="text-[13px] bg-zinc-900 text-white px-3 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors font-medium">+</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ProjectList() {
   const isTma = useIsTma();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -158,11 +238,19 @@ export function ProjectList() {
   const [deleteConfirmTaskId, setDeleteConfirmTaskId] = useState<string | null>(null);
   const taskPopoverRef = useRef<HTMLDivElement>(null);
 
+  const [projectNotes, setProjectNotes] = useState<Record<string, ProjectNote[]>>({});
+  const [notePopoverId, setNotePopoverId] = useState<string | null>(null);
+  const [notePopoverPos, setNotePopoverPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
+  const [newNoteTitle, setNewNoteTitle] = useState('');
+  const [deleteConfirmNoteId, setDeleteConfirmNoteId] = useState<string | null>(null);
+  const notePopoverRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     void fetchProjects();
     void checkPermissions();
     void fetchAssigneeOptions();
     void fetchAllTasks();
+    void fetchAllNotes();
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -177,6 +265,17 @@ export function ProjectList() {
     window.addEventListener('scroll', close, true);
     return () => window.removeEventListener('scroll', close, true);
   }, [taskPopoverId]);
+
+  useEffect(() => {
+    if (!notePopoverId) return;
+    const close = (e: Event) => {
+      if (notePopoverRef.current?.contains(e.target as Node)) return;
+      setNotePopoverId(null);
+      setNotePopoverPos(null);
+    };
+    window.addEventListener('scroll', close, true);
+    return () => window.removeEventListener('scroll', close, true);
+  }, [notePopoverId]);
 
   async function checkPermissions() {
     const role = await getCurrentUserRole();
@@ -315,6 +414,48 @@ export function ProjectList() {
     setProjectTasks((prev) => ({
       ...prev,
       [projectId]: (prev[projectId] ?? []).filter((t) => t.id !== taskId),
+    }));
+  }
+
+  async function fetchAllNotes() {
+    try {
+      const { data, error } = await supabase
+        .from('project_notes')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const grouped: Record<string, ProjectNote[]> = {};
+      for (const n of (data ?? []) as ProjectNote[]) {
+        if (!grouped[n.project_id]) grouped[n.project_id] = [];
+        grouped[n.project_id].push(n);
+      }
+      setProjectNotes(grouped);
+    } catch {
+      // table may not exist yet
+    }
+  }
+
+  async function addNote(projectId: string, title: string) {
+    if (!title.trim()) return;
+    const { data, error } = await supabase
+      .from('project_notes')
+      .insert({ project_id: projectId, title: title.trim() })
+      .select()
+      .single();
+    if (error) return;
+    const note = data as ProjectNote;
+    setProjectNotes((prev) => ({
+      ...prev,
+      [projectId]: [note, ...(prev[projectId] ?? [])],
+    }));
+    setNewNoteTitle('');
+  }
+
+  async function deleteNote(noteId: string, projectId: string) {
+    await supabase.from('project_notes').delete().eq('id', noteId);
+    setProjectNotes((prev) => ({
+      ...prev,
+      [projectId]: (prev[projectId] ?? []).filter((n) => n.id !== noteId),
     }));
   }
 
@@ -748,7 +889,8 @@ export function ProjectList() {
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Специалист</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">Формат</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[160px]">Задачи/Комм.</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Задачи</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Заметки</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-zinc-200/50 bg-white">
@@ -1134,96 +1276,96 @@ export function ProjectList() {
                               <div
                                 className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-blue-50' : 'hover:bg-zinc-100'}`}
                                 onClick={(e) => {
-                                  if (isOpen) {
-                                    setTaskPopoverId(null);
-                                    setTaskPopoverPos(null);
-                                  } else {
+                                  if (isOpen) { setTaskPopoverId(null); setTaskPopoverPos(null); } else {
                                     const rect = e.currentTarget.getBoundingClientRect();
-                                    const popoverW = 384;
+                                    const popoverW = 480;
                                     const openUp = rect.bottom + 300 > window.innerHeight;
                                     let left = rect.left;
                                     if (left + popoverW > window.innerWidth - 8) left = window.innerWidth - popoverW - 8;
                                     if (left < 8) left = 8;
                                     setTaskPopoverId(project.id);
-                                    setTaskPopoverPos({
-                                      top: openUp ? rect.top : rect.bottom,
-                                      left,
-                                      openUp,
-                                    });
+                                    setTaskPopoverPos({ top: openUp ? rect.top : rect.bottom, left, openUp });
                                   }
                                 }}
                               >
                                 {latestTask ? (
                                   <div>
                                     <p className="text-xs text-zinc-900 line-clamp-2">{latestTask.title}</p>
-                                    {tasks.length > 1 && (
-                                      <p className="text-[10px] text-zinc-400 mt-0.5">+{tasks.length - 1} ещё</p>
-                                    )}
+                                    {tasks.length > 1 && <p className="text-[10px] text-zinc-400 mt-0.5">+{tasks.length - 1} ещё</p>}
                                   </div>
                                 ) : (
                                   <span className="text-zinc-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
                                 )}
                               </div>
                               {isOpen && taskPopoverPos && (
-                                <div
-                                  ref={taskPopoverRef}
-                                  className="fixed z-50 w-96 bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
-                                  style={{
-                                    maxHeight: '70vh',
-                                    ...(taskPopoverPos.openUp
-                                      ? { bottom: `${window.innerHeight - taskPopoverPos.top + 4}px`, left: `${taskPopoverPos.left}px` }
-                                      : { top: `${taskPopoverPos.top + 4}px`, left: `${taskPopoverPos.left}px` }),
-                                  }}
-                                >
-                                  <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100">
-                                    <span className="text-sm font-semibold text-zinc-800">Задачи</span>
-                                    <button type="button" onClick={() => { setTaskPopoverId(null); setTaskPopoverPos(null); }} className="flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
-                                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                                    </button>
+                                <ItemPopover
+                                  items={tasks}
+                                  title="Задачи"
+                                  popoverRef={taskPopoverRef}
+                                  pos={taskPopoverPos}
+                                  canEdit={canEdit}
+                                  deleteConfirmId={deleteConfirmTaskId}
+                                  setDeleteConfirmId={setDeleteConfirmTaskId}
+                                  onDelete={(id) => void deleteTask(id, project.id)}
+                                  onClose={() => { setTaskPopoverId(null); setTaskPopoverPos(null); }}
+                                  newValue={newTaskTitle}
+                                  setNewValue={setNewTaskTitle}
+                                  onAdd={() => void addTask(project.id, newTaskTitle, project.specialist)}
+                                  placeholder="Новая задача..."
+                                  showStatusDot
+                                />
+                              )}
+                            </>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-2 py-3 align-top relative">
+                        {(() => {
+                          const notes = projectNotes[project.id] ?? [];
+                          const latestNote = notes[0];
+                          const isOpen = notePopoverId === project.id;
+                          return (
+                            <>
+                              <div
+                                className={`cursor-pointer rounded-md px-2 py-1 -mx-1 transition-colors ${isOpen ? 'bg-amber-50' : 'hover:bg-zinc-100'}`}
+                                onClick={(e) => {
+                                  if (isOpen) { setNotePopoverId(null); setNotePopoverPos(null); } else {
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    const popoverW = 480;
+                                    const openUp = rect.bottom + 300 > window.innerHeight;
+                                    let left = rect.left;
+                                    if (left + popoverW > window.innerWidth - 8) left = window.innerWidth - popoverW - 8;
+                                    if (left < 8) left = 8;
+                                    setNotePopoverId(project.id);
+                                    setNotePopoverPos({ top: openUp ? rect.top : rect.bottom, left, openUp });
+                                  }
+                                }}
+                              >
+                                {latestNote ? (
+                                  <div>
+                                    <p className="text-xs text-zinc-900 line-clamp-2">{latestNote.title}</p>
+                                    {notes.length > 1 && <p className="text-[10px] text-zinc-400 mt-0.5">+{notes.length - 1} ещё</p>}
                                   </div>
-                                  <div className="flex-1 overflow-y-auto overscroll-contain px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
-                                    {tasks.map((t) => (
-                                      <div key={t.id} className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${t.status === 'done' ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'}`}>
-                                        <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${t.status === 'done' ? 'bg-emerald-400' : t.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
-                                        <span className={`flex-1 break-words leading-relaxed ${t.status === 'done' ? 'line-through text-zinc-400' : 'text-zinc-700'}`}>{t.title}</span>
-                                        {canEdit && (
-                                          deleteConfirmTaskId === t.id ? (
-                                            <div className="flex items-center gap-1 flex-shrink-0">
-                                              <button type="button" onClick={() => { void deleteTask(t.id, project.id); setDeleteConfirmTaskId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">Да</button>
-                                              <button type="button" onClick={() => setDeleteConfirmTaskId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">Нет</button>
-                                            </div>
-                                          ) : (
-                                            <button type="button" onClick={() => setDeleteConfirmTaskId(t.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title="Удалить задачу">
-                                              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 3.5h7M4.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M5 5.5v3M7 5.5v3M3.5 3.5l.5 6a1 1 0 001 1h2a1 1 0 001-1l.5-6" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                                            </button>
-                                          )
-                                        )}
-                                      </div>
-                                    ))}
-                                    {tasks.length === 0 && <p className="text-[13px] text-zinc-400 text-center py-4">Нет задач</p>}
-                                  </div>
-                                  {canEdit && (
-                                    <div className="flex gap-1.5 px-3 py-2.5 border-t border-zinc-100">
-                                      <input
-                                        type="text"
-                                        value={newTaskTitle}
-                                        onChange={(e) => setNewTaskTitle(e.target.value)}
-                                        onKeyDown={(e) => {
-                                          if (e.key === 'Enter') void addTask(project.id, newTaskTitle, project.specialist);
-                                        }}
-                                        placeholder="Новая задача..."
-                                        className="flex-1 text-[13px] border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/20 transition-all"
-                                      />
-                                      <button
-                                        type="button"
-                                        onClick={() => void addTask(project.id, newTaskTitle, project.specialist)}
-                                        className="text-[13px] bg-zinc-900 text-white px-3 py-1.5 rounded-lg hover:bg-zinc-800 transition-colors font-medium"
-                                      >
-                                        +
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
+                                ) : (
+                                  <span className="text-zinc-300 text-xs">{canEdit ? '+ заметка' : '—'}</span>
+                                )}
+                              </div>
+                              {isOpen && notePopoverPos && (
+                                <ItemPopover
+                                  items={notes}
+                                  title="Заметки"
+                                  popoverRef={notePopoverRef}
+                                  pos={notePopoverPos}
+                                  canEdit={canEdit}
+                                  deleteConfirmId={deleteConfirmNoteId}
+                                  setDeleteConfirmId={setDeleteConfirmNoteId}
+                                  onDelete={(id) => void deleteNote(id, project.id)}
+                                  onClose={() => { setNotePopoverId(null); setNotePopoverPos(null); }}
+                                  newValue={newNoteTitle}
+                                  setNewValue={setNewNoteTitle}
+                                  onAdd={() => void addNote(project.id, newNoteTitle)}
+                                  placeholder="Новая заметка..."
+                                />
                               )}
                             </>
                           );

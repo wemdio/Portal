@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Menu } from 'lucide-react';
 import { Sidebar } from './Sidebar';
+import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
 
@@ -34,7 +35,6 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     };
   }, [isTma, pathname]);
 
-  // When switching to desktop layout, treat menu as closed without setState in effect
   const mobileMenuOpenResolved = isMobileLayout && mobileMenuOpen;
 
   const isToolsPage = pathname === '/tools';
@@ -52,7 +52,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       pathname.startsWith('/admin')
     );
   const mainOverflowClass = !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
-  const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-8';
+  const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-6';
   const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
   const contentPadding = isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
@@ -61,10 +61,12 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     isRdpPage || isSpreadsheetPage || isGuestReviewPage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   const shellClassName = isTma
-    ? 'flex min-h-screen overflow-hidden'
+    ? 'flex flex-col min-h-screen overflow-hidden'
     : isSpreadsheetPage
-      ? 'flex h-screen overflow-hidden'
-      : 'flex min-h-screen overflow-x-hidden';
+      ? 'flex flex-col h-screen overflow-hidden'
+      : 'flex flex-col min-h-screen overflow-x-hidden';
+
+  const hideNav = isSpreadsheetPage || isGuestReviewPage;
 
   return (
     <div
@@ -74,7 +76,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       }}
     >
       {!isTma ? (
-        isSpreadsheetPage || isGuestReviewPage ? null : (
+        hideNav ? null : (
           <>
             {isMobileLayout ? (
               <>
@@ -98,15 +100,12 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
                 />
               </>
             ) : (
-              <>
-                <Sidebar collapsed={false} isTma={false} />
-                <div className="flex-shrink-0 w-40" />
-              </>
+              <TopNav />
             )}
           </>
         )
       ) : null}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 min-h-0 flex-1 flex-col">
         {isTma && <TmaHeader />}
         <main
           className={`flex-1 flex flex-col min-h-0 ${mainOverflowClass} ${contentPadding}${isTma ? ' tma-safe-bottom' : ''} ${!isTma && isMobileLayout && !isSpreadsheetPage ? 'pt-12' : ''}`}
