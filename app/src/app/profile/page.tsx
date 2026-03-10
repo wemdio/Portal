@@ -106,6 +106,10 @@ export default function ProfilePage() {
   const [newPassword, setNewPassword] = useState('');
   const [newPassword2, setNewPassword2] = useState('');
 
+  const [tgLinked, setTgLinked] = useState<boolean | null>(null);
+  const [tgLoading, setTgLoading] = useState(false);
+  const [tgDeeplink, setTgDeeplink] = useState<string | null>(null);
+
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -214,6 +218,70 @@ export default function ProfilePage() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    let mounted = true;
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const t = session?.access_token;
+        if (!t || !mounted) return;
+        const res = await fetch('/api/telegram/agent/link-status', {
+          headers: { Authorization: `Bearer ${t}` },
+        });
+        if (!res.ok || !mounted) return;
+        const body = (await res.json()) as { linked?: boolean };
+        setTgLinked(!!body.linked);
+      } catch { /* ignore */ }
+    })();
+    return () => { mounted = false; };
+  }, [userId]);
+
+  async function handleTelegramLink() {
+    setTgLoading(true);
+    setError('');
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const t = session?.access_token;
+      if (!t) throw new Error('Not authenticated');
+      const res = await fetch('/api/telegram/agent/link-token', {
+        headers: { Authorization: `Bearer ${t}` },
+      });
+      if (!res.ok) throw new Error('Не удалось сгенерировать ссылку');
+      const body = (await res.json()) as { deeplink?: string };
+      if (body.deeplink) {
+        setTgDeeplink(body.deeplink);
+        window.open(body.deeplink, '_blank');
+      }
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setTgLoading(false);
+    }
+  }
+
+  async function handleTelegramUnlink() {
+    setTgLoading(true);
+    setError('');
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const t = session?.access_token;
+      if (!t) throw new Error('Not authenticated');
+      const res = await fetch('/api/telegram/agent/link-status', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${t}` },
+      });
+      if (!res.ok) throw new Error('Не удалось отвязать');
+      setTgLinked(false);
+      setTgDeeplink(null);
+      setMessage('Telegram отвязан');
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setTgLoading(false);
+    }
+  }
 
   async function handleSaveProfile() {
     if (!userId) return;
@@ -482,6 +550,63 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
+
+      {tgLinked !== null && (
+        <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
+            <h2 className="text-sm font-semibold text-gray-900">Telegram</h2>
+            <p className="mt-1 text-xs text-gray-500">AI-ассистент портала в Telegram</p>
+          </div>
+          <div className="p-5">
+            {tgLinked ? (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                  <span className="text-sm text-gray-700">Telegram привязан</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleTelegramUnlink()}
+                  disabled={tgLoading}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {tgLoading ? 'Отвязка...' : 'Отвязать'}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-gray-600">
+                  Привяжите Telegram, чтобы получать информацию о проектах, задачах и аналитике через бота <b>@Polza_portal_bot</b>.
+                </p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void handleTelegramLink()}
+                    disabled={tgLoading}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#2AABEE] px-4 py-2 text-sm font-semibold text-white hover:bg-[#229ED9] disabled:opacity-50"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
+                    </svg>
+                    {tgLoading ? 'Генерация ссылки...' : 'Привязать Telegram'}
+                  </button>
+                  {tgDeeplink && (
+                    <a
+                      href={tgDeeplink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-blue-600 hover:text-blue-800 underline"
+                    >
+                      Открыть ссылку повторно
+                    </a>
+                  )}
+                </div>
+                <p className="text-xs text-gray-400">Ссылка действительна 10 минут</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
