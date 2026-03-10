@@ -16,14 +16,10 @@ import {
   Trash2,
   ChevronDown,
   ChevronUp,
-  AlertTriangle,
-  RefreshCw,
   Send,
   Download,
   Upload,
   Search,
-  Copy,
-  Check,
   X,
   Globe,
   Network,
@@ -37,7 +33,6 @@ import type {
   OutreachLog,
   OpenAISettings,
   TelegramSettings,
-  DialogMessage,
 } from '@/lib/tgOutreach/types';
 import {
   DEFAULT_OPENAI_SETTINGS,
@@ -231,7 +226,7 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
     setLoading(false);
   }, [campaignId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
   const addAccount = async () => {
     const token = await getToken();
@@ -404,7 +399,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
     setLoading(false);
   }, [campaignId]);
 
-  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
+  useEffect(() => { queueMicrotask(() => { void fetchLogs(); }); }, [fetchLogs]);
 
   useEffect(() => {
     const interval = setInterval(() => void fetchLogs(), 3000);
@@ -464,7 +459,7 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
     setLoading(false);
   }, [campaignId, offset, filterStatus]);
 
-  useEffect(() => { void fetchDialogs(); }, [fetchDialogs]);
+  useEffect(() => { queueMicrotask(() => { void fetchDialogs(); }); }, [fetchDialogs]);
 
   const updateStatus = async (id: string, status: string) => {
     const token = await getToken();
@@ -623,7 +618,7 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
     setLoading(false);
   }, [campaignId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
   const addProcessed = async () => {
     const token = await getToken();
@@ -840,7 +835,7 @@ export default function TgOutreachPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { void fetchCampaigns(); }, [fetchCampaigns]);
+  useEffect(() => { queueMicrotask(() => { void fetchCampaigns(); }); }, [fetchCampaigns]);
 
   const createCampaign = async () => {
     if (!newName.trim()) return;
@@ -889,7 +884,7 @@ export default function TgOutreachPage() {
           {campaigns.map(c => {
             const st = STATUS_LABELS[c.status] ?? STATUS_LABELS.stopped;
             return (
-              <button key={c.id} type="button" onClick={() => setSelectedId(c.id)}
+              <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
                 className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${c.status === 'running' ? 'bg-emerald-400' : c.status === 'error' ? 'bg-rose-400' : 'bg-gray-400'}`} />
                 {c.name}
