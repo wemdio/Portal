@@ -7131,7 +7131,7 @@ export function DatabaseSpreadsheet() {
         onChange={(e) => void handleBriefFileUpload(e)}
       />
 
-      <div className={`grid gap-1 ${rightPanelOpen ? 'lg:grid-cols-[minmax(0,1fr)_220px]' : 'grid-cols-1'} flex-1 min-h-0 overflow-hidden`}>
+      <div className={`grid gap-1 ${rightPanelOpen ? 'lg:grid-cols-[minmax(0,1fr)_220px]' : 'grid-cols-1'} flex-1 min-h-0`} style={{ gridTemplateRows: 'minmax(0,1fr)' }}>
         <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
           {activeReviewReq && (() => {
             const cfg: Record<string, { bg: string; border: string; text: string; icon: string; label: string }> = {
@@ -7159,6 +7159,7 @@ export function DatabaseSpreadsheet() {
           <div
             ref={tableWrapperRef}
             className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 pb-6 dark-scrollbar"
+            style={{ maxHeight: 'calc(100vh - 130px)' }}
             tabIndex={-1}
             onKeyDownCapture={handleGridKeyDown}
             onPaste={handlePaste as unknown as React.ClipboardEventHandler<HTMLDivElement>}
@@ -7506,7 +7507,7 @@ export function DatabaseSpreadsheet() {
         </div>
 
         {rightPanelOpen && (
-        <aside className="rounded border border-gray-200 bg-white p-2 h-fit text-xs">
+        <aside className="rounded border border-gray-200 bg-white p-2 h-fit text-xs overflow-y-auto">
           <div className="flex items-center gap-1 rounded bg-gray-50 p-0.5 text-[10px] mb-2">
             <button
               type="button"
