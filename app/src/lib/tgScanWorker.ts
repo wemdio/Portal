@@ -64,6 +64,45 @@ async function getChatInfo(chatId: number): Promise<TgChatFull | null> {
   }
 }
 
+/**
+ * Determine which forum topic a message belongs to by replying to it.
+ * The Bot API response includes message_thread_id of the thread the
+ * original message lives in. Returns 0 for non-forum chats.
+ */
+async function detectTopicId(chatId: number, messageId: number): Promise<number> {
+  const res = await fetch(`${tgApiBase()}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: '.',
+      reply_parameters: { message_id: messageId },
+    }),
+  });
+
+  const json = (await res.json()) as { ok: boolean; result?: TgMessage; description?: string };
+  if (!json.ok || !json.result) {
+    await logInfo('tg-scan.detectTopic.fail', `detectTopicId failed for msg ${messageId}`, {
+      chatId, messageId, ok: json.ok, description: json.description,
+    });
+    return 0;
+  }
+
+  const threadId = json.result.message_thread_id ?? 0;
+
+  await logInfo('tg-scan.detectTopic', `msg ${messageId} → topic ${threadId}`, {
+    chatId, messageId, threadId,
+  });
+
+  void fetch(`${tgApiBase()}/deleteMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
+  }).catch(() => {});
+
+  return threadId;
+}
+
 async function forwardAndInspect(chatId: number, messageId: number): Promise<TgMessage | null> {
   const res = await fetch(`${tgApiBase()}/forwardMessage`, {
     method: 'POST',
@@ -131,6 +170,7 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       .from('tg_bot_chats')
       .select('last_message_id')
       .eq('chat_id', chatId)
+      .eq('topic_id', topicId ?? 0)
       .single();
 
     let startMsgId = (chatRow?.last_message_id as number | null) ?? 0;
@@ -180,15 +220,14 @@ export async function runTgScanJob(jobId: string): Promise<void> {
     };
 
     await logInfo('tg-transcribe.scan.start', `Scanning for ${videoCount} videos from msg#${startMsgId} in chat ${chatId}`, {
-      chatId, startMsgId, videoCount,
+      chatId, startMsgId, videoCount, topicId,
     });
 
     for (let msgId = startMsgId; msgId > 0 && videosFound < videoCount && scanned < maxScan; msgId--) {
-      // Cooperative cancellation check every 20 messages
       if (scanned % 20 === 0 && scanned > 0) {
         if (await isStopped(jobId)) {
           await flushProgress(true);
-          return; // status already set by PATCH handler
+          return;
         }
       }
 
@@ -200,9 +239,7 @@ export async function runTgScanJob(jobId: string): Promise<void> {
         continue;
       }
 
-      if (scanned % 50 === 0) {
-        await flushProgress();
-      }
+      if (scanned % 50 === 0) await flushProgress();
 
       let forwarded: TgMessage | null;
       try {
@@ -212,10 +249,20 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       }
 
       if (!forwarded) continue;
-      if (topicId != null && forwarded.message_thread_id !== topicId) continue;
 
-      const videoInfo: VideoInfo | null = extractVideoInfo(forwarded);
+      const videoInfo = extractVideoInfo(forwarded);
       if (!videoInfo) continue;
+
+      // For forum topics: check the original message's topic via reply probe.
+      // Only done for video messages to minimize API calls.
+      if (topicId != null) {
+        try {
+          const msgTopicId = await detectTopicId(chatId, msgId);
+          if (msgTopicId !== topicId) continue;
+        } catch {
+          continue;
+        }
+      }
 
       videosFound++;
 
@@ -238,7 +285,6 @@ export async function runTgScanJob(jobId: string): Promise<void> {
       });
       await flushProgress(true);
 
-      // Check cancellation before processing each video
       if (await isStopped(jobId)) {
         await flushProgress(true);
         return;
@@ -260,7 +306,6 @@ export async function runTgScanJob(jobId: string): Promise<void> {
             if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
             if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
           }
-          // Throttled DB write for download progress
           void flushProgress();
         });
 

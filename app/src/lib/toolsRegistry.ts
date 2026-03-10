@@ -33,6 +33,7 @@ export const ALL_TOOL_IDS = [
   'tg-transcribe',
   'rdp',
   'instantly',
+  'tg-outreach',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -139,6 +140,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'Instantly',
     description: 'Управление email-аутричем: кампании, аккаунты, лиды, аналитика.',
     href: '/instantly',
+    accentColor: 'blue',
+  },
+  'tg-outreach': {
+    id: 'tg-outreach',
+    title: 'TG Аутрич',
+    description: 'Массовый Telegram-аутрич: кампании, автоответы GPT, квалификация лидов.',
+    href: '/tools/tg-outreach',
     accentColor: 'blue',
   },
 };
