@@ -151,9 +151,9 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
   return (
     <div
       ref={popoverRef}
-      className="fixed z-50 w-80 bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
+      className="fixed z-50 w-[480px] bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
       style={{
-        maxHeight: '70vh',
+        maxHeight: '80vh',
         ...(pos.openUp
           ? { bottom: `${window.innerHeight - pos.top + 4}px`, left: `${pos.left}px` }
           : { top: `${pos.top + 4}px`, left: `${pos.left}px` }),
@@ -1278,7 +1278,7 @@ export function ProjectList() {
                                 onClick={(e) => {
                                   if (isOpen) { setTaskPopoverId(null); setTaskPopoverPos(null); } else {
                                     const rect = e.currentTarget.getBoundingClientRect();
-                                    const popoverW = 320;
+                                    const popoverW = 480;
                                     const openUp = rect.bottom + 300 > window.innerHeight;
                                     let left = rect.left;
                                     if (left + popoverW > window.innerWidth - 8) left = window.innerWidth - popoverW - 8;
@@ -1331,7 +1331,7 @@ export function ProjectList() {
                                 onClick={(e) => {
                                   if (isOpen) { setNotePopoverId(null); setNotePopoverPos(null); } else {
                                     const rect = e.currentTarget.getBoundingClientRect();
-                                    const popoverW = 320;
+                                    const popoverW = 480;
                                     const openUp = rect.bottom + 300 > window.innerHeight;
                                     let left = rect.left;
                                     if (left + popoverW > window.innerWidth - 8) left = window.innerWidth - popoverW - 8;
