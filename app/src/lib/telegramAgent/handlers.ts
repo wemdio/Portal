@@ -70,18 +70,19 @@ const getKpiSummary: ToolHandler = async (params) => {
 
   const { data, error } = await sb
     .from('projects')
-    .select(`${groupBy}, kpi_plan, kpi_fact, status`)
+    .select('manager, specialist, kpi_plan, kpi_fact, status')
     .in('status', ['В работе', 'Тестирование']);
 
   if (error) return `Ошибка: ${error.message}`;
   if (!data?.length) return 'Нет проектов в работе/тестировании.';
 
+  type KpiRow = { manager: string | null; specialist: string | null; kpi_plan: number | null; kpi_fact: number | null };
   const groups: Record<string, { plan: number; fact: number; count: number }> = {};
-  for (const row of data) {
-    const key = (row as Record<string, unknown>)[groupBy] as string || 'Не указано';
+  for (const row of data as KpiRow[]) {
+    const key = (groupBy === 'specialist' ? row.specialist : row.manager) || 'Не указано';
     if (!groups[key]) groups[key] = { plan: 0, fact: 0, count: 0 };
-    groups[key].plan += (row.kpi_plan as number) ?? 0;
-    groups[key].fact += (row.kpi_fact as number) ?? 0;
+    groups[key].plan += row.kpi_plan ?? 0;
+    groups[key].fact += row.kpi_fact ?? 0;
     groups[key].count += 1;
   }
 
