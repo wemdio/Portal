@@ -924,7 +924,18 @@ export function ProjectList() {
                     <tr key={project.id} className="hover:bg-zinc-50/50 transition-colors group">
                       <td className="px-3 py-3 align-top overflow-hidden">
                         {isTableEditing ? (
-                          <div className="flex items-center gap-2">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-semibold text-zinc-500 truncate">{project.client || '—'}</span>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedProjectId(project.id)}
+                                className="p-0.5 text-zinc-400 hover:text-zinc-900 rounded hover:bg-zinc-100 transition-colors flex-shrink-0"
+                                title="Открыть карточку"
+                              >
+                                ↗
+                              </button>
+                            </div>
                             <InlineInput
                               value={nameValue}
                               onChange={(value) => setDraftValue(project.id, 'name', value)}
@@ -933,14 +944,6 @@ export function ProjectList() {
                               placeholder="Название проекта"
                               className="font-medium"
                             />
-                            <button
-                              type="button"
-                              onClick={() => setSelectedProjectId(project.id)}
-                              className="p-1 text-zinc-400 hover:text-zinc-900 rounded hover:bg-zinc-100 transition-colors"
-                              title="Открыть карточку"
-                            >
-                              ↗
-                            </button>
                           </div>
                         ) : (
                           <button
