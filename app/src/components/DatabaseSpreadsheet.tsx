@@ -288,7 +288,7 @@ const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const VIRTUALIZATION_THRESHOLD = 1500;
-const VIRTUAL_ROW_HEIGHT = 30;
+const VIRTUAL_ROW_HEIGHT = 22;
 const VIRTUAL_OVERSCAN = 10;
 const GROUP_SUMMARY_PAGE_SIZE = 200;
 const WRAP_STORAGE_KEY = 'portal:db-wrap-cells';
@@ -301,8 +301,8 @@ const NON_STANDARD_SPACE_REGEX = /[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/
 const MAX_FILTER_OPTIONS = 1000;
 const BLANK_FILTER_LABEL = '(пусто)';
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}]/gu;
-const DEFAULT_COLUMN_WIDTH = 160;
-const MIN_COLUMN_WIDTH = 80;
+const DEFAULT_COLUMN_WIDTH = 130;
+const MIN_COLUMN_WIDTH = 50;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 const HEADER_LABEL_HINT_REGEX =
   /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
@@ -796,6 +796,7 @@ export function DatabaseSpreadsheet() {
   const [groupSearch, setGroupSearch] = useState('');
   const [groupSummaryLimit, setGroupSummaryLimit] = useState(GROUP_SUMMARY_PAGE_SIZE);
   const [rightPanelTab, setRightPanelTab] = useState<'summary' | 'cleanup'>('summary');
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
   const debouncedGroupSearch = useDebouncedValue(groupSearch, 300);
   const debouncedFilterMenuSearch = useDebouncedValue(filterMenu?.search ?? '', 300);
@@ -1547,7 +1548,8 @@ export function DatabaseSpreadsheet() {
 
   const copyEntireTable = async () => {
     if (!activeTab) return;
-    const rows = activeTab.data.map((row) => row.map((cell) => `${cell ?? ''}`));
+    const indicesToCopy = hasActiveFilters ? [0, ...visibleRowIndices] : activeTab.data.map((_, i) => i);
+    const rows = indicesToCopy.map((i) => (activeTab.data[i] ?? []).map((cell) => `${cell ?? ''}`));
     const cols = activeTab.data[0]?.length ?? 0;
     if (rows.length === 0 || cols === 0) {
       showCopyNotice('Нет данных для копирования', 'error');
@@ -1556,7 +1558,8 @@ export function DatabaseSpreadsheet() {
     const text = buildClipboardTsv(rows);
     try {
       await writeTextToClipboard(text);
-      showCopyNotice(buildCopySummary(rows.length, cols), 'success');
+      const label = hasActiveFilters ? ` (фильтр: ${rows.length} из ${activeTab.data.length})` : '';
+      showCopyNotice(buildCopySummary(rows.length, cols) + label, 'success');
     } catch (error) {
       void logError('spreadsheet.copy_all.failed', error);
       showCopyNotice('Не удалось скопировать таблицу в буфер обмена', 'error');
@@ -1701,36 +1704,44 @@ export function DatabaseSpreadsheet() {
     setEditingTabName('');
   };
 
-  const handleRowHeaderClick = (rowIndex: number, isRange: boolean) => {
+  const handleRowHeaderClick = (rowIndex: number, isShift: boolean, isCtrl = false) => {
     const lastCol = Math.max((activeTab?.data[0]?.length ?? 0) - 1, 0);
-    const anchorRow = isRange ? selectionAnchor.row : rowIndex;
-    setSelection({
-      startRow: anchorRow,
-      endRow: rowIndex,
-      startCol: 0,
-      endCol: lastCol,
-    });
+    if (isCtrl && selectionMode === 'row') {
+      const cur = normalizedSelection;
+      setSelection({
+        startRow: Math.min(cur.startRow, rowIndex),
+        endRow: Math.max(cur.endRow, rowIndex),
+        startCol: 0,
+        endCol: lastCol,
+      });
+    } else {
+      const anchorRow = isShift ? selectionAnchor.row : rowIndex;
+      setSelection({ startRow: anchorRow, endRow: rowIndex, startCol: 0, endCol: lastCol });
+      if (!isShift) setSelectionAnchor({ row: rowIndex, col: 0 });
+    }
     setActiveCell({ row: rowIndex, col: 0 });
     setSelectionMode('row');
-    if (!isRange) {
-      setSelectionAnchor({ row: rowIndex, col: 0 });
-    }
+    tableWrapperRef.current?.focus();
   };
 
-  const handleColumnHeaderClick = (colIndex: number, isRange: boolean) => {
+  const handleColumnHeaderClick = (colIndex: number, isShift: boolean, isCtrl = false) => {
     const lastRow = Math.max((activeTab?.data.length ?? 0) - 1, 0);
-    const anchorCol = isRange ? selectionAnchor.col : colIndex;
-    setSelection({
-      startRow: 0,
-      endRow: lastRow,
-      startCol: anchorCol,
-      endCol: colIndex,
-    });
+    if (isCtrl && selectionMode === 'col') {
+      const cur = normalizedSelection;
+      setSelection({
+        startRow: 0,
+        endRow: lastRow,
+        startCol: Math.min(cur.startCol, colIndex),
+        endCol: Math.max(cur.endCol, colIndex),
+      });
+    } else {
+      const anchorCol = isShift ? selectionAnchor.col : colIndex;
+      setSelection({ startRow: 0, endRow: lastRow, startCol: anchorCol, endCol: colIndex });
+      if (!isShift) setSelectionAnchor({ row: 0, col: colIndex });
+    }
     setActiveCell({ row: 0, col: colIndex });
     setSelectionMode('col');
-    if (!isRange) {
-      setSelectionAnchor({ row: 0, col: colIndex });
-    }
+    tableWrapperRef.current?.focus();
   };
 
   const openContextMenu = (event: MouseEvent, mode: SelectionMode) => {
@@ -1802,8 +1813,10 @@ export function DatabaseSpreadsheet() {
   const copySelection = async () => {
     if (!activeTab) return;
     const { startRow, endRow, startCol, endCol } = normalizedSelection;
+    const visibleSet = hasActiveFilters ? new Set(allRowIndices) : null;
     const values: string[][] = [];
     for (let r = startRow; r <= endRow; r += 1) {
+      if (visibleSet && !visibleSet.has(r)) continue;
       const row = activeTab.data[r] ?? [];
       const cells: string[] = [];
       for (let c = startCol; c <= endCol; c += 1) {
@@ -1812,11 +1825,10 @@ export function DatabaseSpreadsheet() {
       values.push(cells);
     }
     const text = buildClipboardTsv(values);
-    const rows = endRow - startRow + 1;
     const cols = endCol - startCol + 1;
     try {
       await writeTextToClipboard(text);
-      showCopyNotice(buildCopySummary(rows, cols), 'success');
+      showCopyNotice(buildCopySummary(values.length, cols), 'success');
     } catch (error) {
       void logError('spreadsheet.copy.failed', error);
       showCopyNotice('Не удалось скопировать выделение в буфер обмена', 'error');
@@ -2648,8 +2660,7 @@ export function DatabaseSpreadsheet() {
     const columnsWidth = Array.from({ length: colCount }, (_, index) => {
       return columnWidths[index] ?? DEFAULT_COLUMN_WIDTH;
     }).reduce((sum, width) => sum + width, 0);
-    // 36px left sticky row header + 32px add-column cell + a small trailing buffer.
-    return columnsWidth + 36 + 32 + 24;
+    return columnsWidth + 32 + 28 + 20;
   }, [colCount, columnWidths]);
   const showBottomHorizontalScrollbar = colCount > 0;
   const bottomScrollbarContentWidth = Math.max(
@@ -7016,6 +7027,19 @@ export function DatabaseSpreadsheet() {
           Перенос: {wrapLabel}
         </button>
 
+        <button
+          type="button"
+          onClick={() => setRightPanelOpen((v) => !v)}
+          className={`rounded border px-2 py-1 text-[11px] font-medium transition whitespace-nowrap ${
+            rightPanelOpen
+              ? 'border-gray-900 bg-gray-900 text-white'
+              : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+          }`}
+          title={rightPanelOpen ? 'Скрыть панель' : 'Показать панель'}
+        >
+          {rightPanelOpen ? '◨ Панель' : '◧ Панель'}
+        </button>
+
         <div className="h-4 w-px bg-gray-200 mx-0.5" />
 
         <div className="flex items-center gap-1 overflow-x-auto">
@@ -7107,7 +7131,7 @@ export function DatabaseSpreadsheet() {
         onChange={(e) => void handleBriefFileUpload(e)}
       />
 
-      <div className="grid gap-1 lg:grid-cols-[minmax(0,1fr)_220px] flex-1 min-h-0">
+      <div className={`grid gap-1 ${rightPanelOpen ? 'lg:grid-cols-[minmax(0,1fr)_220px]' : 'grid-cols-1'} flex-1 min-h-0`}>
         <div className="relative rounded border border-gray-200 bg-white overflow-hidden flex min-h-0 flex-col">
           {activeReviewReq && (() => {
             const cfg: Record<string, { bg: string; border: string; text: string; icon: string; label: string }> = {
@@ -7155,7 +7179,7 @@ export function DatabaseSpreadsheet() {
             <table ref={tableElementRef} className="min-w-max border-separate border-spacing-0">
               <thead>
                 <tr>
-                  <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-1 py-0.5 text-[10px] font-semibold text-gray-500 w-9 min-w-[36px]">
+                  <th className="sticky top-0 left-0 z-20 border-b border-r border-gray-200 bg-gray-50 px-0.5 py-px text-[10px] font-semibold text-gray-500 w-8 min-w-[32px]">
                     <div className="flex items-center justify-center h-full">
                       <input
                         ref={selectAllRef}
@@ -7163,7 +7187,7 @@ export function DatabaseSpreadsheet() {
                         checked={allVisibleSelected}
                         onChange={toggleSelectAllVisible}
                         onClick={(event) => event.stopPropagation()}
-                        className="h-3 w-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        className="h-2.5 w-2.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                         aria-label="Выбрать все видимые строки"
                       />
                     </div>
@@ -7179,7 +7203,7 @@ export function DatabaseSpreadsheet() {
                         onDragOver={(e) => handleColDragOver(e, colIndex)}
                         onDrop={(e) => handleColDrop(e, colIndex)}
                         onDragEnd={handleColDragEnd}
-                        onClick={(event) => handleColumnHeaderClick(colIndex, event.shiftKey)}
+                        onClick={(event) => handleColumnHeaderClick(colIndex, event.shiftKey, event.ctrlKey || event.metaKey)}
                         onContextMenu={(event) => {
                           if (
                             !(
@@ -7193,7 +7217,7 @@ export function DatabaseSpreadsheet() {
                           openContextMenu(event, 'col');
                         }}
                         style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1.5 py-0.5 text-[10px] font-semibold text-gray-700 transition select-none ${
+                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1 py-px text-[10px] font-semibold text-gray-700 transition select-none ${
                           dragOverCol === colIndex
                             ? 'bg-blue-200 border-l-2 border-l-blue-500'
                             : selectionMode === 'col' &&
@@ -7218,7 +7242,7 @@ export function DatabaseSpreadsheet() {
                         </div>
                         <div
                           onMouseDown={(event) => startColumnResize(event, colIndex)}
-                          className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-blue-400"
+                          className="absolute -right-1 top-0 h-full w-3 cursor-col-resize z-20 hover:bg-blue-400/50 active:bg-blue-500/50"
                         />
                       </th>
                     );
@@ -7264,7 +7288,7 @@ export function DatabaseSpreadsheet() {
                         onDragOver={(e) => handleRowDragOver(e, rowIndex)}
                         onDrop={(e) => handleRowDrop(e, rowIndex)}
                         onDragEnd={handleRowDragEnd}
-                        onClick={(event) => handleRowHeaderClick(rowIndex, event.shiftKey)}
+                        onClick={(event) => handleRowHeaderClick(rowIndex, event.shiftKey, event.ctrlKey || event.metaKey)}
                         onContextMenu={(event) => {
                           if (
                             !(
@@ -7277,7 +7301,7 @@ export function DatabaseSpreadsheet() {
                           }
                           openContextMenu(event, 'row');
                         }}
-                        className={`sticky left-0 z-10 border-b border-r border-gray-200 px-1 py-0.5 text-[10px] font-medium transition-colors select-none ${
+                        className={`sticky left-0 z-10 border-b border-r border-gray-200 px-0.5 py-px text-[10px] font-medium transition-colors select-none ${
                           isHeaderRow ? 'cursor-default' : 'cursor-grab'
                         } ${
                           dragOverRow === rowIndex
@@ -7293,17 +7317,17 @@ export function DatabaseSpreadsheet() {
                                   : 'bg-gray-50 text-gray-500 group-hover:bg-gray-100'
                         }`}
                       >
-                        <div className="flex items-center justify-center gap-1 h-full">
+                        <div className="flex items-center justify-center gap-0.5 h-full">
                           <input
                             type="checkbox"
                             checked={isChecked}
                             disabled={isHeaderRow}
                             onChange={() => toggleRowSelection(rowIndex)}
                             onClick={(event) => event.stopPropagation()}
-                            className="h-3 w-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                            className="h-2.5 w-2.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
                             aria-label={`Выбрать строку ${rowIndex + 1}`}
                           />
-                          <span className="min-w-[1.5rem] text-center">{rowIndex + 1}</span>
+                          <span className="min-w-[1.2rem] text-center">{rowIndex + 1}</span>
                           {rowHasComment && (
                             <button
                               type="button"
@@ -7420,7 +7444,7 @@ export function DatabaseSpreadsheet() {
                                 data-gramm_editor="false"
                                 data-enable-grammarly="false"
                                 data-lt-active="false"
-                              className={`w-full bg-transparent px-1.5 py-0.5 text-[11px] text-gray-900 outline-none resize-none min-h-[22px] leading-snug ring-2 ring-blue-500 ring-inset z-10 relative ${
+                              className={`w-full bg-transparent px-1 py-px text-[11px] text-gray-900 outline-none resize-none min-h-[18px] leading-tight ring-2 ring-blue-500 ring-inset z-10 relative ${
                                 effectiveWrapCells
                                   ? 'whitespace-pre-wrap break-words overflow-hidden'
                                   : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
@@ -7428,7 +7452,7 @@ export function DatabaseSpreadsheet() {
                               />
                             ) : (
                               <div
-                                className={`w-full h-full min-h-[22px] px-1.5 py-0.5 text-[11px] text-gray-900 leading-snug ${
+                                className={`w-full h-full min-h-[18px] px-1 py-px text-[11px] text-gray-900 leading-tight ${
                                   effectiveWrapCells ? 'whitespace-pre-wrap break-words' : 'truncate'
                                 } ${cellMatchesSearch ? 'ring-1 ring-amber-300 ring-inset' : ''}`}
                                 title={!effectiveWrapCells ? value : undefined}
@@ -7481,6 +7505,7 @@ export function DatabaseSpreadsheet() {
           </div>
         </div>
 
+        {rightPanelOpen && (
         <aside className="rounded border border-gray-200 bg-white p-2 h-fit text-xs">
           <div className="flex items-center gap-1 rounded bg-gray-50 p-0.5 text-[10px] mb-2">
             <button
@@ -7733,6 +7758,7 @@ export function DatabaseSpreadsheet() {
             </div>
           )}
         </aside>
+        )}
       </div>
       {showBottomHorizontalScrollbar && fixedScrollbarViewport.width > 0 && (
         <div
