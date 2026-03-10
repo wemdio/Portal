@@ -138,6 +138,23 @@ services:
     networks:
       - portal-network
 
+  worker-tg-outreach:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-tg-outreach
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=tgoutreach
+    stop_grace_period: 30m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   yandexmaps:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
