@@ -359,15 +359,15 @@ export async function upsertBotChat(
     chat_id: chatId,
     title,
     chat_type: chatType,
+    topic_id: topicId ?? 0,
     updated_at: new Date().toISOString(),
   };
   if (lastMessageId != null) row.last_message_id = lastMessageId;
   if (isForum != null) row.is_forum = isForum;
-  if (topicId !== undefined) row.topic_id = topicId;
   if (topicName !== undefined) row.topic_name = topicName;
 
   try {
-    await supabaseAdmin.from('tg_bot_chats').upsert(row, { onConflict: 'chat_id' });
+    await supabaseAdmin.from('tg_bot_chats').upsert(row, { onConflict: 'chat_id,topic_id' });
   } catch {
     // ignore
   }

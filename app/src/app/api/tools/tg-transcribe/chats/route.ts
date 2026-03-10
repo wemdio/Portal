@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
     chatType: r.chat_type as string,
     lastMessageId: r.last_message_id as number | null,
     isForum: (r.is_forum as boolean) ?? false,
-    topicId: (r.topic_id as number | null) ?? null,
+    topicId: (r.topic_id as number) || null,
     topicName: (r.topic_name as string | null) ?? null,
   }));
 

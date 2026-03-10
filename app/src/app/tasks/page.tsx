@@ -1060,18 +1060,6 @@ export default function TasksPage() {
             >
               по проектам
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setView('board');
-                setActiveTab('tasks');
-              }}
-              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium transition ${
-                view === 'board' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              доска
-            </button>
           </div>
         )}
       </div>
