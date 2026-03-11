@@ -5,7 +5,6 @@ import {
   ensureTgApiReady,
   upsertBotChat,
   type TgMessage,
-  type VideoInfo,
   extractVideoInfo,
   processVideoMessage,
   saveErrorRecord,

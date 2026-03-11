@@ -313,8 +313,8 @@ export function ReglamentEditor({ content, onChange, onUploadImage, disabled = f
       const colRect = col.getBoundingClientRect();
       const left = colRect.left;
       const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
-      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-      const padding = 24;
+      const _vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      const _padding = 24;
       const scale = Math.min(1, Math.max(0.7, vw / 1280));
       const editorTop = editorContentBlockRef.current?.getBoundingClientRect().top ?? colRect.top;
       const minTop = Math.max(MIN_TOP, editorTop);

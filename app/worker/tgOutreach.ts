@@ -1,10 +1,10 @@
-import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep, pollLoop } from './_shared';
+import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
 import { runCampaignLoop } from '@/lib/tgOutreach/campaignLoop';
 import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
-const MAX_CONCURRENCY = 5;
+const _MAX_CONCURRENCY = 5;
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);

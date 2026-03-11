@@ -405,7 +405,7 @@ export function YandexMapsParserView() {
 
   const stageStr = activeJob?.progress_stage?.toString() ?? '';
   const stage = getStageLabel(stageStr);
-  const isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
+  const _isCollecting = stageStr.includes('collecting_links') || stageStr === 'links_collected';
   const isParsing = stageStr.includes('parsing_organizations');
 
   return (

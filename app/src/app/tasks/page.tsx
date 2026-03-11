@@ -152,7 +152,6 @@ export default function TasksPage() {
     if (typeof window === 'undefined') return;
     const v = new URLSearchParams(window.location.search).get('view');
     if (v === 'board' || v === 'projects' || v === 'specialists') setView(v);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isBoardPage]);
   const [boards, setBoards] = useState<TaskBoard[]>([]);
   const [columns, setColumns] = useState<TaskBoardColumn[]>([]);

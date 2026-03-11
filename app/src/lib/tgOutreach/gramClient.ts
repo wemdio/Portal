@@ -1,6 +1,5 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import type { OutreachAccount, OutreachProxy } from './types';
 
 export interface ActiveClient {
@@ -75,7 +74,7 @@ export async function buildClients(
 }
 
 export async function disconnectAll(clients: ActiveClient[]) {
-  for (const { client, account } of clients) {
+  for (const { client, account: _account } of clients) {
     try {
       await client.disconnect();
     } catch {

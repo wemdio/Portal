@@ -8,20 +8,7 @@ import {
   ChevronLeft, Loader2, Send, Plus, Trash2, Clock, Mail,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Account, Campaign, CampaignCreatePayload, PaginatedResponse } from '@/lib/instantly/types';
-
-const DEFAULT_SCHEDULE = {
-  schedules: [
-    {
-      name: 'Default',
-      timing: { from: '09:00', to: '17:00' },
-      days: { 0: false, 1: true, 2: true, 3: true, 4: true, 5: true, 6: false },
-      timezone: 'Europe/Moscow',
-    },
-  ],
-  start_date: null,
-  end_date: null,
-};
+import type { Account, Campaign, CampaignCreatePayload } from '@/lib/instantly/types';
 
 interface StepDraft {
   subject: string;
