@@ -212,6 +212,8 @@ function getHealthyProxies(): ProxyEntry[] {
   );
 }
 
+let proxyRoundRobinIndex = 0;
+
 function getProxyDispatcher(exclude?: ProxyEntry): { entry: ProxyEntry; dispatcher: Dispatcher } | undefined {
   if (PROXY_ENTRIES.length === 0) return undefined;
   let candidates = getHealthyProxies().filter((p) => p !== exclude);
@@ -221,7 +223,9 @@ function getProxyDispatcher(exclude?: ProxyEntry): { entry: ProxyEntry; dispatch
   if (candidates.length === 0) {
     candidates = PROXY_ENTRIES;
   }
-  const entry = candidates[Math.floor(Math.random() * candidates.length)];
+  proxyRoundRobinIndex += 1;
+  const idx = proxyRoundRobinIndex % candidates.length;
+  const entry = candidates[idx];
   return { entry, dispatcher: entry.dispatcher };
 }
 

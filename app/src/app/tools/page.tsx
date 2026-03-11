@@ -15,7 +15,7 @@ import {
   Send,
   Waves,
   Video,
-  MessageCircle,
+  MessageSquareMore,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -35,7 +35,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'tg-transcribe': Video,
   rdp: FileText,
   instantly: Send,
-  'tg-outreach': MessageCircle,
+  'tg-outreach': MessageSquareMore,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {

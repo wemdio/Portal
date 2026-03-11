@@ -1,9 +1,13 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
- * Для продакшена используйте Session pooler Supabase в SUPABASE_DB_URL:
- * дашборд → Project Settings → Database → Connection string → "Session pooler" (порт 5432).
- * Session pooler проксируется по IPv4 — подходит для серверов без IPv6 (нет ENETUNREACH).
- * Альтернатива: Transaction pooler (порт 6543) — меньше лимит "max clients reached".
+ * SUPABASE_DB_URL — прямое подключение к Postgres для миграций.
+ *
+ * ВАЖНО: используйте Transaction pooler (порт 6543), НЕ Session pooler (5432).
+ * Session mode ограничен pool_size подключениями — при нескольких сервисах
+ * (portal + workers) возникает MaxClientsInSessionMode.
+ *
+ * Supabase Dashboard → Connect → "Transaction" (порт 6543).
+ * Формат: postgres://user:pass@...pooler.supabase.com:6543/postgres
  */
 const path = require('path');
 const fs = require('fs/promises');
@@ -13,8 +17,14 @@ const { Client } = require('pg');
 
 const MIGRATION_TABLE = 'portal_migrations';
 
-const MAX_RETRIES = 4;
-const RETRY_DELAY_MS = 3000;
+const MAX_RETRIES = 6;
+const RETRY_DELAY_MS = 5000;
+const MAX_CLIENTS_HINT = `
+[db] FIX: MaxClientsInSessionMode — исчерпан лимит подключений Session pooler.
+Используйте Transaction pooler (порт 6543):
+  Supabase Dashboard → Connect → Transaction pooler
+  Замените в SUPABASE_DB_URL порт 5432 на 6543.
+`;
 
 function isRetryableDbError(err) {
   const msg = (err && err.message) ? String(err.message) : '';
@@ -127,6 +137,9 @@ async function ensureDatabase() {
     console.warn('[db] Не задан URL базы данных. Пропускаем миграции.');
     return;
   }
+  if (process.env.NODE_ENV === 'production' && dbUrl.includes(':5432') && !dbUrl.includes(':6543')) {
+    console.warn('[db] ВНИМАНИЕ: используется порт 5432 (Session pooler). Рекомендуется 6543 (Transaction pooler) — меньше риска MaxClientsInSessionMode.');
+  }
 
   const dirCandidates = resolveMigrationsDirCandidates();
   let migrationsDir = '';
@@ -196,10 +209,15 @@ async function ensureDatabase() {
       await client.end().catch(() => {});
       lastError = err;
       if (attempt < MAX_RETRIES && isRetryableDbError(err)) {
+        const isMaxClients = (err && err.message && String(err.message).includes('MaxClientsInSessionMode'));
+        if (isMaxClients && attempt === 1) console.warn(MAX_CLIENTS_HINT);
         console.warn(`[db] Подключение не удалось (попытка ${attempt}/${MAX_RETRIES}), повтор через ${RETRY_DELAY_MS} мс:`, err.message);
         await sleep(RETRY_DELAY_MS);
       } else {
-        throw err;
+        if (lastError && lastError.message && String(lastError.message).includes('MaxClientsInSessionMode')) {
+          console.error(MAX_CLIENTS_HINT);
+        }
+        throw lastError;
       }
     }
   }

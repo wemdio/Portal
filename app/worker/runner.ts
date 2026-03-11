@@ -28,6 +28,9 @@ switch (kind) {
   case 'emailvalidation':
     run('./emailvalidation');
     break;
+  case 'tgoutreach':
+    run('./tgOutreach');
+    break;
   case 'all':
   default:
     run('./index');

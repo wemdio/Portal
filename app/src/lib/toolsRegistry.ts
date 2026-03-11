@@ -145,7 +145,7 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   'tg-outreach': {
     id: 'tg-outreach',
     title: 'TG Аутрич',
-    description: 'Управление Telegram-аккаунтами и прокси для аутрича: пулы, лимиты, проверка, разблокировка.',
+    description: 'Массовый Telegram-аутрич: кампании, автоответы GPT, квалификация лидов.',
     href: '/tools/tg-outreach',
     accentColor: 'blue',
   },

@@ -72,6 +72,9 @@ S3_PUBLIC_BASE_URL=https://your-cdn-or-public-bucket-base
 `SUPABASE_DB_URL` или `DATABASE_URL` используются для проверки соединения и автоприменения миграций при старте/деплое.
 Локально миграции запускаются автоматически при `npm run dev` и `npm start`.
 
+**Важно для продакшена:** используйте **Transaction pooler** (порт **6543**), не Session pooler (5432).
+Supabase Dashboard → Connect → "Transaction" — иначе при нескольких сервисах (portal + workers) возникнет `MaxClientsInSessionMode`.
+
 #### Запуск в режиме разработки
 
 ```bash
