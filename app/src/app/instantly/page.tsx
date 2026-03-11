@@ -8,7 +8,7 @@ import {
   Loader2, AlertCircle, Activity, ListChecks,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, Account, PaginatedResponse } from '@/lib/instantly/types';
+import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
 
 type DashboardStats = {

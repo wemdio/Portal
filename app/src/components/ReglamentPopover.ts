@@ -29,7 +29,7 @@ export const ReglamentPopover = Node.create({
     return [{ tag: 'span[data-reglament-popover]' }];
   },
 
-  renderHTML({ node, HTMLAttributes }) {
+  renderHTML({ node: _node, HTMLAttributes }) {
     return [
       'span',
       mergeAttributes(HTMLAttributes, {

@@ -2822,12 +2822,13 @@ export function DatabaseSpreadsheet() {
     }
 
     const gen = ++groupSummaryGenRef.current;
+    const ref = groupSummaryGenRef;
     const map = new Map<string, { label: string; count: number }>();
     let cursor = 1;
     const CHUNK = 5000;
 
     const processChunk = () => {
-      if (groupSummaryGenRef.current !== gen) return;
+      if (ref.current !== gen) return;
       const end = Math.min(cursor + CHUNK, data.length);
       for (let i = cursor; i < end; i += 1) {
         const row = data[i];
@@ -2844,7 +2845,7 @@ export function DatabaseSpreadsheet() {
         requestAnimationFrame(processChunk);
         return;
       }
-      if (groupSummaryGenRef.current !== gen) return;
+      if (ref.current !== gen) return;
       setGroupSummary(
         [...map.entries()]
           .map(([key, value]) => ({ key, label: value.label, count: value.count }))
@@ -2854,7 +2855,7 @@ export function DatabaseSpreadsheet() {
 
     setGroupSummary([]);
     requestAnimationFrame(processChunk);
-    return () => { groupSummaryGenRef.current++; };
+    return () => { ref.current++; };
   }, [activeTabId, activeTab, groupByCol, rowMatchesFilters]);
 
   const normalizedGroupSearch = normalizeText(debouncedGroupSearch, normalizeOptions);

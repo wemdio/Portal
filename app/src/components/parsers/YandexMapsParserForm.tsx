@@ -2,7 +2,6 @@
 
 import { useMemo, useState, type FormEvent } from 'react';
 import { CITIES, RUBRICS, generateSearchUrls } from '@/lib/parsers/yandexMapsData';
-import { Switch } from '@/components/Switch';
 
 type ProxyForm = {
   enabled: boolean;
@@ -92,10 +91,10 @@ export function YandexMapsParserForm(props: {
   }) => Promise<void> | void;
 }) {
   const [searchUrlsText, setSearchUrlsText] = useState('');
-  const [maxResults, setMaxResults] = useState(1000);
-  const [headless, setHeadless] = useState(true);
+  const [maxResults, _setMaxResults] = useState(1000);
+  const [headless, _setHeadless] = useState(true);
 
-  const [proxy, setProxy] = useState<ProxyForm>({
+  const [proxy, _setProxy] = useState<ProxyForm>({
     enabled: false,
     protocol: 'http',
     host: '',
@@ -104,8 +103,8 @@ export function YandexMapsParserForm(props: {
     password: '',
   });
 
-  const [singleCity, setSingleCity] = useState('');
-  const [singleKeyword, setSingleKeyword] = useState('');
+  const [singleCity, _setSingleCity] = useState('');
+  const [singleKeyword, _setSingleKeyword] = useState('');
 
   const [selectedCities, setSelectedCities] = useState<string[]>([]);
   const [selectedRubrics, setSelectedRubrics] = useState<string[]>([]);
@@ -123,7 +122,7 @@ export function YandexMapsParserForm(props: {
     setSearchUrlsText(next.join('\n'));
   };
 
-  const handleGenerateSingle = () => {
+  const _handleGenerateSingle = () => {
     const city = singleCity.trim();
     const keyword = singleKeyword.trim();
     if (!keyword) return;
@@ -132,7 +131,7 @@ export function YandexMapsParserForm(props: {
     appendUrls([url]);
   };
 
-  const handleGenerateBulk = () => {
+  const _handleGenerateBulk = () => {
     const cities = selectedCities.map((s) => s.trim()).filter(Boolean);
     const rubrics = (customKeyword.trim() ? [customKeyword.trim()] : selectedRubrics).map((s) => s.trim()).filter(Boolean);
     if (!cities.length || !rubrics.length) return;
