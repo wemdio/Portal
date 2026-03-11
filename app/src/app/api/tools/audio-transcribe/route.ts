@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { extractOrConvertToMp3, callOpenRouterTranscription } from '@/lib/transcription';
+import { startTrace } from '@/lib/tracer';
+import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +18,13 @@ function getExtension(filename: string | null): string {
   const idx = filename.lastIndexOf('.');
   if (idx === -1) return '';
   return filename.slice(idx).toLowerCase();
+}
+
+function getIp(req: NextRequest) {
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (!forwarded) return null;
+  const [ip] = forwarded.split(',');
+  return ip?.trim() || null;
 }
 
 async function readFileFromRequest(req: NextRequest): Promise<{
@@ -68,22 +77,55 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return jsonError('Необходима авторизация', 401);
 
+  const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const route = req.nextUrl.pathname;
+  const ip = getIp(req);
+  const logMeta = { userId: user.id, requestId, route, ip };
+  const trace: Awaited<ReturnType<typeof startTrace>> | null = await startTrace({
+    name: 'audio_transcribe.process',
+    input: { requestId, route, ip, userId: user.id },
+    message: 'Запуск расшифровки аудио/видео',
+    userId: user.id,
+  });
+
   let file;
   try {
     file = await readFileFromRequest(req);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Не удалось прочитать тело запроса (formData)';
+    await trace?.fail(err, { stage: 'read_form_data' });
+    await logError('audio.transcribe.read.failed', err, { stage: 'read_form_data' }, logMeta);
     return jsonError(message, 400);
   }
   if (!file.ok || !file.bytes || !file.filename) {
-    return jsonError(file.error ?? 'Неверный файл', 400);
+    const message = file.error ?? 'Неверный файл';
+    const err = new Error(message);
+    await trace?.fail(err, { stage: 'validate_file' });
+    await logError(
+      'audio.transcribe.validation.failed',
+      err,
+      { stage: 'validate_file' },
+      logMeta,
+    );
+    return jsonError(message, 400);
   }
 
   try {
+    await logInfo(
+      'audio.transcribe.start',
+      'Audio transcription started',
+      { filename: file.filename, inputBytes: file.bytes.byteLength, extension: file.ext ?? null },
+      logMeta,
+    );
     const mp3 = await extractOrConvertToMp3({
       bytes: file.bytes,
       inputExt: file.ext ?? getExtension(file.filename),
+    });
+    await trace?.setOutput({
+      filename: file.filename,
+      inputBytes: file.bytes.byteLength,
+      mp3Bytes: mp3.byteLength,
     });
     const text = await callOpenRouterTranscription({ audioMp3: mp3 });
 
@@ -100,6 +142,27 @@ export async function POST(req: NextRequest) {
       }
     })();
 
+    await trace?.end(
+      {
+        filename: file.filename,
+        inputBytes: file.bytes.byteLength,
+        mp3Bytes: mp3.byteLength,
+        textLength: text.length,
+      },
+      'Расшифровка завершена',
+    );
+    await logInfo(
+      'audio.transcribe.success',
+      'Audio transcription completed',
+      {
+        filename: file.filename,
+        inputBytes: file.bytes.byteLength,
+        mp3Bytes: mp3.byteLength,
+        textLength: text.length,
+      },
+      logMeta,
+    );
+
     return NextResponse.json({
       text,
       filename: file.filename,
@@ -108,6 +171,21 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Неизвестная ошибка при расшифровке аудио';
+    await trace?.fail(err, {
+      stage: 'transcribe',
+      filename: file.filename,
+      inputBytes: file.bytes.byteLength,
+    });
+    await logError(
+      'audio.transcribe.failed',
+      err,
+      {
+        stage: 'transcribe',
+        filename: file.filename,
+        inputBytes: file.bytes.byteLength,
+      },
+      logMeta,
+    );
     return jsonError(message, 500);
   }
 }
