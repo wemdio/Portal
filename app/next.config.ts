@@ -18,9 +18,9 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     typedRoutes: true,
-    proxyClientMaxBodySize: '25mb',
+    proxyClientMaxBodySize: '600mb',
     serverActions: {
-      bodySizeLimit: '25mb',
+      bodySizeLimit: '600mb',
     },
   },
   outputFileTracingIncludes: {

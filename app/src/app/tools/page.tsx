@@ -16,6 +16,9 @@ import {
   Waves,
   Video,
   MessageSquareMore,
+  Briefcase,
+  Building2,
+  Users,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -36,6 +39,9 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
+  'habr-career': Briefcase,
+  'linkedin-bot': Building2,
+  'tg-parser': Users,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {
