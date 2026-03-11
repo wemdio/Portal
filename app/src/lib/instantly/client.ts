@@ -300,6 +300,13 @@ export async function listCustomTagMappings(params?: PaginationParams & { tag_id
   );
 }
 
+export async function listAllCustomTagMappings(resourceType?: string): Promise<{ id: string; tag_id: string; resource_id: string; resource_type: string }[]> {
+  return fetchAllPages<{ id: string; tag_id: string; resource_id: string; resource_type: string }>(
+    '/custom-tag-mappings',
+    resourceType ? { resource_type: resourceType } : undefined,
+  );
+}
+
 // ─── Subsequences ─────────────────────────────────────────────────────────────
 
 export async function listSubsequences(params?: PaginationParams & { campaign_id?: string }) {
