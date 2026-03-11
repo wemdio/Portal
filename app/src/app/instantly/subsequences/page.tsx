@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  ChevronLeft, Loader2, GitBranch, Plus, Play, Pause, Copy,
+  ChevronLeft, Loader2, GitBranch, Play, Pause, Copy,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Subsequence, Campaign, PaginatedResponse } from '@/lib/instantly/types';

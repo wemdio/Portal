@@ -12,10 +12,15 @@ type SortDir = 'asc' | 'desc';
 
 interface Props {
   allTags: TgOutreachTag[];
-  onTagsChange: () => void;
+  onTagsChange?: () => void;
 }
 
-export function ProxiesTab({ allTags, onTagsChange: _ }: Props) {
+function SortIcon({ sortKey, sortDir, col }: { sortKey: SortKey; sortDir: SortDir; col: SortKey }) {
+  if (sortKey !== col) return null;
+  return sortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />;
+}
+
+export function ProxiesTab({ allTags }: Props) {
   const { proxies, loading, error, reload } = useTgOutreachProxies();
   const [search, setSearch] = useState('');
   const [filterTagId, setFilterTagId] = useState<string | null>(null);
@@ -74,11 +79,6 @@ export function ProxiesTab({ allTags, onTagsChange: _ }: Props) {
   const handleDelete = async (id: string) => {
     await tgOutreachFetch(`/proxies/${id}`, { method: 'DELETE' });
     reload();
-  };
-
-  const SortIcon = ({ col }: { col: SortKey }) => {
-    if (sortKey !== col) return null;
-    return sortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />;
   };
 
   const uniqueTags = useMemo(() => {
@@ -174,12 +174,12 @@ export function ProxiesTab({ allTags, onTagsChange: _ }: Props) {
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('ip')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      IP:Port <SortIcon col="ip" />
+                      IP:Port <SortIcon sortKey={sortKey} sortDir={sortDir} col="ip" />
                     </button>
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('type')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      Тип <SortIcon col="type" />
+                      Тип <SortIcon sortKey={sortKey} sortDir={sortDir} col="type" />
                     </button>
                   </th>
                   <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Логин</th>

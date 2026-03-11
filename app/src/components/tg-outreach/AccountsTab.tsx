@@ -13,6 +13,11 @@ import type { TgOutreachAccount, TgOutreachTag, AccountStatus } from '@/lib/tgOu
 type SortKey = 'first_name' | 'phone' | 'username' | 'status' | 'created_at';
 type SortDir = 'asc' | 'desc';
 
+function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: SortDir }) {
+  if (sortKey !== col) return null;
+  return sortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />;
+}
+
 const STATUS_CONFIG: Record<AccountStatus, { label: string; cls: string }> = {
   active: { label: 'Активен', cls: 'bg-emerald-50 text-emerald-700' },
   banned: { label: 'Забанен', cls: 'bg-red-50 text-red-700' },
@@ -25,7 +30,7 @@ interface Props {
   onTagsChange: () => void;
 }
 
-export function AccountsTab({ allTags, onTagsChange: _ }: Props) {
+export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
   const { accounts, loading, error, reload } = useTgOutreachAccounts();
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<AccountStatus | null>(null);
@@ -90,11 +95,6 @@ export function AccountsTab({ allTags, onTagsChange: _ }: Props) {
   const handleDelete = async (id: string) => {
     await tgOutreachFetch(`/accounts/${id}`, { method: 'DELETE' });
     reload();
-  };
-
-  const SortIcon = ({ col }: { col: SortKey }) => {
-    if (sortKey !== col) return null;
-    return sortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />;
   };
 
   const uniqueTags = useMemo(() => {
@@ -220,22 +220,22 @@ export function AccountsTab({ allTags, onTagsChange: _ }: Props) {
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('first_name')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      Имя <SortIcon col="first_name" />
+                      Имя <SortIcon col="first_name" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('phone')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      Телефон <SortIcon col="phone" />
+                      Телефон <SortIcon col="phone" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('username')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      Username <SortIcon col="username" />
+                      Username <SortIcon col="username" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
                   <th className="px-4 py-3">
                     <button onClick={() => toggleSort('status')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
-                      Статус <SortIcon col="status" />
+                      Статус <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
                   <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Прокси</th>
