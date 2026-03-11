@@ -1063,3 +1063,76 @@ export async function fetchAndExtract(
 
   return combined;
 }
+
+export { extractInnFromText, extractInnFromHtml } from '@/lib/enrich/innExtractor';
+
+const LEGAL_PATHS_PRIORITY = [
+  '/contacts', '/kontakty', '/контакты',
+  '/requisites', '/rekvizity', '/реквизиты',
+  '/oferta', '/оферта',
+  '/policy', '/privacy',
+  '/legal',
+];
+
+/**
+ * Fetch website pages and extract INN.
+ * 1) Fetch main page raw HTML — scan both raw HTML and extracted text
+ * 2) If not found — try top legal pages in parallel batches
+ */
+export async function fetchInnFromWebsite(
+  rawUrl: string,
+  options?: { timeout?: number; signal?: AbortSignal },
+): Promise<string | null> {
+  const url = normalizeUrl(rawUrl);
+  const { extractInnFromText: extract, extractInnFromHtml } = await import(/* webpackIgnore: true */ './innExtractor');
+  const timeout = options?.timeout ?? 12_000;
+  const signal = options?.signal;
+
+  const origin = new URL(url).origin;
+  const tryWithWww = !/^https?:\/\/www\./i.test(url);
+  const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : null;
+
+  // Step 1: fetch main page — search raw HTML first (catches SPA/JS-rendered INN)
+  const mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  if (mainHtml?.html) {
+    const fromHtml = extractInnFromHtml(mainHtml.html);
+    if (fromHtml) return fromHtml;
+
+    const text = extractTextFromHtml(mainHtml.html);
+    const fromText = extract(text);
+    if (fromText) return fromText;
+  }
+
+  // Also try www variant
+  if (!mainHtml && wwwOrigin) {
+    const wwwHtml = await fetchHtmlWithRetry(wwwOrigin, { timeout, signal, allowHttpErrors: true });
+    if (wwwHtml?.html) {
+      const fromHtml = extractInnFromHtml(wwwHtml.html);
+      if (fromHtml) return fromHtml;
+    }
+  }
+
+  // Step 2: try legal/requisite pages — parallel batch of 3
+  const candidates = LEGAL_PATHS_PRIORITY.map((p) => `${origin}${p}`);
+
+  for (let i = 0; i < candidates.length; i += 3) {
+    if (signal?.aborted) break;
+
+    const batch = candidates.slice(i, i + 3);
+    const results = await Promise.allSettled(
+      batch.map((c) => fetchHtmlWithRetry(c, { timeout: 6_000, signal })),
+    );
+
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || !r.value?.html) continue;
+      const fromHtml = extractInnFromHtml(r.value.html);
+      if (fromHtml) return fromHtml;
+
+      const text = extractTextFromHtml(r.value.html);
+      const fromText = extract(text);
+      if (fromText) return fromText;
+    }
+  }
+
+  return null;
+}
