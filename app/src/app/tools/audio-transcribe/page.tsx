@@ -48,9 +48,25 @@ async function uploadForTranscription(file: File): Promise<TranscribeResponse> {
     body: formData,
   });
 
-  const json = (await res.json()) as TranscribeResponse;
+  const raw = await res.text();
+  const json = (() => {
+    try {
+      return JSON.parse(raw) as TranscribeResponse;
+    } catch {
+      return null;
+    }
+  })();
   if (!res.ok) {
-    throw new Error(json.error || 'Ошибка при расшифровке аудио');
+    if (res.status === 413) {
+      throw new Error('Файл слишком большой для загрузки на сервер.');
+    }
+    throw new Error(
+      json?.error ||
+      `Ошибка при расшифровке аудио (HTTP ${res.status})`,
+    );
+  }
+  if (!json) {
+    throw new Error('Сервер вернул неверный формат ответа');
   }
   return json;
 }

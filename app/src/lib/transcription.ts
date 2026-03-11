@@ -10,6 +10,7 @@ const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
 const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 
 export const MAX_OPENROUTER_AUDIO_BYTES = 25 * 1024 * 1024;
+const TRANSCRIPTION_CHUNK_SECONDS = 40 * 60;
 
 const FFMPEG_EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
@@ -149,7 +150,7 @@ function extractTextFromOpenRouterContent(content: unknown): string {
   return texts.join('');
 }
 
-export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): Promise<string> {
+async function callOpenRouterTranscriptionSingle(input: { audioMp3: Buffer }): Promise<string> {
   if (!OPENROUTER_VIDEO_TRANSCRIPT_API_KEY) {
     throw new Error(
       'Сервис расшифровки не настроен (OPENROUTER_VIDEO_TRANSCRIPT_API_KEY отсутствует в окружении).',
@@ -209,4 +210,52 @@ export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): 
     throw new Error('OpenRouter не вернул текст расшифровки');
   }
   return text;
+}
+
+async function splitMp3ForTranscription(audioMp3: Buffer): Promise<Buffer[]> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'portal-audio-split-'));
+  const inPath = path.join(tmpDir, 'in.mp3');
+  const outPattern = path.join(tmpDir, 'chunk_%03d.mp3');
+  try {
+    await fs.writeFile(inPath, audioMp3);
+    await runFfmpeg([
+      '-y',
+      '-i',
+      inPath,
+      '-f',
+      'segment',
+      '-segment_time',
+      String(TRANSCRIPTION_CHUNK_SECONDS),
+      '-c',
+      'copy',
+      outPattern,
+    ]);
+    const files = (await fs.readdir(tmpDir))
+      .filter((name) => /^chunk_\d{3}\.mp3$/i.test(name))
+      .sort((a, b) => a.localeCompare(b));
+    if (files.length === 0) {
+      throw new Error('Не удалось разбить аудио на части для расшифровки.');
+    }
+    const chunks = await Promise.all(files.map((name) => fs.readFile(path.join(tmpDir, name))));
+    return chunks;
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): Promise<string> {
+  if (input.audioMp3.byteLength <= MAX_OPENROUTER_AUDIO_BYTES) {
+    return callOpenRouterTranscriptionSingle(input);
+  }
+  const chunks = await splitMp3ForTranscription(input.audioMp3);
+  const parts: string[] = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const text = await callOpenRouterTranscriptionSingle({ audioMp3: chunks[i] });
+    if (text) parts.push(text.trim());
+  }
+  const merged = parts.join('\n\n').trim();
+  if (!merged) {
+    throw new Error('Не удалось получить текст при расшифровке фрагментов аудио.');
+  }
+  return merged;
 }
