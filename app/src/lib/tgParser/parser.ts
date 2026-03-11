@@ -151,7 +151,7 @@ async function userToParsed(
     const chId = result?.fullUser?.personalChannelId;
     if (chId) {
       try {
-        const ch = await client.getEntity(chId);
+        const ch = await client.getEntity(Number(chId));
         const chUser = ch as Api.User;
         if (chUser?.username) personalChannel = `https://t.me/${chUser.username}`;
         else personalChannel = `ID: ${chId}`;

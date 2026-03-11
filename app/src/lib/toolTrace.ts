@@ -55,11 +55,16 @@ export async function startToolTrace(options: StartToolTraceOptions): Promise<To
 
 export async function withToolTrace<TResponse extends Response>(
   options: StartToolTraceOptions,
-  handler: (trace: ToolTraceHandle) => Promise<TResponse>,
+  handler: (trace: ToolTraceHandle) => Promise<TResponse | undefined>,
 ): Promise<TResponse> {
   const trace = await startToolTrace(options);
   try {
     const response = await handler(trace);
+    if (response == null) {
+      const fallback = new Response(null, { status: 500 });
+      await trace.fail(new Error('Handler did not return a response'));
+      return fallback as TResponse;
+    }
     if (response.status >= 400) {
       await trace.fail(new Error(`HTTP ${response.status}`), { status: response.status });
     } else {

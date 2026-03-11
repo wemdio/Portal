@@ -296,7 +296,7 @@ export default function TgParserPage() {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('TG Parser');
       ws.columns = COLUMNS.map((col) => ({ header: col, key: col, width: 20 }));
-      users.forEach((u) => ws.addRow(u as Record<string, unknown>));
+      users.forEach((u) => ws.addRow(u as unknown as Record<string, unknown>));
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
