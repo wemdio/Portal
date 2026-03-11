@@ -215,6 +215,7 @@ export function ProjectList() {
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode] = useState<ViewMode>('table');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [leadFilter, setLeadFilter] = useState<string>('all');
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [canCreate, setCanCreate] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
@@ -642,6 +643,10 @@ export function ProjectList() {
     ? projects.find((project) => project.id === selectedProjectId) || null
     : null;
 
+  const uniqueLeads = Array.from(
+    new Set(projects.map((p) => p.manager?.trim()).filter(Boolean)),
+  ).sort((a, b) => a!.localeCompare(b!, 'ru-RU')) as string[];
+
   const filteredProjects = projects.filter((project) => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch = !normalizedSearch
@@ -661,21 +666,28 @@ export function ProjectList() {
         .filter(Boolean)
         .some((value) => value?.toLowerCase().includes(normalizedSearch));
 
+    const matchesLead = leadFilter === 'all'
+      || (project.manager?.trim() ?? '') === leadFilter;
+
     if (statusFilter === 'all') {
-      return matchesSearch && !isCompletedStatus(project.status);
+      return matchesSearch && matchesLead && !isCompletedStatus(project.status);
     }
 
     const status = normalizeStatus(project.status);
-    return matchesSearch && status.includes(statusFilter);
+    return matchesSearch && matchesLead && status.includes(statusFilter);
   });
 
+  const leadScopedProjects = leadFilter === 'all'
+    ? projects
+    : projects.filter((p) => (p.manager?.trim() ?? '') === leadFilter);
+
   const statusCounts = {
-    all: projects.filter((p) => !isCompletedStatus(p.status)).length,
-    'подготовка': projects.filter(p => p.status?.toLowerCase().includes('подготовк')).length,
-    'в работе': projects.filter(p => p.status?.toLowerCase().includes('работ')).length,
-    'тестирование': projects.filter(p => p.status?.toLowerCase().includes('тест')).length,
-    'на паузе': projects.filter(p => p.status?.toLowerCase().includes('пауз')).length,
-    'завершен': projects.filter(p => p.status?.toLowerCase().includes('заверш')).length,
+    all: leadScopedProjects.filter((p) => !isCompletedStatus(p.status)).length,
+    'подготовка': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('подготовк')).length,
+    'в работе': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('работ')).length,
+    'тестирование': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('тест')).length,
+    'на паузе': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('пауз')).length,
+    'завершен': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('заверш')).length,
   };
 
   const sortedProjects = filteredProjects;
@@ -751,6 +763,25 @@ export function ProjectList() {
             onChange={(e) => setSearchTerm(e.target.value)}
           />
       </div>
+
+        {/* Lead Filter */}
+        {uniqueLeads.length > 0 && (
+          <div className="relative">
+            <select
+              value={leadFilter}
+              onChange={(e) => setLeadFilter(e.target.value)}
+              className="appearance-none rounded-full border border-zinc-200/80 bg-white py-2.5 pl-4 pr-9 text-[13px] font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer"
+            >
+              <option value="all">Все лиды</option>
+              {uniqueLeads.map((lead) => (
+                <option key={lead} value={lead}>{lead}</option>
+              ))}
+            </select>
+            <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        )}
 
       {/* Status Filter Tabs */}
       {viewMode !== 'kanban' && (
