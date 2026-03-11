@@ -6,7 +6,7 @@ import type { Route } from 'next';
 import { useParams } from 'next/navigation';
 import {
   ChevronLeft, Loader2, Play, Pause, ExternalLink, Save,
-  Mail, Clock, Users, BarChart3, Settings, Copy,
+  Mail, Clock, Settings,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics } from '@/lib/instantly/types';
