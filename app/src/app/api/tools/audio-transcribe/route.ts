@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
   const route = req.nextUrl.pathname;
   const ip = getIp(req);
   const logMeta = { userId: user.id, requestId, route, ip };
-  let trace: Awaited<ReturnType<typeof startTrace>> | null = await startTrace({
+  const trace: Awaited<ReturnType<typeof startTrace>> | null = await startTrace({
     name: 'audio_transcribe.process',
     input: { requestId, route, ip, userId: user.id },
     message: 'Запуск расшифровки аудио/видео',
