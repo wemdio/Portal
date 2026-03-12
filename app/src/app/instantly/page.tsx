@@ -82,8 +82,8 @@ export default function InstantlyDashboard() {
     setError('');
     try {
       const [campData, accData] = await Promise.all([
-        instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all'),
-        instantlyFetch<{ items: Account[] }>('/accounts?limit=all'),
+        instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=100'),
+        instantlyFetch<{ items: Account[] }>('/accounts?limit=100'),
       ]);
       const campaigns = campData.items ?? [];
       const accounts = accData.items ?? [];
