@@ -99,11 +99,65 @@ def _now_msk() -> str:
     return datetime.now(msk).strftime("%d.%m.%Y %H:%M MSK")
 
 
+# ── Settings (mute alerts) ───────────────────────────────────────────────────
+
+SETTINGS_TABLE = "health_check_settings"
+
+async def _ensure_settings_table() -> None:
+    """Create settings table if not exists (single row: send_alerts)."""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {SETTINGS_TABLE} "
+            "(id int PRIMARY KEY DEFAULT 1, send_alerts boolean NOT NULL DEFAULT true)"
+        )
+    finally:
+        await conn.close()
+
+
+async def get_send_alerts() -> bool:
+    """Whether to send alerts to the chat (can be turned off with /mute in Telegram)."""
+    if not DATABASE_URL:
+        return True
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            row = await conn.fetchrow(
+                f"SELECT send_alerts FROM {SETTINGS_TABLE} WHERE id = 1"
+            )
+            return row["send_alerts"] if row else True
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[health] get_send_alerts error: {e}")
+        return True
+
+
+async def set_send_alerts(enabled: bool) -> None:
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            await conn.execute(
+                f"INSERT INTO {SETTINGS_TABLE} (id, send_alerts) VALUES (1, $1) "
+                "ON CONFLICT (id) DO UPDATE SET send_alerts = EXCLUDED.send_alerts",
+                enabled,
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[health] set_send_alerts error: {e}")
+
+
 # ── Telegram ────────────────────────────────────────────────────────────────
 
-async def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
+async def send_telegram(text: str, parse_mode: str = "HTML", force: bool = False) -> bool:
+    """Send message to the health chat. If force=False and alerts are muted, skips sending."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
+    if not force and not await get_send_alerts():
+        return True  # muted, don't send (but don't treat as error)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -122,16 +176,69 @@ async def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
         return False
 
 
-async def send_startup_message() -> None:
-    text = (
-        "✅ <b>Health-check запущен</b>\n\n"
-        f"Портал: <code>{PORTAL_URL}</code>\n"
-        f"Интервал health-check: {HEALTH_INTERVAL_SEC // 60} мин\n"
-        "Дневной отчёт: 21:00 MSK\n"
-        f"Сервер IP: {SERVER_IP}\n\n"
-        f"🕐 {_now_msk()}"
-    )
-    await send_telegram(text)
+async def _send_telegram_raw(text: str) -> bool:
+    """Send to Telegram without checking mute (for command replies)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, json=payload)
+            return r.is_success
+    except Exception as e:
+        print(f"[health] TG send error: {e}")
+        return False
+
+
+async def poll_telegram_commands() -> None:
+    """Long-poll Telegram for /mute, /unmute, /alerts in the health chat."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    chat_id_str = str(TELEGRAM_CHAT_ID).strip()
+    last_update_id = 0
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=35) as client:
+                r = await client.get(
+                    url,
+                    params={"offset": last_update_id + 1, "timeout": 30},
+                )
+            if not r.is_success:
+                await asyncio.sleep(5)
+                continue
+            data = r.json()
+            for upd in data.get("result", []):
+                last_update_id = max(last_update_id, upd.get("update_id", 0))
+                msg = upd.get("message") or {}
+                if str(msg.get("chat", {}).get("id")) != chat_id_str:
+                    continue
+                text = (msg.get("text") or "").strip().lower()
+                if not text:
+                    continue
+                if text in ("/mute", "/тихо", "/alerts_off", "/выкл", "/off"):
+                    await set_send_alerts(False)
+                    await _send_telegram_raw(
+                        "🔇 <b>Уведомления отключены.</b> Проверки продолжают работать, в чат ничего не приходит. Чтобы снова включить — напишите /вкл"
+                    )
+                elif text in ("/unmute", "/вкл", "/alerts_on", "/on"):
+                    await set_send_alerts(True)
+                    await _send_telegram_raw("🔔 <b>Уведомления включены.</b>")
+                elif text in ("/alerts", "/статус", "/status"):
+                    enabled = await get_send_alerts()
+                    status = "включены 🔔" if enabled else "отключены 🔇"
+                    await _send_telegram_raw(f"Уведомления: {status}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[health] poll_telegram error: {e}")
+            await asyncio.sleep(5)
 
 
 # ── Individual checks ───────────────────────────────────────────────────────
@@ -416,6 +523,8 @@ async def main():
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
     _require("TELEGRAM_HEALTH_BOT_TOKEN or TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
 
+    await _ensure_settings_table()
+
     scheduler = AsyncIOScheduler()
 
     # Health check every 5 min
@@ -437,16 +546,25 @@ async def main():
 
     scheduler.start()
 
-    await send_startup_message()
+    # Poll Telegram for /mute, /вкл, /alerts in the health chat
+    poll_task = asyncio.create_task(poll_telegram_commands())
 
     proxy_count = len(ALL_PROXIES)
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
-        f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, daily at 21:00 MSK"
+        f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, daily at 21:00 MSK. "
+        "Commands in chat: /mute /вкл /alerts"
     )
 
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        poll_task.cancel()
+        try:
+            await poll_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
