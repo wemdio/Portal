@@ -245,8 +245,11 @@ async def poll_telegram_commands() -> None:
 
 async def check_site() -> tuple[bool, str]:
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as c:
+        # Do not follow redirects: we want to validate the public entrypoint itself,
+        # not fail because an auth page or downstream route returns 5xx.
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
             r = await c.get(PORTAL_URL)
+            # Treat any 2xx-3xx as OK (e.g. 307 -> /login is expected for unauth users)
             if r.status_code >= 400:
                 return False, f"HTTP {r.status_code}"
             return True, f"OK ({r.status_code})"
