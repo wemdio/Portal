@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { Api } from 'telegram';
 import type { Dialog } from 'telegram/tl/custom/dialog';
 import type { TelegramClient } from 'telegram';
@@ -13,6 +16,20 @@ import { DEFAULT_FOLLOW_UP } from './types';
 import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { truncateMessage } from '@/lib/logger';
+
+const BUCKET_SESSIONS = 'tg-outreach-sessions';
+const sessionPathCache = new Map<string, string>();
+
+async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
+  const cached = sessionPathCache.get(storagePath);
+  if (cached && fs.existsSync(cached)) return cached;
+  const { data, error } = await db.storage.from(BUCKET_SESSIONS).download(storagePath);
+  if (error || !data) throw new Error(error?.message ?? 'Не удалось скачать .session');
+  const localPath = path.join(os.tmpdir(), `tg-session-${storagePath.replace(/\//g, '-')}`);
+  fs.writeFileSync(localPath, Buffer.from(await data.arrayBuffer()));
+  sessionPathCache.set(storagePath, localPath);
+  return localPath;
+}
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -378,7 +395,8 @@ export async function runCampaignLoop(
 
   log('info', `Запуск кампании "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
-  const clients = await buildClients(accounts, proxies ?? [], log);
+  const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
+  const clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
 
   if (clients.length === 0) {
     log('error', 'Ни один аккаунт не подключился');

@@ -52,3 +52,7 @@ docs/*.xlsx
 # doc env files with credentials
 doc_*.env
 *.env.bak
+
+# python
+**/__pycache__/
+*.py[cod]
