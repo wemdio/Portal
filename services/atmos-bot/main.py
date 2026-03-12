@@ -820,10 +820,13 @@ async def handle_webhook(request: web.Request) -> web.Response:
                 await _reply(chat_id, "❌ Ошибка при выполнении команды.")
         return web.json_response({"ok": True})
 
-    # 3. Group message -> save for analysis
+    # 3. Group message -> save for analysis (skip team chat — it only receives alerts)
     parsed = _parse_group_message(update)
     if parsed and parsed.chat_id and parsed.message_id:
         try:
+            team_id: int | None = int(TEAM_CHAT_ID) if TEAM_CHAT_ID else None
+            if team_id is not None and parsed.chat_id == team_id:
+                return web.json_response({"ok": True})
             await _save_message(parsed)
             await _upsert_chat_state(parsed)
         except Exception as e:
@@ -923,8 +926,12 @@ async def run_analysis_cycle() -> None:
         print("[atmos] No chats to analyze")
         return
 
+    team_id: int | None = int(TEAM_CHAT_ID) if TEAM_CHAT_ID else None
+
     for chat in chats:
         chat_id: int = chat["chat_id"]
+        if team_id is not None and chat_id == team_id:
+            continue  # skip team chat — only destination for alerts
         title: str = chat["chat_title"] or "Unknown"
         username: str | None = chat["chat_username"]
         last_processed: int = chat["last_processed_message_id"] or 0

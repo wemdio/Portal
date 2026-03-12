@@ -41,7 +41,7 @@
 |------------|-------------|----------|
 | `DATABASE_URL` | да | Строка подключения к PostgreSQL |
 | `TELEGRAM_ATMOS_BOT_TOKEN` | да | Токен бота-анализатора |
-| `TELEGRAM_ATMOS_TEAM_CHAT_ID` | да | ID командного чата для алертов и статистики |
+| `TELEGRAM_ATMOS_TEAM_CHAT_ID` | да | ID командного чата, куда бот шлёт алерты и сводки; этот чат не участвует в анализе на негатив |
 | `OPENROUTER_ATMOS_API_KEY` | да | Ключ OpenRouter для LLM-анализа |
 | `ATMOS_WEBHOOK_PORT` | нет | Порт для webhook-сервера (по умолчанию 8090) |
 | `ATMOS_WEBHOOK_URL` | нет | Публичный URL для авторегистрации webhook |
