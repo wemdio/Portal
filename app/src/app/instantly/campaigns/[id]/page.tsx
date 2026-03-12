@@ -6,7 +6,7 @@ import type { Route } from 'next';
 import { useParams } from 'next/navigation';
 import {
   ChevronLeft, Loader2, Play, Pause, ExternalLink, Save,
-  Mail, Clock, Users, BarChart3, Settings, Copy,
+  Mail, Clock, Settings,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics } from '@/lib/instantly/types';
@@ -63,12 +63,24 @@ export default function CampaignDetailPage() {
     try {
       const [c, a, s] = await Promise.all([
         instantlyFetch<Campaign>(`/campaigns/${campaignId}`),
-        instantlyFetch<CampaignAnalytics[]>(`/analytics?type=campaigns&campaign_id=${campaignId}`).catch(() => []),
-        instantlyFetch<CampaignStepAnalytics[]>(`/analytics?type=steps&campaign_id=${campaignId}`).catch(() => []),
+        instantlyFetch<CampaignAnalytics[] | { data: CampaignAnalytics[] }>(
+          `/analytics?type=campaigns&campaign_id=${campaignId}`,
+        ).catch(() => []),
+        instantlyFetch<CampaignStepAnalytics[] | { data: CampaignStepAnalytics[] }>(
+          `/analytics?type=steps&campaign_id=${campaignId}`,
+        ).catch((err) => {
+          console.warn('[instantly] steps analytics error:', err);
+          return [];
+        }),
       ]);
       setCampaign(c);
-      setAnalytics(Array.isArray(a) && a.length > 0 ? a[0] : null);
-      setSteps(Array.isArray(s) ? s : []);
+
+      const analyticsArr = Array.isArray(a) ? a : Array.isArray((a as { data?: unknown }).data) ? (a as { data: CampaignAnalytics[] }).data : [];
+      setAnalytics(analyticsArr.length > 0 ? analyticsArr[0] : null);
+
+      const stepsArr = Array.isArray(s) ? s : Array.isArray((s as { data?: unknown }).data) ? (s as { data: CampaignStepAnalytics[] }).data : [];
+      setSteps(stepsArr);
+
       setEditName(c.name);
       setEditDailyLimit(String(c.daily_limit ?? ''));
     } catch (err) {
@@ -290,7 +302,30 @@ export default function CampaignDetailPage() {
 
       {tab === 'steps' && (
         <div className="rounded-xl border border-zinc-200 bg-white">
-          {steps.length === 0 ? (
+          {steps.length === 0 && campaign.sequences?.[0]?.steps?.length ? (
+            <div className="p-5">
+              <p className="mb-4 text-xs text-zinc-400">Аналитика по шагам пока недоступна. Последовательность писем:</p>
+              <div className="space-y-3">
+                {campaign.sequences[0].steps.map((step, i) => (
+                  <div key={i} className="rounded-lg border border-zinc-100 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">Шаг {i + 1}</span>
+                      {step.wait_days != null && step.wait_days > 0 && (
+                        <span className="flex items-center gap-1 text-xs text-zinc-400">
+                          <Clock className="h-3 w-3" /> ждать {step.wait_days} дн.
+                        </span>
+                      )}
+                    </div>
+                    {step.subject && <p className="text-sm font-medium text-zinc-800 mb-1">Тема: {step.subject}</p>}
+                    {step.body && <div className="text-xs text-zinc-500 line-clamp-3 whitespace-pre-wrap">{step.body}</div>}
+                    {step.variants && step.variants.length > 0 && (
+                      <p className="mt-1 text-xs text-zinc-400">{step.variants.length} вариант(ов)</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : steps.length === 0 ? (
             <p className="px-5 py-12 text-center text-sm text-zinc-400">Нет данных по шагам</p>
           ) : (
             <div className="overflow-x-auto">

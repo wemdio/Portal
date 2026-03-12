@@ -4,10 +4,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  Send, Loader2, Search, Play, Pause, ChevronLeft, ExternalLink, Filter, Copy,
+  Send, Loader2, Search, Play, Pause, ChevronLeft, ExternalLink,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
+import type { Campaign } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
 const STATUS_FILTERS = [

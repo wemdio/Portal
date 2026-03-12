@@ -72,15 +72,6 @@ async function uploadForTranscription(file: File): Promise<TranscribeResponse> {
 }
 
 const MAX_FILE_SIZE_BYTES = 600 * 1024 * 1024;
-const ACCEPTED_TYPES = [
-  'audio/mpeg',
-  'audio/mp3',
-  'audio/wav',
-  'audio/x-wav',
-  'audio/wave',
-  'video/mp4',
-  'video/x-msvideo',
-];
 const ACCEPT_EXT = '.mp3,.wav,.mp4,.avi';
 
 function formatBytes(bytes: number) {

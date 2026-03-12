@@ -1,6 +1,6 @@
 import { mergeAttributes, Node } from '@tiptap/core';
 
-const BUTTON_STYLES = ['primary', 'secondary', 'outline'] as const;
+const _BUTTON_STYLES = ['primary', 'secondary', 'outline'] as const;
 
 export const ReglamentButton = Node.create({
   name: 'reglamentButton',

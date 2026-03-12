@@ -8,7 +8,7 @@ import {
   Loader2, AlertCircle, Activity, ListChecks,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, Account, PaginatedResponse } from '@/lib/instantly/types';
+import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
 
 type DashboardStats = {
@@ -82,8 +82,8 @@ export default function InstantlyDashboard() {
     setError('');
     try {
       const [campData, accData] = await Promise.all([
-        instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all'),
-        instantlyFetch<{ items: Account[] }>('/accounts?limit=all'),
+        instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=100'),
+        instantlyFetch<{ items: Account[] }>('/accounts?limit=100'),
       ]);
       const campaigns = campData.items ?? [];
       const accounts = accData.items ?? [];

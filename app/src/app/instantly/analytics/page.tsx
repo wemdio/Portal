@@ -4,11 +4,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  ChevronLeft, Loader2, BarChart3, Send, Eye, MessageSquare, AlertTriangle, Users, TrendingUp,
+  ChevronLeft, Loader2, BarChart3, Send, Eye, MessageSquare, AlertTriangle, TrendingUp,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
-import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
 function MetricCard({ label, value, icon: Icon, color }: {
   label: string;

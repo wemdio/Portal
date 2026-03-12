@@ -1064,6 +1064,25 @@ export function DatabaseSpreadsheet() {
   });
   const fnsAbortRef = useRef<AbortController | null>(null);
 
+  const [innLookup, setInnLookup] = useState<{
+    isOpen: boolean;
+    urlCol: number;
+    isProcessing: boolean;
+    progress: number;
+    totalRows: number;
+    currentRow: number;
+    found: number;
+  }>({
+    isOpen: false,
+    urlCol: 0,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    found: 0,
+  });
+  const innLookupAbortRef = useRef<AbortController | null>(null);
+
   const readEnrichmentStorage = useCallback(() => {
     try {
       return readPersistedEnrichment(window.localStorage.getItem(enrichmentStorageKey));
@@ -2803,12 +2822,13 @@ export function DatabaseSpreadsheet() {
     }
 
     const gen = ++groupSummaryGenRef.current;
+    const ref = groupSummaryGenRef;
     const map = new Map<string, { label: string; count: number }>();
     let cursor = 1;
     const CHUNK = 5000;
 
     const processChunk = () => {
-      if (groupSummaryGenRef.current !== gen) return;
+      if (ref.current !== gen) return;
       const end = Math.min(cursor + CHUNK, data.length);
       for (let i = cursor; i < end; i += 1) {
         const row = data[i];
@@ -2825,7 +2845,7 @@ export function DatabaseSpreadsheet() {
         requestAnimationFrame(processChunk);
         return;
       }
-      if (groupSummaryGenRef.current !== gen) return;
+      if (ref.current !== gen) return;
       setGroupSummary(
         [...map.entries()]
           .map(([key, value]) => ({ key, label: value.label, count: value.count }))
@@ -2835,7 +2855,7 @@ export function DatabaseSpreadsheet() {
 
     setGroupSummary([]);
     requestAnimationFrame(processChunk);
-    return () => { groupSummaryGenRef.current++; };
+    return () => { ref.current++; };
   }, [activeTabId, activeTab, groupByCol, rowMatchesFilters]);
 
   const normalizedGroupSearch = normalizeText(debouncedGroupSearch, normalizeOptions);
@@ -6238,6 +6258,159 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const openInnLookupModal = () => {
+    setInnLookup({
+      isOpen: true,
+      urlCol: 0,
+      isProcessing: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      found: 0,
+    });
+  };
+  const closeInnLookupModal = () => {
+    if (innLookupAbortRef.current) {
+      innLookupAbortRef.current.abort();
+      innLookupAbortRef.current = null;
+    }
+    setInnLookup((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  const handleStartInnLookup = async () => {
+    if (!activeTab || innLookup.isProcessing) return;
+    flushSave();
+
+    const { urlCol } = innLookup;
+    if (urlCol < 0) return;
+    const headerRow = activeTab.data[0];
+    if (!headerRow) return;
+
+    const innLabel = 'ИНН (найден)';
+    const companyLabel = 'Компания (найдена)';
+    const targetLabels = [innLabel, companyLabel];
+
+    const existingHeaders = headerRow.map((h) => String(h ?? '').trim());
+    const colMap: Record<string, number> = {};
+    for (const label of targetLabels) {
+      const idx = existingHeaders.indexOf(label);
+      if (idx !== -1) colMap[label] = idx;
+    }
+    const missingLabels = targetLabels.filter((l) => !(l in colMap));
+
+    const looksLikeUrl = (s: string) => /\./.test(s) || /^https?:\/\//i.test(s);
+    const rowsToProcess = visibleRowIndices.filter((ri) => {
+      const url = String(activeTab.data[ri]?.[urlCol] ?? '').trim();
+      return url && looksLikeUrl(url);
+    });
+
+    if (rowsToProcess.length === 0) {
+      setLastAction({ message: 'Найти ИНН: нет строк с URL для обработки', time: Date.now() });
+      return;
+    }
+
+    const abortCtrl = new AbortController();
+    innLookupAbortRef.current = abortCtrl;
+    setInnLookup((prev) => ({
+      ...prev,
+      isProcessing: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      found: 0,
+    }));
+
+    let processedCount = 0;
+    let found = 0;
+    const BATCH = 5;
+
+    try {
+      if (missingLabels.length > 0) {
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTab.id) return tab;
+            const nextData = tab.data.map((row) => [...row]);
+            let nextCols = nextData[0].length;
+            for (const label of missingLabels) {
+              nextData[0][nextCols] = label;
+              colMap[label] = nextCols;
+              nextCols++;
+            }
+            for (let r = 1; r < nextData.length; r++) {
+              while (nextData[r].length < nextCols) nextData[r].push('');
+            }
+            return { ...tab, data: nextData };
+          }),
+        );
+      }
+
+      const innCol = colMap[innLabel]!;
+      const compCol = colMap[companyLabel]!;
+
+      for (let i = 0; i < rowsToProcess.length; i += BATCH) {
+        if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
+
+        const batchIndices = rowsToProcess.slice(i, i + BATCH);
+        const items = batchIndices.map((ri) => ({
+          url: String(activeTab.data[ri]?.[urlCol] ?? '').trim(),
+        }));
+
+        const res = await fetch('/api/enrich/inn-lookup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
+          },
+          body: JSON.stringify({ items }),
+          signal: abortCtrl.signal,
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as {
+          results: Array<{ inn: string | null; companyName: string | null }>;
+        };
+
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.id !== activeTab.id) return tab;
+            const nextData = tab.data.map((row) => [...row]);
+            for (let j = 0; j < batchIndices.length; j++) {
+              const ri = batchIndices[j];
+              const r = json.results[j];
+              if (!r?.inn) continue;
+              while (nextData[ri].length <= Math.max(innCol, compCol)) nextData[ri].push('');
+              nextData[ri][innCol] = r.inn;
+              nextData[ri][compCol] = r.companyName ?? '';
+              found++;
+            }
+            return { ...tab, data: nextData };
+          }),
+        );
+
+        processedCount += batchIndices.length;
+        setInnLookup((prev) => ({
+          ...prev,
+          currentRow: processedCount,
+          progress: Math.round((processedCount / rowsToProcess.length) * 100),
+          found,
+        }));
+      }
+
+      setLastAction({
+        message: `ИНН: найдено ${found} из ${processedCount} (парсинг сайтов)`,
+        time: Date.now(),
+      });
+      setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: `ИНН отменено (обработано: ${processedCount})`, time: Date.now() });
+      }
+      setInnLookup((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
+    } finally {
+      innLookupAbortRef.current = null;
+    }
+  };
+
   useEffect(() => {
     if (selectAllRef.current) {
       selectAllRef.current.indeterminate = someVisibleSelected;
@@ -6867,6 +7040,25 @@ export function DatabaseSpreadsheet() {
             className={toolbarMonochromeButtonClass}
           >
             Доходы ФНС
+          </button>
+        )}
+
+        {innLookup.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeInnLookupModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            ИНН... {innLookup.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openInnLookupModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Найти ИНН
           </button>
         )}
 
@@ -9719,6 +9911,96 @@ export function DatabaseSpreadsheet() {
                     type="button"
                     onClick={() => void handleStartFnsEnrichment()}
                     className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-blue-700 transition"
+                  >
+                    Запустить
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* INN lookup modal */}
+      {innLookup.isOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-4">
+              <h3 className="text-base font-semibold text-gray-900">Найти ИНН по сайту</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Парсинг ИНН с сайтов компаний (реквизиты, оферта, контакты)</p>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1.5">Колонка с сайтами (URL)</label>
+                <select
+                  value={innLookup.urlCol}
+                  onChange={(e) => setInnLookup((prev) => ({ ...prev, urlCol: Number(e.target.value) }))}
+                  disabled={innLookup.isProcessing}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:opacity-60"
+                >
+                  <option value={-1}>— Выберите колонку —</option>
+                  {(activeTab?.data[0] ?? []).map((h, i) => (
+                    <option key={i} value={i}>{String(h || `Колонка ${i + 1}`)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                <p className="text-xs text-blue-700 leading-relaxed">
+                  Ищет ИНН на страницах сайта: главная, /contacts, /requisites, /oferta, /policy и др. Найденный ИНН проверяется через DaData. Результаты: «ИНН (найден)», «Компания (найдена)».
+                </p>
+              </div>
+
+              {innLookup.isProcessing && (
+                <div className="rounded-xl border border-gray-100 bg-gray-50 px-4 py-4">
+                  <div className="mb-3 flex items-center justify-between text-sm">
+                    <span className="flex items-center gap-2 font-medium text-gray-900">
+                      <span className="animate-pulse">●</span>
+                      Парсинг сайтов...
+                    </span>
+                    <span className="font-mono text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
+                      {innLookup.currentRow} / {innLookup.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                    <div
+                      className="h-full bg-blue-600 transition-all duration-300 ease-out"
+                      style={{ width: `${innLookup.progress}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 text-[11px] text-gray-500">
+                    Найдено ИНН: <span className="font-medium text-gray-700">{innLookup.found}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs font-medium text-gray-500">
+                {innLookup.isProcessing ? (
+                  <>Обработано: {innLookup.currentRow} / {innLookup.totalRows}</>
+                ) : (
+                  <>Строк с URL: <span className="text-gray-900">{visibleRowIndices.filter((ri) => {
+                    const url = innLookup.urlCol >= 0 ? String(activeTab?.data[ri]?.[innLookup.urlCol] ?? '').trim() : '';
+                    return url && (/\./.test(url) || /^https?:\/\//i.test(url));
+                  }).length}</span></>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeInnLookupModal}
+                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+                >
+                  {innLookup.isProcessing ? 'Стоп' : 'Закрыть'}
+                </button>
+                {!innLookup.isProcessing && (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartInnLookup()}
+                    disabled={innLookup.urlCol < 0}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Запустить
                   </button>

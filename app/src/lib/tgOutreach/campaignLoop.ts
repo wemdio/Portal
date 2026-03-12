@@ -10,7 +10,6 @@ import type {
   DialogMessage,
 } from './types';
 import { DEFAULT_FOLLOW_UP } from './types';
-import type { ActiveClient } from './gramClient';
 import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { truncateMessage } from '@/lib/logger';
@@ -351,7 +350,7 @@ export async function runCampaignLoop(
   }
 
   const tg = campaign.telegram_settings as TelegramSettings;
-  const oai = campaign.openai_settings as OpenAISettings;
+  const _oai = campaign.openai_settings as OpenAISettings;
 
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан в .env');
