@@ -39,6 +39,46 @@ export interface ContainerInfo {
   status: string;
 }
 
+/**
+ * List all containers whose name (without leading /) starts with prefix.
+ * Used to auto-discover portal bots (e.g. prefix "portal-").
+ */
+export async function listContainersWithPrefix(
+  prefix: string
+): Promise<{ containers: ContainerInfo[]; error?: string }> {
+  const docker = getDocker();
+  if (!docker) {
+    return { containers: [], error: dockerUnavailableReason ?? 'Docker unavailable' };
+  }
+  try {
+    const list = await docker.listContainers({ all: true });
+    const containers: ContainerInfo[] = [];
+    for (const c of list) {
+      const name = c.Names?.[0]?.replace(/^\//, '') ?? '';
+      if (!name.startsWith(prefix)) continue;
+      const state = (c.State === 'running'
+        ? 'running'
+        : c.State === 'exited'
+          ? 'exited'
+          : c.State === 'paused'
+            ? 'paused'
+            : 'unknown') as ContainerState;
+      containers.push({
+        id: c.Id,
+        name,
+        state,
+        status: c.Status ?? c.State ?? 'unknown',
+      });
+    }
+    return { containers };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    dockerUnavailableReason = msg;
+    dockerInstance = null;
+    return { containers: [], error: msg };
+  }
+}
+
 export async function listContainersByNames(
   names: string[]
 ): Promise<{ containers: ContainerInfo[]; error?: string }> {

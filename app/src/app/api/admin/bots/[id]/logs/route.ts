@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getBotById } from '@/lib/adminBots/config';
+import { getBotByIdOrContainerName } from '@/lib/adminBots/config';
 import { containerLogs } from '@/lib/adminBots/docker';
 
 export const dynamic = 'force-dynamic';
@@ -37,7 +37,7 @@ export async function GET(
   if ('error' in auth) return auth.error;
 
   const { id } = await params;
-  const bot = getBotById(id);
+  const bot = getBotByIdOrContainerName(id);
   if (!bot) return jsonError('Bot not found', 404);
 
   const url = req.nextUrl;
