@@ -171,7 +171,10 @@ _pool: asyncpg.Pool | None = None
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        # PgBouncer transaction mode: disable prepared statement cache
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0
+        )
     return _pool
 
 
@@ -1207,20 +1210,6 @@ async def register_webhook() -> None:
         print(f"[atmos] Webhook registration failed: {result}")
 
 
-# ── Startup message ────────────────────────────────────────────────────────
-
-async def send_startup_message() -> None:
-    text = (
-        f"✅ <b>Atmos-bot запущен</b>\n\n"
-        f"Анализ: каждые {_cfg.check_interval_sec // 60} мин\n"
-        f"Сводка: каждые {_cfg.stats_interval_sec // 60} мин\n"
-        f"Порог негатива: {_cfg.negative_threshold:.0%}\n"
-        f"Модель: <code>{_escape_html(_cfg.model)}</code>\n\n"
-        f"🕐 {_now_msk()}"
-    )
-    await send_team_message(text)
-
-
 # ── DB schema bootstrap ────────────────────────────────────────────────────
 
 async def ensure_tables() -> None:
@@ -1339,7 +1328,6 @@ async def main() -> None:
     await load_config_from_db()
 
     await register_webhook()
-    await send_startup_message()
 
     app = web.Application()
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
