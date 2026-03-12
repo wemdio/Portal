@@ -1,8 +1,12 @@
 /**
  * Bot Manager: list of bots connected to the portal.
  * - Container bots: health-check, atmos-bot (controlled via Docker when socket available).
+ *   New containers with name starting with CONTAINER_BOT_PREFIX are auto-discovered.
  * - In-app bot: tg-agent (runs inside portal; no start/stop, logs from application_logs).
  */
+
+/** Docker containers whose name starts with this prefix are shown in Bot Manager (auto-discover). */
+export const CONTAINER_BOT_PREFIX = 'portal-';
 
 export const BOT_IDS = ['health-check', 'atmos-bot', 'tg-agent'] as const;
 export type BotId = (typeof BOT_IDS)[number];
@@ -10,12 +14,14 @@ export type BotId = (typeof BOT_IDS)[number];
 export type BotKind = 'container' | 'in-app';
 
 export interface BotConfig {
-  id: BotId;
+  id: string;
   name: string;
   description: string;
   kind: BotKind;
   /** Docker container name when kind === 'container' */
   containerName: string | null;
+  /** True if bot was auto-discovered (not in static BOTS list). */
+  autoDiscovered?: boolean;
 }
 
 export const BOTS: BotConfig[] = [
@@ -44,6 +50,26 @@ export const BOTS: BotConfig[] = [
 
 export function getBotById(id: string): BotConfig | undefined {
   return BOTS.find((b) => b.id === id);
+}
+
+/**
+ * Resolve bot by id (from config) or by container name (auto-discovered).
+ * Use for start/stop/logs so both known and new portal-* containers work.
+ */
+export function getBotByIdOrContainerName(id: string): BotConfig | undefined {
+  const fromConfig = BOTS.find((b) => b.id === id);
+  if (fromConfig) return fromConfig;
+  if (id.startsWith(CONTAINER_BOT_PREFIX)) {
+    return {
+      id,
+      name: id,
+      description: 'Контейнерный бот',
+      kind: 'container',
+      containerName: id,
+      autoDiscovered: true,
+    };
+  }
+  return undefined;
 }
 
 export function getContainerBots(): BotConfig[] {

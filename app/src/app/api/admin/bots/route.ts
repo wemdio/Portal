@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { BOTS, getBotById, getContainerBots } from '@/lib/adminBots/config';
+import { BOTS, CONTAINER_BOT_PREFIX, getContainerBots } from '@/lib/adminBots/config';
 import {
   listContainersByNames,
+  listContainersWithPrefix,
   isDockerAvailable,
   getDockerUnavailableReason,
   type ContainerInfo,
@@ -38,6 +39,8 @@ export interface BotListItem {
   canStop: boolean;
   canStart: boolean;
   canLogs: boolean;
+  /** True if bot was auto-discovered (container name starts with portal-). */
+  autoDiscovered?: boolean;
 }
 
 /**
@@ -48,25 +51,35 @@ export async function GET(_req: NextRequest) {
   const auth = await requireAdmin(_req);
   if ('error' in auth) return auth.error;
 
-  const containerNames = getContainerBots()
+  const dockerAvailable = isDockerAvailable();
+  let dockerError: string | undefined;
+
+  const knownContainerNames = getContainerBots()
     .map((b) => b.containerName)
     .filter((n): n is string => n != null);
 
   let containerInfos: ContainerInfo[] = [];
-  let dockerError: string | undefined;
-  const dockerAvailable = isDockerAvailable();
+  let discoveredContainers: ContainerInfo[] = [];
 
-  if (dockerAvailable && containerNames.length > 0) {
-    const result = await listContainersByNames(containerNames);
-    containerInfos = result.containers;
-    if (result.error) dockerError = result.error;
+  if (dockerAvailable) {
+    if (knownContainerNames.length > 0) {
+      const result = await listContainersByNames(knownContainerNames);
+      containerInfos = result.containers;
+      if (result.error) dockerError = result.error;
+    }
+    const byPrefix = await listContainersWithPrefix(CONTAINER_BOT_PREFIX);
+    discoveredContainers = byPrefix.containers;
+    if (byPrefix.error && !dockerError) dockerError = byPrefix.error;
   }
 
   const byContainerName = new Map(containerInfos.map((c) => [c.name, c]));
+  const knownSet = new Set(knownContainerNames);
 
-  const items: BotListItem[] = BOTS.map((bot) => {
+  const items: BotListItem[] = [];
+
+  for (const bot of BOTS) {
     if (bot.kind === 'in-app') {
-      return {
+      items.push({
         id: bot.id,
         name: bot.name,
         description: bot.description,
@@ -76,11 +89,12 @@ export async function GET(_req: NextRequest) {
         canStop: false,
         canStart: false,
         canLogs: true,
-      };
+      });
+      continue;
     }
     const info = bot.containerName ? byContainerName.get(bot.containerName) : undefined;
     const status: BotStatus = info ? info.state : 'unknown';
-    return {
+    items.push({
       id: bot.id,
       name: bot.name,
       description: bot.description,
@@ -90,8 +104,24 @@ export async function GET(_req: NextRequest) {
       canStop: dockerAvailable && status === 'running',
       canStart: dockerAvailable && (status === 'exited' || status === 'paused'),
       canLogs: true,
-    };
-  });
+    });
+  }
+
+  for (const c of discoveredContainers) {
+    if (knownSet.has(c.name)) continue;
+    items.push({
+      id: c.name,
+      name: c.name,
+      description: 'Контейнерный бот',
+      kind: 'container',
+      status: c.state,
+      statusDetail: c.status,
+      canStop: dockerAvailable && c.state === 'running',
+      canStart: dockerAvailable && (c.state === 'exited' || c.state === 'paused'),
+      canLogs: true,
+      autoDiscovered: true,
+    });
+  }
 
   return NextResponse.json({
     bots: items,
