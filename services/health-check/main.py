@@ -103,9 +103,14 @@ def _now_msk() -> str:
 
 SETTINGS_TABLE = "health_check_settings"
 
+# PgBouncer in transaction mode: prepared statements are not supported (per-connection).
+# Disable asyncpg statement cache to avoid "prepared statement already exists".
+_CONNECT_KWARGS: dict = {"statement_cache_size": 0}
+
+
 async def _ensure_settings_table() -> None:
     """Create settings table if not exists (single row: send_alerts)."""
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
     try:
         await conn.execute(
             f"CREATE TABLE IF NOT EXISTS {SETTINGS_TABLE} "
@@ -120,7 +125,7 @@ async def get_send_alerts() -> bool:
     if not DATABASE_URL:
         return True
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
         try:
             row = await conn.fetchrow(
                 f"SELECT send_alerts FROM {SETTINGS_TABLE} WHERE id = 1"
@@ -137,7 +142,7 @@ async def set_send_alerts(enabled: bool) -> None:
     if not DATABASE_URL:
         return
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
         try:
             await conn.execute(
                 f"INSERT INTO {SETTINGS_TABLE} (id, send_alerts) VALUES (1, $1) "
@@ -264,7 +269,7 @@ async def check_db() -> tuple[bool, str, int | None, int | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set", None, None
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
         try:
             await conn.execute("SELECT 1")
             cur = await conn.fetchval(
@@ -465,7 +470,7 @@ async def run_daily_report():
     # ── 1. Jobs ──
     if DATABASE_URL:
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
             try:
                 jobs_text = await _fetch_daily_jobs(conn)
                 sections.append(jobs_text)
