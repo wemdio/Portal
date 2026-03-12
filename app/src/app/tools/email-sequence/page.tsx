@@ -318,6 +318,10 @@ export default function EmailSequencePage() {
   const [activeLetterIndex, setActiveLetterIndex] = useState<1 | 2 | 3 | 4>(1);
   const [segmentModalId, setSegmentModalId] = useState<string | null>(null);
   const [segmentModalNotice, setSegmentModalNotice] = useState<string | null>(null);
+  const [segmentEditMode, setSegmentEditMode] = useState<'create' | 'edit' | null>(null);
+  const [segmentEditId, setSegmentEditId] = useState<string | null>(null);
+  const [segmentEditText, setSegmentEditText] = useState<string>('');
+  const [segmentEditBusy, setSegmentEditBusy] = useState(false);
   const [analyzeQueueByRun, setAnalyzeQueueByRun] = useState<Record<string, number[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -641,6 +645,63 @@ export default function EmailSequencePage() {
     }
   }, [canDeleteSelectedRun, refresh, run?.id]);
 
+  const openCreateSegmentModal = useCallback(() => {
+    if (!run?.id) return;
+    if (segments.length >= 5) return;
+    setSegmentEditMode('create');
+    setSegmentEditId(null);
+    setSegmentEditText('');
+  }, [run?.id, segments.length]);
+
+  const openEditSegmentModal = useCallback(
+    (segment: EmailSequenceSegmentRow) => {
+      setSegmentEditMode('edit');
+      setSegmentEditId(segment.id);
+      setSegmentEditText(cleanSegmentText(segment.segment_text ?? ''));
+    },
+    [],
+  );
+
+  const closeSegmentEditModal = useCallback(() => {
+    if (segmentEditBusy) return;
+    setSegmentEditMode(null);
+    setSegmentEditId(null);
+    setSegmentEditText('');
+  }, [segmentEditBusy]);
+
+  const saveSegmentEdit = useCallback(async () => {
+    if (!run?.id) return;
+    if (!segmentEditMode) return;
+    const text = segmentEditText.trim();
+    if (!text) {
+      setError('Текст сегмента не может быть пустым.');
+      return;
+    }
+    setError(null);
+    setSegmentEditBusy(true);
+    try {
+      if (segmentEditMode === 'create') {
+        await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}/segments`, {
+          method: 'POST',
+          body: JSON.stringify({ segment_text: text }),
+        });
+      } else if (segmentEditMode === 'edit' && segmentEditId) {
+        await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}/segments`, {
+          method: 'PATCH',
+          body: JSON.stringify({ id: segmentEditId, segment_text: text }),
+        });
+      }
+      await refresh(run.id);
+      setSegmentEditMode(null);
+      setSegmentEditId(null);
+      setSegmentEditText('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setSegmentEditBusy(false);
+    }
+  }, [refresh, run?.id, segmentEditId, segmentEditMode, segmentEditText]);
+
   const modalSegment = useMemo(() => {
     if (!segmentModalId) return null;
     return segments.find((s) => s.id === segmentModalId) ?? null;
@@ -725,10 +786,11 @@ export default function EmailSequencePage() {
                 onChange={(v) => setBrief((b) => ({ ...b, FIGURES: v }))}
                 rows={3}
               />
-              <TextField
+              <TextAreaField
                 label="Имя отправителя (подпись)*"
                 value={brief.sender_name ?? ''}
                 onChange={(v) => setBrief((b) => ({ ...b, sender_name: v }))}
+                rows={3}
                 placeholder="Имя для подписи"
               />
             </div>
@@ -830,14 +892,24 @@ export default function EmailSequencePage() {
               </p>
             ) : null}
           </div>
-          <button
-            type="button"
-            onClick={generateSegments}
-            disabled={!run?.id || busy != null}
-            className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-50"
-          >
-            Сгенерировать сегменты
-          </button>
+          <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={generateSegments}
+              disabled={!run?.id || busy != null}
+              className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Сгенерировать сегменты
+            </button>
+            <button
+              type="button"
+              onClick={openCreateSegmentModal}
+              disabled={!run?.id || busy != null || segments.length >= 5}
+              className="inline-flex items-center rounded-xl border border-dashed border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Добавить сегмент
+            </button>
+          </div>
         </div>
 
         {segments.length ? (
@@ -890,10 +962,21 @@ export default function EmailSequencePage() {
                   </div>
 
                   <div className="mt-auto pt-4 flex items-center justify-between">
-                    <div className="text-xs text-gray-500">
-                      Нажмите, чтобы открыть
+                    <div className="flex items-center gap-2">
+                      <div className="text-xs text-gray-500">
+                        Нажмите, чтобы открыть
+                      </div>
                     </div>
-                    <div className="text-xs font-semibold text-gray-700 group-hover:text-gray-900">→</div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEditSegmentModal(s);
+                      }}
+                      className="text-xs font-semibold text-gray-700 hover:text-gray-900 underline-offset-2 hover:underline"
+                    >
+                      Редактировать
+                    </button>
                   </div>
                 </button>
               );
@@ -1086,6 +1169,68 @@ export default function EmailSequencePage() {
           }
         }}
       />
+      {segmentEditMode ? (
+        <div className="fixed inset-0 z-50">
+          <div className="absolute inset-0 bg-black/40" onClick={closeSegmentEditModal} />
+          <div className="absolute inset-0 flex items-end justify-center p-4 pb-24 sm:items-center sm:pb-4">
+            <div className="w-full max-w-2xl rounded-2xl border border-gray-200 bg-white shadow-xl">
+              <div className="flex items-start justify-between gap-4 border-b border-gray-100 p-5">
+                <div className="min-w-0">
+                  <h3 className="text-base sm:text-lg font-semibold text-gray-900">
+                    {segmentEditMode === 'create' ? 'Новый сегмент' : 'Редактировать сегмент'}
+                  </h3>
+                  <p className="mt-1 text-xs sm:text-sm text-gray-500">
+                    Текст сегмента будет использоваться для анализа и генерации цепочки.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeSegmentEditModal}
+                  aria-label="Закрыть"
+                  className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-transparent text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                    <path d="M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    <path d="M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+              <div className="p-5">
+                <textarea
+                  value={segmentEditText}
+                  onChange={(e) => setSegmentEditText(e.target.value)}
+                  rows={8}
+                  className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                  placeholder="Опишите сегмент и ЛПР. Например: компания, размер, должности ЛПР, тип продукта или услуги, боли и задачи."
+                />
+                <div className="mt-4 flex items-center justify-between gap-2">
+                  <div className="text-xs text-gray-500">
+                    {segments.length ? `После сохранения сегмент будет под номером ${segments.length + (segmentEditMode === 'create' ? 1 : 0)}.` : 'Это будет первый сегмент.'}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={closeSegmentEditModal}
+                      disabled={segmentEditBusy}
+                      className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveSegmentEdit}
+                      disabled={segmentEditBusy}
+                      className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {segmentEditBusy ? 'Сохранение…' : 'Сохранить'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
