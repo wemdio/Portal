@@ -133,6 +133,8 @@ export interface OutreachAccount {
   phone: string;
   proxy_id: string | null;
   session_data: string;
+  /** Storage path for .session file (TDesktop SQLite), e.g. campaign_id/account_id.session */
+  session_file_path?: string | null;
   is_active: boolean;
   cooldown_until: string | null;
   created_at: string;

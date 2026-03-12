@@ -213,6 +213,9 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
   const [showBulkProxy, setShowBulkProxy] = useState(false);
   const [bulkText, setBulkText] = useState('');
   const [form, setForm] = useState({ session_name: '', api_id: '', api_hash: '', phone: '', session_data: '', proxy_id: '' });
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -290,18 +293,67 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
     void load();
   };
 
+  const handleAccountsFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    e.target.value = '';
+    if (!files?.length) return;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const token = await getToken();
+      const form = new FormData();
+      for (let i = 0; i < files.length; i++) form.append('files', files[i]);
+      const res = await fetch(`${API_BASE}/accounts/bulk-files?campaign_id=${encodeURIComponent(campaignId)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const err = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        setUploadError(err.error ?? res.statusText ?? 'Ошибка загрузки');
+        return;
+      }
+      void load();
+    } finally {
+      setUploading(false);
+    }
+  };
+
   if (loading) return <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>;
 
   return (
     <div className="space-y-6">
       {/* Accounts */}
       <div className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-semibold text-gray-800">Аккаунты ({accounts.length})</h3>
-          <button type="button" onClick={() => setShowAdd(!showAdd)} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Добавить
-          </button>
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,.session,application/json"
+              multiple
+              className="hidden"
+              onChange={handleAccountsFilesUpload}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer disabled:opacity-50"
+              title="JSON (по одному аккаунту в файле) и опционально .session с тем же именем (77059642280.json + 77059642280.session)"
+            >
+              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+              Загрузить JSON и .session
+            </button>
+            <button type="button" onClick={() => setShowAdd(!showAdd)} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
+              <Plus className="h-3.5 w-3.5" /> Добавить
+            </button>
+          </div>
         </div>
+        {uploadError && (
+          <p className="text-xs text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{uploadError}</p>
+        )}
 
         {showAdd && (
           <div className="space-y-2 rounded-lg border border-gray-200 p-3">
@@ -359,7 +411,14 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
         </div>
         {showBulkProxy && (
           <div className="space-y-2 rounded-lg border border-gray-200 p-3">
-            <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={4} placeholder="По одному прокси на строку" className="inp w-full" />
+            <p className="text-xs text-gray-600">Или добавить несколько прокси (по одному на строку)</p>
+            <textarea
+              value={bulkText}
+              onChange={e => setBulkText(e.target.value)}
+              rows={4}
+              placeholder={'socks5://user:pass@host:port\nhttp://user:pass@host:port\n...'}
+              className="inp w-full font-mono text-[11px]"
+            />
             <button type="button" onClick={bulkAddProxy} className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">Добавить все</button>
           </div>
         )}

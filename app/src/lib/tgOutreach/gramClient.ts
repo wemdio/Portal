@@ -25,11 +25,24 @@ function parseProxyUrl(url: string): { ip: string; port: number; username?: stri
   }
 }
 
+export type SessionFactory = (storagePath: string) => Promise<string>;
+
 export async function createGramClient(
   account: OutreachAccount,
   proxy: OutreachProxy | null,
+  downloadSessionFile?: SessionFactory,
 ): Promise<TelegramClient> {
-  const session = new StringSession(account.session_data);
+  let session: import('telegram/sessions').Session;
+  if (account.session_data?.trim()) {
+    session = new StringSession(account.session_data);
+  } else if (account.session_file_path && downloadSessionFile) {
+    const localPath = await downloadSessionFile(account.session_file_path);
+    const SQLiteSession = (await import('gramjs-sqlitesession')).default as new (path: string) => import('telegram/sessions').Session;
+    session = new SQLiteSession(localPath);
+  } else {
+    throw new Error('Нет session_data или session_file_path');
+  }
+
   const proxyConfig = proxy ? parseProxyUrl(proxy.url) : undefined;
   const proxyParams =
     proxyConfig && (proxyConfig.socksType === 4 || proxyConfig.socksType === 5)
@@ -49,20 +62,22 @@ export async function buildClients(
   accounts: OutreachAccount[],
   proxies: OutreachProxy[],
   log: (level: 'info' | 'warning' | 'error', msg: string) => void,
+  downloadSessionFile?: SessionFactory,
 ): Promise<ActiveClient[]> {
   const proxyMap = new Map(proxies.map(p => [p.id, p]));
   const clients: ActiveClient[] = [];
 
   for (const acc of accounts) {
     if (!acc.is_active) continue;
-    if (!acc.session_data) {
-      log('warning', `Аккаунт ${acc.session_name}: нет session_data, пропуск`);
+    const hasSession = (acc.session_data?.trim()) || (acc.session_file_path && downloadSessionFile);
+    if (!hasSession) {
+      log('warning', `Аккаунт ${acc.session_name}: нет session_data или .session файла, пропуск`);
       continue;
     }
 
     try {
       const proxy = acc.proxy_id ? proxyMap.get(acc.proxy_id) ?? null : null;
-      const client = await createGramClient(acc, proxy);
+      const client = await createGramClient(acc, proxy, downloadSessionFile);
       clients.push({ client, account: acc });
       log('info', `Аккаунт ${acc.session_name}: подключён`);
     } catch (err) {
@@ -84,6 +99,13 @@ export async function disconnectAll(clients: ActiveClient[]) {
 }
 
 export async function getUpdatedSessionString(client: TelegramClient): Promise<string> {
-  const session = client.session as StringSession;
-  return session.save();
+  const session = client.session;
+  if (session instanceof StringSession) {
+    return session.save();
+  }
+  if (typeof (session as { save?: () => unknown }).save === 'function') {
+    const out = (session as { save: () => unknown }).save();
+    return typeof out === 'string' ? out : '';
+  }
+  return '';
 }
