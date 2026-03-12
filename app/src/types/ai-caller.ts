@@ -328,7 +328,7 @@ export const DEFAULT_PIPELINE_SETTINGS = {
     backoffSeconds: 0.6,
   },
   language: 'ru',
-  firstMessageMode: 'assistant-speaks-first',
+  firstMessageMode: 'assistant-waits-for-user',
   backgroundSound: 'off',
   endCallFunctionEnabled: true,
   endCallPhrases: [

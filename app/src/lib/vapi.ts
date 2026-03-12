@@ -105,6 +105,9 @@ export function createCall(data: {
     assistantId: data.assistantId,
     phoneNumberId: data.phoneNumberId,
     customer: data.customer,
+    assistantOverrides: {
+      firstMessageMode: 'assistant-waits-for-user',
+    },
   };
 
   if (data.contactData) {
@@ -114,6 +117,7 @@ export function createCall(data: {
     if (data.contactData.email) parts.push(`Email: ${data.contactData.email}`);
     if (parts.length > 0) {
       payload.assistantOverrides = {
+        ...(payload.assistantOverrides as Record<string, unknown>),
         variableValues: {
           contact_name: data.contactData.contactName ?? '',
           company_name: data.contactData.companyName ?? '',
