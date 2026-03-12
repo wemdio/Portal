@@ -86,7 +86,9 @@ export async function containerStart(containerName: string): Promise<{ ok: boole
   if (!docker) return { ok: false, error: dockerUnavailableReason ?? 'Docker unavailable' };
   try {
     const list = await docker.listContainers({ all: true });
-    const c = list.find((x) => x.Names?.some((n) => n.replace(/^\//, '') === containerName));
+    const c = list.find((x: { Id: string; Names?: string[] }) =>
+      x.Names?.some((n: string) => n.replace(/^\//, '') === containerName)
+    );
     if (!c) return { ok: false, error: `Container ${containerName} not found` };
     const container = docker.getContainer(c.Id);
     await container.start();
@@ -102,7 +104,9 @@ export async function containerStop(containerName: string): Promise<{ ok: boolea
   if (!docker) return { ok: false, error: dockerUnavailableReason ?? 'Docker unavailable' };
   try {
     const list = await docker.listContainers({ all: true });
-    const c = list.find((x) => x.Names?.some((n) => n.replace(/^\//, '') === containerName));
+    const c = list.find((x: { Id: string; Names?: string[] }) =>
+      x.Names?.some((n: string) => n.replace(/^\//, '') === containerName)
+    );
     if (!c) return { ok: false, error: `Container ${containerName} not found` };
     const container = docker.getContainer(c.Id);
     await container.stop();
@@ -131,7 +135,9 @@ export async function containerLogs(
   if (!docker) return { logs: '', error: dockerUnavailableReason ?? 'Docker unavailable' };
   try {
     const list = await docker.listContainers({ all: true });
-    const c = list.find((x) => x.Names?.some((n) => n.replace(/^\//, '') === containerName));
+    const c = list.find((x: { Id: string; Names?: string[] }) =>
+      x.Names?.some((n: string) => n.replace(/^\//, '') === containerName)
+    );
     if (!c) return { logs: '', error: `Container ${containerName} not found` };
     const container = docker.getContainer(c.Id);
     const stream = await container.logs({
@@ -140,7 +146,7 @@ export async function containerLogs(
       stderr: true,
       tail: options?.tail ?? 1000,
     });
-    const buf = await streamToBuffer(stream as Readable);
+    const buf = await streamToBuffer(stream as unknown as Readable);
     // Docker stream: each frame = 8-byte header (1 byte stream type, 3 padding, 4 byte BE size) + payload
     const chunks: string[] = [];
     let i = 0;
