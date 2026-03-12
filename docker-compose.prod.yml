@@ -165,9 +165,7 @@ services:
       - portal-network
 
   health-check:
-    build:
-      context: ./services/health-check
-      dockerfile: Dockerfile
+    image: ${DOCKER_USERNAME}/portal-health-check:prod
     container_name: portal-health-check
     env_file:
       - .env
@@ -183,6 +181,25 @@ services:
       - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  atmos-bot:
+    image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
+    container_name: portal-atmos-bot
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - TELEGRAM_ATMOS_BOT_TOKEN=${TELEGRAM_ATMOS_BOT_TOKEN}
+      - TELEGRAM_ATMOS_TEAM_CHAT_ID=${TELEGRAM_ATMOS_TEAM_CHAT_ID}
+      - OPENROUTER_ATMOS_API_KEY=${OPENROUTER_ATMOS_API_KEY}
+      - ATMOS_WEBHOOK_PORT=${ATMOS_WEBHOOK_PORT:-8090}
+      - ATMOS_WEBHOOK_URL=${ATMOS_WEBHOOK_URL}
+    ports:
+      - "8090:8090"
     restart: unless-stopped
     networks:
       - portal-network

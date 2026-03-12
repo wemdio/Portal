@@ -68,14 +68,14 @@ blocks:
                 echo '--- Step 2: pull new images ---';
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
                 sudo -n docker compose -p portal -f docker-compose.prod.yml pull;
-                echo '--- Step 3: restart portal + yandexmaps + guacd + rdp-ws ---';
-                for svc in portal yandexmaps guacd rdp-ws; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-rdp-ws 2>/dev/null || true;
-                sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws;
+                echo '--- Step 3: restart portal + yandexmaps + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
+                for svc in portal yandexmaps guacd rdp-ws telegram-bot-api health-check atmos-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot 2>/dev/null || true;
+                sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps guacd rdp-ws telegram-bot-api health-check atmos-bot;
                 echo '--- Step 4: restart workers ---';
-                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
-                sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation 2>/dev/null || true;
-                sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation;
+                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach 2>/dev/null || true;
+                sudo -n docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach;
                 sudo -n docker image prune -f;
                 sudo -n docker volume prune -f;
                 echo '--- Deploy complete ---'"

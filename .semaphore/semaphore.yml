@@ -55,4 +55,6 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-yandexmaps:prod --platform linux/amd64 -f services/yandexmaps/Dockerfile services/yandexmaps'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-rdp-ws:prod --platform linux/amd64 -f services/rdp-ws/Dockerfile services/rdp-ws'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-atmos-bot:prod --platform linux/amd64 -f services/atmos-bot/Dockerfile services/atmos-bot'
 
