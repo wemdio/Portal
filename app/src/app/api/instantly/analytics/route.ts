@@ -22,12 +22,14 @@ export const GET = withAuth(async (req) => {
     }
     case 'steps': {
       if (!campaign_id) return NextResponse.json({ error: 'campaign_id is required' }, { status: 400 });
-      const data = await instantly.getCampaignAnalyticsSteps({ campaign_id });
-      return NextResponse.json(data);
+      const raw = await instantly.getCampaignAnalyticsSteps({ campaign_id });
+      const items = Array.isArray(raw) ? raw : Array.isArray((raw as { data?: unknown }).data) ? (raw as { data: unknown[] }).data : [];
+      return NextResponse.json(items);
     }
     default: {
-      const data = await instantly.getCampaignAnalytics({ campaign_id });
-      return NextResponse.json(data);
+      const raw = await instantly.getCampaignAnalytics({ campaign_id });
+      const items = Array.isArray(raw) ? raw : Array.isArray((raw as { data?: unknown }).data) ? (raw as { data: unknown[] }).data : [];
+      return NextResponse.json(items);
     }
   }
 });
