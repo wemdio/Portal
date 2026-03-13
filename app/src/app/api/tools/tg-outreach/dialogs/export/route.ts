@@ -1,38 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import type { DialogMessage } from '@/lib/tgOutreach/types';
+import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const auth = await authenticateRequest(req.headers.get('authorization'));
-  if ('error' in auth) return auth.error;
-
-  const url = new URL(req.url);
-  const campaignId = url.searchParams.get('campaign_id');
-  const format = url.searchParams.get('format') ?? 'json';
-
-  if (!campaignId) return jsonError('campaign_id обязателен', 400);
-
-  const { data, error } = await auth.supabase
-    .from('tg_outreach_dialogs')
-    .select('*')
-    .eq('campaign_id', campaignId)
-    .order('last_message_at', { ascending: false, nullsFirst: false });
-
-  if (error) return jsonError(error.message, 500);
-
-  if (format === 'html') {
-    const html = generateHtmlExport(data ?? []);
-    return new NextResponse(html, {
-      headers: {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Content-Disposition': `attachment; filename="dialogs_${campaignId}.html"`,
-      },
-    });
-  }
-
-  return NextResponse.json({ items: data ?? [] });
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-outreach.dialogs.export.get' },
+    async () => {
+      
+        const auth = await authenticateRequest(req.headers.get('authorization'));
+        if ('error' in auth) return auth.error;
+      
+        const url = new URL(req.url);
+        const campaignId = url.searchParams.get('campaign_id');
+        const format = url.searchParams.get('format') ?? 'json';
+      
+        if (!campaignId) return jsonError('campaign_id обязателен', 400);
+      
+        const { data, error } = await auth.supabase
+          .from('tg_outreach_dialogs')
+          .select('*')
+          .eq('campaign_id', campaignId)
+          .order('last_message_at', { ascending: false, nullsFirst: false });
+      
+        if (error) return jsonError(error.message, 500);
+      
+        if (format === 'html') {
+          const html = generateHtmlExport(data ?? []);
+          return new NextResponse(html, {
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Content-Disposition': `attachment; filename="dialogs_${campaignId}.html"`,
+            },
+          });
+        }
+      
+        return NextResponse.json({ items: data ?? [] });
+    },
+  );
 }
 
 interface DialogRow {

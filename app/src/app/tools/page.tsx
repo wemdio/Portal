@@ -16,6 +16,9 @@ import {
   Waves,
   Video,
   MessageSquareMore,
+  Briefcase,
+  Building2,
+  Users,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -33,23 +36,37 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'auto-report': FileText,
    'audio-transcribe': Waves,
   'tg-transcribe': Video,
+  'cis-lead-finder': Building2,
   rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
+  'habr-career': Briefcase,
+  'linkedin-bot': Building2,
+  'tg-parser': Users,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
-  const isEmerald = config.accentColor === 'emerald';
+  const hasBadge = Boolean(config.badge);
 
   if (config.disabled) {
+    const badgeClass = config.badgeVariant === 'emerald'
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-amber-100 text-amber-700';
     return (
-      <div className="rounded-2xl p-10 min-w-0 flex flex-col h-full border border-gray-200 bg-gray-50 opacity-50 cursor-not-allowed select-none">
+      <div className="rounded-2xl p-10 min-w-0 flex flex-col h-full border border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed select-none">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
               <p className="text-base font-semibold text-gray-400">{config.title}</p>
+              {config.badge && (
+                <span
+                  className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
+                >
+                  {config.badge}
+                </span>
+              )}
             </div>
             <p className="text-sm text-gray-400">{config.description}</p>
           </div>
@@ -60,22 +77,19 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
     );
   }
 
-  const borderClass = config.badge
-    ? isEmerald
-      ? 'border-2 border-emerald-200 bg-gradient-to-br from-emerald-50 to-white hover:border-emerald-300'
-      : 'border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white hover:border-blue-300'
+  const borderClass = hasBadge
+    ? 'border border-gray-200 bg-gray-50 hover:border-blue-300 hover:bg-blue-50/60'
     : 'border border-gray-200 bg-white';
   const badgeClass = config.badgeVariant === 'emerald'
     ? 'bg-emerald-100 text-emerald-700'
     : 'bg-amber-100 text-amber-700';
-  const linkClass = isEmerald ? 'text-emerald-600 group-hover:text-emerald-700' : 'text-blue-600 group-hover:text-blue-700';
-  const iconClass = isEmerald
-    ? 'text-emerald-500 group-hover:text-emerald-600'
-    : 'text-gray-400 group-hover:text-blue-600';
+  const linkClass = 'text-blue-600 group-hover:text-blue-700';
+  const iconClass = 'text-gray-400 group-hover:text-blue-600';
 
   return (
     <Link
       href={config.href as Route}
+      prefetch={false}
       className={`group rounded-2xl p-10 transition hover:shadow-md min-w-0 flex flex-col h-full ${borderClass}`}
     >
       <div className="flex items-start justify-between gap-4">

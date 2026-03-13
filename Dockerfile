@@ -27,6 +27,9 @@ ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
 ENV NEXT_PUBLIC_RDP_WS_URL=$NEXT_PUBLIC_RDP_WS_URL
 
+# Increase Node heap for Next.js build (avoids OOM in Docker)
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+
 # Build Next.js application
 RUN npm run build
 
@@ -57,6 +60,6 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
-ENV BODY_SIZE_LIMIT=25mb
+ENV BODY_SIZE_LIMIT=600mb
 
 CMD ["node", "scripts/start.js"]

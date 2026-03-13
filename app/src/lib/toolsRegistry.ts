@@ -34,6 +34,10 @@ export const ALL_TOOL_IDS = [
   'rdp',
   'instantly',
   'tg-outreach',
+  'habr-career',
+  'linkedin-bot',
+  'tg-parser',
+  'cis-lead-finder',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -128,6 +132,16 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/tg-transcribe',
     accentColor: 'blue',
   },
+  'cis-lead-finder': {
+    id: 'cis-lead-finder',
+    title: 'CIS Lead Finder',
+    description: 'Импорт таблиц (ИНН/телефоны) → нормализация компаний → пробив Telegram → контакты ЛПР.',
+    href: '/tools/cis-lead-finder',
+    badge: 'В разработке',
+    badgeVariant: 'amber',
+    accentColor: 'blue',
+    disabled: true,
+  },
   rdp: {
     id: 'rdp',
     title: 'Удалённый рабочий стол',
@@ -147,6 +161,27 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'TG Аутрич',
     description: 'Массовый Telegram-аутрич: кампании, автоответы GPT, квалификация лидов.',
     href: '/tools/tg-outreach',
+    accentColor: 'blue',
+  },
+  'habr-career': {
+    id: 'habr-career',
+    title: 'Habr Career',
+    description: 'Парсинг вакансий и компаний с career.habr.com с экспортом в таблицу.',
+    href: '/tools/habr-career',
+    accentColor: 'blue',
+  },
+  'linkedin-bot': {
+    id: 'linkedin-bot',
+    title: 'LinkedIn Companies',
+    description: 'Парсинг компаний по поисковому URL LinkedIn с экспортом в CSV, Excel или Google Sheets.',
+    href: '/tools/linkedin-bot',
+    accentColor: 'blue',
+  },
+  'tg-parser': {
+    id: 'tg-parser',
+    title: 'TG User Parser',
+    description: 'Парсинг пользователей из Telegram: сообщения в чатах, участники, комментарии. Экспорт в Excel/CSV.',
+    href: '/tools/tg-parser',
     accentColor: 'blue',
   },
 };

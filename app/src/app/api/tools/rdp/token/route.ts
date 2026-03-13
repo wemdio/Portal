@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import crypto from 'crypto';
+import { withToolTrace } from '@/lib/toolTrace';
 
 const admin = supabaseAdmin!;
 
@@ -30,35 +31,41 @@ function encryptToken(connectionParams: Record<string, unknown>, secret: string)
 }
 
 export async function POST(req: NextRequest) {
-  const user = await getUser(req);
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  if (!RDP_WS_SECRET) {
-    return NextResponse.json({ error: 'RDP not configured' }, { status: 503 });
-  }
-
-  const { data: session } = await admin
-    .from('rdp_sessions')
-    .select('id')
-    .eq('user_id', user.id)
-    .eq('status', 'active')
-    .limit(1)
-    .maybeSingle();
-
-  if (!session) {
-    return NextResponse.json(
-      { error: 'Сначала начните сессию' },
-      { status: 403 },
-    );
-  }
-
-  const connectionParams = {
-    connection: {
-      type: 'rdp',
+  return withToolTrace(
+    { request: req, operation: 'tools.rdp.token.post' },
+    async () => {
+      
+        const user = await getUser(req);
+        if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      
+        if (!RDP_WS_SECRET) {
+          return NextResponse.json({ error: 'RDP not configured' }, { status: 503 });
+        }
+      
+        const { data: session } = await admin
+          .from('rdp_sessions')
+          .select('id')
+          .eq('user_id', user.id)
+          .eq('status', 'active')
+          .limit(1)
+          .maybeSingle();
+      
+        if (!session) {
+          return NextResponse.json(
+            { error: 'Сначала начните сессию' },
+            { status: 403 },
+          );
+        }
+      
+        const connectionParams = {
+          connection: {
+            type: 'rdp',
+          },
+        };
+      
+        const token = encryptToken(connectionParams, RDP_WS_SECRET);
+      
+        return NextResponse.json({ token: btoa(token) });
     },
-  };
-
-  const token = encryptToken(connectionParams, RDP_WS_SECRET);
-
-  return NextResponse.json({ token: btoa(token) });
+  );
 }

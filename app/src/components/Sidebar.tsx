@@ -119,6 +119,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
   }, []);
 
   useEffect(() => {
+    if (!userEmail) return;
     let cancelled = false;
     void (async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -144,7 +145,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       });
     })();
     return () => { cancelled = true; };
-  }, [userRole]);
+  }, [userEmail]);
 
   useEffect(() => {
     if (!isTma || typeof window === 'undefined') return;
@@ -206,6 +207,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             <Link
               key={item.name}
               href={item.href as Route}
+              prefetch={false}
               onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
                 ${isActive
@@ -232,6 +234,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
       >
         <Link
           href={'/profile' as Route}
+          prefetch={false}
           onClick={() => onMobileClose?.()}
           className={`mb-2 flex items-center gap-2 rounded-lg px-1.5 py-1.5 transition ${
             isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-zinc-50'

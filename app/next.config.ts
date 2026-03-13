@@ -18,9 +18,9 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   experimental: {
     typedRoutes: true,
-    proxyClientMaxBodySize: '25mb',
+    proxyClientMaxBodySize: '600mb',
     serverActions: {
-      bodySizeLimit: '25mb',
+      bodySizeLimit: '600mb',
     },
   },
   outputFileTracingIncludes: {
@@ -29,7 +29,7 @@ const nextConfig: NextConfig = {
       './node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs',
     ],
   },
-  serverExternalPackages: ['pdf-parse', 'pdfjs-dist'],
+  serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode'],
   env: {
     NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,

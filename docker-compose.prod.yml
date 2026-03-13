@@ -9,9 +9,14 @@ services:
       - .env
     ports:
       - "3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Allow non-root app user to access Docker socket via host docker group GID.
+    group_add:
+      - "${DOCKER_GID:-999}"
     environment:
       - NODE_ENV=production
-      - BODY_SIZE_LIMIT=25mb
+      - BODY_SIZE_LIMIT=600mb
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
@@ -161,6 +166,49 @@ services:
     restart: unless-stopped
     ports:
       - "8010:8000"
+    networks:
+      - portal-network
+
+  health-check:
+    image: ${DOCKER_USERNAME}/portal-health-check:prod
+    container_name: portal-health-check
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
+      - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-144.31.54.166}
+      - HH_PROXY_URLS=${HH_PROXY_URLS}
+      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_BUCKET=${S3_BUCKET}
+    # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
+    extra_hosts:
+      - "polza-portal.ru:host-gateway"
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  atmos-bot:
+    image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
+    container_name: portal-atmos-bot
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - TELEGRAM_ATMOS_BOT_TOKEN=${TELEGRAM_ATMOS_BOT_TOKEN}
+      - TELEGRAM_ATMOS_TEAM_CHAT_ID=${TELEGRAM_ATMOS_TEAM_CHAT_ID}
+      - OPENROUTER_ATMOS_API_KEY=${OPENROUTER_ATMOS_API_KEY}
+      - ATMOS_WEBHOOK_PORT=${ATMOS_WEBHOOK_PORT:-8090}
+      - ATMOS_WEBHOOK_URL=${ATMOS_WEBHOOK_URL}
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
     networks:
       - portal-network
 

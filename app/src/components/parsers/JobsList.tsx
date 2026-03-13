@@ -56,6 +56,8 @@ type Props = {
   onRefresh: () => void;
   busy: boolean;
   refreshing?: boolean;
+  /** Фактическое количество строк в hh_vacancies для активного запуска */
+  activeJobParsedCount?: number;
 };
 
 const MAX_JOBS = 20;
@@ -83,6 +85,7 @@ export function JobsList({
   onRefresh,
   busy,
   refreshing,
+  activeJobParsedCount,
 }: Props) {
   const displayJobs = jobs.slice(0, MAX_JOBS);
   return (
@@ -114,7 +117,11 @@ export function JobsList({
             const isActive = activeJobId === job.id;
             const stoppedByUser = isStoppedByUser(job.status, job.error_message);
             const totalFound = typeof job.total_found === 'number' ? job.total_found : null;
-            const totalParsed = typeof job.total_parsed === 'number' ? job.total_parsed : null;
+            const parsedFromJob = typeof job.total_parsed === 'number' ? job.total_parsed : null;
+            const totalParsed =
+              job.id === activeJobId && typeof activeJobParsedCount === 'number'
+                ? activeJobParsedCount
+                : parsedFromJob;
             const hasTotal = totalFound != null && totalFound > 0;
             const progressFromJob = typeof job.progress_percent === 'number'
               ? Math.max(0, Math.min(100, Math.round(job.progress_percent)))
@@ -124,7 +131,7 @@ export function JobsList({
             const fallbackProgress = job.status === 'completed'
               ? 100
               : hasTotal && !shouldHideFallback
-                ? Math.min(100, Math.round(((totalParsed ?? 0) / totalFound) * 100))
+                ? Math.min(100, Math.round(((parsedFromJob ?? 0) / totalFound) * 100))
                 : null;
             const progressValue = progressFromJob ?? fallbackProgress;
             const hasProgress = progressValue != null;
@@ -196,9 +203,9 @@ export function JobsList({
                               ? `Статус: ${stageLabel}`
                               : 'Прогресс: —'}
                         </span>
-                        {totalFound != null || totalParsed != null ? (
+                        {totalParsed != null ? (
                           <span>
-                            Найдено: {totalFound ?? '—'} · Обработано: {totalParsed ?? '—'}
+                            Обработано: {totalParsed}
                           </span>
                         ) : null}
                         {job.error_message ? (
