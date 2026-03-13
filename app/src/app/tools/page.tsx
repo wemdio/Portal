@@ -89,6 +89,7 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
   return (
     <Link
       href={config.href as Route}
+      prefetch={false}
       className={`group rounded-2xl p-10 transition hover:shadow-md min-w-0 flex flex-col h-full ${borderClass}`}
     >
       <div className="flex items-start justify-between gap-4">
