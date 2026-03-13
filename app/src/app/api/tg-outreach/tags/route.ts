@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export const GET = withTgOutreachAuth(async (_req, { supabase }) => {
   const { data: tags, error } = await supabase
-    .from('tg_outreach_tags')
+    .from('tg_pool_tags')
     .select('*')
     .order('created_at', { ascending: false });
 
@@ -21,7 +21,7 @@ export const POST = withTgOutreachAuth(async (req, { supabase, userId }) => {
   }
 
   const { data: tag, error } = await supabase
-    .from('tg_outreach_tags')
+    .from('tg_pool_tags')
     .insert({
       name: body.name.trim(),
       color: body.color ?? '#3b82f6',

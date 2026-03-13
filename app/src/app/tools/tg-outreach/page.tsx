@@ -23,7 +23,13 @@ import {
   X,
   Globe,
   Network,
+  Tag,
+  Shield,
 } from 'lucide-react';
+import { AccountsTab as AccountPoolTab } from '@/components/tg-outreach/AccountsTab';
+import { ProxiesTab as ProxyPoolTab } from '@/components/tg-outreach/ProxiesTab';
+import { TagManager } from '@/components/tg-outreach/TagManager';
+import { useTgOutreachTags } from '@/lib/tgOutreach/hooks';
 import type {
   OutreachCampaign,
   OutreachAccount,
@@ -874,8 +880,8 @@ function RangeField({ label, value, onChange }: { label: string; value: [number,
   );
 }
 
-/* =================== MAIN PAGE =================== */
-export default function TgOutreachPage() {
+/* =================== CAMPAIGNS SECTION =================== */
+function CampaignsSection() {
   const [campaigns, setCampaigns] = useState<OutreachCampaign[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -985,6 +991,104 @@ export default function TgOutreachPage() {
         {selected && (
           <CampaignView campaign={selected} onUpdate={() => void fetchCampaigns()} onDelete={deleteCampaign} />
         )}
+      </div>
+    </div>
+  );
+}
+
+/* =================== ACCOUNT POOL SECTION =================== */
+function AccountPoolSection() {
+  const { tags, reload: reloadTags } = useTgOutreachTags();
+  const [showTagManager, setShowTagManager] = useState(false);
+
+  return (
+    <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+      <header className="space-y-2">
+        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+          <Shield className="h-3.5 w-3.5" />
+          Пул аккаунтов
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Управление аккаунтами</h1>
+            <p className="max-w-2xl text-sm text-gray-500">
+              Глобальный пул Telegram-аккаунтов. Добавляйте, настраивайте лимиты, проверяйте статус и разблокируйте.
+            </p>
+          </div>
+          <button type="button" onClick={() => setShowTagManager(true)}
+            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
+            <Tag className="h-3.5 w-3.5" /> Теги
+          </button>
+        </div>
+      </header>
+      <AccountPoolTab allTags={tags} onTagsChange={reloadTags} />
+      {showTagManager && <TagManager tags={tags} onClose={() => setShowTagManager(false)} onUpdate={reloadTags} />}
+    </div>
+  );
+}
+
+/* =================== PROXY POOL SECTION =================== */
+function ProxyPoolSection() {
+  const { tags, reload: reloadTags } = useTgOutreachTags();
+  const [showTagManager, setShowTagManager] = useState(false);
+
+  return (
+    <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+      <header className="space-y-2">
+        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+          <Network className="h-3.5 w-3.5" />
+          Пул прокси
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Управление прокси</h1>
+            <p className="max-w-2xl text-sm text-gray-500">
+              Глобальный пул прокси-серверов для Telegram-аккаунтов. Привязывайте к аккаунтам и отслеживайте использование.
+            </p>
+          </div>
+          <button type="button" onClick={() => setShowTagManager(true)}
+            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
+            <Tag className="h-3.5 w-3.5" /> Теги
+          </button>
+        </div>
+      </header>
+      <ProxyPoolTab allTags={tags} onTagsChange={reloadTags} />
+      {showTagManager && <TagManager tags={tags} onClose={() => setShowTagManager(false)} onUpdate={reloadTags} />}
+    </div>
+  );
+}
+
+/* =================== MAIN PAGE (TOP-LEVEL TABS) =================== */
+const TOP_TABS = [
+  { id: 'campaigns', label: 'Кампании', icon: MessageSquareMore },
+  { id: 'accounts', label: 'Аккаунты', icon: Users },
+  { id: 'proxies', label: 'Прокси', icon: Network },
+] as const;
+
+type TopTab = (typeof TOP_TABS)[number]['id'];
+
+export default function TgOutreachPage() {
+  const [topTab, setTopTab] = useState<TopTab>('campaigns');
+
+  return (
+    <div className="flex gap-6 text-left max-w-full">
+      <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+        <div className="flex gap-1 border-b border-gray-200">
+          {TOP_TABS.map(t => {
+            const Icon = t.icon;
+            return (
+              <button key={t.id} type="button" onClick={() => setTopTab(t.id)}
+                className={`inline-flex items-center gap-1.5 px-5 py-3 text-sm font-medium transition border-b-2 -mb-px cursor-pointer ${topTab === t.id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
+                <Icon className="h-4 w-4" />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {topTab === 'campaigns' && <CampaignsSection />}
+        {topTab === 'accounts' && <AccountPoolSection />}
+        {topTab === 'proxies' && <ProxyPoolSection />}
       </div>
     </div>
   );
