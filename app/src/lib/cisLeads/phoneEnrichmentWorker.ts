@@ -161,7 +161,7 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
     const contacts = toCheck.map(
       (p, i) =>
         new Api.InputPhoneContact({
-          clientId: Date.now() + i,
+          clientId: BigInt(Date.now() + i) as unknown as never,
           phone: p,
           firstName: 'Lead',
           lastName: 'Finder',
