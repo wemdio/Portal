@@ -85,7 +85,7 @@ async function withClient<T>(fn: (client: TelegramClient) => Promise<T>): Promis
       session_data: account.session_data ?? '',
       session_file_path: account.session_file_path,
       is_active: true,
-    },
+    } as unknown as import('@/lib/tgOutreach/types').OutreachAccount,
     null,
     downloadSessionFile,
   );
@@ -158,13 +158,14 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
 
   await withClient(async (client) => {
     // Telegram requires contacts import in batches; keep it small and safe.
-    const contacts = toCheck.map((p, i) =>
-      new Api.InputPhoneContact({
-        clientId: BigInt(Date.now() + i),
-        phone: p,
-        firstName: 'Lead',
-        lastName: 'Finder',
-      }),
+    const contacts = toCheck.map(
+      (p, i) =>
+        new Api.InputPhoneContact({
+          clientId: Date.now() + i,
+          phone: p,
+          firstName: 'Lead',
+          lastName: 'Finder',
+        }),
     );
 
     try {

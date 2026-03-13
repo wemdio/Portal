@@ -4,6 +4,7 @@ import type {
   ContactCandidate,
   LprSeniority,
   LprProvider,
+  LprFunction,
 } from '@/types/lpr';
 import { searchPeople } from './apolloClient';
 import { enrichPerson } from './pdlClient';
@@ -121,9 +122,9 @@ class ApolloPdlProvider implements LprDiscoveryProvider {
       }));
 
     if (config.functions?.length) {
-      const allowedFunctions = new Set(config.functions);
+      const allowedFunctions = new Set<LprFunction>(config.functions);
       const functionalFiltered = filtered.filter(
-        (f) => f.function_area != null && allowedFunctions.has(f.function_area as string),
+        (f) => f.function_area != null && allowedFunctions.has(f.function_area as LprFunction),
       );
       if (functionalFiltered.length > 0) filtered = functionalFiltered;
     }

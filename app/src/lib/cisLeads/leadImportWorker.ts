@@ -131,8 +131,10 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
   if (!supabaseAdmin) return;
   if (!hasDadataKey()) return;
 
+  const db = supabaseAdmin;
+
   // Keep this bounded; the job can be resumed by re-running normalization later.
-  const { data: leads, error } = await supabaseAdmin
+  const { data: leads, error } = await db
     .from('raw_leads')
     .select('id, raw_inn, raw_company_name, raw_city, raw_region')
     .eq('import_job_id', jobId)
@@ -179,7 +181,7 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
     // Upsert by INN when available; otherwise insert best-effort row.
     let companyId: string | null = null;
     if (outInn) {
-      const { data: company, error: upsertErr } = await supabaseAdmin
+      const { data: company, error: upsertErr } = await db
         .from('companies')
         .upsert(
           {
@@ -205,7 +207,7 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
         .single<{ id: string }>();
       if (!upsertErr && company) companyId = company.id;
     } else {
-      const { data: company, error: insErr } = await supabaseAdmin
+      const { data: company, error: insErr } = await db
         .from('companies')
         .insert({
           inn: null,
@@ -231,7 +233,7 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
 
     if (!companyId) return;
 
-    await supabaseAdmin
+    await db
       .from('raw_leads')
       .update({ company_id: companyId })
       .eq('id', lead.id)

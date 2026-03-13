@@ -841,7 +841,6 @@ async function copyStyledReportToSheets({
   const textBlob = new Blob([fallbackText], { type: 'text/plain' });
 
   if (navigator.clipboard && 'write' in navigator.clipboard && typeof ClipboardItem !== 'undefined') {
-    // @ts-expect-error ClipboardItem typing varies by TS lib target
     await navigator.clipboard.write([new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob })]);
     return;
   }
