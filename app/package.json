@@ -88,8 +88,8 @@
     "@testing-library/jest-dom": "^6.1.5",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.5.1",
-    "@types/jest": "^29.5.11",
     "@types/dockerode": "^4.0.1",
+    "@types/jest": "^29.5.11",
     "@types/node": "^20",
     "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
@@ -103,5 +103,8 @@
     "jsdom": "^28.1.0",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "lightningcss-linux-x64-gnu": "^1.31.1"
   }
 }
