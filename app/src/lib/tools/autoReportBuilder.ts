@@ -4,6 +4,8 @@
  */
 
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
+const INSTANTLY_TIMEOUT_MS = 20_000;
+const INSTANTLY_MAX_RETRIES = 2;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -13,6 +15,62 @@ export interface InstantlyCampaignItem {
   status?: number;
   timestamp_created?: string;
   timestamp_updated?: string;
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+async function fetchInstantlyJson(
+  url: string,
+  headers: HeadersInit,
+  context: string,
+): Promise<unknown> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= INSTANTLY_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), INSTANTLY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { headers, signal: controller.signal });
+      if (res.ok) {
+        return (await res.json()) as unknown;
+      }
+
+      const body = await res.text().catch(() => '');
+      if (attempt < INSTANTLY_MAX_RETRIES && isRetryableStatus(res.status)) {
+        await sleep(400 * (attempt + 1));
+        continue;
+      }
+
+      throw new Error(
+        `${context} failed: ${res.status}${body ? ` ${body.slice(0, 400)}` : ''}`,
+      );
+    } catch (err) {
+      lastError = err;
+      const message = getErrorMessage(err);
+      const isTimeout = err instanceof Error && err.name === 'AbortError';
+      const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message);
+      if (attempt < INSTANTLY_MAX_RETRIES && (isTimeout || isNetwork)) {
+        await sleep(400 * (attempt + 1));
+        continue;
+      }
+      break;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw new Error(`${context} failed: ${getErrorMessage(lastError)}`);
 }
 
 function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {
@@ -40,17 +98,21 @@ export async function fetchInstantlyCampaignsList(apiKey: string): Promise<Insta
   const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
   const all: InstantlyCampaignItem[] = [];
   let startingAfter: string | null = null;
+  const seenPageTokens = new Set<string>();
+  let pageCount = 0;
 
   do {
     const url = new URL(`${INSTANTLY_BASE}/campaigns`);
     url.searchParams.set('limit', '100');
     if (startingAfter) url.searchParams.set('starting_after', startingAfter);
 
-    const res = await fetch(url.toString(), { headers });
-    if (!res.ok) {
-      throw new Error(`Instantly list campaigns failed: ${res.status} ${await res.text()}`);
-    }
-    const data = (await res.json()) as unknown;
+    const tokenKey = startingAfter ?? '__first__';
+    if (seenPageTokens.has(tokenKey)) break;
+    seenPageTokens.add(tokenKey);
+    pageCount += 1;
+    if (pageCount > 200) break;
+
+    const data = await fetchInstantlyJson(url.toString(), headers, 'Instantly list campaigns');
     const arr = extractCampaignsArray(data);
     if (arr?.length) all.push(...arr);
 
@@ -75,26 +137,15 @@ export async function fetchInstantlyCampaignData(
     Authorization: `Bearer ${apiKey}`,
   };
 
-  const [analyticsRes, stepsRes] = await Promise.all([
-    fetch(
-      `${INSTANTLY_BASE}/campaigns/analytics?id=${encodeURIComponent(campaignId)}&expand_crm_events=true`,
-      { headers }
-    ),
-    fetch(
-      `${INSTANTLY_BASE}/campaigns/analytics/steps?campaign_id=${encodeURIComponent(campaignId)}`,
-      { headers }
-    ),
+  const analyticsUrl =
+    `${INSTANTLY_BASE}/campaigns/analytics?id=${encodeURIComponent(campaignId)}&expand_crm_events=true`;
+  const stepsUrl =
+    `${INSTANTLY_BASE}/campaigns/analytics/steps?campaign_id=${encodeURIComponent(campaignId)}`;
+
+  const [analytics, steps] = await Promise.all([
+    fetchInstantlyJson(analyticsUrl, headers, 'Instantly analytics'),
+    fetchInstantlyJson(stepsUrl, headers, 'Instantly steps'),
   ]);
-
-  if (!analyticsRes.ok) {
-    throw new Error(`Instantly analytics failed: ${analyticsRes.status} ${await analyticsRes.text()}`);
-  }
-  if (!stepsRes.ok) {
-    throw new Error(`Instantly steps failed: ${stepsRes.status} ${await stepsRes.text()}`);
-  }
-
-  const analytics = (await analyticsRes.json()) as unknown;
-  const steps = (await stepsRes.json()) as unknown;
   return { analytics, steps };
 }
 

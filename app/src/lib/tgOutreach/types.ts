@@ -84,7 +84,7 @@ export interface OpenAISettings {
 export interface FollowUpSettings {
   enabled: boolean;
   delay_hours: number;
-  delay_minutes?: number; // опционально для обратной совместимости
+  delay_minutes?: number;
   prompt: string;
 }
 

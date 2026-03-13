@@ -29,7 +29,7 @@ export const POST = withTgOutreachAuth(async (req, { supabase }, params) => {
   const avatar_url = urlData.publicUrl;
 
   const { error: updateError } = await supabase
-    .from('tg_outreach_accounts')
+    .from('tg_pool_accounts')
     .update({ avatar_url, updated_at: new Date().toISOString() })
     .eq('id', id);
 
