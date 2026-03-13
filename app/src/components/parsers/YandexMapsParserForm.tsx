@@ -110,6 +110,11 @@ export function YandexMapsParserForm(props: {
   const [selectedRubrics, setSelectedRubrics] = useState<string[]>([]);
   const [customKeyword, setCustomKeyword] = useState('');
 
+  const allCities = useMemo(
+    () => Object.values(CITIES).flat().map((city) => city.trim()).filter(Boolean),
+    []
+  );
+
   const searchUrls = useMemo(() => {
     return searchUrlsText
       .split('\n')
@@ -203,7 +208,25 @@ export function YandexMapsParserForm(props: {
         
         <div className="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-2">
-            <label className="block text-sm font-medium text-gray-700">Города</label>
+            <div className="flex items-center justify-between gap-3">
+              <label className="block text-sm font-medium text-gray-700">Города</label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="text-xs px-2 py-1 rounded-md border border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-100"
+                  onClick={() => setSelectedCities(allCities)}
+                >
+                  Выбрать все
+                </button>
+                <button
+                  type="button"
+                  className="text-xs px-2 py-1 rounded-md border border-gray-200 text-gray-500 hover:bg-gray-50"
+                  onClick={() => setSelectedCities([])}
+                >
+                  Очистить
+                </button>
+              </div>
+            </div>
             <MultiSelect
               options={CITIES}
               value={selectedCities}
