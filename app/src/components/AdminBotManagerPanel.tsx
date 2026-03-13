@@ -114,6 +114,18 @@ export function AdminBotManagerPanel() {
   );
 
   const botName = (id: string) => bots.find((b) => b.id === id)?.name ?? id;
+  const actionHint = (bot: BotListItem, action: 'stop' | 'start') => {
+    if (bot.kind !== 'container') return '';
+    if (!dockerAvailable) return 'Недоступно: нет доступа к Docker';
+    if (action === 'stop') {
+      if (bot.status !== 'running') return 'Можно остановить только работающий контейнер';
+      return '';
+    }
+    if (bot.status !== 'exited' && bot.status !== 'paused') {
+      return 'Можно запустить только остановленный или приостановленный контейнер';
+    }
+    return '';
+  };
 
   if (loading) {
     return (
@@ -161,11 +173,12 @@ export function AdminBotManagerPanel() {
               </div>
             </div>
             <div className="mt-5 flex flex-wrap gap-2">
-              {bot.canStop && (
+              {bot.kind === 'container' && (
                 <button
                   type="button"
                   onClick={() => runAction(bot.id, 'stop')}
-                  disabled={actionLoading === bot.id}
+                  disabled={actionLoading === bot.id || !bot.canStop}
+                  title={actionHint(bot, 'stop')}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                 >
                   {actionLoading === bot.id ? (
@@ -176,11 +189,12 @@ export function AdminBotManagerPanel() {
                   Остановить
                 </button>
               )}
-              {bot.canStart && (
+              {bot.kind === 'container' && (
                 <button
                   type="button"
                   onClick={() => runAction(bot.id, 'start')}
-                  disabled={actionLoading === bot.id}
+                  disabled={actionLoading === bot.id || !bot.canStart}
+                  title={actionHint(bot, 'start')}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
                 >
                   {actionLoading === bot.id ? (
