@@ -33,7 +33,17 @@ export async function GET(_req: NextRequest) {
       
         try {
           const campaigns = await fetchInstantlyCampaignsList(INSTANTLY_API_KEY);
-          return NextResponse.json({ campaigns });
+          const sorted = [...campaigns].sort((a, b) => {
+            const at = a.timestamp_created ?? a.timestamp_updated ?? '';
+            const bt = b.timestamp_created ?? b.timestamp_updated ?? '';
+            // ISO timestamps can be compared lexicographically, but date parsing is safer for unexpected formats.
+            const an = at ? Date.parse(at) : NaN;
+            const bn = bt ? Date.parse(bt) : NaN;
+            if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return bn - an;
+            if (at && bt && at !== bt) return bt.localeCompare(at);
+            return (b.name ?? '').localeCompare(a.name ?? '', 'ru');
+          });
+          return NextResponse.json({ campaigns: sorted });
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Ошибка загрузки кампаний';
           return jsonError(message, 500);

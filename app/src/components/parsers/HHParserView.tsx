@@ -251,6 +251,21 @@ function safeHostname(url: string | null | undefined) {
   }
 }
 
+function extractHhEmployerKey(url: string | null | undefined): string | null {
+  const s = String(url ?? '').trim();
+  if (!s) return null;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host !== 'hh.ru') return null;
+    const match = parsed.pathname.match(/\/employer\/(\d+)/);
+    if (!match) return null;
+    return `hh:${match[1]}`;
+  } catch {
+    return null;
+  }
+}
+
 export function HHParserView() {
   const [jobs, setJobs] = useState<ParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -620,8 +635,17 @@ export function HHParserView() {
         { company_name: string; site: string; company_url: string; description: string; vacancyCount: number }
       >();
       for (const v of items) {
-        const host = safeHostname(v.company_site_url) ?? safeHostname(v.company_url);
-        const key = (host ?? v.company_name ?? '').trim().toLowerCase();
+        const siteHost = safeHostname(v.company_site_url);
+        const hhEmployerKey = extractHhEmployerKey(v.company_url);
+        const fallbackName = (v.company_name ?? '').trim().toLowerCase();
+
+        const key = (
+          siteHost && siteHost !== 'hh.ru'
+            ? siteHost
+            : hhEmployerKey
+              ? hhEmployerKey
+              : siteHost || fallbackName
+        ).trim().toLowerCase();
         if (!key) continue;
         const existing = map.get(key);
         if (!existing) {
@@ -655,8 +679,8 @@ export function HHParserView() {
         ['Company', 'Site', 'CompanyUrl', 'Description', 'Vacancies', 'JobId', 'Parser'],
         ...companies.slice(0, MAX_ROWS).map((c) => [
           c.company_name,
-          c.site,
-          c.company_url,
+          c.site,          // только внешний сайт компании (если есть)
+          c.company_url,   // страница работодателя на hh.ru
           c.description,
           String(c.vacancyCount),
           activeJobId,
@@ -732,6 +756,7 @@ export function HHParserView() {
         <JobsList
           jobs={jobs}
           activeJobId={activeJobId}
+          activeJobParsedCount={resultsCount}
           onSelect={(id) => setActiveJobId(id)}
           onRefresh={() => void handleManualRefresh()}
           busy={busy}
