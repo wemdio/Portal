@@ -6,22 +6,22 @@ export const dynamic = 'force-dynamic';
 export const GET = withTgOutreachAuth(async (_req, { supabase }, params) => {
   const id = params?.id;
   const { data, error } = await supabase
-    .from('tg_outreach_accounts')
+    .from('tg_pool_accounts')
     .select(`
       *,
-      proxy:tg_outreach_proxies(id, ip, port, type),
-      tg_outreach_account_tags(tag_id, tg_outreach_tags(*))
+      proxy:tg_pool_proxies(id, ip, port, type),
+      tg_pool_account_tags(tag_id, tg_pool_tags(*))
     `)
     .eq('id', id)
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 404 });
 
-  const junctions = (data.tg_outreach_account_tags ?? []) as Array<{ tg_outreach_tags: unknown }>;
+  const junctions = (data.tg_pool_account_tags ?? []) as Array<{ tg_pool_tags: unknown }>;
   return NextResponse.json({
     ...data,
-    tags: junctions.map((j) => j.tg_outreach_tags).filter(Boolean),
-    tg_outreach_account_tags: undefined,
+    tags: junctions.map((j) => j.tg_pool_tags).filter(Boolean),
+    tg_pool_account_tags: undefined,
   });
 });
 
@@ -45,7 +45,7 @@ export const PATCH = withTgOutreachAuth(async (req, { supabase }, params) => {
   updateFields.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase
-    .from('tg_outreach_accounts')
+    .from('tg_pool_accounts')
     .update(updateFields)
     .eq('id', id)
     .select()
@@ -54,9 +54,9 @@ export const PATCH = withTgOutreachAuth(async (req, { supabase }, params) => {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   if (body.tag_ids !== undefined) {
-    await supabase.from('tg_outreach_account_tags').delete().eq('account_id', id);
+    await supabase.from('tg_pool_account_tags').delete().eq('account_id', id);
     if (body.tag_ids.length) {
-      await supabase.from('tg_outreach_account_tags').insert(
+      await supabase.from('tg_pool_account_tags').insert(
         body.tag_ids.map((tag_id: string) => ({ account_id: id, tag_id })),
       );
     }
@@ -67,7 +67,7 @@ export const PATCH = withTgOutreachAuth(async (req, { supabase }, params) => {
 
 export const DELETE = withTgOutreachAuth(async (_req, { supabase }, params) => {
   const id = params?.id;
-  const { error } = await supabase.from('tg_outreach_accounts').delete().eq('id', id);
+  const { error } = await supabase.from('tg_pool_accounts').delete().eq('id', id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 });

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { buildHeuristicCleanupResults, type CompanyCleanupEntry } from '@/lib/companyNameCleanup';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 
 export const dynamic = 'force-dynamic';
@@ -64,18 +65,25 @@ const SYSTEM_PROMPT = `Сейчас я пришлю тебе названия к
 Порядок и нумерация должны быть ТОЧНО такими же, как во входных данных. Если не знаешь как очистить — верни оригинальное название с его номером.
 НИКОГДА не пропускай строки. Если на входе 100 компаний — в ответе должно быть ровно 100 пронумерованных строк.`;
 
-type CompanyEntry = {
-  idx: number;
-  name: string;
-  domain?: string;
-};
-
 type RequestBody = {
-  companies: CompanyEntry[];
+  companies: CompanyCleanupEntry[];
 };
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1500;
+
+function getFetchFailureReason(err: unknown): string {
+  if (err instanceof Error && err.cause instanceof Error) {
+    const cause = err.cause as Error & { code?: string };
+    const code = cause.code ?? '';
+    const message = cause.message ?? '';
+    if (code && message) return `${code}: ${message}`;
+    if (code) return code;
+    if (message) return message;
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
 
 export async function POST(req: NextRequest) {
   // --- Auth ---
@@ -120,128 +128,146 @@ export async function POST(req: NextRequest) {
 
   const userMessage = companyLines.join('\n');
 
-  // --- Call OpenRouter with retries and model fallback ---
-  const modelErrors: string[] = [];
+  // --- Call OpenRouter with retries and built-in fallback models ---
+  const primaryModel = OPENROUTER_CLEANUP_MODELS[0];
+  const fallbackModels = OPENROUTER_CLEANUP_MODELS.slice(1);
+  const configuredModelsLabel = OPENROUTER_CLEANUP_MODELS.join(', ');
 
-  for (const model of OPENROUTER_CLEANUP_MODELS) {
-    let lastModelError = `Model ${model}: unknown error`;
+  let lastAiError = 'Unknown AI error';
+  let sawNonRetryableFailure = false;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-      let response: Response;
-      let timeout: ReturnType<typeof setTimeout> | undefined;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    let response: Response;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
 
-      try {
-        const controller = new AbortController();
-        timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
-            'HTTP-Referer': 'https://portal.app',
-            'X-Title': 'Portal - Name Cleanup',
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content: userMessage },
-            ],
-            temperature: 0.1,
-            max_tokens: 4000,
-          }),
-        });
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          lastModelError = 'Превышено время ожидания ответа от AI';
-        } else {
-          const msg = err instanceof Error ? err.message : 'Network error';
-          lastModelError = `Ошибка сети при обращении к AI: ${msg}`;
-        }
+    try {
+      const controller = new AbortController();
+      timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENROUTER_CLEANUP_API_KEY}`,
+          'HTTP-Referer': 'https://portal.app',
+          'X-Title': 'Portal - Name Cleanup',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: primaryModel,
+          ...(fallbackModels.length > 0 ? { models: fallbackModels } : {}),
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage },
+          ],
+          temperature: 0.1,
+          max_tokens: 4000,
+        }),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        lastAiError = 'Превышено время ожидания ответа от AI';
+      } else {
+        lastAiError = `Ошибка сети при обращении к AI: ${getFetchFailureReason(err)}`;
+      }
 
+      if (attempt < MAX_RETRIES) {
+        await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
+        continue;
+      }
+      break;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+
+    if (response.ok) {
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+
+      if (!content) {
+        lastAiError = 'Пустой ответ от AI';
         if (attempt < MAX_RETRIES) {
           await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
           continue;
         }
         break;
-      } finally {
-        if (timeout) clearTimeout(timeout);
       }
 
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+      // Parse numbered response: "1. Name", "2. Name", etc.
+      const lines = content.split('\n').map((line: string) => line.trim());
+      const numberedMap = new Map<number, string>();
 
-        if (!content) {
-          lastModelError = 'Пустой ответ от AI';
-          if (attempt < MAX_RETRIES) {
-            await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-            continue;
-          }
-          break;
+      for (const line of lines) {
+        if (!line) continue;
+        const match = line.match(/^(\d+)\.\s*(.+)/);
+        if (match) {
+          numberedMap.set(parseInt(match[1], 10), match[2].trim());
         }
-
-        // Parse numbered response: "1. Name", "2. Name", etc.
-        const lines = content.split('\n').map((line: string) => line.trim());
-        const numberedMap = new Map<number, string>();
-
-        for (const line of lines) {
-          if (!line) continue;
-          const match = line.match(/^(\d+)\.\s*(.+)/);
-          if (match) {
-            numberedMap.set(parseInt(match[1], 10), match[2].trim());
-          }
-        }
-
-        let results: { idx: number; cleanedName: string }[];
-
-        if (numberedMap.size >= companies.length * 0.8) {
-          // Numbered format detected — map by number
-          results = companies.map((c, i) => ({
-            idx: c.idx,
-            cleanedName: numberedMap.get(i + 1) || c.name,
-          }));
-        } else {
-          // Fallback: positional mapping (non-empty lines only)
-          const cleanedNames = lines.filter((l: string) => l.length > 0);
-          results = companies.map((c, i) => ({
-            idx: c.idx,
-            cleanedName: cleanedNames[i] && cleanedNames[i].length > 0
-              ? cleanedNames[i]
-              : c.name,
-          }));
-        }
-
-        return NextResponse.json({ results });
       }
 
-      let errorMessage = `API error: ${response.status}`;
-      try {
-        const errorData = await response.json() as { error?: { message?: string } | string };
-        if (typeof errorData.error === 'string') {
-          errorMessage = errorData.error;
-        } else if (typeof errorData.error?.message === 'string') {
-          errorMessage = errorData.error.message;
-        }
-      } catch {
-        // ignore
+      let results: { idx: number; cleanedName: string }[];
+
+      if (numberedMap.size >= companies.length * 0.8) {
+        // Numbered format detected — map by number
+        results = companies.map((c, i) => ({
+          idx: c.idx,
+          cleanedName: numberedMap.get(i + 1) || c.name,
+        }));
+      } else {
+        // Fallback: positional mapping (non-empty lines only)
+        const cleanedNames = lines.filter((l: string) => l.length > 0);
+        results = companies.map((c, i) => ({
+          idx: c.idx,
+          cleanedName: cleanedNames[i] && cleanedNames[i].length > 0
+            ? cleanedNames[i]
+            : c.name,
+        }));
       }
 
-      lastModelError = errorMessage;
-      const providerError = /provider returned error/i.test(errorMessage);
-      const shouldRetry = providerError || [429, 500, 502, 503, 504].includes(response.status);
-      if (shouldRetry && attempt < MAX_RETRIES) {
-        await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
-        continue;
-      }
-      break;
+      return NextResponse.json({ results });
     }
 
-    modelErrors.push(`${model}: ${lastModelError}`);
+    let errorMessage = `API error: ${response.status}`;
+    try {
+      const errorData = await response.json() as { error?: { message?: string } | string };
+      if (typeof errorData.error === 'string') {
+        errorMessage = errorData.error;
+      } else if (typeof errorData.error?.message === 'string') {
+        errorMessage = errorData.error.message;
+      }
+    } catch {
+      // ignore
+    }
+
+    lastAiError = errorMessage;
+    const providerError = /provider returned error/i.test(errorMessage);
+    const shouldRetry = providerError || [429, 500, 502, 503, 504].includes(response.status);
+    if (!shouldRetry) {
+      sawNonRetryableFailure = true;
+    }
+    if (shouldRetry && attempt < MAX_RETRIES) {
+      await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
+      continue;
+    }
+    break;
   }
 
-  return jsonError(`Не удалось получить ответ от AI. ${modelErrors.join(' | ')}`, 502);
+  if (!sawNonRetryableFailure) {
+    const results = buildHeuristicCleanupResults(companies);
+    const warning = `AI временно недоступен, применена локальная очистка. Модели: ${configuredModelsLabel}. Причина: ${lastAiError}`;
+
+    console.warn('[cleanup-names] Falling back to heuristic cleanup', {
+      models: OPENROUTER_CLEANUP_MODELS,
+      companyCount: companies.length,
+      reason: lastAiError,
+    });
+
+    return NextResponse.json(
+      { results, warning },
+      { headers: { 'X-Portal-Name-Cleanup-Fallback': 'heuristic' } },
+    );
+  }
+
+  return jsonError(`Не удалось получить ответ от AI. ${configuredModelsLabel}: ${lastAiError}`, 502);
 }
 
 function sleep(ms: number) {

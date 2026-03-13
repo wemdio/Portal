@@ -5768,6 +5768,7 @@ export function DatabaseSpreadsheet() {
     let processedCount = 0;
     let errorCount = 0;
     let lastBatchError: string | null = null;
+    let usedLocalCleanupFallback = false;
 
     try {
       const batches: typeof rowsToProcess[] = [];
@@ -5829,6 +5830,10 @@ export function DatabaseSpreadsheet() {
           }
 
           const data = await response.json();
+          if (typeof data.warning === 'string' && data.warning.trim()) {
+            usedLocalCleanupFallback = true;
+            lastBatchError = data.warning.trim();
+          }
           const results: { idx: number; cleanedName: string }[] = data.results;
 
           // Update the spreadsheet data
@@ -5887,6 +5892,8 @@ export function DatabaseSpreadsheet() {
       setLastAction({
         message: errorCount > 0
           ? `Очистка названий: ${successCount} успешно, ${errorCount} с ошибками`
+          : usedLocalCleanupFallback
+            ? `Очистка названий завершена локально: ${processedCount} строк`
           : `Очистка названий завершена: ${processedCount} строк`,
         time: Date.now(),
       });

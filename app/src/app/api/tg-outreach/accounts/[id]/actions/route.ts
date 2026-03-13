@@ -30,8 +30,8 @@ export const POST = withTgOutreachAuth(async (req, { supabase }, params) => {
   }
 
   const { data: account, error } = await supabase
-    .from('tg_outreach_accounts')
-    .select('*, proxy:tg_outreach_proxies(*)')
+    .from('tg_pool_accounts')
+    .select('*, proxy:tg_pool_proxies(*)')
     .eq('id', id)
     .single();
 
@@ -47,7 +47,7 @@ export const POST = withTgOutreachAuth(async (req, { supabase }, params) => {
   if (action === 'sync_profile' && result.profile) {
     const profile = result.profile as Record<string, string>;
     await supabase
-      .from('tg_outreach_accounts')
+      .from('tg_pool_accounts')
       .update({
         first_name: profile.first_name ?? account.first_name,
         last_name: profile.last_name ?? account.last_name,
@@ -60,7 +60,7 @@ export const POST = withTgOutreachAuth(async (req, { supabase }, params) => {
 
   if (result.status && result.status !== account.status) {
     await supabase
-      .from('tg_outreach_accounts')
+      .from('tg_pool_accounts')
       .update({ status: result.status, updated_at: new Date().toISOString() })
       .eq('id', id);
   }
