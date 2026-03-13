@@ -345,9 +345,15 @@ export function SearchParserView() {
     }
 
     return Array.from(map.values()).sort((a, b) => {
-      const an = (a.company_name ?? a.site ?? '').toLowerCase();
-      const bn = (b.company_name ?? b.site ?? '').toLowerCase();
-      return an.localeCompare(bn, 'ru');
+      const at = a.created_at ?? '';
+      const bt = b.created_at ?? '';
+      const an = at ? Date.parse(at) : NaN;
+      const bn = bt ? Date.parse(bt) : NaN;
+      if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return bn - an;
+      if (at && bt && at !== bt) return bt.localeCompare(at);
+      const ax = (a.company_name ?? a.site ?? '').toLowerCase();
+      const bx = (b.company_name ?? b.site ?? '').toLowerCase();
+      return ax.localeCompare(bx, 'ru');
     });
   }, [results]);
 
@@ -380,7 +386,18 @@ export function SearchParserView() {
   }, [getAccessToken]);
 
   useEffect(() => {
-    latestCreatedAtRef.current = results.length ? results[results.length - 1]?.created_at ?? null : null;
+    if (results.length === 0) {
+      latestCreatedAtRef.current = null;
+      return;
+    }
+    // Keep cursor for incremental loads stable even if backend order changes.
+    let max = results[0]?.created_at ?? null;
+    for (const r of results) {
+      const v = r?.created_at ?? null;
+      if (!v) continue;
+      if (!max || v > max) max = v;
+    }
+    latestCreatedAtRef.current = max;
   }, [results]);
 
   const refreshJobs = useCallback(async () => {
@@ -1029,6 +1046,11 @@ export function SearchParserView() {
                                   >
                                      {r.company_name ?? '—'}
                                   </a>
+                                  {r.created_at ? (
+                                    <div className="mt-0.5 text-[11px] leading-4 text-gray-500">
+                                      Добавлено: {formatDate(r.created_at)}
+                                    </div>
+                                  ) : null}
                                </td>
                                <td className="px-4 py-3">
                                  <div className="flex items-center gap-2 max-w-[320px]">

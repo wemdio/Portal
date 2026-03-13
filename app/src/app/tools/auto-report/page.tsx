@@ -14,6 +14,24 @@ interface InstantlyCampaignItem {
   id: string;
   name: string;
   status?: number;
+  timestamp_created?: string;
+  timestamp_updated?: string;
+}
+
+function formatCampaignTimestamp(value: string | null | undefined): string | null {
+  const raw = (value ?? '').trim();
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  if (Number.isFinite(ms)) {
+    return new Date(ms).toLocaleString('ru-RU', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+  return raw;
 }
 
 const CampaignRow = memo(function CampaignRow({
@@ -25,6 +43,10 @@ const CampaignRow = memo(function CampaignRow({
   isChecked: boolean;
   onToggle: (id: string) => void;
 }) {
+  const createdLabel =
+    formatCampaignTimestamp(campaign.timestamp_created) ??
+    formatCampaignTimestamp(campaign.timestamp_updated);
+
   return (
     <li>
       <label
@@ -49,8 +71,15 @@ const CampaignRow = memo(function CampaignRow({
         >
           <Check className="h-3 w-3 stroke-[3]" />
         </span>
-        <span className="flex-1 min-w-0 text-sm font-medium text-gray-800 break-words truncate">
-          {campaign.name || campaign.id}
+        <span className="flex-1 min-w-0">
+          <span className="block text-sm font-medium text-gray-800 break-words truncate">
+            {campaign.name || campaign.id}
+          </span>
+          {createdLabel ? (
+            <span className="block text-[11px] leading-4 text-gray-500 truncate">
+              Добавлено: {createdLabel}
+            </span>
+          ) : null}
         </span>
         <a
           href={`${INSTANTLY_ANALYTICS_URL_BASE}${campaign.id}/analytics`}
@@ -564,6 +593,262 @@ function tableTextToRows(tableText: string): string[][] {
   return tableText.split('\n').map((line) => line.split('\t'));
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function buildSheetsHtmlReport({
+  summary,
+  campaignData,
+  periodText,
+}: {
+  summary: ReportSummary;
+  campaignData: Record<string, CampaignRecordView>;
+  periodText: string;
+}): string {
+  const campaigns = Object.values(campaignData);
+
+  const SHEETS_COL_A_WIDTH_PX = 278;
+
+  const css = {
+    table: `border-collapse:collapse; table-layout:fixed; width:auto; font-family: Arial, Helvetica, sans-serif;`,
+    th: `background:${REPORT_COLORS.headerBg}; color:#ffffff; font-weight:700; font-size:12px; border:1px solid ${REPORT_COLORS.border}; padding:8px 10px;`,
+    td: `font-size:12px; border:1px solid ${REPORT_COLORS.border}; padding:8px 10px; color:#111827; white-space:normal; word-break:break-word;`,
+    tdRight: `text-align:right;`,
+    colA: `width:${SHEETS_COL_A_WIDTH_PX}px; min-width:${SHEETS_COL_A_WIDTH_PX}px; max-width:${SHEETS_COL_A_WIDTH_PX}px;`,
+    subheader: `background:${REPORT_COLORS.sectionSubheaderBg}; font-weight:700;`,
+    stepRow: `background:${REPORT_COLORS.stepRowBg}; font-weight:700;`,
+    titleCell: `background:${REPORT_COLORS.titleBg}; color:#ffffff; font-weight:700; font-size:18px; padding:10px 12px;`,
+    periodCell: `background:${REPORT_COLORS.titleBg}; color:rgba(255,255,255,0.9); font-size:12px; padding:0 12px 10px 12px;`,
+    sectionCell: `background:#ffffff; font-weight:700; font-size:12px; color:#111827; padding:12px 12px 6px 12px;`,
+  } as const;
+
+  const colWidthsPx = [SHEETS_COL_A_WIDTH_PX, 96, 130, 120, 90, 90, 90, 140, 120] as const;
+  const colgroup = `<colgroup>${colWidthsPx
+    .map((w) => `<col style="width:${w}px" width="${w}">`)
+    .join('')}</colgroup>`;
+
+  const rows: string[] = [];
+
+  const tr = (cells: string) => `<tr>${cells}</tr>`;
+  const td = (content: string, style: string, colspan?: number) =>
+    `<td${colspan ? ` colspan="${colspan}"` : ''} style="${style}">${content}</td>`;
+  // Google Sheets часто игнорирует `color` у `<th>` при вставке HTML из буфера,
+  // поэтому делаем заголовки как `<td>` со стилем (визуально это то же самое).
+  const th = (content: string, style: string, colspan?: number) =>
+    `<td${colspan ? ` colspan="${colspan}"` : ''} style="${style}">${content}</td>`;
+
+  // Title + Period (merged across A..I)
+  // Важно: `css.td` содержит `color:#111827` и может перетирать белый текст заголовка,
+  // поэтому специфичные стили (title/period) должны быть ПОСЛЕ базовых.
+  rows.push(tr(td('Отчёт по email-кампании', `${css.td}; ${css.titleCell}`, 9)));
+  rows.push(tr(td(escapeHtml(periodText), `${css.td}; ${css.periodCell}`, 9)));
+
+  // Spacer
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:6px 0; border-left:1px solid ${REPORT_COLORS.border}; border-right:1px solid ${REPORT_COLORS.border};`, 9)));
+
+  // Campaign stats section
+  rows.push(tr(td('Статистика по кампаниям:', `${css.sectionCell}; ${css.td}`, 9)));
+  rows.push(
+    tr(
+      [
+        th('Название кампании', `${css.th}; text-align:left; ${css.colA}`),
+        th('Контактов', css.th),
+        th('Уник. открытий', css.th),
+        th('% открываемости', css.th),
+        th('Ответов', css.th),
+        th('% ответов', css.th),
+        th('Лидов', css.th),
+        th('Отправлено писем', css.th),
+        th('Остаток базы', css.th),
+      ].join('')
+    )
+  );
+  for (const c of campaigns) {
+    const openPct =
+      c.totalEmailsSent > 0 ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1) : '0.0';
+    const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
+    const remainingBase = Math.max(0, c.leads - c.contacts);
+    rows.push(
+      tr(
+        [
+          td(escapeHtml(c.name), `${css.td}; ${css.colA}`),
+          td(String(c.contacts), `${css.td}; ${css.tdRight}`),
+          td(String(c.opened), `${css.td}; ${css.tdRight}`),
+          td(`${openPct}%`, `${css.td}; ${css.tdRight}`),
+          td(String(c.replies), `${css.td}; ${css.tdRight}`),
+          td(`${replyPct}%`, `${css.td}; ${css.tdRight}`),
+          td(String(c.leads), `${css.td}; ${css.tdRight}`),
+          td(String(c.totalEmailsSent), `${css.td}; ${css.tdRight}`),
+          td(String(remainingBase), `${css.td}; ${css.tdRight}`),
+        ].join('')
+      )
+    );
+  }
+
+  // Spacer
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+
+  // Overall section (use A..C; merge D..I as empty)
+  rows.push(tr(td('Общая статистика:', `${css.sectionCell}; ${css.td}`, 9)));
+  rows.push(
+    tr(
+      [
+        th('Показатель', `${css.th}; text-align:left; ${css.colA}`),
+        th('Значение', css.th),
+        th('Конверсия в следующий этап', css.th),
+        td('&nbsp;', `${css.td}; border-left:none;`, 6),
+      ].join('')
+    )
+  );
+  const overallRows: Array<[string, string, string]> = [
+    ['Общее количество контактов', String(summary.totalContacts), ''],
+    ['Общее количество отправленных писем', String(summary.totalEmailsSent), ''],
+    ['Общее количество открытий', String(summary.totalOpened), `${summary.conversion.openPctAllEmails}%`],
+    ['Общее количество ответов', String(summary.totalReplies), `${summary.conversion.replyPctByLeads}%`],
+    ['Общее количество лидов', String(summary.totalLeads), ''],
+    ['Общее количество бракованных', String(summary.totalBounced), ''],
+  ];
+  for (const [label, value, conv] of overallRows) {
+    rows.push(
+      tr(
+        [
+          td(escapeHtml(label), `${css.td}; ${css.colA}; font-weight:600; white-space:normal;`),
+          td(escapeHtml(value), css.td),
+          td(escapeHtml(conv), css.td),
+          td('&nbsp;', `${css.td}; border-left:none;`, 6),
+        ].join('')
+      )
+    );
+  }
+
+  // Spacer
+  rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+
+  // Details section (use A..F; merge G..I)
+  rows.push(tr(td('Детализация по письмам:', `${css.sectionCell}; ${css.td}`, 9)));
+
+  for (const c of campaigns) {
+    rows.push(
+      tr([td(escapeHtml(c.name), `${css.td}; ${css.subheader}`, 6), td('&nbsp;', `${css.td}; border-left:none;`, 3)].join(''))
+    );
+    rows.push(
+      tr(
+        [
+          th('STEP', `${css.th}; text-align:left; ${css.colA}`),
+          th('SENT', css.th),
+          th('OPENED', css.th),
+          th('REPLIED', css.th),
+          th('CLICKED', css.th),
+          th('OPPORTUNITIES', css.th),
+          td('&nbsp;', `${css.td}; border-left:none;`, 3),
+        ].join('')
+      )
+    );
+
+    const stepKeys = Object.keys(c.steps).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+    if (stepKeys.length === 0) {
+      const openPct =
+        c.totalEmailsSent > 0 ? ((num(c.opened) / c.totalEmailsSent) * 100).toFixed(1) : '0.0';
+      const replyPct = c.contacts > 0 ? ((c.replies / c.contacts) * 100).toFixed(1) : '0.0';
+      rows.push(
+        tr(
+          [
+            td('Общая статистика', `${css.td}; ${css.colA}; font-weight:700;`),
+            td(String(c.totalEmailsSent), `${css.td}; ${css.tdRight}`),
+            td(`${num(c.opened)}|${openPct}%`, `${css.td}; ${css.tdRight}`),
+            td(`${c.replies}|${replyPct}%`, `${css.td}; ${css.tdRight}`),
+            td('0', `${css.td}; ${css.tdRight}`),
+            td('0', `${css.td}; ${css.tdRight}`),
+            td('&nbsp;', `${css.td}; border-left:none;`, 3),
+          ].join('')
+        )
+      );
+    } else {
+      for (const stepKey of stepKeys) {
+        const step = c.steps[Number(stepKey)];
+        const stepOpenPct =
+          step.totalSent > 0 ? ((step.totalOpened / step.totalSent) * 100).toFixed(1) : '0.0';
+        const stepReplyPct =
+          step.totalSent > 0 ? ((step.totalReplied / step.totalSent) * 100).toFixed(1) : '0.0';
+        rows.push(
+          tr(
+            [
+              td(escapeHtml(step.stepName), `${css.td}; ${css.colA}; ${css.stepRow}`),
+              td(String(step.totalSent), `${css.td}; ${css.tdRight}; ${css.stepRow}`),
+              td(`${step.totalOpened}|${stepOpenPct}%`, `${css.td}; ${css.tdRight}; ${css.stepRow}`),
+              td(`${step.totalReplied}|${stepReplyPct}%`, `${css.td}; ${css.tdRight}; ${css.stepRow}`),
+              td(String(step.totalClicked), `${css.td}; ${css.tdRight}; ${css.stepRow}`),
+              td(String(step.totalOpportunities), `${css.td}; ${css.tdRight}; ${css.stepRow}`),
+              td('&nbsp;', `${css.td}; border-left:none;`, 3),
+            ].join('')
+          )
+        );
+        const variantKeys = Object.keys(step.variants).sort();
+        for (const letter of variantKeys) {
+          const v = step.variants[letter];
+          const vOpen = v.sent > 0 ? ((v.opened / v.sent) * 100).toFixed(0) : '0';
+          const vReply = v.sent > 0 ? ((v.replied / v.sent) * 100).toFixed(0) : '0';
+          rows.push(
+            tr(
+              [
+                td(escapeHtml(v.letter), `${css.td}; ${css.colA}`),
+                td(String(v.sent), `${css.td}; ${css.tdRight}`),
+                td(`${v.opened}|${vOpen}%`, `${css.td}; ${css.tdRight}`),
+                td(`${v.replied}|${vReply}%`, `${css.td}; ${css.tdRight}`),
+                td(String(v.clicked), `${css.td}; ${css.tdRight}`),
+                td(String(v.opportunities), `${css.td}; ${css.tdRight}`),
+                td('&nbsp;', `${css.td}; border-left:none;`, 3),
+              ].join('')
+            )
+          );
+        }
+      }
+    }
+
+    // Spacer between campaigns
+    rows.push(tr(td('&nbsp;', `${css.td}; padding:8px 0;`, 9)));
+  }
+
+  return `
+    <table style="${css.table}">
+      ${colgroup}
+      <tbody>
+        ${rows.join('')}
+      </tbody>
+    </table>
+  `.trim();
+}
+
+async function copyStyledReportToSheets({
+  summary,
+  campaignData,
+  periodText,
+  fallbackText,
+}: {
+  summary: ReportSummary;
+  campaignData: Record<string, CampaignRecordView>;
+  periodText: string;
+  fallbackText: string;
+}) {
+  const html = buildSheetsHtmlReport({ summary, campaignData, periodText });
+  const htmlBlob = new Blob([html], { type: 'text/html' });
+  const textBlob = new Blob([fallbackText], { type: 'text/plain' });
+
+  if (navigator.clipboard && 'write' in navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+    // @ts-expect-error ClipboardItem typing varies by TS lib target
+    await navigator.clipboard.write([new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob })]);
+    return;
+  }
+
+  await navigator.clipboard.writeText(fallbackText);
+}
+
 function getColumnWidths(rows: (string | number)[][]): { wch: number }[] {
   if (!rows.length) return [];
   const numCols = rows.reduce((max, r) => (r.length > max ? r.length : max), 0);
@@ -816,6 +1101,7 @@ export default function AutoReportPage() {
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [reportCreatedAt, setReportCreatedAt] = useState<string | null>(null);
   const [reportHistory, setReportHistory] = useState<SavedReport[]>([]);
+  const [copyToSheetsState, setCopyToSheetsState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
 
   useEffect(() => {
     setReportHistory(loadReportHistory());
@@ -841,7 +1127,16 @@ export default function AutoReportPage() {
         setCampaignsLoading(false);
         return;
       }
-      setCampaignsList(data.campaigns ?? []);
+      const sorted = [...(data.campaigns ?? [])].sort((a, b) => {
+        const at = a.timestamp_created ?? a.timestamp_updated ?? '';
+        const bt = b.timestamp_created ?? b.timestamp_updated ?? '';
+        const an = at ? Date.parse(at) : NaN;
+        const bn = bt ? Date.parse(bt) : NaN;
+        if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return bn - an;
+        if (at && bt && at !== bt) return bt.localeCompare(at);
+        return (b.name ?? '').localeCompare(a.name ?? '', 'ru');
+      });
+      setCampaignsList(sorted);
       setSelectedIds(new Set());
       setCampaignsFetched(true);
     } catch (err) {
@@ -980,6 +1275,30 @@ export default function AutoReportPage() {
       downloadExcel(report.tableText, report.rows ?? [], filename);
     }
   };
+
+  const handleCopyToGoogleSheets = useCallback(async () => {
+    if (!report) return;
+    const periodText = reportCreatedAt
+      ? `Период: с ${new Date(reportCreatedAt).toLocaleDateString('ru-RU')} по ${new Date(reportCreatedAt).toLocaleDateString('ru-RU')}`
+      : `Период: с ${new Date().toLocaleDateString('ru-RU')} по ${new Date().toLocaleDateString('ru-RU')}`;
+    const data = report.campaignData as Record<string, CampaignRecordView>;
+    if (!data || Object.keys(data).length === 0) return;
+
+    setCopyToSheetsState('copying');
+    try {
+      await copyStyledReportToSheets({
+        summary: report.summary,
+        campaignData: data,
+        periodText,
+        fallbackText: report.tableText || report.csvText || '',
+      });
+      setCopyToSheetsState('copied');
+      window.setTimeout(() => setCopyToSheetsState('idle'), 1500);
+    } catch {
+      setCopyToSheetsState('error');
+      window.setTimeout(() => setCopyToSheetsState('idle'), 2000);
+    }
+  }, [report, reportCreatedAt]);
 
   return (
     <div className="flex gap-6 text-left max-w-full">
@@ -1167,6 +1486,22 @@ export default function AutoReportPage() {
                 <FileSpreadsheet className="h-4 w-4" />
                 Скачать Excel
               </button>
+              <button
+                type="button"
+                onClick={handleCopyToGoogleSheets}
+                disabled={copyToSheetsState === 'copying' || !(report.campaignData && Object.keys(report.campaignData).length > 0)}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none"
+                title="Скопирует таблицу в буфер как HTML со стилями. Вставьте в Google Sheets (Ctrl+V)."
+              >
+                {copyToSheetsState === 'copied' ? <Check className="h-4 w-4" /> : <FileSpreadsheet className="h-4 w-4" />}
+                {copyToSheetsState === 'copying'
+                  ? 'Копирую…'
+                  : copyToSheetsState === 'copied'
+                    ? 'Скопировано'
+                    : copyToSheetsState === 'error'
+                      ? 'Не удалось'
+                      : 'Скопировать в Google Sheets'}
+              </button>
             </div>
             <details className="mt-2" open>
               <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
@@ -1183,16 +1518,6 @@ export default function AutoReportPage() {
                   }
                 />
               </div>
-              <details className="mt-3">
-                <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
-                  Исходный текст (для копирования)
-                </summary>
-                <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200">
-                  <pre className="p-3 text-xs text-gray-600 whitespace-pre-wrap font-sans bg-gray-50">
-                    {report.tableText}
-                  </pre>
-                </div>
-              </details>
             </details>
           </div>
         )}

@@ -37,6 +37,7 @@ export const ALL_TOOL_IDS = [
   'habr-career',
   'linkedin-bot',
   'tg-parser',
+  'cis-lead-finder',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -130,6 +131,16 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Автоматическая расшифровка видео из Telegram-группы с разделением по авторам.',
     href: '/tools/tg-transcribe',
     accentColor: 'blue',
+  },
+  'cis-lead-finder': {
+    id: 'cis-lead-finder',
+    title: 'CIS Lead Finder',
+    description: 'Импорт таблиц (ИНН/телефоны) → нормализация компаний → пробив Telegram → контакты ЛПР.',
+    href: '/tools/cis-lead-finder',
+    badge: 'В разработке',
+    badgeVariant: 'amber',
+    accentColor: 'blue',
+    disabled: true,
   },
   rdp: {
     id: 'rdp',
