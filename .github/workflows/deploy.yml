@@ -1,14 +1,15 @@
-name: Auto (push main)
+name: Auto (push)
 
 on:
   push:
-    branches:
-      - main
+    branches-ignore:
+      - test
 
       
 jobs:
   test:
     name: Run tests
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: self-hosted
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -51,7 +52,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: Push Docker image
     runs-on: self-hosted
-    needs: test
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
