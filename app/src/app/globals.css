@@ -40,6 +40,18 @@ body {
   min-height: var(--app-viewport-height, 100vh);
 }
 
+@layer base {
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role='button'][aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+}
+
 html.tma-mobile body {
   background: var(--tma-bg);
   color: var(--tma-fg);

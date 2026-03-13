@@ -15,6 +15,9 @@ import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
+import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
+import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
+import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
 const HH_DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
@@ -263,6 +266,30 @@ async function claimEmailValidationJob(): Promise<string | null> {
   return pending.id as string;
 }
 
+async function claimLeadImportJob(): Promise<string | null> {
+  const db = supabaseAdmin!;
+
+  const { data: pending } = await db
+    .from('lead_import_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('lead_import_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
+}
+
 // --------------------------------------------------------------------------
 // RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
 // has passed without an active session being started.
@@ -341,6 +368,35 @@ async function pollOnce(): Promise<boolean> {
     log('info', `Running email validation job ${evJobId}`);
     await runEmailValidationJob(evJobId);
     return true;
+  }
+
+  const leadImportJobId = await claimLeadImportJob();
+  if (leadImportJobId) {
+    log('info', `Running lead import job ${leadImportJobId}`);
+    await runLeadImportJob(leadImportJobId);
+    return true;
+  }
+
+  // Low-priority continuous enrichment: probe phones for Telegram identity.
+  // Runs in small batches to avoid rate limits.
+  try {
+    const out = await runPhoneEnrichmentBatch();
+    if (out.processed > 0) {
+      log('info', `Phone enrichment processed ${out.processed} phone(s)`);
+      return true;
+    }
+  } catch (err) {
+    log('warn', 'Phone enrichment batch failed', err);
+  }
+
+  try {
+    const out = await runContactAggregationBatch();
+    if (out.processed > 0) {
+      log('info', `Contact aggregation processed ${out.processed} item(s)`);
+      return true;
+    }
+  } catch (err) {
+    log('warn', 'Contact aggregation batch failed', err);
   }
 
   return false;

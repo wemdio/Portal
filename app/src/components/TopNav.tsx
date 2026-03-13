@@ -40,7 +40,7 @@ export function TopNav() {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
       <div className="flex items-center gap-4 px-4 h-11">
-        <Link href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
+        <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
           Portal
         </Link>
 
@@ -57,6 +57,7 @@ export function TopNav() {
               <Link
                 key={item.name}
                 href={item.href as Route}
+                prefetch={false}
                 className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-medium transition-all duration-150 ${
                   isActive
                     ? 'bg-zinc-900 text-white shadow-sm'
@@ -79,6 +80,7 @@ export function TopNav() {
         <div className="flex items-center gap-2 flex-shrink-0">
           <Link
             href={'/profile' as Route}
+            prefetch={false}
             className="flex items-center gap-2 rounded-full px-2 py-1 hover:bg-zinc-100 transition-colors"
           >
             {userAvatarUrl ? (

@@ -79,6 +79,7 @@ export function useNavData() {
   }, []);
 
   useEffect(() => {
+    if (!userEmail) return;
     let cancelled = false;
     void (async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -104,7 +105,7 @@ export function useNavData() {
       });
     })();
     return () => { cancelled = true; };
-  }, [userRole]);
+  }, [userEmail]);
 
   const handleAvatarError = () => {
     if (avatarTriedSigned) {
