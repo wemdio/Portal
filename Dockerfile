@@ -5,8 +5,11 @@ WORKDIR /app
 # Copy package files
 COPY app/package.json app/package-lock.json ./
 
-# Install dependencies (include optional native packages like lightningcss/swc)
-RUN npm ci --include=optional
+# Install dependencies and force musl lightningcss binary for Alpine.
+# package-lock currently contains only gnu flavor, which breaks Next/Turbopack on musl.
+RUN npm ci --include=optional \
+  && LIGHTNINGCSS_VERSION=$(node -p "require('./node_modules/lightningcss/package.json').version") \
+  && npm install --no-save "lightningcss-linux-x64-musl@${LIGHTNINGCSS_VERSION}"
 
 # Stage 2: Builder
 FROM node:20-alpine AS builder
