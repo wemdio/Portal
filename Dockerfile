@@ -5,8 +5,8 @@ WORKDIR /app
 # Copy package files
 COPY app/package.json app/package-lock.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (include optional native packages like lightningcss/swc)
+RUN npm ci --include=optional
 
 # Stage 2: Builder
 FROM node:20-alpine AS builder

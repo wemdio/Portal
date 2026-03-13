@@ -6,7 +6,8 @@ WORKDIR /app
 COPY app/package.json app/package-lock.json ./
 
 # Skip postinstall (playwright install) — we run it manually below
-RUN npm ci --ignore-scripts
+# Include optional native packages for cross-platform deterministic installs.
+RUN npm ci --include=optional --ignore-scripts
 
 # Install Chromium + system dependencies
 RUN npx playwright install chromium --with-deps
