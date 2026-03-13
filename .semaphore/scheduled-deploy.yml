@@ -63,6 +63,8 @@ blocks:
                   sudo -n sh /tmp/get-docker.sh;
                   sudo -n systemctl enable --now docker >/dev/null 2>&1 || true;
                 fi;
+                export DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
+                echo \"Using DOCKER_GID=\${DOCKER_GID}\";
                 echo '--- Step 1: drain worker ---';
                 sudo -n bash drain-worker.sh;
                 echo '--- Step 2: pull new images ---';

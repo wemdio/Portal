@@ -51,7 +51,7 @@ export async function GET(_req: NextRequest) {
   const auth = await requireAdmin(_req);
   if ('error' in auth) return auth.error;
 
-  const dockerAvailable = isDockerAvailable();
+  const dockerInitiallyAvailable = isDockerAvailable();
   let dockerError: string | undefined;
 
   const knownContainerNames = getContainerBots()
@@ -61,7 +61,7 @@ export async function GET(_req: NextRequest) {
   let containerInfos: ContainerInfo[] = [];
   let discoveredContainers: ContainerInfo[] = [];
 
-  if (dockerAvailable) {
+  if (dockerInitiallyAvailable) {
     if (knownContainerNames.length > 0) {
       const result = await listContainersByNames(knownContainerNames);
       containerInfos = result.containers;
@@ -71,6 +71,8 @@ export async function GET(_req: NextRequest) {
     discoveredContainers = byPrefix.containers;
     if (byPrefix.error && !dockerError) dockerError = byPrefix.error;
   }
+
+  const dockerAvailable = dockerError ? false : isDockerAvailable();
 
   const byContainerName = new Map(containerInfos.map((c) => [c.name, c]));
   const knownSet = new Set(knownContainerNames);
