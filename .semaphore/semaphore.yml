@@ -22,7 +22,7 @@ blocks:
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - cd $APP_PATH
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
-          - npm ci
+          - npm ci --include=optional
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       jobs:
         - name: Lint, typecheck, build, test, audit
