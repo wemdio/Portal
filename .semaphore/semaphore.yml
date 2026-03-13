@@ -1,7 +1,10 @@
-# При пуше в main: тесты (в т.ч. типопроверка, сборка, аудит) + сборка и пуш образов в Docker Hub.
-# Деплой только по расписанию (Task: .semaphore/scheduled-deploy.yml) — ночью только pull и рестарт.
+# Логика веток:
+# - push в feature-ветки (не main/test): запускаем тесты;
+# - push в test: ничего не делаем;
+# - push в main: сборка и push Docker-образов (без тестов).
+# Деплой остаётся по расписанию (Task: .semaphore/scheduled-deploy.yml).
 version: v1.0
-name: Auto (push main) — test and build
+name: Auto (push) — branch-aware test/build
 execution_time_limit:
   hours: 3
 agent:
@@ -11,6 +14,8 @@ agent:
 blocks:
   - name: Run tests
     dependencies: []
+    run:
+      when: "branch != 'main' AND branch != 'test'"
     task:
       secrets:
         - name: portal-secrets
@@ -36,8 +41,7 @@ blocks:
             - npm test -- --watchAll=false
             - npm audit --audit-level=critical
   - name: Push Docker image
-    dependencies:
-      - Run tests
+    dependencies: []
     run:
       when: "branch = 'main'"
     task:
