@@ -271,7 +271,8 @@ export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): 
 }
 
 async function callLocalTranscription(input: { audioMp3: Buffer; filename?: string }): Promise<string> {
-  const blob = new Blob([input.audioMp3], { type: 'audio/mpeg' });
+  const audioBytes = Uint8Array.from(input.audioMp3);
+  const blob = new Blob([audioBytes], { type: 'audio/mpeg' });
   const form = new FormData();
   form.append('file', blob, input.filename ?? 'audio.mp3');
 
