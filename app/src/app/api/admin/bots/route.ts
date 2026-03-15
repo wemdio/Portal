@@ -9,6 +9,7 @@ import {
   getDockerUnavailableReason,
   type ContainerInfo,
 } from '@/lib/adminBots/docker';
+import { isInAppBotEnabled } from '@/lib/adminBots/inAppState';
 
 export const dynamic = 'force-dynamic';
 
@@ -81,15 +82,16 @@ export async function GET(_req: NextRequest) {
 
   for (const bot of BOTS) {
     if (bot.kind === 'in-app') {
+      const enabled = await isInAppBotEnabled(bot.id);
       items.push({
         id: bot.id,
         name: bot.name,
         description: bot.description,
         kind: 'in-app',
-        status: 'in-app' as BotStatus,
-        statusDetail: 'работает в процессе портала',
-        canStop: false,
-        canStart: false,
+        status: (enabled ? 'running' : 'exited') as BotStatus,
+        statusDetail: enabled ? 'работает в процессе портала' : 'остановлен через Bot Manager',
+        canStop: enabled,
+        canStart: !enabled,
         canLogs: true,
       });
       continue;
