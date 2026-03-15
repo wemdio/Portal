@@ -5,6 +5,7 @@ services:
     depends_on:
       - yandexmaps
       - telegram-bot-api
+      - transcribe-worker
     env_file:
       - .env
     ports:
@@ -37,6 +38,8 @@ services:
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - OPENROUTER_VIDEO_TRANSCRIPT_API_KEY=${OPENROUTER_VIDEO_TRANSCRIPT_API_KEY}
       - AI_CALLER_TG_BOT_TOKEN=${AI_CALLER_TG_BOT_TOKEN}
+      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-local}
+      - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
     restart: unless-stopped
     networks:
       - portal-network
@@ -156,6 +159,19 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
     stop_grace_period: 30m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  transcribe-worker:
+    image: ${DOCKER_USERNAME}/portal-transcribe-worker:prod
+    container_name: portal-transcribe-worker
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
+      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-1}
     restart: unless-stopped
     networks:
       - portal-network

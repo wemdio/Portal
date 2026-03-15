@@ -4,7 +4,8 @@
  */
 
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
-const INSTANTLY_TIMEOUT_MS = 20_000;
+/** Таймаут одного запроса к Instantly (увеличен для списка кампаний при медленной сети). */
+const INSTANTLY_TIMEOUT_MS = 45_000;
 const INSTANTLY_MAX_RETRIES = 2;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
@@ -70,7 +71,14 @@ async function fetchInstantlyJson(
     }
   }
 
-  throw new Error(`${context} failed: ${getErrorMessage(lastError)}`);
+  const msg = getErrorMessage(lastError);
+  const isAborted = /aborted|AbortError/i.test(msg) || (lastError instanceof Error && lastError.name === 'AbortError');
+  if (isAborted) {
+    throw new Error(
+      `${context} failed: запрос отменён по таймауту или обрыву сети. Проверьте доступ к api.instantly.ai и попробуйте ещё раз.`,
+    );
+  }
+  throw new Error(`${context} failed: ${msg}`);
 }
 
 function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {

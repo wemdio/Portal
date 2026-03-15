@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { extractOrConvertToMp3, callOpenRouterTranscription } from '@/lib/transcription';
+import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
@@ -127,7 +127,7 @@ export async function POST(req: NextRequest) {
       inputBytes: file.bytes.byteLength,
       mp3Bytes: mp3.byteLength,
     });
-    const text = await callOpenRouterTranscription({ audioMp3: mp3 });
+    const text = await transcribeAudio({ audioMp3: mp3, filename: file.filename });
 
     void (async () => {
       try {
