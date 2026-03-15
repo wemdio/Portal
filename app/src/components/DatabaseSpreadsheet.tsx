@@ -1340,20 +1340,23 @@ export function DatabaseSpreadsheet() {
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
-      // Поддержка Ctrl+Z / Cmd+Z
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'z' || e.code === 'KeyZ')) {
         e.preventDefault();
         handleUndo();
         return;
       }
 
-      // Игнорируем если фокус в инпуте/текстареа (кроме нашей таблицы)
+      const inCellInput =
+        (document.activeElement instanceof HTMLInputElement ||
+          document.activeElement instanceof HTMLTextAreaElement) &&
+        document.activeElement.closest('td');
+
       if (
-        document.activeElement instanceof HTMLInputElement ||
-        document.activeElement instanceof HTMLTextAreaElement
+        (document.activeElement instanceof HTMLInputElement ||
+          document.activeElement instanceof HTMLTextAreaElement) &&
+        !inCellInput
       ) {
-        // Разрешаем навигацию если это инпут внутри ячейки
-        if (!document.activeElement.closest('td')) return;
+        return;
       }
 
       if (!activeTab) return;
@@ -1365,6 +1368,10 @@ export function DatabaseSpreadsheet() {
       let nextRow = row;
       let nextCol = col;
       let handled = false;
+
+      const isArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+
+      if (inCellInput && isArrow && !e.shiftKey) return;
 
       if (e.key === 'ArrowUp') {
         nextRow = Math.max(0, row - 1);
@@ -1381,10 +1388,11 @@ export function DatabaseSpreadsheet() {
       }
 
       if (handled) {
+        e.preventDefault();
         if (e.shiftKey) {
           const anchorRow = selectionAnchor.row;
           const anchorCol = selectionAnchor.col;
-          
+
           setSelection({
             startRow: Math.min(anchorRow, nextRow),
             endRow: Math.max(anchorRow, nextRow),
@@ -1400,7 +1408,7 @@ export function DatabaseSpreadsheet() {
           });
           setSelectionAnchor({ row: nextRow, col: nextCol });
         }
-        
+
         setActiveCell({ row: nextRow, col: nextCol });
       }
     };
@@ -2644,7 +2652,7 @@ export function DatabaseSpreadsheet() {
 
   const handleGridKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const isSelectAll =
-      (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a';
+      (event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'a' || event.nativeEvent.code === 'KeyA');
     if (isSelectAll) {
       event.preventDefault();
       if (!activeTab) return;
@@ -2675,7 +2683,7 @@ export function DatabaseSpreadsheet() {
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const isCopy =
-      (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c';
+      (event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'c' || event.nativeEvent.code === 'KeyC');
     if (isCopy) {
       event.preventDefault();
       void copySelection();
@@ -6966,15 +6974,16 @@ export function DatabaseSpreadsheet() {
           Очистить
         </button>
 
+        <button
+          type="button"
+          onClick={() => importInputRef.current?.click()}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-gray-50"
+        >
+          ↑ Импорт
+        </button>
+
         <div className="flex items-center rounded bg-gray-100 p-0.5">
-          <button
-            type="button"
-            onClick={() => importInputRef.current?.click()}
-            className="rounded px-2 py-1 text-[11px] font-medium text-gray-600 transition hover:bg-white hover:text-gray-900"
-          >
-            Импорт
-          </button>
-          <div className="h-3 w-px bg-gray-300 mx-0.5" />
+          <span className="px-1.5 py-1 text-[11px] text-gray-400">↓</span>
           <button
             type="button"
             onClick={handleExportCsv}

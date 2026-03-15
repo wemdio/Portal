@@ -21,22 +21,23 @@ function getErrorMessage(err: unknown): string {
 }
 
 function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string | null }) {
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const publicUrl = normalizePublicAvatarUrl(user.avatar_url);
-  const avatarUrl = signedUrl ?? publicUrl;
+  const avatarUrl = (signedUrl && !failedUrls.has(signedUrl)) ? signedUrl
+    : (publicUrl && !failedUrls.has(publicUrl)) ? publicUrl
+    : null;
   const initial = (user.full_name || user.email || '?').charAt(0).toUpperCase();
-  const showImage = avatarUrl && failedUrl !== avatarUrl;
 
   return (
     <div className="h-10 w-10 rounded-full flex items-center justify-center overflow-hidden bg-blue-600 flex-shrink-0">
-      {showImage ? (
+      {avatarUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           key={avatarUrl}
           src={avatarUrl}
           alt=""
           className="h-full w-full object-cover"
-          onError={() => setFailedUrl(avatarUrl)}
+          onError={() => setFailedUrls((prev) => new Set(prev).add(avatarUrl))}
         />
       ) : (
         <span className="text-white font-medium">{initial}</span>
@@ -246,7 +247,8 @@ export default function UsersPage() {
     if (idsWithAvatar.length === 0) return;
 
     let cancelled = false;
-    void (async () => {
+
+    const fetchAvatars = async () => {
       try {
         const token = await getAccessToken();
         if (!token || cancelled) return;
@@ -265,9 +267,19 @@ export default function UsersPage() {
       } catch {
         // ignore: fallback to public URL or initial
       }
-    })();
+    };
+
+    void fetchAvatars();
+    const interval = setInterval(() => void fetchAvatars(), 30 * 60 * 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchAvatars();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
     return () => {
       cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [users, getAccessToken]);
 

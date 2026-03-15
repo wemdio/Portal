@@ -64,24 +64,25 @@ function TeamMemberAvatar({
   signedUrl?: string | null;
   variant: 'manager' | 'specialist';
 }) {
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const publicUrl = normalizePublicAvatarUrl(avatarUrl);
-  const url = signedUrl ?? publicUrl;
+  const url = (signedUrl && !failedUrls.has(signedUrl)) ? signedUrl
+    : (publicUrl && !failedUrls.has(publicUrl)) ? publicUrl
+    : null;
   const initial = displayName.charAt(0).toUpperCase();
-  const showImage = Boolean(url && failedUrl !== url);
 
   const bgClass = variant === 'manager' ? 'bg-blue-50 border-blue-100 text-blue-600' : 'bg-gray-100 border-gray-200 text-gray-600';
 
   return (
-    <div className={`h-9 w-9 rounded-full flex items-center justify-center overflow-hidden border flex-shrink-0 mr-3 ${showImage ? '' : bgClass}`}>
-      {showImage && url ? (
+    <div className={`h-9 w-9 rounded-full flex items-center justify-center overflow-hidden border flex-shrink-0 mr-3 ${url ? '' : bgClass}`}>
+      {url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           key={url}
           src={url}
           alt=""
           className="h-full w-full object-cover"
-          onError={() => setFailedUrl(url)}
+          onError={() => setFailedUrls((prev) => new Set(prev).add(url))}
         />
       ) : (
         <span className="text-sm font-bold">{initial}</span>
@@ -118,7 +119,8 @@ export default function TeamPage() {
   useEffect(() => {
     if (profiles.length === 0) return;
     let cancelled = false;
-    void (async () => {
+
+    const fetchAvatars = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token;
@@ -133,8 +135,21 @@ export default function TeamPage() {
       } catch {
         // ignore
       }
-    })();
-    return () => { cancelled = true; };
+    };
+
+    void fetchAvatars();
+    const interval = setInterval(() => void fetchAvatars(), 30 * 60 * 1000);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchAvatars();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [profiles.length]);
 
   const loadCapacities = () => {

@@ -305,6 +305,19 @@ export function ProjectList() {
   }, []);
 
   useEffect(() => {
+    const interval = setInterval(() => void fetchSignedAvatars(), 30 * 60 * 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchSignedAvatars();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
     if (!taskPopoverId) return;
     const close = (e: Event) => {
       if (taskPopoverRef.current?.contains(e.target as Node)) return;
