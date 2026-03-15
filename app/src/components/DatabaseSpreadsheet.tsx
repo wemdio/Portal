@@ -2541,6 +2541,7 @@ export function DatabaseSpreadsheet() {
   const removeSelectedColumns = () => {
     if (!activeTab) return;
     const { startCol, endCol } = normalizedSelection;
+    const scrollLeft = tableWrapperRef.current?.scrollLeft ?? 0;
     updateActiveSheet((sheet) => {
       const nextData = sheet.data.map((row) => {
         const filtered = row.filter((_, idx) => idx < startCol || idx > endCol);
@@ -2548,10 +2549,19 @@ export function DatabaseSpreadsheet() {
       });
       return { ...sheet, data: nextData };
     });
-    setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
-    setSelectionAnchor({ row: 0, col: 0 });
-    setActiveCell({ row: 0, col: 0 });
+    setColumnWidths((prev) => {
+      if (prev.length === 0) return prev;
+      return prev.filter((_, idx) => idx < startCol || idx > endCol);
+    });
+    const newColCount = (activeTab.data[0]?.length ?? 1) - (endCol - startCol + 1);
+    const clampedCol = Math.min(startCol, Math.max(0, newColCount - 1));
+    setSelection({ startRow: 0, startCol: clampedCol, endRow: 0, endCol: clampedCol });
+    setSelectionAnchor({ row: 0, col: clampedCol });
+    setActiveCell({ row: 0, col: clampedCol });
     setSelectionMode('cell');
+    requestAnimationFrame(() => {
+      if (tableWrapperRef.current) tableWrapperRef.current.scrollLeft = scrollLeft;
+    });
   };
 
   const confirmDeleteSelection = () => {

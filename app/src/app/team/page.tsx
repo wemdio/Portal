@@ -36,8 +36,7 @@ interface ManagerStats {
 
 const STORAGE_KEY_CAPACITY = 'portal:team-capacity';
 const DEFAULT_CAPACITY = 4;
-const MANAGER_ROLES = new Set<UserRole>(['manager', 'director', 'admin']);
-const SPECIALIST_ROLES = new Set<UserRole>(['technician', 'marketer', 'sales']);
+const LEAD_ROLES = new Set<UserRole>(['lead']);
 
 type SortDir = 'asc' | 'desc';
 type SpecialistSortKey = 'name' | 'status' | 'fact' | 'prep' | 'plan' | 'load';
@@ -182,27 +181,24 @@ export default function TeamPage() {
     const statsMap = new Map<string, SpecialistStats>();
     const managerMap = new Map<string, ManagerStats>();
 
-    // Seed stats with registered users so users with zero active projects are visible.
     profiles.forEach((profile) => {
       const name = normalizeAssigneeName(getAssigneeDisplayName(profile));
       if (!name) return;
 
-      if (profile.role && MANAGER_ROLES.has(profile.role)) {
+      if (profile.role && LEAD_ROLES.has(profile.role)) {
         managerMap.set(name, {
           name,
           fact: 0,
           prep: 0,
-          plan: capacities[`manager:${name}`] || DEFAULT_CAPACITY,
+          plan: capacities[`manager:${name}`] ?? DEFAULT_CAPACITY,
           activeProjects: [],
         });
-      }
-
-      if (profile.role && SPECIALIST_ROLES.has(profile.role)) {
+      } else if (profile.role) {
         statsMap.set(name, {
           name,
           fact: 0,
           prep: 0,
-          plan: capacities[`specialist:${name}`] || DEFAULT_CAPACITY,
+          plan: capacities[`specialist:${name}`] ?? DEFAULT_CAPACITY,
           activeProjects: [],
         });
       }
@@ -221,7 +217,7 @@ export default function TeamPage() {
           name,
           fact: 0,
           prep: 0,
-          plan: capacities[`specialist:${name}`] || DEFAULT_CAPACITY,
+          plan: capacities[`specialist:${name}`] ?? DEFAULT_CAPACITY,
           activeProjects: []
         };
 
@@ -231,7 +227,7 @@ export default function TeamPage() {
         } else if (isPrep) {
           existing.prep++;
         }
-        existing.plan = capacities[`specialist:${name}`] || DEFAULT_CAPACITY;
+        existing.plan = capacities[`specialist:${name}`] ?? DEFAULT_CAPACITY;
         statsMap.set(name, existing);
       }
 
@@ -243,7 +239,7 @@ export default function TeamPage() {
           name,
           fact: 0,
           prep: 0,
-          plan: capacities[`manager:${name}`] || DEFAULT_CAPACITY,
+          plan: capacities[`manager:${name}`] ?? DEFAULT_CAPACITY,
           activeProjects: []
         };
 
@@ -253,7 +249,7 @@ export default function TeamPage() {
         } else if (isPrep) {
           existing.prep++;
         }
-        existing.plan = capacities[`manager:${name}`] || DEFAULT_CAPACITY;
+        existing.plan = capacities[`manager:${name}`] ?? DEFAULT_CAPACITY;
         managerMap.set(name, existing);
       }
     });
@@ -270,6 +266,9 @@ export default function TeamPage() {
   const freeSpots = Math.max(0, totalPlan - totalFact);
 
   const getLoadStatus = (fact: number, plan: number) => {
+    if (plan === 0) return fact > 0
+      ? { label: 'Перегруз', color: 'text-red-700 bg-red-50 ring-red-600/20' }
+      : { label: 'Свободен', color: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' };
     const ratio = fact / plan;
     if (ratio > 1.1) return { label: 'Перегруз', color: 'text-red-700 bg-red-50 ring-red-600/20' };
     if (ratio < 0.7) return { label: 'Свободен', color: 'text-emerald-700 bg-emerald-50 ring-emerald-600/20' };
@@ -277,10 +276,11 @@ export default function TeamPage() {
   };
 
   const getLoadScore = (fact: number, plan: number) => {
+    if (plan === 0) return fact > 0 ? 2 : 0;
     const ratio = fact / plan;
-    if (ratio > 1.1) return 2; // Перегруз
-    if (ratio < 0.7) return 0; // Свободен
-    return 1; // Норма
+    if (ratio > 1.1) return 2;
+    if (ratio < 0.7) return 0;
+    return 1;
   };
 
   const sortedManagers = useMemo(() => {
@@ -428,7 +428,7 @@ export default function TeamPage() {
       {/* Managers Table */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
         <div className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'} border-b border-gray-100 bg-gray-50/50 flex items-center justify-between`}>
-          <h2 className="text-lg font-bold text-gray-900">Лиды (Менеджеры)</h2>
+          <h2 className="text-lg font-bold text-gray-900">Лиды</h2>
           <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">
             {specialistStats.managers.length} человек
           </span>
@@ -508,7 +508,7 @@ export default function TeamPage() {
             <tbody className="divide-y divide-gray-50 bg-white">
               {sortedManagers.map((stat) => {
                 const status = getLoadStatus(stat.fact, stat.plan);
-                const loadPercent = Math.min(100, Math.round((stat.fact / stat.plan) * 100));
+                const loadPercent = stat.plan > 0 ? Math.min(100, Math.round((stat.fact / stat.plan) * 100)) : (stat.fact > 0 ? 100 : 0);
                 
                 return (
                   <tr key={stat.name} className="hover:bg-gray-50 transition-colors">
@@ -542,7 +542,7 @@ export default function TeamPage() {
                     <td className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'}`}>
                       <div className="flex items-center justify-center gap-2">
                         <button 
-                          onClick={() => saveCapacity(`manager:${stat.name}`, Math.max(1, stat.plan - 1))}
+                          onClick={() => saveCapacity(`manager:${stat.name}`, Math.max(0, stat.plan - 1))}
                           className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 text-[10px]"
                         >
                           ▼
@@ -662,7 +662,7 @@ export default function TeamPage() {
             <tbody className="divide-y divide-gray-50 bg-white">
               {sortedSpecialists.map((stat) => {
                 const status = getLoadStatus(stat.fact, stat.plan);
-                const loadPercent = Math.min(100, Math.round((stat.fact / stat.plan) * 100));
+                const loadPercent = stat.plan > 0 ? Math.min(100, Math.round((stat.fact / stat.plan) * 100)) : (stat.fact > 0 ? 100 : 0);
                 
                 return (
                   <tr key={stat.name} className="hover:bg-gray-50 transition-colors">
@@ -696,7 +696,7 @@ export default function TeamPage() {
                     <td className={`${isTma ? 'px-4 py-3' : 'px-6 py-4'}`}>
                       <div className="flex items-center justify-center gap-2">
                         <button 
-                          onClick={() => saveCapacity(`specialist:${stat.name}`, Math.max(1, stat.plan - 1))}
+                          onClick={() => saveCapacity(`specialist:${stat.name}`, Math.max(0, stat.plan - 1))}
                           className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 text-[10px]"
                         >
                           ▼

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole } from '@/types';
 import { isTechnician, isLead } from '@/lib/roles';
@@ -163,6 +163,21 @@ export default function BillingCalendarPage() {
   const now = new Date();
   const [currentYear, setCurrentYear] = useState(now.getFullYear());
   const [currentMonth, setCurrentMonth] = useState(now.getMonth());
+
+  // Day popover state
+  const [dayPopover, setDayPopover] = useState<{ dateStr: string; rect: DOMRect } | null>(null);
+  const dayPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!dayPopover) return;
+    const handler = (e: MouseEvent) => {
+      if (dayPopoverRef.current && !dayPopoverRef.current.contains(e.target as Node)) {
+        setDayPopover(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [dayPopover]);
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -766,7 +781,17 @@ export default function BillingCalendarPage() {
                       );
                     })}
                     {daySubs.length > 3 && (
-                      <div className="text-[9px] sm:text-[10px] text-gray-400 px-1.5">+{daySubs.length - 3} ещё</div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setDayPopover((prev) => prev?.dateStr === dateStr ? null : { dateStr, rect });
+                        }}
+                        className="text-[9px] sm:text-[10px] text-blue-500 hover:text-blue-700 font-medium px-1.5 cursor-pointer transition-colors"
+                      >
+                        +{daySubs.length - 3} ещё
+                      </button>
                     )}
                   </div>
                 </div>
@@ -778,6 +803,81 @@ export default function BillingCalendarPage() {
               <div key={`trail-${i}`} className="min-h-[56px] sm:min-h-[80px] border-b border-r border-gray-200 bg-gray-50/30" />
             ))}
           </div>
+
+          {/* Day popover */}
+          {dayPopover && (() => {
+            const popSubs = subscriptionsByDate.get(dayPopover.dateStr) || [];
+            if (popSubs.length === 0) return null;
+            const d = new Date(dayPopover.dateStr + 'T00:00:00');
+            const label = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+            const total = popSubs.reduce((s, sub) => s + sub.billing_amount, 0);
+            const r = dayPopover.rect;
+            const openUp = r.bottom + 300 > window.innerHeight;
+            let left = r.left;
+            if (left + 320 > window.innerWidth - 8) left = window.innerWidth - 328;
+            if (left < 8) left = 8;
+
+            return (
+              <div
+                ref={dayPopoverRef}
+                className="fixed z-50 w-[320px] bg-white rounded-xl border border-gray-200 shadow-2xl flex flex-col"
+                style={{
+                  maxHeight: '60vh',
+                  ...(openUp
+                    ? { bottom: `${window.innerHeight - r.top + 4}px`, left: `${left}px` }
+                    : { top: `${r.bottom + 4}px`, left: `${left}px` }),
+                }}
+              >
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
+                  <div>
+                    <span className="text-sm font-semibold text-gray-900">{label}</span>
+                    <span className="ml-2 text-xs text-gray-400">{popSubs.length} подписок</span>
+                  </div>
+                  <button type="button" onClick={() => setDayPopover(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
+                  {popSubs.map((sub) => {
+                    const cfg = STATUS_CONFIG[sub.status] || STATUS_CONFIG.active;
+                    return (
+                      <button
+                        key={sub.id}
+                        type="button"
+                        onClick={() => {
+                          setDayPopover(null);
+                          if (isLead(userRole) && (sub.status === 'pending_review' || sub.status === 'keep' || sub.status === 'cancel')) {
+                            openDecisionModal(sub);
+                          } else if (isTechnician(userRole)) {
+                            openEditModal(sub);
+                          }
+                        }}
+                        className={`w-full text-left rounded-lg p-2.5 text-xs transition-colors hover:opacity-80 ${cfg.bg} ${cfg.text}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium truncate">{sub.project_name}</span>
+                          <span className="font-semibold flex-shrink-0">{formatCurrency(sub.billing_amount, sub.currency)}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 opacity-70 text-[10px]">
+                          <span>{sub.email_provider || '—'}</span>
+                          <span>·</span>
+                          <span>{sub.email_count} почт</span>
+                          <span>·</span>
+                          <span className={`inline-flex items-center gap-0.5`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                            {cfg.label}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="px-4 py-2 border-t border-gray-100 text-xs font-semibold text-gray-700 text-right">
+                  Итого: {formatCurrency(total, popSubs[0]?.currency || 'USD')}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 

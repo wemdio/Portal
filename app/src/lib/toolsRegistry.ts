@@ -65,6 +65,7 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badge: 'В разработке',
     badgeVariant: 'amber',
     accentColor: 'blue',
+    disabled: true,
   },
   'ai-caller': {
     id: 'ai-caller',
@@ -78,9 +79,10 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'AI Звонилка v2',
     description: 'Естественный голос через ElevenLabs Conversational AI.',
     href: '/tools/ai-caller-v2',
-    badge: 'ElevenLabs',
-    badgeVariant: 'emerald',
+    badge: 'В разработке',
+    badgeVariant: 'amber',
     accentColor: 'emerald',
+    disabled: true,
   },
   databases: {
     id: 'databases',
