@@ -115,7 +115,15 @@ export function AdminBotManagerPanel() {
 
   const botName = (id: string) => bots.find((b) => b.id === id)?.name ?? id;
   const actionHint = (bot: BotListItem, action: 'stop' | 'start') => {
-    if (bot.kind !== 'container') return '';
+    if (bot.kind !== 'container') {
+      if (action === 'stop' && bot.status !== 'running' && bot.status !== 'in-app') {
+        return 'Бот уже остановлен';
+      }
+      if (action === 'start' && bot.status === 'running') {
+        return 'Бот уже запущен';
+      }
+      return '';
+    }
     if (!dockerAvailable) return 'Недоступно: нет доступа к Docker';
     if (action === 'stop') {
       if (bot.status !== 'running') return 'Можно остановить только работающий контейнер';
@@ -173,38 +181,34 @@ export function AdminBotManagerPanel() {
               </div>
             </div>
             <div className="mt-5 flex flex-wrap gap-2">
-              {bot.kind === 'container' && (
-                <button
-                  type="button"
-                  onClick={() => runAction(bot.id, 'stop')}
-                  disabled={actionLoading === bot.id || !bot.canStop}
-                  title={actionHint(bot, 'stop')}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                >
-                  {actionLoading === bot.id ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Square className="h-4 w-4" />
-                  )}
-                  Остановить
-                </button>
-              )}
-              {bot.kind === 'container' && (
-                <button
-                  type="button"
-                  onClick={() => runAction(bot.id, 'start')}
-                  disabled={actionLoading === bot.id || !bot.canStart}
-                  title={actionHint(bot, 'start')}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-                >
-                  {actionLoading === bot.id ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Play className="h-4 w-4" />
-                  )}
-                  Запустить
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => runAction(bot.id, 'stop')}
+                disabled={actionLoading === bot.id || !bot.canStop}
+                title={actionHint(bot, 'stop')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                {actionLoading === bot.id ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+                Остановить
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction(bot.id, 'start')}
+                disabled={actionLoading === bot.id || !bot.canStart}
+                title={actionHint(bot, 'start')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+              >
+                {actionLoading === bot.id ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                Запустить
+              </button>
               {bot.canLogs && (
                 <button
                   type="button"
