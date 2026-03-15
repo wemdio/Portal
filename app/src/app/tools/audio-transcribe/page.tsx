@@ -147,13 +147,13 @@ export default function AudioTranscribeToolPage() {
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
   const cancelRequestedRef = useRef(false);
 
-  const fetchHistory = useCallback(async () => {
+  const fetchHistory = useCallback(async (): Promise<HistoryItem[]> => {
     setHistoryLoading(true);
     try {
       const token = await getToken();
       if (!token) {
         setHistory([]);
-        return;
+        return [];
       }
       const res = await fetch('/api/tools/audio-transcribe', {
         method: 'GET',
@@ -163,12 +163,15 @@ export default function AudioTranscribeToolPage() {
       });
       if (!res.ok) {
         setHistory([]);
-        return;
+        return [];
       }
       const json = (await res.json()) as { items?: HistoryItem[] };
-      setHistory(Array.isArray(json.items) ? json.items : []);
+      const items = Array.isArray(json.items) ? json.items : [];
+      setHistory(items);
+      return items;
     } catch {
       setHistory([]);
+      return [];
     } finally {
       setHistoryLoading(false);
     }
@@ -251,6 +254,7 @@ export default function AudioTranscribeToolPage() {
       pollingStopped = true;
     };
 
+    let lastKnownStage: TranscribeProgressResponse['stage'] = 'queued';
     const pollProgress = async () => {
       while (!pollingStopped) {
         try {
@@ -261,6 +265,7 @@ export default function AudioTranscribeToolPage() {
           }
           const nextPercent = Math.max(0, Math.min(100, Number(progress.progressPercent ?? 0)));
           const stage = progress.stage ?? 'queued';
+          lastKnownStage = stage;
           setProgressPercent(nextPercent);
           setProgressStage(stage);
 
@@ -301,6 +306,7 @@ export default function AudioTranscribeToolPage() {
     };
 
     const pollingPromise = pollProgress();
+    let shouldAwaitByProgress = false;
     try {
       const resp = await uploadForTranscription(file, jobId, uploadAbort.signal);
       setResult(resp);
@@ -310,21 +316,55 @@ export default function AudioTranscribeToolPage() {
       void fetchHistory();
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === 'AbortError';
+      const networkFailed = err instanceof TypeError && /fetch failed/i.test(err.message);
       const message = aborted
         ? 'Расшифровка остановлена. Для продолжения запустите её заново с нуля.'
         : (err instanceof Error ? err.message : 'Неизвестная ошибка');
       if (aborted || cancelRequestedRef.current) {
         setProgressStage('cancelled');
         setProgressHint('Расшифровка остановлена');
+      } else if (networkFailed) {
+        shouldAwaitByProgress = true;
+        setProgressHint('Соединение потеряно, ожидаем завершение по прогрессу...');
       } else {
         setProgressStage('error');
         setProgressHint(message);
       }
-      setError(message);
-      setResult(null);
+      if (!networkFailed) {
+        setError(message);
+        setResult(null);
+      }
     } finally {
-      stopPolling();
-      await pollingPromise.catch(() => {});
+      if (shouldAwaitByProgress) {
+        const timeoutMs = 20 * 60 * 1000;
+        const timedOut = await Promise.race([
+          pollingPromise.then(() => false).catch(() => false),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(true), timeoutMs)),
+        ]);
+        if (timedOut) {
+          stopPolling();
+          await pollingPromise.catch(() => {});
+          setError('Связь с сервером потеряна, и ожидание прогресса превысило лимит. Попробуйте открыть историю расшифровок.');
+        } else if (String(lastKnownStage) === 'done') {
+          const items = await fetchHistory();
+          const matched = items.find((item) => item.filename === file.name) ?? items[0];
+          if (matched) {
+            setResult({
+              text: matched.text,
+              filename: matched.filename,
+              length: matched.length,
+            });
+            setError(null);
+          }
+        } else if (String(lastKnownStage) === 'error') {
+          setError('Ошибка расшифровки. Проверьте логи сервера и попробуйте снова.');
+        } else if (String(lastKnownStage) === 'cancelled') {
+          setError('Расшифровка остановлена.');
+        }
+      } else {
+        stopPolling();
+        await pollingPromise.catch(() => {});
+      }
       uploadAbortControllerRef.current = null;
       cancelRequestedRef.current = false;
       setActiveJobId(null);
