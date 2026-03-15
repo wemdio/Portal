@@ -514,7 +514,7 @@ export default function BillingCalendarPage() {
     const pendingCount = subscriptions.filter((s) => s.status === 'pending_review').length;
     const thisMonthSubs = subscriptions.filter((s) => {
       const d = new Date(s.next_billing_date);
-      return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+      return d.getFullYear() === currentYear && d.getMonth() === currentMonth && s.status === 'keep';
     });
     const monthTotal = thisMonthSubs.reduce((sum, s) => sum + s.billing_amount, 0);
     const upcomingCount = subscriptions.filter((s) => {

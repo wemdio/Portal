@@ -189,6 +189,11 @@ type EmailSplitState = {
   sourceCol: number;
 };
 
+type PhoneSplitState = {
+  isOpen: boolean;
+  sourceCol: number;
+};
+
 type EmailScrapingState = {
   isOpen: boolean;
   sourceCol: number;
@@ -302,7 +307,7 @@ const MAX_FILTER_OPTIONS = 1000;
 const BLANK_FILTER_LABEL = '(пусто)';
 const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}]/gu;
 const DEFAULT_COLUMN_WIDTH = 130;
-const MIN_COLUMN_WIDTH = 50;
+const MIN_COLUMN_WIDTH = 30;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 const HEADER_LABEL_HINT_REGEX =
   /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
@@ -1005,6 +1010,10 @@ export function DatabaseSpreadsheet() {
     col: 0,
   });
   const [emailSplit, setEmailSplit] = useState<EmailSplitState>({
+    isOpen: false,
+    sourceCol: 0,
+  });
+  const [phoneSplit, setPhoneSplit] = useState<PhoneSplitState>({
     isOpen: false,
     sourceCol: 0,
   });
@@ -4884,6 +4893,82 @@ export function DatabaseSpreadsheet() {
     closeEmailSplitModal();
   };
 
+  // ── Phone Split (Разделение телефонов) ──────────────────────────────
+
+  const openPhoneSplitModal = () => {
+    setPhoneSplit({ isOpen: true, sourceCol: 0 });
+  };
+
+  const closePhoneSplitModal = () => {
+    setPhoneSplit((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const splitPhoneCell = (cell: string): string[] => {
+    const trimmed = cell.trim();
+    if (!trimmed) return [];
+
+    const parts = trimmed
+      .split(/[,;]\s*/)
+      .flatMap((part) => {
+        const inner = part.trim();
+        if (!inner) return [];
+        const multiPlus = inner.split(/(?<=\d)\s+(?=\+)/).map((s) => s.trim()).filter(Boolean);
+        if (multiPlus.length > 1) return multiPlus;
+        return [inner];
+      })
+      .filter((p) => p.length > 0);
+
+    return parts;
+  };
+
+  const handleSplitPhones = () => {
+    if (!activeTab) return;
+    const data = activeTab.data;
+    const header = hasHeaderRow(data) ? data[0] : null;
+    const body = header ? data.slice(1) : data;
+    const col = phoneSplit.sourceCol;
+
+    const newRows: string[][] = [];
+    let splitCount = 0;
+
+    for (const row of body) {
+      const cellValue = (row[col] ?? '').trim();
+      if (!cellValue) {
+        newRows.push(row);
+        continue;
+      }
+
+      const phones = splitPhoneCell(cellValue);
+
+      if (phones.length <= 1) {
+        newRows.push(row);
+        continue;
+      }
+
+      splitCount += 1;
+      for (const phone of phones) {
+        const newRow = [...row];
+        newRow[col] = phone;
+        newRows.push(newRow);
+      }
+    }
+
+    if (splitCount === 0) {
+      setLastAction({ message: 'Нет строк с несколькими телефонами для разделения', time: Date.now() });
+      closePhoneSplitModal();
+      return;
+    }
+
+    const totalNewRows = newRows.length - body.length;
+    setUndoSnapshot(`Разделение телефонов (${splitCount} строк → +${totalNewRows} новых)`);
+    applyRows(header ? [header, ...newRows] : newRows);
+    setLastAction({
+      message: `Разделено ${splitCount} строк, добавлено ${totalNewRows} новых строк`,
+      time: Date.now(),
+    });
+    closePhoneSplitModal();
+  };
+
   // ── Email Scraping (Найти почты) ──────────────────────────────
 
   const openEmailScrapingModal = () => {
@@ -7416,8 +7501,8 @@ export function DatabaseSpreadsheet() {
                           }
                           openContextMenu(event, 'col');
                         }}
-                        style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex) }}
-                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1 py-px text-[10px] font-semibold text-gray-700 transition select-none ${
+                        style={{ width: getColumnWidth(colIndex), minWidth: getColumnWidth(colIndex), maxWidth: getColumnWidth(colIndex) }}
+                        className={`sticky top-0 z-10 relative cursor-grab border-b border-r border-gray-200 px-1 py-px text-[10px] font-semibold text-gray-700 transition select-none overflow-hidden ${
                           dragOverCol === colIndex
                             ? 'bg-blue-200 border-l-2 border-l-blue-500'
                             : selectionMode === 'col' &&
@@ -7613,8 +7698,9 @@ export function DatabaseSpreadsheet() {
                             style={{
                               width: getColumnWidth(colIndex),
                               minWidth: getColumnWidth(colIndex),
+                              maxWidth: getColumnWidth(colIndex),
                             }}
-                            className={`border-b border-r border-gray-200 p-0 align-top ${cellBackground}`}
+                            className={`border-b border-r border-gray-200 p-0 align-top overflow-hidden ${cellBackground}`}
                           >
                             {isActive ? (
                               <textarea
@@ -7881,6 +7967,13 @@ export function DatabaseSpreadsheet() {
                     className="w-full text-left rounded-lg border border-violet-200 bg-violet-50/40 px-3 py-2 text-xs font-medium text-violet-800 transition hover:bg-violet-50 hover:border-violet-300"
                   >
                     Разделить почты по строкам
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openPhoneSplitModal}
+                    className="w-full text-left rounded-lg border border-violet-200 bg-violet-50/40 px-3 py-2 text-xs font-medium text-violet-800 transition hover:bg-violet-50 hover:border-violet-300"
+                  >
+                    Разделить телефоны по строкам
                   </button>
                 </div>
               </div>
@@ -9166,6 +9259,95 @@ export function DatabaseSpreadsheet() {
               <button
                 type="button"
                 onClick={handleSplitEmails}
+                className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-violet-600/20 transition-all hover:bg-violet-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+              >
+                <span>✂</span>
+                Разделить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Phone Split Modal ─────────────────────────────── */}
+      {phoneSplit.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-600 text-white shadow-sm font-bold text-lg">
+                  ☎
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Разделить телефоны</h3>
+                  <p className="text-xs text-gray-500 font-medium">Дублирование строк при нескольких номерах</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closePhoneSplitModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с телефонами
+                </label>
+                <select
+                  value={phoneSplit.sourceCol}
+                  onChange={(e) =>
+                    setPhoneSplit((prev) => ({ ...prev, sourceCol: Number(e.target.value) }))
+                  }
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-violet-400 focus:ring-2 focus:ring-violet-100 focus:outline-none"
+                >
+                  {headerLabels.map((label, i) => (
+                    <option key={i} value={i}>
+                      {label || toColumnLabel(i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg bg-violet-50 border border-violet-100 p-3 text-xs text-violet-900 space-y-1">
+                <p>
+                  Если в ячейке несколько телефонов (через запятую, точку с запятой или пробел между номерами),
+                  строка будет продублирована для каждого номера.
+                </p>
+                <p>
+                  Строк с несколькими телефонами:{' '}
+                  <span className="font-semibold text-gray-900">
+                    {activeTab
+                      ? (() => {
+                          const body = hasHeaderRow(activeTab.data)
+                            ? activeTab.data.slice(1)
+                            : activeTab.data;
+                          return body.filter((row) => {
+                            const cell = (row[phoneSplit.sourceCol] ?? '').trim();
+                            if (!cell) return false;
+                            return splitPhoneCell(cell).length > 1;
+                          }).length;
+                        })()
+                      : 0}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end border-t border-gray-100 px-6 py-4 bg-gray-50/50 gap-3">
+              <button
+                type="button"
+                onClick={closePhoneSplitModal}
+                className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+              >
+                Закрыть
+              </button>
+              <button
+                type="button"
+                onClick={handleSplitPhones}
                 className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-violet-600/20 transition-all hover:bg-violet-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
               >
                 <span>✂</span>
