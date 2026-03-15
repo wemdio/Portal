@@ -14,6 +14,16 @@ const TRANSCRIPTION_CHUNK_SECONDS = 40 * 60;
 
 const FFMPEG_EXE = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 
+type TranscriptionProvider = 'local' | 'openrouter';
+
+const TRANSCRIPTION_PROVIDER: TranscriptionProvider =
+  (process.env.TRANSCRIPTION_PROVIDER as TranscriptionProvider) || 'local';
+
+const TRANSCRIPTION_WORKER_URL =
+  process.env.TRANSCRIPTION_WORKER_URL || 'http://transcribe-worker:8070';
+
+const LOCAL_TRANSCRIBE_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * Локально (npm run dev): ffmpeg-static или явные пути node_modules; иначе PATH или FFMPEG_PATH в .env.
  * В Docker: в образе установлен ffmpeg (apk add ffmpeg), используется системный бинарник.
@@ -258,4 +268,38 @@ export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): 
     throw new Error('Не удалось получить текст при расшифровке фрагментов аудио.');
   }
   return merged;
+}
+
+async function callLocalTranscription(input: { audioMp3: Buffer; filename?: string }): Promise<string> {
+  const blob = new Blob([input.audioMp3], { type: 'audio/mpeg' });
+  const form = new FormData();
+  form.append('file', blob, input.filename ?? 'audio.mp3');
+
+  const res = await fetch(`${TRANSCRIPTION_WORKER_URL}/transcribe`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(LOCAL_TRANSCRIBE_TIMEOUT_MS),
+  });
+
+  const raw = await res.text().catch(() => '');
+  if (!res.ok) {
+    throw new Error(`Локальный транскрибатор (${res.status}): ${raw || res.statusText}`);
+  }
+
+  const json = JSON.parse(raw) as { text?: string; audio_duration_sec?: number; processing_time_sec?: number };
+  const text = (json.text ?? '').trim();
+  if (!text) {
+    throw new Error('Локальный транскрибатор не вернул текст расшифровки');
+  }
+  return text;
+}
+
+/**
+ * Unified entry point: routes to local worker or OpenRouter based on TRANSCRIPTION_PROVIDER env.
+ */
+export async function transcribeAudio(input: { audioMp3: Buffer; filename?: string }): Promise<string> {
+  if (TRANSCRIPTION_PROVIDER === 'local') {
+    return callLocalTranscription(input);
+  }
+  return callOpenRouterTranscription(input);
 }

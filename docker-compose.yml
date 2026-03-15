@@ -12,6 +12,7 @@ services:
     depends_on:
       - yandexmaps
       - telegram-bot-api
+      - transcribe-worker
     ports:
       - "3000:3000"
     environment:
@@ -36,6 +37,8 @@ services:
       - TG_AGENT_BOT_TOKEN=${TG_AGENT_BOT_TOKEN}
       - OPENROUTER_AGENT_API_KEY=${OPENROUTER_AGENT_API_KEY}
       - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
+      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-local}
+      - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
     restart: unless-stopped
     networks:
       - portal-network
@@ -65,6 +68,23 @@ services:
       - WORKER_POLL_INTERVAL_MS=3000
     depends_on:
       - yandexmaps
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  transcribe-worker:
+    build:
+      context: ./services/transcribe-worker
+      dockerfile: Dockerfile
+    container_name: portal-transcribe-worker
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
+      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-1}
+    ports:
+      - "8070:8070"
     restart: unless-stopped
     networks:
       - portal-network
