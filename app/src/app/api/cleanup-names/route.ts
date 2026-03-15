@@ -9,7 +9,7 @@ const OPENROUTER_CLEANUP_API_KEY = process.env.OPENROUTER_CLEANUP_API_KEY ?? '';
 const OPENROUTER_CLEANUP_MODELS = (
   process.env.OPENROUTER_CLEANUP_MODELS ??
   process.env.OPENROUTER_CLEANUP_MODEL ??
-  'x-ai/grok-4.1-fast,google/gemini-3-flash-preview'
+  'xai/grok-4-1-fast-non-reasoning,google/gemini-3-flash-preview'
 )
   .split(',')
   .map((model) => model.trim())
@@ -143,7 +143,7 @@ export async function POST(req: NextRequest) {
     try {
       const controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      response = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

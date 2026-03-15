@@ -286,7 +286,7 @@ export async function POST(req: NextRequest) {
       return analysis;
     }
 
-    const aiRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const aiRes = await fetch('https://router.requesty.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -41,7 +41,7 @@ export async function callLlm(
       const controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

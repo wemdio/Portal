@@ -82,10 +82,10 @@ DEFAULT_SYSTEM_PROMPT = """Ты — аналитик атмосферы в ча�
 
 AVAILABLE_MODELS = [
     ("google/gemini-2.0-flash-001", "Gemini 2.0 Flash — дёшево, быстро"),
-    ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash Preview — новее"),
-    ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B — мощнее"),
-    ("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B — альтернатива"),
-    ("deepseek/deepseek-chat-v3-0324", "DeepSeek V3 — дёшево"),
+    ("google/gemini-2.5-flash", "Gemini 2.5 Flash Preview — новее"),
+    ("novita/meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B — мощнее"),
+    ("novita/qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B — альтернатива"),
+    ("novita/deepseek/deepseek-v3-0324", "DeepSeek V3 — дёшево"),
 ]
 
 
@@ -880,7 +880,7 @@ async def analyze_messages(messages: list[dict[str, str]]) -> AnalysisResult | N
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://router.requesty.ai/v1/chat/completions",
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
