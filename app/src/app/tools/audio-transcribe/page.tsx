@@ -17,7 +17,18 @@ interface TranscribeResponse {
   text: string;
   filename: string;
   length: number;
+  job_id?: string;
   error?: string;
+}
+
+interface TranscribeProgressResponse {
+  found: boolean;
+  jobId: string;
+  stage?: 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
+  progressPercent?: number;
+  processedSeconds?: number | null;
+  audioDurationSeconds?: number | null;
+  error?: string | null;
 }
 
 interface HistoryItem {
@@ -35,7 +46,11 @@ async function getToken() {
   return session?.access_token ?? '';
 }
 
-async function uploadForTranscription(file: File): Promise<TranscribeResponse> {
+async function uploadForTranscription(
+  file: File,
+  jobId: string,
+  signal?: AbortSignal
+): Promise<TranscribeResponse> {
   const token = await getToken();
   const formData = new FormData();
   formData.append('file', file);
@@ -44,8 +59,10 @@ async function uploadForTranscription(file: File): Promise<TranscribeResponse> {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
+      'X-Transcribe-Job-Id': jobId,
     },
     body: formData,
+    signal,
   });
 
   const raw = await res.text();
@@ -71,6 +88,36 @@ async function uploadForTranscription(file: File): Promise<TranscribeResponse> {
   return json;
 }
 
+async function fetchTranscriptionProgress(jobId: string): Promise<TranscribeProgressResponse> {
+  const token = await getToken();
+  const res = await fetch(`/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(jobId)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    throw new Error(`Не удалось получить прогресс (HTTP ${res.status})`);
+  }
+  return (await res.json()) as TranscribeProgressResponse;
+}
+
+async function cancelTranscription(jobId: string): Promise<void> {
+  const token = await getToken();
+  const res = await fetch('/api/tools/audio-transcribe/cancel', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ jobId }),
+  });
+  if (!res.ok) {
+    throw new Error(`Не удалось остановить расшифровку (HTTP ${res.status})`);
+  }
+}
+
 const MAX_FILE_SIZE_BYTES = 600 * 1024 * 1024;
 const ACCEPT_EXT = '.mp3,.wav,.mp4,.avi';
 
@@ -92,7 +139,13 @@ export default function AudioTranscribeToolPage() {
   const [copied, setCopied] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressStage, setProgressStage] = useState<'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error' | null>(null);
+  const [progressHint, setProgressHint] = useState<string | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
+  const cancelRequestedRef = useRef(false);
 
   const fetchHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -184,16 +237,116 @@ export default function AudioTranscribeToolPage() {
     setError(null);
     setLoading(true);
     setCopied(false);
+    setProgressPercent(0);
+    setProgressStage('queued');
+    setProgressHint('Подготовка файла...');
+
+    const jobId = crypto.randomUUID();
+    setActiveJobId(jobId);
+    cancelRequestedRef.current = false;
+    const uploadAbort = new AbortController();
+    uploadAbortControllerRef.current = uploadAbort;
+    let pollingStopped = false;
+    const stopPolling = () => {
+      pollingStopped = true;
+    };
+
+    const pollProgress = async () => {
+      while (!pollingStopped) {
+        try {
+          const progress = await fetchTranscriptionProgress(jobId);
+          if (!progress.found) {
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+            continue;
+          }
+          const nextPercent = Math.max(0, Math.min(100, Number(progress.progressPercent ?? 0)));
+          const stage = progress.stage ?? 'queued';
+          setProgressPercent(nextPercent);
+          setProgressStage(stage);
+
+          if (stage === 'converting') {
+            setProgressHint('Конвертация аудио...');
+          } else if (stage === 'transcribing') {
+            if (
+              typeof progress.processedSeconds === 'number'
+              && typeof progress.audioDurationSeconds === 'number'
+              && progress.audioDurationSeconds > 0
+            ) {
+              setProgressHint(
+                `Расшифровка: ${Math.floor(progress.processedSeconds)}с / ${Math.floor(progress.audioDurationSeconds)}с`,
+              );
+            } else {
+              setProgressHint('Расшифровка аудио...');
+            }
+          } else if (stage === 'done') {
+            setProgressHint('Готово');
+            setProgressPercent(100);
+            stopPolling();
+            return;
+          } else if (stage === 'cancelled') {
+            setProgressHint(progress.error ?? 'Расшифровка остановлена');
+            setProgressStage('cancelled');
+            stopPolling();
+            return;
+          } else if (stage === 'error') {
+            setProgressHint(progress.error ?? 'Ошибка обработки');
+            stopPolling();
+            return;
+          }
+        } catch {
+          // ignore transient polling errors
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+    };
+
+    const pollingPromise = pollProgress();
     try {
-      const resp = await uploadForTranscription(file);
+      const resp = await uploadForTranscription(file, jobId, uploadAbort.signal);
       setResult(resp);
+      setProgressPercent(100);
+      setProgressStage('done');
+      setProgressHint('Готово');
       void fetchHistory();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Неизвестная ошибка';
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      const message = aborted
+        ? 'Расшифровка остановлена. Для продолжения запустите её заново с нуля.'
+        : (err instanceof Error ? err.message : 'Неизвестная ошибка');
+      if (aborted || cancelRequestedRef.current) {
+        setProgressStage('cancelled');
+        setProgressHint('Расшифровка остановлена');
+      } else {
+        setProgressStage('error');
+        setProgressHint(message);
+      }
       setError(message);
       setResult(null);
     } finally {
+      stopPolling();
+      await pollingPromise.catch(() => {});
+      uploadAbortControllerRef.current = null;
+      cancelRequestedRef.current = false;
+      setActiveJobId(null);
       setLoading(false);
+    }
+  };
+
+  const onCancel = async () => {
+    if (!loading || !activeJobId) return;
+    const ok = window.confirm(
+      'Остановить текущую расшифровку?\n\nПосле остановки продолжить нельзя — нужно будет запускать расшифровку заново с нуля.'
+    );
+    if (!ok) return;
+
+    cancelRequestedRef.current = true;
+    uploadAbortControllerRef.current?.abort();
+    setProgressStage('cancelled');
+    setProgressHint('Останавливаем расшифровку...');
+    try {
+      await cancelTranscription(activeJobId);
+    } catch {
+      // ignore cancel errors; local abort already triggered
     }
   };
 
@@ -288,35 +441,59 @@ export default function AudioTranscribeToolPage() {
               Файл не отправляется, пока вы не нажмёте кнопку ниже. Для новой записи просто
               выберите другой файл.
             </div>
-            <button
-              type="button"
-              onClick={onSubmit}
-              disabled={!file || loading}
-              className={[
-                'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition',
-                !file || loading
-                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                  : 'bg-indigo-600 text-white hover:bg-indigo-700',
-              ].join(' ')}
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Обработка...
-                </>
-              ) : (
-                <>
-                  <AudioLines className="h-4 w-4" />
-                  Отправить на расшифровку
-                </>
+            <div className="flex items-center gap-2">
+              {loading && (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="inline-flex items-center gap-2 rounded-full bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-200"
+                >
+                  Остановить
+                </button>
               )}
-            </button>
+              <button
+                type="button"
+                onClick={onSubmit}
+                disabled={!file || loading}
+                className={[
+                  'inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition',
+                  !file || loading
+                    ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700',
+                ].join(' ')}
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {progressPercent > 0 ? `Обработка... ${progressPercent}%` : 'Обработка...'}
+                  </>
+                ) : (
+                  <>
+                    <AudioLines className="h-4 w-4" />
+                    Отправить на расшифровку
+                  </>
+                )}
+              </button>
+            </div>
           </div>
 
           {error && (
             <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <p>{error}</p>
+            </div>
+          )}
+          {loading && (
+            <div className="space-y-1.5">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                <div
+                  className="h-full rounded-full bg-indigo-600 transition-all duration-300"
+                  style={{ width: `${Math.max(4, Math.min(100, progressPercent))}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-gray-500">
+                {progressHint ?? 'Идёт обработка...'}
+              </p>
             </div>
           )}
         </div>

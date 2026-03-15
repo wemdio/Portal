@@ -24,6 +24,17 @@ const TRANSCRIPTION_WORKER_URL =
 
 const LOCAL_TRANSCRIBE_TIMEOUT_MS = 10 * 60 * 1000;
 
+type LocalProgressStage = 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
+
+export interface LocalTranscriptionProgress {
+  jobId: string;
+  stage: LocalProgressStage;
+  progressPercent: number;
+  processedSeconds: number | null;
+  audioDurationSeconds: number | null;
+  error: string | null;
+}
+
 /**
  * Локально (npm run dev): ffmpeg-static или явные пути node_modules; иначе PATH или FFMPEG_PATH в .env.
  * В Docker: в образе установлен ffmpeg (apk add ffmpeg), используется системный бинарник.
@@ -270,7 +281,11 @@ export async function callOpenRouterTranscription(input: { audioMp3: Buffer }): 
   return merged;
 }
 
-async function callLocalTranscription(input: { audioMp3: Buffer; filename?: string }): Promise<string> {
+async function callLocalTranscription(input: {
+  audioMp3: Buffer;
+  filename?: string;
+  jobId?: string;
+}): Promise<string> {
   const audioBytes = Uint8Array.from(input.audioMp3);
   const blob = new Blob([audioBytes], { type: 'audio/mpeg' });
   const form = new FormData();
@@ -279,6 +294,7 @@ async function callLocalTranscription(input: { audioMp3: Buffer; filename?: stri
   const res = await fetch(`${TRANSCRIPTION_WORKER_URL}/transcribe`, {
     method: 'POST',
     body: form,
+    headers: input.jobId ? { 'x-transcribe-job-id': input.jobId } : undefined,
     signal: AbortSignal.timeout(LOCAL_TRANSCRIBE_TIMEOUT_MS),
   });
 
@@ -298,9 +314,66 @@ async function callLocalTranscription(input: { audioMp3: Buffer; filename?: stri
 /**
  * Unified entry point: routes to local worker or OpenRouter based on TRANSCRIPTION_PROVIDER env.
  */
-export async function transcribeAudio(input: { audioMp3: Buffer; filename?: string }): Promise<string> {
+export async function transcribeAudio(input: { audioMp3: Buffer; filename?: string; jobId?: string }): Promise<string> {
   if (TRANSCRIPTION_PROVIDER === 'local') {
     return callLocalTranscription(input);
   }
   return callOpenRouterTranscription(input);
+}
+
+export async function getLocalTranscriptionProgress(jobId: string): Promise<LocalTranscriptionProgress | null> {
+  if (!jobId.trim()) return null;
+  if (TRANSCRIPTION_PROVIDER !== 'local') return null;
+
+  const res = await fetch(`${TRANSCRIPTION_WORKER_URL}/progress/${encodeURIComponent(jobId)}`, {
+    method: 'GET',
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    throw new Error(`Local progress error (${res.status}): ${raw || res.statusText}`);
+  }
+
+  const json = (await res.json()) as {
+    job_id?: string;
+    stage?: LocalProgressStage;
+    progress_percent?: number;
+    processed_seconds?: number | null;
+    audio_duration_seconds?: number | null;
+    error?: string | null;
+  };
+
+  return {
+    jobId: json.job_id ?? jobId,
+    stage: json.stage ?? 'queued',
+    progressPercent: Math.max(0, Math.min(100, Number(json.progress_percent ?? 0))),
+    processedSeconds:
+      typeof json.processed_seconds === 'number' ? json.processed_seconds : null,
+    audioDurationSeconds:
+      typeof json.audio_duration_seconds === 'number' ? json.audio_duration_seconds : null,
+    error: typeof json.error === 'string' ? json.error : null,
+  };
+}
+
+export async function cancelLocalTranscription(jobId: string): Promise<{ ok: boolean; message?: string }> {
+  if (!jobId.trim()) return { ok: false, message: 'jobId is required' };
+  if (TRANSCRIPTION_PROVIDER !== 'local') return { ok: false, message: 'Cancel is supported only for local mode' };
+
+  const res = await fetch(`${TRANSCRIPTION_WORKER_URL}/cancel/${encodeURIComponent(jobId)}`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    throw new Error(`Local cancel error (${res.status}): ${raw || res.statusText}`);
+  }
+
+  const json = (await res.json()) as { ok?: boolean; message?: string };
+  return {
+    ok: Boolean(json.ok),
+    message: typeof json.message === 'string' ? json.message : undefined,
+  };
 }

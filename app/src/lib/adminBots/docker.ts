@@ -10,10 +10,10 @@ let dockerInstance: Docker | null = null;
 let dockerUnavailableReason: string | null = null;
 
 function getDocker(): Docker | null {
-  if (dockerUnavailableReason) return null;
   if (dockerInstance) return dockerInstance;
   try {
     dockerInstance = new Docker();
+    dockerUnavailableReason = null;
     return dockerInstance;
   } catch (e) {
     dockerUnavailableReason = e instanceof Error ? e.message : 'Docker init failed';
