@@ -316,7 +316,8 @@ export default function AudioTranscribeToolPage() {
       void fetchHistory();
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === 'AbortError';
-      const networkFailed = err instanceof TypeError && /fetch failed/i.test(err.message);
+      const networkFailed = err instanceof TypeError
+        && /(fetch failed|failed to fetch|networkerror)/i.test(err.message);
       const message = aborted
         ? 'Расшифровка остановлена. Для продолжения запустите её заново с нуля.'
         : (err instanceof Error ? err.message : 'Неизвестная ошибка');
