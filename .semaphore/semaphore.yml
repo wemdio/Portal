@@ -61,4 +61,5 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-worker:prod --platform linux/amd64 -f Dockerfile.worker .'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-atmos-bot:prod --platform linux/amd64 -f services/atmos-bot/Dockerfile services/atmos-bot'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-transcribe-worker:prod --platform linux/amd64 -f services/transcribe-worker/Dockerfile services/transcribe-worker'
 

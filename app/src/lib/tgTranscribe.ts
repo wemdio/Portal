@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { extractOrConvertToMp3, extractMp3FromFile, callOpenRouterTranscription } from '@/lib/transcription';
+import { extractOrConvertToMp3, extractMp3FromFile, transcribeAudio } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { isMtprotoAvailable, downloadFileByFileId, downloadFileByFileIdToPath } from '@/lib/tgMtprotoDownload';
 import fs from 'node:fs/promises';
@@ -319,7 +319,7 @@ export async function processVideoMessage(
   }
 
   onProgress?.({ phase: 'transcribing' });
-  const text = await callOpenRouterTranscription({ audioMp3: mp3 });
+  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename });
 
   await supabaseAdmin.from('tg_video_transcripts').insert({
     tg_chat_id: msg.chat.id,
