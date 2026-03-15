@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { extractOrConvertToMp3, callOpenRouterTranscription } from '@/lib/transcription';
+import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 
@@ -78,6 +78,7 @@ export async function POST(req: NextRequest) {
   if (!user) return jsonError('Необходима авторизация', 401);
 
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
+  const transcribeJobId = (req.headers.get('x-transcribe-job-id') ?? '').trim() || undefined;
   const route = req.nextUrl.pathname;
   const ip = getIp(req);
   const logMeta = { userId: user.id, requestId, route, ip };
@@ -127,7 +128,11 @@ export async function POST(req: NextRequest) {
       inputBytes: file.bytes.byteLength,
       mp3Bytes: mp3.byteLength,
     });
-    const text = await callOpenRouterTranscription({ audioMp3: mp3 });
+    const text = await transcribeAudio({
+      audioMp3: mp3,
+      filename: file.filename,
+      jobId: transcribeJobId,
+    });
 
     void (async () => {
       try {

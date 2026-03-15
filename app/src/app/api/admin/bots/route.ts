@@ -1,14 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { BOTS, CONTAINER_BOT_PREFIX, getContainerBots } from '@/lib/adminBots/config';
+import { BOTS, getContainerBots } from '@/lib/adminBots/config';
 import {
   listContainersByNames,
-  listContainersWithPrefix,
   isDockerAvailable,
   getDockerUnavailableReason,
   type ContainerInfo,
 } from '@/lib/adminBots/docker';
+import { isInAppBotEnabled } from '@/lib/adminBots/inAppState';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,7 +59,6 @@ export async function GET(_req: NextRequest) {
     .filter((n): n is string => n != null);
 
   let containerInfos: ContainerInfo[] = [];
-  let discoveredContainers: ContainerInfo[] = [];
 
   if (dockerInitiallyAvailable) {
     if (knownContainerNames.length > 0) {
@@ -67,29 +66,25 @@ export async function GET(_req: NextRequest) {
       containerInfos = result.containers;
       if (result.error) dockerError = result.error;
     }
-    const byPrefix = await listContainersWithPrefix(CONTAINER_BOT_PREFIX);
-    discoveredContainers = byPrefix.containers;
-    if (byPrefix.error && !dockerError) dockerError = byPrefix.error;
   }
 
   const dockerAvailable = dockerError ? false : isDockerAvailable();
 
   const byContainerName = new Map(containerInfos.map((c) => [c.name, c]));
-  const knownSet = new Set(knownContainerNames);
-
   const items: BotListItem[] = [];
 
   for (const bot of BOTS) {
     if (bot.kind === 'in-app') {
+      const enabled = await isInAppBotEnabled(bot.id);
       items.push({
         id: bot.id,
         name: bot.name,
         description: bot.description,
         kind: 'in-app',
-        status: 'in-app' as BotStatus,
-        statusDetail: 'работает в процессе портала',
-        canStop: false,
-        canStart: false,
+        status: (enabled ? 'running' : 'exited') as BotStatus,
+        statusDetail: enabled ? 'работает в процессе портала' : 'остановлен через Bot Manager',
+        canStop: enabled,
+        canStart: !enabled,
         canLogs: true,
       });
       continue;
@@ -106,22 +101,6 @@ export async function GET(_req: NextRequest) {
       canStop: dockerAvailable && status === 'running',
       canStart: dockerAvailable && (status === 'exited' || status === 'paused'),
       canLogs: true,
-    });
-  }
-
-  for (const c of discoveredContainers) {
-    if (knownSet.has(c.name)) continue;
-    items.push({
-      id: c.name,
-      name: c.name,
-      description: 'Контейнерный бот',
-      kind: 'container',
-      status: c.state,
-      statusDetail: c.status,
-      canStop: dockerAvailable && c.state === 'running',
-      canStart: dockerAvailable && (c.state === 'exited' || c.state === 'paused'),
-      canLogs: true,
-      autoDiscovered: true,
     });
   }
 

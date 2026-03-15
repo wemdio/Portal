@@ -1,11 +1,10 @@
 /**
  * Bot Manager: list of bots connected to the portal.
  * - Container bots: health-check, atmos-bot (controlled via Docker when socket available).
- *   New containers with name starting with CONTAINER_BOT_PREFIX are auto-discovered.
  * - In-app bot: tg-agent (runs inside portal; no start/stop, logs from application_logs).
  */
 
-/** Docker containers whose name starts with this prefix are shown in Bot Manager (auto-discover). */
+/** Reserved prefix for potential bot auto-discovery by container name. */
 export const CONTAINER_BOT_PREFIX = 'portal-';
 
 export const BOT_IDS = ['health-check', 'atmos-bot', 'tg-agent'] as const;

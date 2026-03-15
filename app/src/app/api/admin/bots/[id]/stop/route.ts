@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { getBotByIdOrContainerName } from '@/lib/adminBots/config';
 import { containerStop } from '@/lib/adminBots/docker';
+import { setInAppBotEnabled } from '@/lib/adminBots/inAppState';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,8 +36,15 @@ export async function POST(
   const { id } = await params;
   const bot = getBotByIdOrContainerName(id);
   if (!bot) return jsonError('Bot not found', 404);
-  if (bot.kind !== 'container' || !bot.containerName) {
-    return jsonError('This bot cannot be stopped (in-app)', 400);
+  if (bot.kind === 'in-app') {
+    const result = await setInAppBotEnabled(bot.id, false);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error ?? 'Failed to stop' }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true });
+  }
+  if (!bot.containerName) {
+    return jsonError('Container name is missing', 400);
   }
 
   const result = await containerStop(bot.containerName);
