@@ -56,7 +56,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
   const contentPadding = isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
-    : (isSpreadsheetPage ? 'p-1.5' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
+    : (isSpreadsheetPage ? 'p-1.5' : isRdpPage ? 'p-2' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
   const contentWidth =
     isRdpPage || isSpreadsheetPage || isGuestReviewPage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 

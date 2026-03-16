@@ -307,6 +307,11 @@ export default function TasksPage() {
     await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
   }, []);
 
+  const updateTaskDeadline = useCallback(async (taskId: string, deadline: string | null) => {
+    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, deadline } : t)));
+    await supabase.from('tasks').update({ deadline, updated_at: new Date().toISOString() }).eq('id', taskId);
+  }, []);
+
   const deleteTask = useCallback(async (taskId: string) => {
     setDbTasks((prev) => prev.filter((t) => t.id !== taskId));
     await supabase.from('tasks').delete().eq('id', taskId);
@@ -728,6 +733,40 @@ export default function TasksPage() {
             </select>
           </div>
         </div>
+
+        {!task.isLegacy && (
+          <div className="flex items-center gap-2 mt-1.5">
+            {task.deadline && task.status !== 'done' ? (() => {
+              const today = new Date(); today.setHours(0,0,0,0);
+              const dl = new Date(task.deadline + 'T00:00:00');
+              const diff = Math.floor((dl.getTime() - today.getTime()) / (1000*60*60*24));
+              const fmt = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+              const cls = diff < 0 ? 'text-red-600 bg-red-50' : diff === 0 ? 'text-amber-700 bg-amber-50' : diff <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
+              const suffix = diff < 0 ? ' (просрочено)' : diff === 0 ? ' (сегодня)' : '';
+              return (
+                <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                  {fmt}{suffix}
+                </span>
+              );
+            })() : null}
+            <span className="relative inline-flex items-center">
+              <input
+                type="date"
+                value={task.deadline ?? ''}
+                onChange={(e) => void updateTaskDeadline(task.id, e.target.value || null)}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                style={{ colorScheme: 'light' }}
+              />
+              <span className="inline-flex items-center text-[10px] text-gray-400 hover:text-gray-600 pointer-events-none">
+                {task.deadline ? '✏' : '+ срок'}
+              </span>
+            </span>
+            {task.deadline && task.status !== 'done' && (
+              <button type="button" onClick={() => void updateTaskDeadline(task.id, null)} className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title="Убрать дедлайн">✕</button>
+            )}
+          </div>
+        )}
 
         {!task.isLegacy && ((task.description != null && task.description !== '') || (task.image_url != null && task.image_url !== '')) && (
           <div className="mt-2 pt-2 border-t border-gray-100">
