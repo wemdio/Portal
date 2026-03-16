@@ -45,7 +45,7 @@ export async function openaiGenerate(
     Authorization: `Bearer ${apiKey}`,
   };
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
     method: 'POST',
     headers,
     body: JSON.stringify(body),

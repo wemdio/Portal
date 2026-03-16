@@ -9,6 +9,8 @@ import {
   Loader2,
   CircleDot,
   User,
+  Maximize,
+  Minimize,
 } from 'lucide-react';
 
 async function getToken() {
@@ -68,16 +70,32 @@ function RdpViewer({
   remoteScale?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<{ disconnect(): void } | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
+  const clipboardCleanupRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const zoomRef = useRef(1.0);
   const baseScaleRef = useRef(1.0);
   const currentScaleRef = useRef(1.0);
-  // remoteScale: visual fraction of the remote desktop (e.g. 0.8 → connect at 125%
-  // resolution so the remote renders more content → appears at 80% visual size).
   const remoteScaleRef = useRef(remoteScale);
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!wrapperRef.current) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      wrapperRef.current.requestFullscreen();
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -193,8 +211,6 @@ function RdpViewer({
         });
 
         const keyboard = new Guacamole.Keyboard(document);
-        // F11 (0xFFC8) and F12 (0xFFC9) are intercepted by the browser for
-        // fullscreen and devtools — don't forward them to the remote session.
         const BLOCKED_KEYSYMS = new Set([0xFFC8, 0xFFC9]);
         keyboard.onkeydown = (keysym: number) => {
           if (BLOCKED_KEYSYMS.has(keysym)) return;
@@ -203,6 +219,47 @@ function RdpViewer({
         keyboard.onkeyup = (keysym: number) => {
           if (BLOCKED_KEYSYMS.has(keysym)) return;
           client.sendKeyEvent(0, keysym);
+        };
+
+        // Clipboard: local → remote
+        const handlePaste = (e: ClipboardEvent) => {
+          const text = e.clipboardData?.getData('text/plain');
+          if (!text) return;
+          const stream = client.createClipboardStream('text/plain');
+          const writer = new Guacamole.StringWriter(stream);
+          writer.sendText(text);
+          writer.sendEnd();
+        };
+        window.addEventListener('paste', handlePaste);
+
+        // Clipboard: remote → local
+        client.onclipboard = (stream: { onblob: ((data: string) => void) | null; onend: (() => void) | null }, mimetype: string) => {
+          if (!mimetype.startsWith('text/')) return;
+          let data = '';
+          stream.onblob = (blob: string) => { data += atob(blob); };
+          stream.onend = () => {
+            if (data && navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(data).catch(() => {});
+            }
+          };
+        };
+
+        const syncClipboardToRemote = async () => {
+          try {
+            if (!navigator.clipboard?.readText) return;
+            const text = await navigator.clipboard.readText();
+            if (!text) return;
+            const stream = client.createClipboardStream('text/plain');
+            const writer = new Guacamole.StringWriter(stream);
+            writer.sendText(text);
+            writer.sendEnd();
+          } catch { /* clipboard permission denied */ }
+        };
+        window.addEventListener('focus', syncClipboardToRemote);
+
+        clipboardCleanupRef.current = () => {
+          window.removeEventListener('paste', handlePaste);
+          window.removeEventListener('focus', syncClipboardToRemote);
         };
 
         // Ждём размеры контейнера (flex может дать 0×0 до первого layout). Таймаут — чтобы не висеть вечно.
@@ -244,6 +301,7 @@ function RdpViewer({
     return () => {
       cancelled = true;
       roRef.current?.disconnect();
+      clipboardCleanupRef.current?.();
       if (clientRef.current) {
         try {
           clientRef.current.disconnect();
@@ -256,8 +314,8 @@ function RdpViewer({
 
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 w-full">
-      <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-2 shrink-0">
+    <div ref={wrapperRef} className="flex flex-col flex-1 min-h-0 w-full">
+      <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-1.5 shrink-0">
         <div className="flex items-center gap-2 text-sm">
           {status === 'connecting' && (
             <>
@@ -278,7 +336,14 @@ function RdpViewer({
             </>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleFullscreen}
+            className="flex items-center gap-1 rounded-lg bg-gray-200 px-2.5 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-300 transition"
+            title={isFullscreen ? 'Выйти из полноэкранного режима' : 'Полноэкранный режим'}
+          >
+            {isFullscreen ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />}
+          </button>
           <button
             onClick={onDisconnect}
             className="flex items-center gap-1 rounded-lg bg-red-100 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-200 transition"
@@ -371,17 +436,12 @@ export default function RdpPage() {
     );
   }
 
-  // Я подключён — показываем экран RDP
   if (connected) {
     return (
       <div className="flex flex-col flex-1 min-h-0 h-full">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2 shrink-0 mb-4">
-          <Monitor className="h-6 w-6 text-violet-600" />
-          Удалённый рабочий стол
-        </h1>
         <div
-          className="rounded-2xl border border-gray-200 overflow-hidden bg-white shadow-sm flex-1 min-h-0 flex flex-col"
-          style={{ maxHeight: 'calc(100vh - 140px)' }}
+          className="rounded-xl border border-gray-200 overflow-hidden bg-white shadow-sm flex-1 min-h-0 flex flex-col"
+          style={{ maxHeight: 'calc(100vh - 60px)' }}
         >
           <RdpViewer onDisconnect={handleDisconnect} remoteScale={DEFAULT_REMOTE_SCALE} />
         </div>

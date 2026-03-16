@@ -143,6 +143,6 @@ export async function createAvatarReadUrl(params: { key: string }): Promise<Pres
     Bucket: bucket,
     Key: params.key,
   });
-  const readUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 10 });
+  const readUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 60 });
   return { readUrl, key: params.key };
 }

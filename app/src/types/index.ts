@@ -72,6 +72,7 @@ export interface Task {
   image_url?: string | null;
   status: TaskStatus;
   specialist?: string;
+  deadline?: string | null;
   created_by?: string;
   created_at?: string;
   updated_at?: string;

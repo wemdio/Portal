@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
-const OPENROUTER_MODEL = 'google/gemini-2.5-pro';
+const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
 
 import {
   VOICEMAIL_DETECTION_BLOCK,
@@ -244,7 +244,7 @@ async function handlePost(req: NextRequest) {
 
   // Generate prompt via AI
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const response = await fetch('https://router.requesty.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
