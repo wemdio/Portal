@@ -41,13 +41,13 @@ export async function GET(req: NextRequest) {
       try {
         const { readUrl } = await createAvatarReadUrl({ key });
         result[name] = readUrl;
-      } catch {
-        // skip avatars that fail to sign
+      } catch (err) {
+        console.error(`[avatars] Failed to sign ${key}:`, err);
       }
     }),
   );
 
   return NextResponse.json(result, {
-    headers: { 'Cache-Control': 'private, max-age=300' },
+    headers: { 'Cache-Control': 'private, max-age=1800' },
   });
 }

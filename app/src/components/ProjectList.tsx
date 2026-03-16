@@ -128,7 +128,7 @@ function getCommentValue(project: Project) {
   return project.comments || project.comment_elvira || project.comment_anya || '';
 }
 
-type PopoverItem = { id: string; title: string; status?: string };
+type PopoverItem = { id: string; title: string; status?: string; deadline?: string | null };
 
 type ItemPopoverProps = {
   items: PopoverItem[];
@@ -145,9 +145,22 @@ type ItemPopoverProps = {
   onAdd: () => void;
   placeholder: string;
   showStatusDot?: boolean;
+  onDeadlineChange?: (id: string, deadline: string | null) => void;
 };
 
-function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot }: ItemPopoverProps) {
+function formatDeadlineLabel(deadline: string): { text: string; color: string } {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dl = new Date(deadline + 'T00:00:00');
+  const diff = Math.floor((dl.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  const formatted = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  if (diff < 0) return { text: `${formatted} (просрочено)`, color: 'text-red-600 bg-red-50' };
+  if (diff === 0) return { text: `${formatted} (сегодня)`, color: 'text-amber-700 bg-amber-50' };
+  if (diff <= 2) return { text: formatted, color: 'text-amber-600 bg-amber-50' };
+  return { text: formatted, color: 'text-zinc-500 bg-zinc-100' };
+}
+
+function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange }: ItemPopoverProps) {
   return (
     <div
       ref={popoverRef}
@@ -168,12 +181,47 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
       <div className="flex-1 overflow-y-auto overscroll-contain px-2 py-2 space-y-1" style={{ minHeight: 0 }}>
         {items.map((item) => {
           const isDone = item.status === 'done';
+          const dlInfo = item.deadline && !isDone ? formatDeadlineLabel(item.deadline) : null;
           return (
             <div key={item.id} className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${isDone ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'}`}>
               {showStatusDot && (
                 <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${isDone ? 'bg-emerald-400' : item.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
               )}
-              <span className={`flex-1 break-words leading-relaxed ${isDone ? 'line-through text-zinc-400' : 'text-zinc-700'}`}>{item.title}</span>
+              <div className="flex-1 min-w-0">
+                <span className={`break-words leading-relaxed ${isDone ? 'line-through text-zinc-400' : 'text-zinc-700'}`}>{item.title}</span>
+                <div className="flex items-center gap-1.5 mt-1">
+                  {dlInfo && (
+                    <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${dlInfo.color}`}>
+                      <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                      {dlInfo.text}
+                    </span>
+                  )}
+                  {canEdit && onDeadlineChange && !isDone && (
+                    <span className="relative inline-flex items-center opacity-0 group-hover:opacity-100 transition-colors">
+                      <input
+                        type="date"
+                        value={item.deadline ?? ''}
+                        onChange={(e) => onDeadlineChange(item.id, e.target.value || null)}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        style={{ colorScheme: 'light' }}
+                      />
+                      <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-600 pointer-events-none">
+                        {item.deadline ? '✏' : '+ срок'}
+                      </span>
+                    </span>
+                  )}
+                  {canEdit && onDeadlineChange && item.deadline && !isDone && (
+                    <button
+                      type="button"
+                      onClick={() => onDeadlineChange(item.id, null)}
+                      className="text-[10px] text-zinc-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                      title="Убрать дедлайн"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
               {canEdit && (
                 deleteConfirmId === item.id ? (
                   <div className="flex items-center gap-1 flex-shrink-0">
@@ -253,6 +301,19 @@ export function ProjectList() {
     void fetchAllTasks();
     void fetchAllNotes();
     // Intentionally run once on mount; fetchers are stable in behavior
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => void fetchSignedAvatars(), 30 * 60 * 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void fetchSignedAvatars();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -415,6 +476,16 @@ export function ProjectList() {
     setProjectTasks((prev) => ({
       ...prev,
       [projectId]: (prev[projectId] ?? []).filter((t) => t.id !== taskId),
+    }));
+  }
+
+  async function updateTaskDeadline(taskId: string, projectId: string, deadline: string | null) {
+    await supabase.from('tasks').update({ deadline }).eq('id', taskId);
+    setProjectTasks((prev) => ({
+      ...prev,
+      [projectId]: (prev[projectId] ?? []).map((t) =>
+        t.id === taskId ? { ...t, deadline } : t,
+      ),
     }));
   }
 
@@ -718,51 +789,23 @@ export function ProjectList() {
 
   return (
     <div className={isTma ? 'space-y-4' : 'space-y-4'}>
-      {/* Header */}
-      <div className={`flex flex-col sm:flex-row sm:items-center sm:justify-between pb-3 ${isTma ? 'gap-3' : 'gap-4'}`}>
-        <div>
-          <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-semibold tracking-tight text-zinc-900`}>Проекты</h1>
-        </div>
-        <div className={isTma ? 'flex w-full flex-col gap-2' : 'flex flex-wrap items-center gap-2'}>
-          {canEdit && (
-            <button
-              type="button"
-              onClick={() => void handleToggleEditing()}
-              className={`inline-flex items-center justify-center rounded-xl px-4 py-2 text-xs font-medium transition-all duration-200 ${isTma ? 'w-full' : ''} ${
-                isTableEditing
-                  ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                  : 'bg-white text-zinc-700 shadow-sm hover:shadow-md border border-zinc-200/80'
-              }`}
-            >
-              {isTableEditing ? 'Завершить' : 'Редактировать'}
-            </button>
-          )}
-        {canCreate && (
-          <Link 
-            href="/projects/new"
-              className={`inline-flex items-center justify-center rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
-          >
-            <span className="mr-1.5 text-sm leading-none">+</span> Новый проект
-          </Link>
-        )}
-        </div>
-      </div>
+      {/* Header + Controls — single row */}
+      <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-2'}>
+        <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>Проекты</h1>
 
-      {/* Controls */}
-      <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-col lg:flex-row gap-3 items-center mb-3'}>
         {/* Search */}
-        <div className="relative flex-1 w-full lg:max-w-md">
-          <svg className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="relative">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
           <input
             type="text"
-            className="w-full rounded-full border border-zinc-200/80 bg-white py-2.5 pl-11 pr-4 text-sm text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
-            placeholder="Поиск проектов..."
+            className="w-44 rounded-xl border border-zinc-200/80 bg-white py-2 pl-8 pr-3 text-xs text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
+            placeholder="Поиск..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
-      </div>
+        </div>
 
         {/* Lead Filter */}
         {uniqueLeads.length > 0 && (
@@ -770,49 +813,71 @@ export function ProjectList() {
             <select
               value={leadFilter}
               onChange={(e) => setLeadFilter(e.target.value)}
-              className="appearance-none rounded-full border border-zinc-200/80 bg-white py-2.5 pl-4 pr-9 text-[13px] font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer"
+              className="appearance-none rounded-xl border border-zinc-200/80 bg-white py-2 pl-3 pr-7 text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer"
             >
               <option value="all">Все лиды</option>
               {uniqueLeads.map((lead) => (
                 <option key={lead} value={lead}>{lead}</option>
               ))}
             </select>
-            <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
           </div>
         )}
 
-      {/* Status Filter Tabs */}
-      {viewMode !== 'kanban' && (
-          <div className={isTma ? 'flex w-full items-center gap-1 overflow-x-auto no-scrollbar pt-2' : 'flex items-center gap-1 overflow-x-auto no-scrollbar bg-white p-1 rounded-full shadow-sm border border-zinc-200/80'}>
-          {[
-            { key: 'all', label: 'Все' },
-            { key: 'подготовка', label: 'Подготовка' },
-            { key: 'в работе', label: 'В работе' },
-            { key: 'тестирование', label: 'Тест' },
-            { key: 'на паузе', label: 'Пауза' },
-            { key: 'завершен', label: 'Завершено' },
-          ].map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setStatusFilter(tab.key)}
-                className={`flex items-center px-4 py-2 rounded-full text-[13px] font-medium whitespace-nowrap transition-all duration-300 ${
-                statusFilter === tab.key
+        {/* Status Filter Tabs */}
+        {viewMode !== 'kanban' && (
+          <div className={isTma ? 'flex w-full items-center gap-0.5 overflow-x-auto no-scrollbar' : 'flex items-center gap-0.5 overflow-x-auto no-scrollbar bg-white px-1 py-0.5 rounded-xl shadow-sm border border-zinc-200/80'}>
+            {[
+              { key: 'all', label: 'Все' },
+              { key: 'подготовка', label: 'Подготовка' },
+              { key: 'в работе', label: 'В работе' },
+              { key: 'тестирование', label: 'Тест' },
+              { key: 'на паузе', label: 'Пауза' },
+              { key: 'завершен', label: 'Завершено' },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setStatusFilter(tab.key)}
+                className={`flex items-center px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all duration-300 ${
+                  statusFilter === tab.key
                     ? 'bg-zinc-100 text-zinc-900 shadow-sm'
                     : 'text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50'
-              }`}
-            >
-              {tab.label}
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] transition-colors duration-300 ${
+                }`}
+              >
+                {tab.label}
+                <span className={`ml-1.5 px-1.5 py-px rounded-full text-[10px] transition-colors duration-300 ${
                   statusFilter === tab.key ? 'bg-white text-zinc-700 shadow-sm' : 'bg-zinc-100 text-zinc-400'
-              }`}>
-                {statusCounts[tab.key as keyof typeof statusCounts] || 0}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+                }`}>
+                  {statusCounts[tab.key as keyof typeof statusCounts] || 0}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {canEdit && (
+          <button
+            type="button"
+            onClick={() => void handleToggleEditing()}
+            className={`inline-flex items-center justify-center rounded-xl px-4 py-2 text-xs font-medium transition-all duration-200 ${isTma ? 'w-full' : ''} ${
+              isTableEditing
+                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                : 'bg-white text-zinc-700 shadow-sm hover:shadow-md border border-zinc-200/80'
+            }`}
+          >
+            {isTableEditing ? 'Завершить' : 'Редактировать'}
+          </button>
+        )}
+        {canCreate && (
+          <Link
+            href="/projects/new"
+            className={`inline-flex items-center justify-center rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
+          >
+            <span className="mr-1.5 text-sm leading-none">+</span> Новый проект
+          </Link>
+        )}
       </div>
 
       {/* Empty State */}
@@ -1322,12 +1387,25 @@ export function ProjectList() {
                                   }
                                 }}
                               >
-                                {latestTask ? (
-                                  <div>
-                                    <p className="text-xs text-zinc-900 line-clamp-2">{latestTask.title}</p>
-                                    {tasks.length > 1 && <p className="text-[10px] text-zinc-400 mt-0.5">+{tasks.length - 1} ещё</p>}
-                                  </div>
-                                ) : (
+                                {latestTask ? (() => {
+                                  const nearestDl = tasks.filter((t) => t.deadline && t.status !== 'done')
+                                    .sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))[0];
+                                  const dlLabel = nearestDl?.deadline ? formatDeadlineLabel(nearestDl.deadline) : null;
+                                  return (
+                                    <div>
+                                      <p className="text-xs text-zinc-900 line-clamp-2">{latestTask.title}</p>
+                                      <div className="flex items-center gap-1.5 mt-0.5">
+                                        {tasks.length > 1 && <span className="text-[10px] text-zinc-400">+{tasks.length - 1} ещё</span>}
+                                        {dlLabel && (
+                                          <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-1 py-px rounded ${dlLabel.color}`}>
+                                            <svg width="8" height="8" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                                            {dlLabel.text}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })() : (
                                   <span className="text-zinc-300 text-xs">{canEdit ? '+ задача' : '—'}</span>
                                 )}
                               </div>
@@ -1347,6 +1425,7 @@ export function ProjectList() {
                                   onAdd={() => void addTask(project.id, newTaskTitle, project.specialist)}
                                   placeholder="Новая задача..."
                                   showStatusDot
+                                  onDeadlineChange={(id, dl) => void updateTaskDeadline(id, project.id, dl)}
                                 />
                               )}
                             </>

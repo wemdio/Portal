@@ -124,6 +124,9 @@ export default function PaymentsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<'requests' | 'stats'>('requests');
 
+  type FormMode = 'request' | 'expense';
+  const [formMode, setFormMode] = useState<FormMode>('request');
+
   // Form state
   const [form, setForm] = useState({
     department: 'outreach',
@@ -217,21 +220,30 @@ export default function PaymentsPage() {
 
     setSubmitting(true);
     try {
-      const { error } = await supabase.from('payment_requests').insert({
+      const payload: Record<string, unknown> = {
         user_id: userId,
         department: form.department,
         description: form.description.trim(),
         amount,
         project_id: form.project_id || null,
         comment: form.comment.trim() || null,
-      });
+      };
+
+      if (formMode === 'expense') {
+        payload.status = 'approved';
+        payload.decided_by = userId;
+        payload.decided_at = new Date().toISOString();
+        payload.decision_comment = 'Занесено в расход';
+      }
+
+      const { error } = await supabase.from('payment_requests').insert(payload);
       if (error) throw error;
 
       setForm({ department: 'outreach', description: '', amount: '', project_id: '', comment: '' });
       await fetchRequests();
     } catch (err) {
       console.error('Error submitting request:', err);
-      alert('Ошибка при отправке запроса');
+      alert('Ошибка при отправке');
     } finally {
       setSubmitting(false);
     }
@@ -356,10 +368,42 @@ export default function PaymentsPage() {
             <div className="lg:col-span-1">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden sticky top-6">
                 <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">Новый запрос</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">Заполните форму для запроса оплаты</p>
+                  <h2 className="text-base font-bold text-gray-900">
+                    {formMode === 'request' ? 'Запрос на оплату' : 'Занести в расход'}
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {formMode === 'request'
+                      ? 'Запрос отправится на согласование'
+                      : 'Добавится сразу в статистику без согласования'}
+                  </p>
                 </div>
                 <div className="px-6 py-5 space-y-4">
+                  {/* Mode toggle */}
+                  <div className="flex rounded-xl bg-gray-100 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setFormMode('request')}
+                      className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg transition ${
+                        formMode === 'request'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      Запрос на оплату
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormMode('expense')}
+                      className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg transition ${
+                        formMode === 'expense'
+                          ? 'bg-white text-gray-900 shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      Занести в расход
+                    </button>
+                  </div>
+
                   {/* Department */}
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-1.5">Отдел</label>
@@ -437,7 +481,11 @@ export default function PaymentsPage() {
                     disabled={!formValid || submitting}
                     className="w-full py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
-                    {submitting ? 'Отправка...' : 'Отправить запрос'}
+                    {submitting
+                      ? 'Отправка...'
+                      : formMode === 'request'
+                        ? 'Отправить запрос'
+                        : 'Занести в расход'}
                   </button>
                 </div>
               </div>
@@ -465,7 +513,10 @@ export default function PaymentsPage() {
               ) : (
                 <div className="space-y-3">
                   {enrichedRequests.map((r) => {
-                    const sc = STATUS_CONFIG[r.status] || STATUS_CONFIG.pending;
+                    const isDirectExpense = r.status === 'approved' && r.decision_comment === 'Занесено в расход';
+                    const sc = isDirectExpense
+                      ? { label: 'Расход', bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' }
+                      : (STATUS_CONFIG[r.status] || STATUS_CONFIG.pending);
                     return (
                       <div
                         key={r.id}
@@ -499,7 +550,9 @@ export default function PaymentsPage() {
                               )}
                               {r.status !== 'pending' && r.decided_at && (
                                 <p className="mt-1.5 text-xs text-gray-400">
-                                  {r.status === 'approved' ? 'Согласовано' : 'Отклонено'}{' '}
+                                  {isDirectExpense
+                                    ? 'Занесено в расход'
+                                    : r.status === 'approved' ? 'Согласовано' : 'Отклонено'}{' '}
                                   {profiles[r.decided_by ?? '']?.full_name || ''}{' '}
                                   {formatDateTime(r.decided_at)}
                                 </p>

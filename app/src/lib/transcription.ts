@@ -190,7 +190,7 @@ async function callOpenRouterTranscriptionSingle(input: { audioMp3: Buffer }): P
     'Transcribe the provided audio into plain text. Output ONLY the transcript (no markdown). ' +
     'Preserve punctuation, numbers, and proper names. Language: auto-detect; if Russian is present, output Russian text.';
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${OPENROUTER_VIDEO_TRANSCRIPT_API_KEY}`,

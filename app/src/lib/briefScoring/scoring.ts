@@ -140,7 +140,7 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
     let response: Response;
 
     try {
-      response = await fetchImpl('https://openrouter.ai/api/v1/chat/completions', {
+      response = await fetchImpl('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

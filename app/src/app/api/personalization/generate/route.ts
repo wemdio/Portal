@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
     try {
       const controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
-      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      response = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
