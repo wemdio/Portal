@@ -157,13 +157,22 @@ export async function containerStop(containerName: string): Promise<{ ok: boolea
   }
 }
 
-function streamToBuffer(stream: Readable): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
+function streamToBuffer(stream: Readable | Buffer | string): Promise<Buffer> {
+  if (Buffer.isBuffer(stream)) {
+    return Promise.resolve(stream);
+  }
+  if (typeof stream === 'string') {
+    return Promise.resolve(Buffer.from(stream));
+  }
+  if (stream && typeof stream.on === 'function') {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
+      stream.on('error', reject);
+    });
+  }
+  return Promise.reject(new Error('Docker logs stream is not readable'));
 }
 
 /** Get container logs from start. Docker API uses 8-byte header per frame; we strip and concat as text. */
@@ -186,7 +195,7 @@ export async function containerLogs(
       stderr: true,
       tail: options?.tail ?? 1000,
     });
-    const buf = await streamToBuffer(stream as unknown as Readable);
+    const buf = await streamToBuffer(stream as unknown as Readable | Buffer | string);
     // Docker stream: each frame = 8-byte header (1 byte stream type, 3 padding, 4 byte BE size) + payload
     const chunks: string[] = [];
     let i = 0;
