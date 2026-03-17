@@ -142,10 +142,11 @@ export default function CreateCampaignPage() {
         }],
       },
       sequences: [{
-        steps: steps.map((s) => ({
-          subject: s.subject,
-          body: s.body,
-          wait_days: s.wait_days,
+        steps: steps.map((s, i) => ({
+          type: 'email' as const,
+          delay: i < steps.length - 1 ? steps[i + 1].wait_days : 1,
+          delay_unit: 'days' as const,
+          variants: [{ subject: s.subject, body: s.body }],
         })),
       }],
       email_list: selectedAccounts.length > 0 ? selectedAccounts : undefined,
