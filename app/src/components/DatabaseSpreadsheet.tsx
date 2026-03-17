@@ -10337,14 +10337,6 @@ export function DatabaseSpreadsheet() {
                 </div>
               </div>
 
-              {dadataEnrichment.mode === 'name' && (
-                <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
-                  <p className="text-xs text-amber-700 leading-relaxed">
-                    При поиске по названию берётся первый результат из подсказок DaData. Для точного поиска используйте режим «По ИНН».
-                  </p>
-                </div>
-              )}
-
               {!dadataEnrichment.isProcessing && (
                 <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
                   <p className="text-xs text-blue-700 leading-relaxed">

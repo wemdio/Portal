@@ -60,7 +60,8 @@ async function executeToolCalls(
     } else {
       try {
         const args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown>;
-        content = await handler(args);
+        const readHandler = handler as (params: Record<string, unknown>) => Promise<string>;
+        content = await readHandler(args);
       } catch (err) {
         content = `Ошибка: ${err instanceof Error ? err.message : 'Unknown error'}`;
       }
