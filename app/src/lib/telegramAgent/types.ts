@@ -70,3 +70,5 @@ export type LlmResponse = {
 };
 
 export type ToolHandler = (params: Record<string, unknown>) => Promise<string>;
+
+export type WriteToolHandler = (params: Record<string, unknown>, user: AgentUser) => Promise<string>;
