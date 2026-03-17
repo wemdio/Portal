@@ -43,11 +43,9 @@ function shouldRetryBriefScoringError(errorMessage: string, attemptCount: number
   if (attemptCount >= MAX_ATTEMPTS) return false;
   const lower = errorMessage.toLowerCase();
   const retryable = [
-    '429',
     '502',
     '503',
     '504',
-    'rate limit',
     'timeout',
     'network',
     'ошибка сети',

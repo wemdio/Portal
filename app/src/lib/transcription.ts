@@ -7,7 +7,7 @@ import path from 'node:path';
 const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
   process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? ''
 ).trim();
-const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
+const OPENROUTER_MODEL = 'policy/transcription';
 
 export const MAX_OPENROUTER_AUDIO_BYTES = 25 * 1024 * 1024;
 const TRANSCRIPTION_CHUNK_SECONDS = 40 * 60;

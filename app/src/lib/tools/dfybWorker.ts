@@ -21,15 +21,8 @@ const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY || '';
 const OPENROUTER_PERSONALIZATION_API_KEY =
   process.env.OPENROUTER_PERSONALIZATION_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY || '';
 const OPENROUTER_CLEANUP_API_KEY = process.env.OPENROUTER_CLEANUP_API_KEY || '';
-const OPENROUTER_CLEANUP_MODELS = (
-  process.env.OPENROUTER_CLEANUP_MODELS ??
-  process.env.OPENROUTER_CLEANUP_MODEL ??
-  'xai/grok-4-1-fast-non-reasoning,google/gemini-3-flash-preview'
-)
-  .split(',')
-  .map((m) => m.trim())
-  .filter(Boolean);
-const AI_MODEL = 'google/gemini-3-flash-preview';
+const CLEANUP_MODEL = 'policy/cleanup';
+const AI_MODEL = 'policy/gemini-flash';
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
@@ -122,7 +115,7 @@ async function callOpenRouter(
         const json = await res.json();
         return json.choices?.[0]?.message?.content || '';
       }
-      if ([429, 502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
+      if ([502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
         await sleep(RETRY_BASE_DELAY * 2 ** attempt);
         continue;
       }
@@ -555,39 +548,35 @@ async function stepNameCleanup(jobId: string, data: string[][]): Promise<string[
       .join('\n');
 
     let cleanedMap: Map<number, string> | null = null;
-    for (const model of OPENROUTER_CLEANUP_MODELS) {
-      try {
-        const content = await callOpenRouter(OPENROUTER_CLEANUP_API_KEY, model, [
-          { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
-          { role: 'user', content: input },
-        ], { temperature: 0.1, title: 'Portal - DFYB Cleanup' });
+    try {
+      const content = await callOpenRouter(OPENROUTER_CLEANUP_API_KEY, CLEANUP_MODEL, [
+        { role: 'system', content: CLEANUP_SYSTEM_PROMPT },
+        { role: 'user', content: input },
+      ], { temperature: 0.1, title: 'Portal - DFYB Cleanup' });
 
-        const numbered = new Map<number, string>();
-        const allLines: string[] = [];
-        for (const line of content.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const match = trimmed.match(/^(\d+)\.\s*(.+)/);
-          if (match) {
-            numbered.set(parseInt(match[1], 10), match[2].trim());
-          }
-          allLines.push(trimmed);
+      const numbered = new Map<number, string>();
+      const allLines: string[] = [];
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const match = trimmed.match(/^(\d+)\.\s*(.+)/);
+        if (match) {
+          numbered.set(parseInt(match[1], 10), match[2].trim());
         }
-
-        if (numbered.size >= chunk.length * 0.8) {
-          cleanedMap = numbered;
-        } else if (allLines.length > 0) {
-          // Fallback: positional mapping
-          const positional = new Map<number, string>();
-          for (let j = 0; j < allLines.length && j < chunk.length; j++) {
-            if (allLines[j]) positional.set(j + 1, allLines[j]);
-          }
-          cleanedMap = positional;
-        }
-        if (cleanedMap && cleanedMap.size > 0) break;
-      } catch {
-        continue;
+        allLines.push(trimmed);
       }
+
+      if (numbered.size >= chunk.length * 0.8) {
+        cleanedMap = numbered;
+      } else if (allLines.length > 0) {
+        const positional = new Map<number, string>();
+        for (let j = 0; j < allLines.length && j < chunk.length; j++) {
+          if (allLines[j]) positional.set(j + 1, allLines[j]);
+        }
+        cleanedMap = positional;
+      }
+    } catch {
+      // routing policy handles fallback; skip batch on total failure
     }
 
     if (cleanedMap) {

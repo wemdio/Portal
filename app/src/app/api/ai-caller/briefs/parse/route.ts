@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
-const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
+const OPENROUTER_MODEL = 'policy/gemini-flash';
 
 import {
   VOICEMAIL_DETECTION_BLOCK,
