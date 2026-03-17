@@ -15,11 +15,20 @@ export type TgFrom = {
   language_code?: string;
 };
 
+export type TgVoice = {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  mime_type?: string;
+  file_size?: number;
+};
+
 export type TgMessage = {
   message_id: number;
   chat: TgChat;
   from?: TgFrom;
   text?: string;
+  voice?: TgVoice;
   date: number;
 };
 

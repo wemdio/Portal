@@ -318,6 +318,97 @@ export const WRITE_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_search_parser',
+      description: 'Запустить поисковый парсер (Google через Serper). Ищет сайты по запросам. Результаты появятся на портале. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          queries: { type: 'string', description: 'Поисковые запросы через перенос строки. Пример: "стоматологии Москва\\nклиники СПб"' },
+          brief: { type: 'string', description: 'Описание целевой аудитории — система сгенерирует запросы автоматически' },
+          search_depth: { type: 'number', description: 'Глубина поиска 1-10 (по умолчанию 5)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_yandex_maps_parser',
+      description: 'Запустить парсер Яндекс.Карт. Собирает организации по поисковому URL. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          search_urls: { type: 'string', description: 'URL-ы поиска Яндекс.Карт через перенос строки (обязательно). Пример: "https://yandex.ru/maps/?text=стоматологии+москва"' },
+          max_results: { type: 'number', description: 'Макс. организаций (по умолчанию 500, максимум 5000)' },
+        },
+        required: ['search_urls'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_email_search',
+      description: 'Запустить поиск email-адресов по списку сайтов. Парсит страницы и извлекает контакты. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          urls: { type: 'string', description: 'Список URL сайтов через перенос строки (обязательно). Пример: "https://company1.ru\\nhttps://company2.ru"' },
+        },
+        required: ['urls'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_email_validation',
+      description: 'Запустить валидацию email-адресов. Проверяет существование и доставляемость. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          emails: { type: 'string', description: 'Список email через перенос строки (обязательно). Пример: "info@company1.ru\\nsales@company2.ru"' },
+        },
+        required: ['emails'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_lpr_search',
+      description: 'Найти ЛПР (лицо, принимающее решения) в компании. Использует Apollo + PDL. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          domain: { type: 'string', description: 'Домен компании (например company.ru)' },
+          company_name: { type: 'string', description: 'Название компании' },
+          linkedin_url: { type: 'string', description: 'URL LinkedIn компании' },
+          seniorities: { type: 'string', description: 'Уровни: owner,c_suite,vp,director,manager (через запятую)' },
+          functions: { type: 'string', description: 'Отделы: sales,marketing,operations,finance,engineering,hr (через запятую)' },
+          max_candidates: { type: 'number', description: 'Макс. кандидатов (по умолчанию 10)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'launch_brief_scoring',
+      description: 'Запустить оценку компаний под бриф (скоринг ЦА). Оценивает релевантность компаний для целевой аудитории. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          brief_text: { type: 'string', description: 'Описание целевой аудитории / бриф (обязательно)' },
+          companies: { type: 'string', description: 'Названия компаний через перенос строки. Пример: "ООО Ромашка\\nАО Тюльпан"' },
+        },
+        required: ['brief_text'],
+      },
+    },
+  },
 ];
 
 export const ALL_TOOLS: ToolDefinition[] = [...AGENT_TOOLS, ...WRITE_TOOLS];
