@@ -844,7 +844,7 @@ export function ProjectList() {
   };
 
   return (
-    <div className={isTma ? 'space-y-4' : 'space-y-4'}>
+    <div className={isTma ? 'space-y-4' : 'flex flex-1 min-h-0 flex-col gap-4'}>
       {/* Header + Controls — single row */}
       <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-2'}>
         <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>Проекты</h1>
@@ -1024,8 +1024,8 @@ export function ProjectList() {
 
       {/* Table View */}
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
-        <div className="relative overflow-hidden rounded-[24px] bg-white shadow-sm border border-zinc-200/80">
-          <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[24px] bg-white shadow-sm border border-zinc-200/80">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full divide-y divide-zinc-200/50 text-xs min-w-[1400px]">
               <thead className="bg-white/95 backdrop-blur sticky top-0 z-10">
                 <tr>
