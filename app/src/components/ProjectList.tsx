@@ -813,16 +813,18 @@ export function ProjectList() {
             <select
               value={leadFilter}
               onChange={(e) => setLeadFilter(e.target.value)}
-              className="appearance-none rounded-xl border border-zinc-200/80 bg-white py-2 pl-3 pr-7 text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer"
+              className={`appearance-none rounded-xl border border-zinc-200/80 bg-white py-2 pl-3 ${isTma ? 'pr-3' : 'pr-7'} text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer`}
             >
               <option value="all">Все лиды</option>
               {uniqueLeads.map((lead) => (
                 <option key={lead} value={lead}>{lead}</option>
               ))}
             </select>
-            <svg className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+            {!isTma && (
+              <svg className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            )}
           </div>
         )}
 

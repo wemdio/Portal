@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo } from 'react';
-import { Plus, Search, Trash2, Settings, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
+import { useState, useMemo, type ChangeEvent } from 'react';
+import { Plus, Search, Trash2, Settings, ChevronUp, ChevronDown, Loader2, Upload } from 'lucide-react';
 import { useTgOutreachAccounts } from '@/lib/tgOutreach/hooks';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 import { AddAccountModal } from './AddAccountModal';
@@ -40,6 +40,8 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -95,6 +97,25 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
   const handleDelete = async (id: string) => {
     await tgOutreachFetch(`/accounts/${id}`, { method: 'DELETE' });
     reload();
+  };
+
+  const handleFilesUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (!files.length) return;
+
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const form = new FormData();
+      files.forEach((file) => form.append('files', file));
+      await tgOutreachFetch('/accounts/bulk-files', { method: 'POST', body: form });
+      reload();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Ошибка загрузки');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const uniqueTags = useMemo(() => {
@@ -187,8 +208,26 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
             <Plus className="h-4 w-4" />
             Добавить аккаунт
           </button>
+          <label className={`relative flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-zinc-50 ${uploading ? 'opacity-60' : ''}`}>
+            <input
+              type="file"
+              multiple
+              accept=".json,.session,.txt"
+              className="absolute inset-0 cursor-pointer opacity-0"
+              onChange={handleFilesUpload}
+              disabled={uploading}
+              title="Загрузите JSON и/или .session файлы"
+            />
+            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            Загрузить файлы
+          </label>
         </div>
       </div>
+      {uploadError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {uploadError}
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
@@ -209,8 +248,8 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
-                  <th className="px-4 py-3 w-10">
+                <tr className="border-b border-zinc-100 bg-zinc-50/50">
+                  <th className="px-4 py-3 w-10 text-center">
                     <input
                       type="checkbox"
                       checked={selected.size === filtered.length && filtered.length > 0}
@@ -218,29 +257,29 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
                       className="rounded border-zinc-300"
                     />
                   </th>
-                  <th className="px-4 py-3">
-                    <button onClick={() => toggleSort('first_name')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
+                  <th className="px-4 py-3 text-center">
+                    <button onClick={() => toggleSort('first_name')} className="mx-auto flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
                       Имя <SortIcon col="first_name" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
-                  <th className="px-4 py-3">
-                    <button onClick={() => toggleSort('phone')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
+                  <th className="px-4 py-3 text-center">
+                    <button onClick={() => toggleSort('phone')} className="mx-auto flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
                       Телефон <SortIcon col="phone" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
-                  <th className="px-4 py-3">
-                    <button onClick={() => toggleSort('username')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
+                  <th className="px-4 py-3 text-center">
+                    <button onClick={() => toggleSort('username')} className="mx-auto flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
                       Username <SortIcon col="username" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
-                  <th className="px-4 py-3">
-                    <button onClick={() => toggleSort('status')} className="flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
+                  <th className="px-4 py-3 text-center">
+                    <button onClick={() => toggleSort('status')} className="mx-auto flex items-center gap-1 text-xs font-medium text-zinc-500 uppercase">
                       Статус <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
                     </button>
                   </th>
-                  <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Прокси</th>
-                  <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Теги</th>
-                  <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Действия</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-zinc-500 uppercase">Прокси</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-zinc-500 uppercase">Теги</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-zinc-500 uppercase">Действия</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-50">
@@ -304,11 +343,11 @@ function AccountRow({
 
   return (
     <tr className={`hover:bg-zinc-50 ${selected ? 'bg-blue-50/30' : ''}`}>
-      <td className="px-4 py-3">
+      <td className="px-4 py-3 text-center">
         <input type="checkbox" checked={selected} onChange={onToggle} className="rounded border-zinc-300" />
       </td>
       <td className="px-4 py-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-center gap-2">
           {account.avatar_url ? (
             <img src={account.avatar_url} alt="" className="h-7 w-7 rounded-full object-cover" />
           ) : (
@@ -316,7 +355,7 @@ function AccountRow({
               {(account.first_name?.[0] ?? '?').toUpperCase()}
             </div>
           )}
-          <div>
+          <div className="text-center">
             <div className="font-medium text-zinc-800">
               {account.first_name} {account.last_name}
             </div>
@@ -326,20 +365,20 @@ function AccountRow({
           </div>
         </div>
       </td>
-      <td className="px-4 py-3 text-zinc-600 font-mono text-xs">{account.phone || '—'}</td>
-      <td className="px-4 py-3 text-zinc-600">
+      <td className="px-4 py-3 text-center text-zinc-600 font-mono text-xs">{account.phone || '—'}</td>
+      <td className="px-4 py-3 text-center text-zinc-600">
         {account.username ? `@${account.username}` : '—'}
       </td>
-      <td className="px-4 py-3">
+      <td className="px-4 py-3 text-center">
         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusCfg.cls}`}>
           {statusCfg.label}
         </span>
       </td>
-      <td className="px-4 py-3 text-xs text-zinc-500">
+      <td className="px-4 py-3 text-center text-xs text-zinc-500">
         {proxy ? `${proxy.ip}:${proxy.port}` : '—'}
       </td>
       <td className="px-4 py-3">
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap items-center justify-center gap-1">
           {account.tags?.map((tag) => (
             <span
               key={tag.id}
@@ -352,13 +391,19 @@ function AccountRow({
         </div>
       </td>
       <td className="px-4 py-3">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-center gap-1.5">
           <CheckDropdown accountId={account.id} onActionComplete={onReload} />
           <UnblockDropdown accountId={account.id} onActionComplete={onReload} />
-          <button onClick={onSettings} className="p-1 text-zinc-400 hover:text-zinc-600 transition-colors">
+          <button
+            onClick={onSettings}
+            className="rounded-md border border-transparent p-1 text-zinc-400 transition-colors hover:border-zinc-200 hover:bg-zinc-100 hover:text-zinc-700"
+          >
             <Settings className="h-4 w-4" />
           </button>
-          <button onClick={onDelete} className="p-1 text-zinc-400 hover:text-red-500 transition-colors">
+          <button
+            onClick={onDelete}
+            className="rounded-md border border-transparent p-1 text-zinc-400 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+          >
             <Trash2 className="h-4 w-4" />
           </button>
         </div>

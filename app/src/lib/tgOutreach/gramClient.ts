@@ -37,7 +37,8 @@ export async function createGramClient(
     session = new StringSession(account.session_data);
   } else if (account.session_file_path && downloadSessionFile) {
     const localPath = await downloadSessionFile(account.session_file_path);
-    const SQLiteSession = (await import('gramjs-sqlitesession')).default as new (path: string) => import('telegram/sessions').Session;
+    const mod = await import('gramjs-sqlitesession');
+    const SQLiteSession = (typeof mod === 'function' ? mod : mod.default ?? mod) as new (path: string) => import('telegram/sessions').Session;
     session = new SQLiteSession(localPath);
   } else {
     throw new Error('Нет session_data или session_file_path');

@@ -1174,7 +1174,7 @@ export default function TasksPage() {
                     onClick={() => setShowAddBoardForm(true)}
                     className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
                   >
-                    + Создать доску
+                    {isTma ? '+ доска' : '+ Создать доску'}
                   </button>
                   <button
                     type="button"
@@ -1182,7 +1182,7 @@ export default function TasksPage() {
                     disabled={!selectedBoardId || addingColumn}
                     className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                   >
-                    {addingColumn ? 'Добавление...' : '+ Добавить колонку'}
+                    {addingColumn ? 'Добавление...' : isTma ? '+ колонка' : '+ Добавить колонку'}
                   </button>
                 </>
               )}

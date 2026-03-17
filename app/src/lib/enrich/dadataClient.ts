@@ -2,6 +2,26 @@ function getDadataApiKey() { return process.env.DADATA_API_KEY ?? ''; }
 const DADATA_FIND_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party';
 const DADATA_SUGGEST_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party';
 
+export interface DadataFounder {
+  inn?: string;
+  ogrn?: string;
+  name?: string;
+  fio?: { surname?: string; name?: string; patronymic?: string };
+  hid?: string;
+  type?: 'LEGAL' | 'PHYSICAL';
+  share?: { type?: string; value?: number; numerator?: number; denominator?: number };
+}
+
+export interface DadataManager {
+  inn?: string;
+  ogrn?: string;
+  name?: string;
+  fio?: { surname?: string; name?: string; patronymic?: string };
+  post?: string;
+  hid?: string;
+  type?: 'EMPLOYEE' | 'FOREIGNER' | 'LEGAL';
+}
+
 export interface DadataSuggestion {
   value: string;
   data: {
@@ -11,8 +31,12 @@ export interface DadataSuggestion {
     type?: string;
     name?: { full_with_opf?: string; short_with_opf?: string };
     management?: { name?: string; post?: string };
+    founders?: DadataFounder[];
+    managers?: DadataManager[];
     state?: { status?: string };
     address?: { value?: string; unrestricted_value?: string; data?: { city?: string; region?: string } };
+    phones?: Array<{ value?: string }>;
+    emails?: Array<{ value?: string }>;
     [key: string]: unknown;
   };
 }
