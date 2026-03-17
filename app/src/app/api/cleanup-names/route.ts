@@ -6,14 +6,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 export const dynamic = 'force-dynamic';
 
 const OPENROUTER_CLEANUP_API_KEY = process.env.OPENROUTER_CLEANUP_API_KEY ?? '';
-const OPENROUTER_CLEANUP_MODELS = (
-  process.env.OPENROUTER_CLEANUP_MODELS ??
-  process.env.OPENROUTER_CLEANUP_MODEL ??
-  'xai/grok-4-1-fast-non-reasoning,google/gemini-3-flash-preview'
-)
-  .split(',')
-  .map((model) => model.trim())
-  .filter((model) => model.length > 0);
+const CLEANUP_MODEL = 'policy/cleanup';
 const OPENROUTER_TIMEOUT_MS = 70000;
 
 function jsonError(message: string, status: number) {
@@ -100,9 +93,6 @@ export async function POST(req: NextRequest) {
   if (!OPENROUTER_CLEANUP_API_KEY) {
     return jsonError('OPENROUTER_CLEANUP_API_KEY not configured on server', 500);
   }
-  if (OPENROUTER_CLEANUP_MODELS.length === 0) {
-    return jsonError('OPENROUTER_CLEANUP_MODELS not configured on server', 500);
-  }
 
   // --- Parse body ---
   let body: RequestBody;
@@ -128,10 +118,7 @@ export async function POST(req: NextRequest) {
 
   const userMessage = companyLines.join('\n');
 
-  // --- Call OpenRouter with retries and built-in fallback models ---
-  const primaryModel = OPENROUTER_CLEANUP_MODELS[0];
-  const fallbackModels = OPENROUTER_CLEANUP_MODELS.slice(1);
-  const configuredModelsLabel = OPENROUTER_CLEANUP_MODELS.join(', ');
+  // --- Call Requesty with routing policy (handles fallback internally) ---
 
   let lastAiError = 'Unknown AI error';
   let sawNonRetryableFailure = false;
@@ -153,8 +140,7 @@ export async function POST(req: NextRequest) {
         },
         signal: controller.signal,
         body: JSON.stringify({
-          model: primaryModel,
-          ...(fallbackModels.length > 0 ? { models: fallbackModels } : {}),
+          model: CLEANUP_MODEL,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: userMessage },
@@ -240,7 +226,7 @@ export async function POST(req: NextRequest) {
 
     lastAiError = errorMessage;
     const providerError = /provider returned error/i.test(errorMessage);
-    const shouldRetry = providerError || [429, 500, 502, 503, 504].includes(response.status);
+    const shouldRetry = providerError || [500, 502, 503, 504].includes(response.status);
     if (!shouldRetry) {
       sawNonRetryableFailure = true;
     }
@@ -253,10 +239,10 @@ export async function POST(req: NextRequest) {
 
   if (!sawNonRetryableFailure) {
     const results = buildHeuristicCleanupResults(companies);
-    const warning = `AI временно недоступен, применена локальная очистка. Модели: ${configuredModelsLabel}. Причина: ${lastAiError}`;
+    const warning = `AI временно недоступен, применена локальная очистка. Модель: ${CLEANUP_MODEL}. Причина: ${lastAiError}`;
 
     console.warn('[cleanup-names] Falling back to heuristic cleanup', {
-      models: OPENROUTER_CLEANUP_MODELS,
+      model: CLEANUP_MODEL,
       companyCount: companies.length,
       reason: lastAiError,
     });
@@ -267,7 +253,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return jsonError(`Не удалось получить ответ от AI. ${configuredModelsLabel}: ${lastAiError}`, 502);
+  return jsonError(`Не удалось получить ответ от AI. ${CLEANUP_MODEL}: ${lastAiError}`, 502);
 }
 
 function sleep(ms: number) {

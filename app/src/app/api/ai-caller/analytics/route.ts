@@ -295,7 +295,7 @@ export async function POST(req: NextRequest) {
         'X-Title': 'Portal - Call Analytics',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
+        model: 'policy/gemini-flash',
         messages: [
           { role: 'system', content: ANALYSIS_PROMPT },
           { role: 'user', content: `ТРАНСКРИПТ:\n${transcript.slice(0, 3000)}` },

@@ -1,7 +1,7 @@
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY || '';
-const MODEL = 'google/gemini-3-flash-preview';
+const MODEL = 'policy/gemini-flash';
 
 export interface DfybPlan {
   analysis: string;
