@@ -46,12 +46,37 @@ blocks:
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
 
               sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
-                docker-compose.prod.yml drain-worker.sh ${USER}@${HOST}:/home/Portal/prod/
+                docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
               printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
                 "set -e;
                 cd /home/Portal/prod;
                 chmod +x drain-worker.sh;
+                upsert_env() {
+                  key=\"\$1\";
+                  val=\"\$2\";
+                  if [ ! -f .env ]; then
+                    echo '.env not found in /home/Portal/prod' && exit 1;
+                  fi;
+                  if grep -q \"^\${key}=\" .env; then
+                    sed -i \"s|^\${key}=.*|\${key}=\${val}|\" .env;
+                  else
+                    printf '\n%s=%s\n' \"\${key}\" \"\${val}\" >> .env;
+                  fi;
+                };
+                maintenance_enabled=0;
+                disable_maintenance() {
+                  if [ \"\${maintenance_enabled}\" != \"1\" ]; then
+                    return;
+                  fi;
+                  echo '--- Step 6: disable maintenance mode (fail-safe) ---';
+                  echo '[scheduled] maintenance fail-safe executed';
+                  upsert_env MAINTENANCE_MODE false || true;
+                  SAFE_DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
+                  sudo -n env DOCKER_GID=\"\${SAFE_DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal || true;
+                  maintenance_enabled=0;
+                };
+                trap 'rc=$?; disable_maintenance; exit $rc' EXIT;
                 echo '--- Step 0: ensure deps (skip if already present) ---';
                 if ! command -v apt-get >/dev/null 2>&1; then echo 'apt-get not found' && exit 1; fi;
                 if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
@@ -65,16 +90,24 @@ blocks:
                 fi;
                 export DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
                 echo \"Using DOCKER_GID=\${DOCKER_GID}\";
-                echo '--- Step 1: drain worker ---';
+                echo '--- Step 0.1: install custom nginx 50x page ---';
+                if [ -f /home/Portal/prod/50x.html ]; then
+                  sudo -n cp /home/Portal/prod/50x.html /usr/share/nginx/html/50x.html || true;
+                fi;
+                echo '--- Step 1: enable maintenance mode ---';
+                upsert_env MAINTENANCE_MODE true;
+                sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
+                maintenance_enabled=1;
+                echo '--- Step 2: drain worker ---';
                 sudo -n bash drain-worker.sh;
-                echo '--- Step 2: pull new images ---';
+                echo '--- Step 3: pull new images ---';
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml pull;
-                echo '--- Step 3: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
+                echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
                 for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
                 sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot 2>/dev/null || true;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot;
-                echo '--- Step 3.1: verify Docker socket access inside portal ---';
+                echo '--- Step 4.1: verify Docker socket access inside portal ---';
                 PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                 echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
                 case \"\${PORTAL_GROUPS}\" in
@@ -82,10 +115,13 @@ blocks:
                   *) echo 'portal is missing expected DOCKER_GID in GroupAdd' && exit 1;;
                 esac;
                 sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
-                echo '--- Step 4: restart workers ---';
+                echo '--- Step 5: restart workers ---';
                 for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
                 sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach 2>/dev/null || true;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach;
+                echo '--- Step 6: disable maintenance mode (normal path) ---';
+                echo '[scheduled] maintenance disabled after successful deploy';
+                disable_maintenance;
                 sudo -n docker image prune -f;
                 sudo -n docker volume prune -f;
                 echo '--- Deploy complete ---'"

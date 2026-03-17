@@ -99,6 +99,14 @@ def _now_msk() -> str:
     return datetime.now(msk).strftime("%d.%m.%Y %H:%M MSK")
 
 
+def _format_exception_message(error: Exception, limit: int = 120) -> str:
+    """Return non-empty, compact exception text for Telegram alerts."""
+    message = str(error).strip()
+    if message:
+        return message[:limit]
+    return f"{error.__class__.__name__}: no details"[:limit]
+
+
 # ── Settings (mute alerts) ───────────────────────────────────────────────────
 
 SETTINGS_TABLE = "health_check_settings"
@@ -281,7 +289,9 @@ async def check_db() -> tuple[bool, str, int | None, int | None]:
         finally:
             await conn.close()
     except Exception as e:
-        return False, str(e)[:120], None, None
+        error_text = _format_exception_message(e)
+        print(f"[health] DB check error: {type(e).__name__}: {repr(e)}")
+        return False, error_text, None, None
 
 
 async def check_proxy(proxy_url: str) -> tuple[bool, str]:

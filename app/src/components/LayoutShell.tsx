@@ -15,6 +15,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const isSpreadsheetPage = pathname === '/tools/databases';
   const isRdpPage = pathname === '/tools/rdp';
   const isGuestReviewPage = pathname.startsWith('/review/');
+  const isMaintenancePage = pathname === '/maintenance';
   const isTma = useIsTma();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
@@ -54,11 +55,13 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const mainOverflowClass = !isTma && (isSpreadsheetPage || isGuestReviewPage) ? 'overflow-hidden' : 'overflow-y-auto';
   const desktopDefaultPadding = shouldUseCompactDensity ? 'p-3 md:p-4' : 'p-6';
   const desktopToolsPadding = shouldUseCompactDensity ? 'px-6 py-6 md:p-8' : 'px-6 py-6 md:p-8';
-  const contentPadding = isTma
+  const contentPadding = isMaintenancePage
+    ? 'p-0'
+    : isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : isRdpPage ? 'p-2' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
   const contentWidth =
-    isRdpPage || isSpreadsheetPage || isGuestReviewPage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
+    isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   const shellClassName = isTma
     ? 'flex flex-col min-h-screen overflow-hidden'
@@ -66,7 +69,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       ? 'flex flex-col h-screen overflow-hidden'
       : 'flex flex-col min-h-screen overflow-x-hidden';
 
-  const hideNav = isSpreadsheetPage || isGuestReviewPage;
+  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage;
 
   return (
     <div

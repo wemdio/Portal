@@ -9,6 +9,41 @@ export async function middleware(request: NextRequest) {
   })
 
   const pathname = request.nextUrl.pathname
+  const isMaintenanceMode = process.env.MAINTENANCE_MODE === 'true'
+  const maintenanceBypassToken = process.env.MAINTENANCE_BYPASS_TOKEN
+  const bypassCookieName = 'portal_maintenance_bypass'
+
+  if (isMaintenanceMode) {
+    const bypassCookie = request.cookies.get(bypassCookieName)?.value
+    const bypassFromQuery = request.nextUrl.searchParams.get('maintenance_bypass')
+    const hasValidBypassToken =
+      Boolean(maintenanceBypassToken) && bypassFromQuery === maintenanceBypassToken
+    const hasBypassAccess = bypassCookie === '1' || hasValidBypassToken
+
+    if (hasValidBypassToken) {
+      response.cookies.set({
+        name: bypassCookieName,
+        value: '1',
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+      })
+    }
+
+    const maintenanceAllowedPath =
+      pathname === '/maintenance' ||
+      pathname.startsWith('/_next') ||
+      pathname === '/favicon.ico' ||
+      pathname.startsWith('/api')
+
+    if (!maintenanceAllowedPath && !hasBypassAccess) {
+      return NextResponse.redirect(new URL('/maintenance', request.url))
+    }
+
+    if (pathname === '/maintenance' && hasBypassAccess) {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
 
   if (pathname.startsWith('/api/ai-caller')) {
     const referer = request.headers.get('referer') ?? ''
@@ -80,6 +115,7 @@ export async function middleware(request: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser()
   const isPublicPath =
+    pathname === '/maintenance' ||
     pathname === '/login' ||
     pathname.startsWith('/api/telegram/verify') ||
     pathname.startsWith('/api/telegram/link') ||

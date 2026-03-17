@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Портал обновляется</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+        color: #e2e8f0;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(34, 211, 238, 0.18), transparent 40%),
+          radial-gradient(circle at 80% 10%, rgba(129, 140, 248, 0.2), transparent 35%),
+          radial-gradient(circle at 50% 100%, rgba(14, 165, 233, 0.12), transparent 45%),
+          #020617;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .card {
+        width: min(680px, 100%);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        background: rgba(15, 23, 42, 0.72);
+        border-radius: 18px;
+        padding: 36px;
+        box-shadow: 0 22px 46px rgba(2, 6, 23, 0.5);
+        backdrop-filter: blur(4px);
+      }
+      .badge {
+        display: inline-block;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(103, 232, 249, 0.35);
+        color: #a5f3fc;
+        background: rgba(34, 211, 238, 0.14);
+        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+      }
+      h1 {
+        margin: 18px 0 14px;
+        font-size: clamp(30px, 4vw, 44px);
+        line-height: 1.1;
+        color: #f8fafc;
+      }
+      p {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.6;
+        color: #cbd5e1;
+      }
+      .hint {
+        margin-top: 18px;
+        color: #94a3b8;
+        font-size: 14px;
+      }
+      .actions {
+        margin-top: 24px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .button {
+        text-decoration: none;
+        color: #082f49;
+        background: #67e8f9;
+        border-radius: 10px;
+        padding: 10px 16px;
+        font-weight: 700;
+      }
+      .ghost {
+        color: #e2e8f0;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 10px;
+        padding: 10px 16px;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <span class="badge">Technical update</span>
+      <h1>Мы обновляем портал</h1>
+      <p>
+        Команда сейчас добавляет новые фичи и исправляет баги.
+        Пожалуйста, попробуйте обновить страницу через несколько минут.
+      </p>
+      <div class="actions">
+        <a class="button" href="/">Обновить страницу</a>
+        <div class="ghost">Обычно это занимает 2-5 минут</div>
+      </div>
+      <div class="hint">Если проблема сохраняется дольше обычного, напишите в поддержку.</div>
+    </main>
+  </body>
+</html>

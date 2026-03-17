@@ -300,9 +300,12 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
   };
 
   const handleAccountsFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+    const fileList = e.target.files;
+    const files = fileList ? Array.from(fileList) : [];
     e.target.value = '';
-    if (!files?.length) return;
+    if (!files.length) {
+      return;
+    }
     setUploadError(null);
     setUploading(true);
     try {
@@ -320,6 +323,7 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
         return;
       }
       void load();
+    } catch {
     } finally {
       setUploading(false);
     }
@@ -334,24 +338,20 @@ function AccountsTab({ campaignId }: { campaignId: string }) {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-semibold text-gray-800">Аккаунты ({accounts.length})</h3>
           <div className="flex items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,.session,application/json"
-              multiple
-              className="hidden"
-              onChange={handleAccountsFilesUpload}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer disabled:opacity-50"
-              title="JSON (по одному аккаунту в файле) и опционально .session с тем же именем (77059642280.json + 77059642280.session)"
-            >
-              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-              Загрузить JSON и .session
-            </button>
+            <div className={`relative inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition ${uploading ? 'opacity-50' : ''}`}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,.session"
+                multiple
+                className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                onChange={handleAccountsFilesUpload}
+                disabled={uploading}
+                title="JSON (по одному аккаунту в файле) и опционально .session с тем же именем (77059642280.json + 77059642280.session)"
+              />
+              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin pointer-events-none" /> : <Upload className="h-3.5 w-3.5 pointer-events-none" />}
+              <span className="pointer-events-none">Загрузить JSON и .session</span>
+            </div>
             <button type="button" onClick={() => setShowAdd(!showAdd)} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
               <Plus className="h-3.5 w-3.5" /> Добавить
             </button>
