@@ -455,6 +455,23 @@ export const WRITE_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'deduplicate_results',
+      description: 'Убрать дубликаты в результатах парсера по email или по сайту. Оставляет строку с наибольшим заполнением. Может также удалить строки без email/сайта. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          job_id: { type: 'string', description: 'UUID парсер-задачи (обязательно)' },
+          field: { type: 'string', enum: ['email', 'site'], description: 'По какому полю дедуплицировать. По умолчанию: email (если доступно)' },
+          remove_empty: { type: 'boolean', description: 'Удалить строки, у которых указанное поле пустое. По умолчанию: false' },
+          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
+        },
+        required: ['job_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_pipeline',
       description: 'Создать автоматический пайплайн из нескольких шагов (парсинг → обогащение → валидация → экспорт). Шаги выполняются последовательно, результаты передаются между ними, файл отправляется в чат. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
@@ -463,17 +480,17 @@ export const WRITE_TOOLS: ToolDefinition[] = [
           name: { type: 'string', description: 'Краткое название пайплайна' },
           steps: {
             type: 'array',
-            description: 'Шаги пайплайна. Типы: parse_hh, parse_search, parse_yandex_maps, clean_names, enrich_emails, validate_emails, export. Export добавляется автоматически если не указан.',
+            description: 'Шаги пайплайна. Типы: parse_hh, parse_search, parse_yandex_maps, clean_names, enrich_emails, validate_emails, deduplicate, export. Export добавляется автоматически если не указан.',
             items: {
               type: 'object',
               properties: {
                 type: {
                   type: 'string',
-                  enum: ['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'export'],
+                  enum: ['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'deduplicate', 'export'],
                 },
                 config: {
                   type: 'object',
-                  description: 'parse_hh: {text, area?, salary_from?, fetch_employers?}. parse_search: {queries?: string[], brief?}. parse_yandex_maps: {search_urls: string[]}. clean_names/enrich_emails/validate_emails/export: {} (данные из предыдущих шагов).',
+                  description: 'parse_hh: {text, area?, salary_from?, fetch_employers?}. parse_search: {queries?: string[], brief?}. parse_yandex_maps: {search_urls: string[]}. clean_names/enrich_emails/validate_emails/deduplicate/export: {} (данные из предыдущих шагов).',
                 },
               },
               required: ['type'],

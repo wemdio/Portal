@@ -31,19 +31,26 @@ function buildProxyOptions(proxy?: ProxyConfig | null) {
   };
 }
 
-interface PoolAccount {
-  session_data: Record<string, unknown>;
+export interface SessionSource {
+  session_data?: Record<string, unknown> | null;
   proxy?: ProxyConfig | null;
 }
 
-async function createClient(account: PoolAccount) {
-  const sessionString = (account.session_data?.session_string as string) ?? '';
+function extractSessionString(source: SessionSource): string {
+  const sd = source.session_data;
+  if (!sd) return '';
+  if (typeof sd === 'string') return sd;
+  return (sd.session_string as string) ?? '';
+}
+
+async function createClient(source: SessionSource) {
+  const sessionString = extractSessionString(source);
   if (!sessionString) throw new Error('Аккаунт не имеет session_string');
 
   const session = new StringSession(sessionString);
   const client = new TelegramClient(session, API_ID, API_HASH, {
     connectionRetries: 3,
-    proxy: buildProxyOptions(account.proxy),
+    proxy: buildProxyOptions(source.proxy),
   });
 
   await client.connect();
@@ -56,7 +63,7 @@ export interface SendResult {
 }
 
 export async function sendMessageViaAccount(
-  account: PoolAccount,
+  source: SessionSource,
   tgUserId: number,
   text: string,
   clearDraft: boolean = false,
@@ -67,7 +74,7 @@ export async function sendMessageViaAccount(
 
   let client: InstanceType<typeof TelegramClient> | null = null;
   try {
-    client = await createClient(account);
+    client = await createClient(source);
     const entity = await client.getEntity(tgUserId);
     await client.sendMessage(entity, { message: text });
 

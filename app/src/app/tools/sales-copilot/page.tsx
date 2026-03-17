@@ -4,7 +4,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Bot,
-  Plus,
   Loader2,
   Settings,
   ScrollText,
@@ -23,16 +22,16 @@ import {
   ChevronDown,
   ChevronUp,
   UserCircle,
+  Phone,
+  ShieldCheck,
+  KeyRound,
+  LogOut,
 } from 'lucide-react';
 import type {
   SalesCopilotConfig,
   SalesCopilotDraft,
   SalesCopilotLog,
   DraftStats,
-} from '@/lib/salesCopilot/types';
-import {
-  DEFAULT_REACTIVE_PROMPT,
-  DEFAULT_PROACTIVE_PROMPT,
 } from '@/lib/salesCopilot/types';
 
 const API = '/api/sales-copilot';
@@ -63,16 +62,6 @@ function timeAgo(iso: string) {
   const days = Math.floor(hours / 24);
   return `${days}д назад`;
 }
-
-type PoolAccount = {
-  id: string;
-  phone: string;
-  first_name: string;
-  last_name: string;
-  username: string;
-  status: string;
-  avatar_url: string;
-};
 
 type Tab = 'drafts' | 'settings' | 'logs';
 type DraftSubTab = 'reactive' | 'proactive';
@@ -123,19 +112,13 @@ export default function SalesCopilotPage() {
           <h1 className="text-2xl font-bold">Sales Copilot</h1>
         </div>
 
-        {configs.length > 0 && (
+        {selectedConfig && (
           <div className="flex items-center gap-2">
-            <select
-              className="border rounded-lg px-3 py-1.5 text-sm"
-              value={selectedConfigId ?? ''}
-              onChange={e => setSelectedConfigId(e.target.value)}
-            >
-              {configs.map(c => (
-                <option key={c.id} value={c.id}>
-                  {c.account?.first_name ?? ''} {c.account?.last_name ?? ''} {c.account?.username ? `@${c.account.username}` : c.account?.phone ?? c.id.slice(0, 8)}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-1.5 text-sm text-gray-600">
+              <UserCircle className="w-4 h-4" />
+              {selectedConfig.tg_first_name || selectedConfig.phone || selectedConfig.id.slice(0, 8)}
+              {selectedConfig.tg_username && <span className="text-gray-400">@{selectedConfig.tg_username}</span>}
+            </div>
             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
               selectedConfig?.is_enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
             }`}>
@@ -174,77 +157,169 @@ export default function SalesCopilotPage() {
   );
 }
 
-/* ---------- Empty state ---------- */
+/* ---------- Empty state — phone auth flow ---------- */
+
+type AuthStep = 'phone' | 'code' | 'password';
 
 function EmptyState({ onCreated }: { onCreated: () => void }) {
-  const [accounts, setAccounts] = useState<PoolAccount[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [showForm, setShowForm] = useState(false);
+  const [step, setStep] = useState<AuthStep>('phone');
+  const [phone, setPhone] = useState('+7');
+  const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  useEffect(() => {
-    (async () => {
-      const token = await getToken();
-      const res = await fetch('/api/tg-outreach/accounts', { headers: authHeaders(token) });
-      const data = await res.json();
-      setAccounts(data.items ?? []);
-    })();
-  }, []);
-
-  const handleCreate = async () => {
-    if (!selectedAccountId) return;
-    setCreating(true);
+  const handleSendCode = async () => {
+    setLoading(true);
+    setError('');
     try {
       const token = await getToken();
-      await fetch(`${API}/configs`, {
+      const res = await fetch(`${API}/auth/send-code`, {
         method: 'POST',
         headers: authHeaders(token),
-        body: JSON.stringify({
-          account_id: selectedAccountId,
-          reactive_system_prompt: DEFAULT_REACTIVE_PROMPT,
-          proactive_system_prompt: DEFAULT_PROACTIVE_PROMPT,
-        }),
+        body: JSON.stringify({ phone }),
       });
-      onCreated();
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? 'Ошибка отправки кода');
+        return;
+      }
+      setStep('code');
+    } catch {
+      setError('Сетевая ошибка');
     } finally {
-      setCreating(false);
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyCode = async (pwd?: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const token = await getToken();
+      const body: Record<string, string> = { phone, code };
+      if (pwd) body.password = pwd;
+      const res = await fetch(`${API}/auth/verify-code`, {
+        method: 'POST',
+        headers: authHeaders(token),
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.needs_password) {
+          setStep('password');
+          setError('');
+          return;
+        }
+        setError(data.error ?? 'Ошибка верификации');
+        return;
+      }
+      onCreated();
+    } catch {
+      setError('Сетевая ошибка');
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="text-center py-16 space-y-4">
-      <Bot className="w-12 h-12 text-gray-300 mx-auto" />
-      <p className="text-gray-500">Нет настроенных copilot&apos;ов</p>
-      {!showForm ? (
-        <button
-          onClick={() => setShowForm(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium"
-        >
-          <Plus className="w-4 h-4" /> Подключить аккаунт
-        </button>
-      ) : (
-        <div className="inline-flex items-center gap-2">
-          <select
-            className="border rounded-lg px-3 py-2 text-sm"
-            value={selectedAccountId}
-            onChange={e => setSelectedAccountId(e.target.value)}
-          >
-            <option value="">Выберите аккаунт</option>
-            {accounts.map(a => (
-              <option key={a.id} value={a.id}>
-                {a.first_name} {a.last_name} {a.username ? `@${a.username}` : a.phone}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={handleCreate}
-            disabled={!selectedAccountId || creating}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50"
-          >
-            {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Создать'}
-          </button>
+    <div className="flex items-center justify-center py-16">
+      <div className="w-full max-w-sm space-y-5">
+        <div className="text-center space-y-2">
+          <Bot className="w-12 h-12 text-indigo-300 mx-auto" />
+          <h2 className="text-lg font-semibold">Подключите Telegram</h2>
+          <p className="text-sm text-gray-500">Введите номер вашего рабочего аккаунта для начала работы с Copilot</p>
         </div>
-      )}
+
+        {step === 'phone' && (
+          <div className="space-y-3">
+            <div className="relative">
+              <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                className="w-full border rounded-lg pl-10 pr-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 outline-none"
+                placeholder="+7 900 123 45 67"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSendCode()}
+              />
+            </div>
+            <button
+              onClick={handleSendCode}
+              disabled={loading || phone.length < 10}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              Отправить код
+            </button>
+          </div>
+        )}
+
+        {step === 'code' && (
+          <div className="space-y-3">
+            <div className="bg-emerald-50 text-emerald-700 rounded-lg p-3 text-sm text-center">
+              <ShieldCheck className="w-4 h-4 inline mr-1.5" />
+              Код отправлен в Telegram на {phone}
+            </div>
+            <div className="relative">
+              <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                className="w-full border rounded-lg pl-10 pr-3 py-2.5 text-sm text-center tracking-[0.3em] font-mono focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 outline-none"
+                placeholder="12345"
+                value={code}
+                onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                onKeyDown={e => e.key === 'Enter' && handleVerifyCode()}
+                autoFocus
+              />
+            </div>
+            <button
+              onClick={() => handleVerifyCode()}
+              disabled={loading || code.length < 4}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+              Подключить
+            </button>
+            <button
+              onClick={() => { setStep('phone'); setCode(''); setError(''); }}
+              className="w-full text-center text-xs text-gray-400 hover:text-gray-600"
+            >
+              Ввести другой номер
+            </button>
+          </div>
+        )}
+
+        {step === 'password' && (
+          <div className="space-y-3">
+            <div className="bg-amber-50 text-amber-700 rounded-lg p-3 text-sm text-center">
+              <KeyRound className="w-4 h-4 inline mr-1.5" />
+              Аккаунт защищён двухфакторной аутентификацией
+            </div>
+            <input
+              className="w-full border rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400 outline-none"
+              type="password"
+              placeholder="Облачный пароль"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleVerifyCode(password)}
+              autoFocus
+            />
+            <button
+              onClick={() => handleVerifyCode(password)}
+              disabled={loading || !password}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+              Подтвердить
+            </button>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 text-red-600 rounded-lg p-3 text-sm text-center">
+            {error}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -544,8 +619,8 @@ function SettingsTab({
     setMsg('');
     try {
       const token = await getToken();
-      const { id, user_id, account_id, created_at, updated_at, account, ...body } = form;
-      void id; void user_id; void account_id; void created_at; void updated_at; void account;
+      const { id, user_id, account_id, created_at, updated_at, session_data, phone, tg_first_name, tg_username, ...body } = form;
+      void id; void user_id; void account_id; void created_at; void updated_at; void session_data; void phone; void tg_first_name; void tg_username;
       await fetch(`${API}/configs/${config.id}`, {
         method: 'PATCH',
         headers: authHeaders(token),
@@ -590,16 +665,22 @@ function SettingsTab({
     }
   };
 
-  const accountLabel = config.account
-    ? `${config.account.first_name} ${config.account.last_name} ${config.account.username ? `(@${config.account.username})` : config.account.phone}`
-    : config.account_id.slice(0, 8);
+  const accountLabel = config.tg_first_name
+    ? `${config.tg_first_name}${config.tg_username ? ` (@${config.tg_username})` : ''}`
+    : config.phone || config.id.slice(0, 8);
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div className="flex items-center justify-between border rounded-xl p-4">
-        <div>
-          <div className="font-medium">{accountLabel}</div>
-          <div className="text-sm text-gray-400">Аккаунт привязан к copilot</div>
+        <div className="flex items-center gap-3">
+          <UserCircle className="w-10 h-10 text-indigo-300" />
+          <div>
+            <div className="font-medium">{accountLabel}</div>
+            <div className="text-sm text-gray-400">
+              {config.phone && <span>{config.phone} &middot; </span>}
+              Подключённый аккаунт
+            </div>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button

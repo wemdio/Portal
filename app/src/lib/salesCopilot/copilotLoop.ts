@@ -34,14 +34,12 @@ function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolea
 async function hasPendingDraft(
   db: SupabaseClient,
   configId: string,
-  accountId: string,
   tgUserId: number,
 ): Promise<boolean> {
   const { count } = await db
     .from('sales_copilot_drafts')
     .select('id', { count: 'exact', head: true })
     .eq('config_id', configId)
-    .eq('account_id', accountId)
     .eq('tg_user_id', tgUserId)
     .eq('status', 'pending');
   return (count ?? 0) > 0;
@@ -63,7 +61,6 @@ async function writeLog(db: SupabaseClient, configId: string, level: string, mes
 async function scanReactive(
   client: TelegramClient,
   config: SalesCopilotConfig,
-  accountId: string,
   db: SupabaseClient,
   log: LogFn,
 ) {
@@ -82,7 +79,7 @@ async function scanReactive(
     const tgUserId = Number(user.id);
     if (config.excluded_chat_ids?.includes(tgUserId)) continue;
 
-    if (await hasPendingDraft(db, config.id, accountId, tgUserId)) continue;
+    if (await hasPendingDraft(db, config.id, tgUserId)) continue;
 
     try {
       const history = await client.getMessages(user, { limit: config.reactive_history_limit });
@@ -107,7 +104,6 @@ async function scanReactive(
 
       await db.from('sales_copilot_drafts').insert({
         config_id: config.id,
-        account_id: accountId,
         tg_user_id: tgUserId,
         tg_username: user.username ?? null,
         tg_display_name: displayName,
@@ -144,7 +140,6 @@ async function scanReactive(
 async function scanProactive(
   client: TelegramClient,
   config: SalesCopilotConfig,
-  accountId: string,
   db: SupabaseClient,
   log: LogFn,
 ) {
@@ -170,7 +165,7 @@ async function scanProactive(
     const silenceDays = Math.floor((Date.now() - lastMsgDate.getTime()) / (24 * 3600 * 1000));
     if (silenceDays < config.proactive_silence_days) continue;
 
-    if (await hasPendingDraft(db, config.id, accountId, tgUserId)) continue;
+    if (await hasPendingDraft(db, config.id, tgUserId)) continue;
 
     try {
       const history = await client.getMessages(user, { limit: config.reactive_history_limit });
@@ -195,7 +190,6 @@ async function scanProactive(
 
       await db.from('sales_copilot_drafts').insert({
         config_id: config.id,
-        account_id: accountId,
         tg_user_id: tgUserId,
         tg_username: user.username ?? null,
         tg_display_name: displayName,
@@ -254,19 +248,36 @@ export async function runCopilotLoop(
     return;
   }
 
-  const { data: account } = await db
-    .from('tg_pool_accounts')
-    .select('*')
-    .eq('id', config.account_id)
-    .single();
-
-  if (!account) {
-    log('error', 'Аккаунт не найден в пуле');
+  if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
+    log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан');
+    await db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
     return;
   }
 
-  if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
-    log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан');
+  let sessionStr = '';
+  let accountLabel = configId.slice(0, 8);
+
+  const inlineSession = config.session_data as Record<string, unknown> | null;
+  if (inlineSession?.session_string) {
+    sessionStr = inlineSession.session_string as string;
+    accountLabel = config.tg_username || config.phone || accountLabel;
+  } else if (config.account_id) {
+    const { data: account } = await db
+      .from('tg_pool_accounts')
+      .select('*')
+      .eq('id', config.account_id)
+      .single();
+
+    if (!account) {
+      log('error', 'Аккаунт не найден (ни inline session, ни пул)');
+      return;
+    }
+    sessionStr = (account.session_data?.session_string as string) ?? '';
+    accountLabel = account.username || account.phone || account.id.slice(0, 8);
+  }
+
+  if (!sessionStr) {
+    log('error', 'Нет session_string — подключите аккаунт');
     await db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
     return;
   }
@@ -274,12 +285,6 @@ export async function runCopilotLoop(
   const { StringSession } = await import('telegram/sessions');
   const { TelegramClient } = await import('telegram');
 
-  const sessionStr = (account.session_data?.session_string as string) ?? '';
-  if (!sessionStr) {
-    log('error', 'Аккаунт не имеет session_string');
-    await db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
-    return;
-  }
   const session = new StringSession(sessionStr);
 
   const apiId = Number(process.env.TG_API_ID) || 0;
@@ -289,7 +294,7 @@ export async function runCopilotLoop(
   try {
     client = new TelegramClient(session, apiId, apiHash, { connectionRetries: 3 });
     await client.connect();
-    log('info', `Подключён к аккаунту ${account.username || account.phone || account.id.slice(0, 8)}`);
+    log('info', `Подключён к аккаунту ${accountLabel}`);
   } catch (err) {
     log('error', `Ошибка подключения: ${err instanceof Error ? err.message : String(err)}`);
     await db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
@@ -316,8 +321,8 @@ export async function runCopilotLoop(
       }
 
       await expireOldDrafts(db, configId);
-      await scanReactive(client, config as SalesCopilotConfig, account.id, db, log);
-      await scanProactive(client, config as SalesCopilotConfig, account.id, db, log);
+      await scanReactive(client, config as SalesCopilotConfig, db, log);
+      await scanProactive(client, config as SalesCopilotConfig, db, log);
 
       const interval = (config.scan_interval_seconds ?? 300) * 1000;
       log('info', `Скан завершён. Пауза ${Math.round(interval / 1000)} сек`);

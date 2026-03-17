@@ -4,6 +4,7 @@ import { logAudit } from '@/lib/loggerServer';
 import { createPipeline, startPipeline } from './pipeline';
 import type { PipelineStep } from './pipeline';
 import { cleanCompanyNames } from './cleanNames';
+import { deduplicateByField } from './dedup';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
@@ -556,11 +557,28 @@ export const cleanNames: WriteToolHandler = async (params, user) => {
   return `Очищено ${result.cleaned} из ${result.total} названий компаний.`;
 };
 
+export const deduplicateResults: WriteToolHandler = async (params, user) => {
+  const jobId = params.job_id as string | undefined;
+  if (!jobId) return 'Необходимо указать job_id.';
+
+  const field = (params.field as 'email' | 'site' | undefined) ?? 'email';
+  const removeEmpty = params.remove_empty === true;
+  const result = await deduplicateByField(jobId, field, params.parser_type as string | undefined, removeEmpty);
+  if (typeof result === 'string') return result;
+
+  await logAudit('telegram-agent.write.deduplicate', `Deduplicated by ${field}: removed ${result.removed}/${result.total}, remove_empty=${removeEmpty}`, {
+    jobId, field, removeEmpty, removed: result.removed, total: result.total, userId: user.userId, userName: user.fullName,
+  });
+
+  if (result.removed === 0) return `Дубликатов по полю «${field}» не найдено (${result.total} записей).`;
+  return `Удалено ${result.removed} из ${result.total} записей (по полю «${field}»${removeEmpty ? ' + пустые строки' : ''}). Осталось ${result.total - result.removed}.`;
+};
+
 export const launchPipeline: WriteToolHandler = async (params, user) => {
   const rawSteps = params.steps as { type: string; config?: Record<string, unknown> }[] | undefined;
   if (!rawSteps?.length) return 'Необходимо указать хотя бы один шаг.';
 
-  const validTypes = new Set(['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'export']);
+  const validTypes = new Set(['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'deduplicate', 'export']);
   for (const s of rawSteps) {
     if (!validTypes.has(s.type)) return `Неизвестный тип шага: ${s.type}. Допустимые: ${[...validTypes].join(', ')}`;
   }
@@ -598,5 +616,6 @@ export const writeToolHandlers: Record<string, WriteToolHandler> = {
   launch_lpr_search: launchLprSearch,
   launch_brief_scoring: launchBriefScoring,
   clean_company_names: cleanNames,
+  deduplicate_results: deduplicateResults,
   create_pipeline: launchPipeline,
 };

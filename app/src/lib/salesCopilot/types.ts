@@ -7,7 +7,12 @@ export type CopilotLogLevel = 'info' | 'warning' | 'error';
 export interface SalesCopilotConfig {
   id: string;
   user_id: string;
-  account_id: string;
+  account_id?: string | null;
+
+  session_data?: Record<string, unknown> | null;
+  phone: string;
+  tg_first_name: string;
+  tg_username: string;
 
   is_enabled: boolean;
   llm_model: string;
@@ -32,16 +37,6 @@ export interface SalesCopilotConfig {
 
   created_at: string;
   updated_at: string;
-
-  account?: {
-    id: string;
-    phone: string;
-    first_name: string;
-    last_name: string;
-    username: string;
-    status: string;
-    avatar_url: string;
-  } | null;
 }
 
 export interface CopilotDraftMessage {
@@ -53,7 +48,7 @@ export interface CopilotDraftMessage {
 export interface SalesCopilotDraft {
   id: string;
   config_id: string;
-  account_id: string;
+  account_id?: string | null;
 
   tg_user_id: number;
   tg_username: string | null;

@@ -4,6 +4,7 @@ import { sendMessage, sendDocument } from './telegram';
 import type { AgentUser } from './types';
 import { exportPipelineResults } from './pipelineExport';
 import { cleanNamesForPipelineStep } from './cleanNames';
+import { deduplicateByField } from './dedup';
 
 export type StepType =
   | 'parse_hh'
@@ -12,6 +13,7 @@ export type StepType =
   | 'clean_names'
   | 'enrich_emails'
   | 'validate_emails'
+  | 'deduplicate'
   | 'export';
 
 export type PipelineStep = {
@@ -77,6 +79,7 @@ const STEP_ORDER: Record<string, number> = {
   clean_names: 1,
   enrich_emails: 2,
   validate_emails: 3,
+  deduplicate: 3.5,
   export: 4,
 };
 
@@ -95,7 +98,7 @@ function validateStepOrder(steps: PipelineStep[]): string | null {
     const prev = STEP_ORDER[steps[i - 1].type] ?? 0;
     const curr = STEP_ORDER[steps[i].type] ?? 0;
     if (curr < prev) {
-      return `Неверный порядок шагов: ${steps[i].type} не может идти после ${steps[i - 1].type}. Правильный порядок: парсинг → очистка названий → поиск email → валидация → экспорт.`;
+      return `Неверный порядок шагов: ${steps[i].type} не может идти после ${steps[i - 1].type}. Правильный порядок: парсинг → очистка названий → поиск email → валидация → дедупликация → экспорт.`;
     }
   }
 
@@ -241,7 +244,7 @@ export async function advancePipeline(pipelineId: string): Promise<boolean> {
   }
 
   const nextStep = pipeline.steps[nextIdx];
-  const SYNC_STEPS = new Set<StepType>(['export', 'clean_names']);
+  const SYNC_STEPS = new Set<StepType>(['export', 'clean_names', 'deduplicate']);
 
   if (nextStep.type === 'export') {
     nextStep.status = 'running';
@@ -500,6 +503,20 @@ async function launchStep(pipeline: Pipeline, stepIdx: number, user: AgentUser):
       return `clean_${parserStep.job_id}`;
     }
 
+    case 'deduplicate': {
+      const parserStep = pipeline.steps.slice(0, stepIdx).reverse()
+        .find((s) => PARSER_TYPES.has(s.type) && s.status === 'completed' && s.job_id);
+      if (!parserStep?.job_id) throw new Error('Нет завершённого шага парсинга для дедупликации.');
+
+      const typeKey = parserStep.type.replace('parse_', '');
+      const field = (step.config.field as 'email' | 'site' | undefined) ?? 'email';
+      const removeEmpty = step.config.remove_empty === true;
+      const result = await deduplicateByField(parserStep.job_id, field, typeKey, removeEmpty);
+      if (typeof result === 'string') throw new Error(result);
+      step.result_count = result.total - result.removed;
+      return `dedup_${parserStep.job_id}`;
+    }
+
     default:
       throw new Error(`Cannot launch step type: ${step.type}`);
   }
@@ -650,6 +667,7 @@ function describeStep(step: PipelineStep): string {
     clean_names: 'Очистка названий',
     enrich_emails: 'Поиск email',
     validate_emails: 'Валидация email',
+    deduplicate: 'Дедупликация',
     export: 'Экспорт CSV',
   };
   return labels[step.type] ?? step.type;

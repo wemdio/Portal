@@ -48,11 +48,18 @@ function describeAction(tool: string, args: Record<string, unknown>): string {
     launch_lpr_search: (a) => `Найти ЛПР: ${a.domain ?? a.company_name ?? a.linkedin_url ?? ''}`,
     launch_brief_scoring: (a) => `Скоринг ЦА по брифу: «${String(a.brief_text ?? '').slice(0, 50)}...»`,
     clean_company_names: (a) => `Очистить названия компаний (job: ${String(a.job_id ?? '').slice(0, 8)}...)`,
+    deduplicate_results: (a) => {
+      const parts = [`Убрать дубликаты по «${a.field ?? 'email'}»`];
+      if (a.remove_empty) parts.push('+ удалить строки без значения');
+      parts.push(`(job: ${String(a.job_id ?? '').slice(0, 8)}...)`);
+      return parts.join(' ');
+    },
     create_pipeline: (a) => {
       const steps = (a.steps as { type: string }[] | undefined) ?? [];
       const labels: Record<string, string> = {
         parse_hh: 'HH', parse_search: 'Поиск', parse_yandex_maps: 'Яндекс.Карты',
-        clean_names: 'Очистка', enrich_emails: 'Email', validate_emails: 'Валидация', export: 'Экспорт',
+        clean_names: 'Очистка', enrich_emails: 'Email', validate_emails: 'Валидация',
+        deduplicate: 'Дедупликация', export: 'Экспорт',
       };
       const chain = steps.map((s) => labels[s.type] ?? s.type).join(' → ');
       return `Создать пайплайн: ${chain}`;

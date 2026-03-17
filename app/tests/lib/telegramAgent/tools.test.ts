@@ -7,12 +7,12 @@ describe('telegramAgent/tools', () => {
     expect(AGENT_TOOLS).toHaveLength(14);
   });
 
-  it('defines 16 write tools', () => {
-    expect(WRITE_TOOLS).toHaveLength(16);
+  it('defines 17 write tools', () => {
+    expect(WRITE_TOOLS).toHaveLength(17);
   });
 
   it('ALL_TOOLS = read + write', () => {
-    expect(ALL_TOOLS).toHaveLength(30);
+    expect(ALL_TOOLS).toHaveLength(31);
   });
 
   it('all tools have type "function"', () => {
@@ -46,7 +46,7 @@ describe('telegramAgent/tools', () => {
     for (const tool of WRITE_TOOLS) {
       expect(WRITE_TOOL_NAMES.has(tool.function.name)).toBe(true);
     }
-    expect(WRITE_TOOL_NAMES.size).toBe(16);
+    expect(WRITE_TOOL_NAMES.size).toBe(17);
   });
 
   it.each([
@@ -79,6 +79,7 @@ describe('telegramAgent/tools', () => {
     'launch_lpr_search',
     'launch_brief_scoring',
     'clean_company_names',
+    'deduplicate_results',
     'create_pipeline',
   ])('includes tool "%s"', (name) => {
     expect(TOOL_NAMES).toContain(name);
