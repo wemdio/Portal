@@ -60,8 +60,9 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     : isTma
     ? (isSpreadsheetPage ? 'p-1.5' : 'px-4 py-4')
     : (isSpreadsheetPage ? 'p-1.5' : isRdpPage ? 'p-2' : isToolsPage ? desktopToolsPadding : desktopDefaultPadding);
-  const contentWidth =
-    isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
+  const shouldUseFullHeightContent =
+    isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
+  const contentWidth = shouldUseFullHeightContent ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
   const shellClassName = isTma
     ? 'flex flex-col min-h-screen overflow-hidden'
