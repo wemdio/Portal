@@ -5,9 +5,10 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   Mail, Users, BarChart3, Send, Pause, FileText, ChevronRight,
-  Loader2, AlertCircle, Activity, ListChecks,
+  Loader2, AlertCircle, Activity, ListChecks, AlertTriangle,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
+import { getCurrentUserRole, isAdmin } from '@/lib/roles';
 import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
 
@@ -67,13 +68,14 @@ function StatCard({ label, value, icon: Icon, href, color, loading: isLoading }:
   return inner;
 }
 
-const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: string }[] = [
+const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: string; adminOnly?: boolean }[] = [
   { label: 'Кампании', href: '/instantly/campaigns', icon: Send, desc: 'Создание, настройка и управление кампаниями' },
   { label: 'Аккаунты', href: '/instantly/accounts', icon: Mail, desc: 'Email-аккаунты, прогрев, статусы' },
   { label: 'Lead списки', href: '/instantly/lead-lists', icon: ListChecks, desc: 'Списки лидов и импорт баз' },
   { label: 'Лиды', href: '/instantly/leads', icon: Users, desc: 'Просмотр и управление лидами' },
   { label: 'Аналитика', href: '/instantly/analytics', icon: BarChart3, desc: 'Аналитика кампаний и аккаунтов' },
   { label: 'Блок-лист', href: '/instantly/block-list', icon: AlertCircle, desc: 'Заблокированные домены и email' },
+  { label: 'Анализатор', href: '/instantly/analyzer', icon: AlertTriangle, desc: 'Неактивные кампании с лидами, занимающими тариф', adminOnly: true },
 ];
 
 export default function InstantlyDashboard() {
@@ -82,6 +84,11 @@ export default function InstantlyDashboard() {
   const [error, setError] = useState('');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentCampaigns, setRecentCampaigns] = useState<Campaign[]>([]);
+  const [userIsAdmin, setUserIsAdmin] = useState(false);
+
+  useEffect(() => {
+    getCurrentUserRole().then((role) => setUserIsAdmin(isAdmin(role)));
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -189,7 +196,7 @@ export default function InstantlyDashboard() {
                 <h2 className="text-sm font-semibold text-zinc-900">Разделы</h2>
               </div>
               <div className="divide-y divide-zinc-50">
-                {NAV_LINKS.map((link) => (
+                {NAV_LINKS.filter((link) => !link.adminOnly || userIsAdmin).map((link) => (
                   <Link
                     key={link.href}
                     href={link.href as Route}

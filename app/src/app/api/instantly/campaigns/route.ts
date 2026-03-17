@@ -16,8 +16,20 @@ export const GET = withAuth(async (req) => {
     return NextResponse.json({ items: campaigns });
   }
 
+  const numLimit = limit ? parseInt(limit, 10) : 100;
+
+  if (numLimit > 100) {
+    const all = await instantly.listAllCampaigns();
+    all.sort((a, b) => {
+      const ta = a.timestamp_created ?? '';
+      const tb = b.timestamp_created ?? '';
+      return tb > ta ? 1 : tb < ta ? -1 : 0;
+    });
+    return NextResponse.json({ items: all.slice(0, numLimit) });
+  }
+
   const data = await instantly.listCampaigns({
-    limit: limit ? parseInt(limit, 10) : 100,
+    limit: numLimit,
     starting_after,
     status: status ? parseInt(status, 10) : undefined,
     tag_ids,

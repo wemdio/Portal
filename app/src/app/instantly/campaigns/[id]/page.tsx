@@ -115,10 +115,16 @@ export default function CampaignDetailPage() {
       setCampaign(c);
 
       const analyticsArr = Array.isArray(a) ? a : Array.isArray((a as { data?: unknown }).data) ? (a as { data: CampaignAnalytics[] }).data : [];
-      setAnalytics(analyticsArr.length > 0 ? analyticsArr[0] : null);
+      const matched = analyticsArr.find(
+        (item) => item.campaign_id === campaignId || (item as Record<string, unknown>).id === campaignId,
+      );
+      setAnalytics(matched ?? null);
 
       const stepsArr = Array.isArray(s) ? s : Array.isArray((s as { data?: unknown }).data) ? (s as { data: CampaignStepAnalytics[] }).data : [];
-      setSteps(stepsArr);
+      const filteredSteps = stepsArr.filter(
+        (item) => !('campaign_id' in item) || (item as Record<string, unknown>).campaign_id === campaignId,
+      );
+      setSteps(filteredSteps);
       setAllTags(tags.items ?? []);
 
       setEditName(c.name);

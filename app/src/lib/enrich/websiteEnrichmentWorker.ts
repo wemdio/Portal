@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
-import { fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
+import { extractNormalizedUrls, fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
@@ -255,28 +255,49 @@ async function setEmailCache(
   }
 }
 
-async function fetchEmailsWithCache(
-  item: QueueItem,
+function parseEmailList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/[;,\n]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function mergeUniqueEmails(values: Array<string | null | undefined>, limit = 10): string[] {
+  const unique = new Map<string, string>();
+  for (const value of values) {
+    for (const email of parseEmailList(value)) {
+      const key = email.toLowerCase();
+      if (unique.has(key)) continue;
+      unique.set(key, email);
+      if (unique.size >= limit) {
+        return Array.from(unique.values());
+      }
+    }
+  }
+  return Array.from(unique.values());
+}
+
+async function fetchEmailsForUrl(
+  normalizedUrl: string,
   inflight: Map<string, Promise<FetchResult>>,
 ): Promise<FetchResult> {
-  const key = `email:${item.url_normalized}`;
+  const key = `email:${normalizedUrl}`;
   if (inflight.has(key)) return inflight.get(key)!;
 
   const promise = (async () => {
-    if (item.url_normalized) {
-      const cached = await getEmailCache(item.url_normalized);
-      if (cached && cached.expires_at && new Date(cached.expires_at).getTime() > Date.now()) {
-        if (cached.last_error && !cached.emails && shouldUseCachedError(cached.last_error)) {
-          return { error: cached.last_error };
-        }
-        return { text: cached.emails ?? '' };
+    const cached = await getEmailCache(normalizedUrl);
+    if (cached && cached.expires_at && new Date(cached.expires_at).getTime() > Date.now()) {
+      if (cached.last_error && !cached.emails && shouldUseCachedError(cached.last_error)) {
+        return { error: cached.last_error };
       }
+      return { text: cached.emails ?? '' };
     }
 
     try {
       const abortController = new AbortController();
       const result = await runWithTimeout(
-        scrapeEmails(item.url_raw, {
+        scrapeEmails(normalizedUrl, {
           timeout: FETCH_TIMEOUT_MS,
           signal: abortController.signal,
         }),
@@ -287,18 +308,16 @@ async function fetchEmailsWithCache(
         },
       );
       const emailsText = result.emails.slice(0, 10).join('; ');
-      if (item.url_normalized) {
-        await setEmailCache(item.url_normalized, {
-          emails: emailsText,
-          sourceUrl: item.url_raw,
-          pagesScanned: result.pagesScanned,
-        });
-      }
+      await setEmailCache(normalizedUrl, {
+        emails: emailsText,
+        sourceUrl: normalizedUrl,
+        pagesScanned: result.pagesScanned,
+      });
       return { text: emailsText };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Ошибка извлечения email';
-      if (item.url_normalized && shouldUseCachedError(message)) {
-        await setEmailCache(item.url_normalized, { error: message, sourceUrl: item.url_raw });
+      if (shouldUseCachedError(message)) {
+        await setEmailCache(normalizedUrl, { error: message, sourceUrl: normalizedUrl });
       }
       return { error: message };
     }
@@ -310,6 +329,47 @@ async function fetchEmailsWithCache(
   } finally {
     inflight.delete(key);
   }
+}
+
+async function fetchEmailsWithCache(
+  item: QueueItem,
+  inflight: Map<string, Promise<FetchResult>>,
+): Promise<FetchResult> {
+  let targets: string[];
+  try {
+    targets = extractNormalizedUrls(item.url_raw);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Невалидный URL' };
+  }
+  if (targets.length === 0) {
+    return { error: 'Пустой URL' };
+  }
+
+  const collectedTexts: string[] = [];
+  const errors = new Set<string>();
+
+  for (const normalizedUrl of targets) {
+    const result = await fetchEmailsForUrl(normalizedUrl, inflight);
+    if (result.text) {
+      collectedTexts.push(result.text);
+      continue;
+    }
+    if (result.error) {
+      errors.add(result.error);
+    }
+  }
+
+  const mergedEmails = mergeUniqueEmails(collectedTexts, 10);
+  if (mergedEmails.length > 0) {
+    return { text: mergedEmails.join('; ') };
+  }
+
+  if (errors.size > 0) {
+    const [firstError] = Array.from(errors);
+    return { error: errors.size > 1 ? `${firstError} (и ещё ${errors.size - 1})` : firstError };
+  }
+
+  return { text: '' };
 }
 
 async function updateQueueItem(

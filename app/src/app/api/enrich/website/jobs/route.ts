@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { normalizeUrl } from '@/lib/enrich/websiteParser';
+import { extractNormalizedUrls, normalizeUrl } from '@/lib/enrich/websiteParser';
 
 export const dynamic = 'force-dynamic';
 
@@ -99,7 +99,12 @@ export async function POST(req: NextRequest) {
         invalidCount += 1;
       } else {
         try {
-          normalized = normalizeUrl(rawUrl);
+          normalized = extractionType === 'email'
+            ? extractNormalizedUrls(rawUrl)[0] ?? ''
+            : normalizeUrl(rawUrl);
+          if (!normalized) {
+            throw new Error('Невалидный URL');
+          }
         } catch (err) {
           status = 'failed';
           lastError = err instanceof Error ? err.message : 'Невалидный URL';

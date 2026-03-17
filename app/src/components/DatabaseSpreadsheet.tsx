@@ -272,6 +272,7 @@ const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
+const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
 const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
@@ -869,9 +870,11 @@ export function DatabaseSpreadsheet() {
     leadListId: string;
     pushing: boolean;
     result: string;
-  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '' });
-  const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string }>>([]);
+    loadingLists: boolean;
+  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: false });
+  const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string; ts?: string }>>([]);
   const [instantlyLeadLists, setInstantlyLeadLists] = useState<Array<{ id: string; name: string }>>([]);
+  const [instantlyCampaignSearch, setInstantlyCampaignSearch] = useState('');
   const [projectsList, setProjectsList] = useState<Array<{ id: string; name: string }>>([]);
   const [reviewPublish, setReviewPublish] = useState<{
     isOpen: boolean;
@@ -5119,6 +5122,7 @@ export function DatabaseSpreadsheet() {
       let consecutiveErrors = 0;
       let lastProgressTime = Date.now();
       let token = currentToken;
+      let lastProcessed = processedCount;
       const signal = emailScrapingAbortRef.current?.signal;
       const pendingUpdates: Map<number, string> = new Map();
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5192,6 +5196,10 @@ export function DatabaseSpreadsheet() {
 
           const processed = data.job?.processed ?? 0;
           const jobTotal = data.job?.total ?? total;
+          if (processed > lastProcessed) {
+            lastProcessed = processed;
+            lastProgressTime = Date.now();
+          }
           setEmailScraping((prev) => ({
             ...prev,
             currentRow: Math.min(processed, jobTotal),
@@ -5203,8 +5211,8 @@ export function DatabaseSpreadsheet() {
             break;
           }
 
-          if (Date.now() - lastProgressTime > ENRICHMENT_STALL_TIMEOUT_MS) {
-            throw new Error('Процесс завис — нет новых результатов');
+          if (Date.now() - lastProgressTime > EMAIL_SCRAPING_STALL_TIMEOUT_MS) {
+            throw new Error('Поиск почт не продвигается более 10 минут');
           }
 
           await new Promise((r) => setTimeout(r, ENRICHMENT_PROGRESS_INTERVAL_MS));
@@ -7224,23 +7232,44 @@ export function DatabaseSpreadsheet() {
         <button
           type="button"
           onClick={async () => {
-            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '' });
+            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: true });
+            setInstantlyCampaigns([]);
+            setInstantlyLeadLists([]);
+            setInstantlyCampaignSearch('');
             try {
               const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
-              const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+              const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+              const errors: string[] = [];
               const [cRes, lRes] = await Promise.all([
-                fetch('/api/instantly/campaigns?limit=all', { headers }),
+                fetch('/api/instantly/campaigns?limit=500', { headers }),
                 fetch('/api/instantly/lead-lists?limit=all', { headers }),
               ]);
               if (cRes.ok) {
                 const cd = await cRes.json();
-                setInstantlyCampaigns((cd.items ?? []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name })));
+                const raw = (cd.items ?? cd.data ?? (Array.isArray(cd) ? cd : [])) as Array<{ id: string; name: string; timestamp_created?: string }>;
+                const sorted = raw
+                  .map((c) => ({ id: c.id, name: c.name, ts: c.timestamp_created ?? '' }))
+                  .sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
+                setInstantlyCampaigns(sorted);
+              } else {
+                const errBody = await cRes.json().catch(() => ({ error: cRes.statusText }));
+                errors.push(`Кампании: ${errBody?.error ?? cRes.statusText}`);
               }
               if (lRes.ok) {
                 const ld = await lRes.json();
-                setInstantlyLeadLists((ld.items ?? []).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
+                setInstantlyLeadLists((ld.items ?? ld.data ?? (Array.isArray(ld) ? ld : [])).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
+              } else {
+                const errBody = await lRes.json().catch(() => ({ error: lRes.statusText }));
+                errors.push(`Lead-списки: ${errBody?.error ?? lRes.statusText}`);
               }
-            } catch {}
+              if (errors.length) {
+                setInstantlyPush((s) => ({ ...s, result: `Ошибка загрузки: ${errors.join('; ')}` }));
+              }
+            } catch (err) {
+              setInstantlyPush((s) => ({ ...s, result: `Ошибка: ${err instanceof Error ? err.message : 'не удалось загрузить данные'}` }));
+            } finally {
+              setInstantlyPush((s) => ({ ...s, loadingLists: false }));
+            }
           }}
           disabled={!activeTab || rowCount === 0}
           className="inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -8634,7 +8663,7 @@ export function DatabaseSpreadsheet() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-500 px-1">
-                  В ячейках должны быть URL компаний (example.com или https://...)
+                  В ячейках могут быть один или несколько URL компаний: через запятую, точку с запятой или перенос строки
                 </p>
               </div>
 
@@ -9655,28 +9684,91 @@ export function DatabaseSpreadsheet() {
                 {instantlyPush.result}
               </div>
             )}
-            <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
-            <select
-              value={instantlyPush.campaignId}
-              onChange={(e) => setInstantlyPush((s) => ({ ...s, campaignId: e.target.value, leadListId: '' }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">— Выберите кампанию —</option>
-              {instantlyCampaigns.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
-            <select
-              value={instantlyPush.leadListId}
-              onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">— Выберите lead-список —</option>
-              {instantlyLeadLists.map((l) => (
-                <option key={l.id} value={l.id}>{l.name}</option>
-              ))}
-            </select>
+            {instantlyPush.loadingLists ? (
+              <div className="flex items-center gap-2 py-6 justify-center text-sm text-gray-400">
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                Загрузка кампаний и списков…
+              </div>
+            ) : (
+              <>
+                <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
+                <div className="relative mb-3">
+                  <input
+                    type="text"
+                    placeholder={instantlyPush.campaignId
+                      ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
+                      : 'Поиск кампании…'}
+                    value={instantlyCampaignSearch}
+                    onChange={(e) => {
+                      setInstantlyCampaignSearch(e.target.value);
+                      if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
+                    }}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {instantlyPush.campaignId && !instantlyCampaignSearch && (
+                    <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                      <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
+                        {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
+                      </span>
+                    </div>
+                  )}
+                  {instantlyPush.campaignId && (
+                    <button
+                      type="button"
+                      onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }}
+                      className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                  )}
+                </div>
+                {!instantlyPush.campaignId && (() => {
+                  const q = instantlyCampaignSearch.toLowerCase().trim();
+                  const filtered = q
+                    ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q))
+                    : instantlyCampaigns;
+                  return (
+                    <div className="mb-3 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+                      {filtered.length === 0 ? (
+                        <p className="px-3 py-3 text-sm text-gray-400 text-center">
+                          {q ? 'Ничего не найдено' : 'Нет кампаний'}
+                        </p>
+                      ) : (
+                        filtered.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' }));
+                              setInstantlyCampaignSearch('');
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate">{c.name}</span>
+                            {c.ts && (
+                              <span className="shrink-0 text-[10px] text-gray-400">
+                                {new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}
+                              </span>
+                            )}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  );
+                })()}
+                <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
+                <select
+                  value={instantlyPush.leadListId}
+                  onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">— Выберите lead-список —</option>
+                  {instantlyLeadLists.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+              </>
+            )}
             <div className="flex justify-end gap-2">
               <button
                 type="button"
