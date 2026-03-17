@@ -1,14 +1,14 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  ChevronLeft, Loader2, Send, Plus, Trash2, Clock, Mail,
+  ChevronLeft, Loader2, Send, Plus, Trash2, Clock, Mail, Search, X, Tag,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Account, Campaign, CampaignCreatePayload } from '@/lib/instantly/types';
+import type { Account, Campaign, CampaignCreatePayload, CustomTag } from '@/lib/instantly/types';
 
 interface StepDraft {
   subject: string;
@@ -37,6 +37,12 @@ export default function CreateCampaignPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [allTags, setAllTags] = useState<CustomTag[]>([]);
+  const [tagMappings, setTagMappings] = useState<{ tag_id: string; resource_id: string; resource_type: string }[]>([]);
+  const [filterTagId, setFilterTagId] = useState<string | null>(null);
+  const [tagDropdownOpen, setTagDropdownOpen] = useState(false);
+  const [tagSearch, setTagSearch] = useState('');
+  const tagDropdownRef = useRef<HTMLDivElement>(null);
 
   const [scheduleFrom, setScheduleFrom] = useState('09:00');
   const [scheduleTo, setScheduleTo] = useState('17:00');
@@ -44,12 +50,57 @@ export default function CreateCampaignPage() {
     '0': false, '1': true, '2': true, '3': true, '4': true, '5': true, '6': false,
   });
 
+  const accountTagsMap = React.useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const mapping of tagMappings) {
+      if (!m.has(mapping.resource_id)) m.set(mapping.resource_id, new Set());
+      m.get(mapping.resource_id)!.add(mapping.tag_id);
+    }
+    return m;
+  }, [tagMappings]);
+
+  const filteredAccounts = React.useMemo(() => {
+    if (!filterTagId) return accounts;
+    return accounts.filter((a) => {
+      const tags = accountTagsMap.get(a.email);
+      return tags?.has(filterTagId);
+    });
+  }, [accounts, filterTagId, accountTagsMap]);
+
   useEffect(() => {
-    instantlyFetch<{ items: Account[] }>('/accounts?limit=all')
-      .then((d) => setAccounts(d.items ?? []))
+    Promise.all([
+      instantlyFetch<{ items: Account[] }>('/accounts?limit=all'),
+      instantlyFetch<{ items: CustomTag[] }>('/tags?limit=all'),
+      instantlyFetch<{ items: { tag_id: string; resource_id: string; resource_type: string }[] }>('/tag-mappings?limit=all&resource_type=account'),
+    ])
+      .then(([accts, tags, mappings]) => {
+        setAccounts(accts.items ?? []);
+        setAllTags(tags.items ?? []);
+        setTagMappings(mappings.items ?? []);
+      })
       .catch(() => {})
       .finally(() => setLoadingAccounts(false));
   }, []);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (tagDropdownRef.current && !tagDropdownRef.current.contains(e.target as Node)) {
+        setTagDropdownOpen(false);
+      }
+    };
+    if (tagDropdownOpen) document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [tagDropdownOpen]);
+
+  const getTagDisplayName = (t: CustomTag) => t.name || t.label || '';
+
+  const q = tagSearch.trim().toLowerCase();
+  const searchedTags = q
+    ? allTags.filter((t) => getTagDisplayName(t).toLowerCase().includes(q))
+    : allTags;
+
+  const selectedTag = filterTagId ? allTags.find((t) => t.id === filterTagId) : null;
+  const selectedTagName = selectedTag ? getTagDisplayName(selectedTag) : null;
 
   const addStep = () => {
     setSteps((prev) => [...prev, { subject: '', body: '', wait_days: 2 }]);
@@ -214,12 +265,75 @@ export default function CreateCampaignPage() {
             <p className="text-sm text-zinc-400 py-4 text-center">Нет доступных аккаунтов</p>
           ) : (
             <>
+              {allTags.length > 0 && (
+                <div className="mb-3 relative" ref={tagDropdownRef}>
+                  <button
+                    onClick={() => { setTagDropdownOpen((v) => !v); setTagSearch(''); }}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      filterTagId
+                        ? 'bg-zinc-900 text-white border-zinc-900'
+                        : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
+                    }`}
+                  >
+                    <Tag className="h-3 w-3" />
+                    {selectedTagName ?? 'Фильтр по тегу'}
+                    {filterTagId && (
+                      <span
+                        role="button"
+                        onClick={(e) => { e.stopPropagation(); setFilterTagId(null); setTagDropdownOpen(false); }}
+                        className="ml-1 rounded-full hover:bg-white/20 p-0.5"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </span>
+                    )}
+                  </button>
+                  {tagDropdownOpen && (
+                    <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded-lg border border-zinc-200 bg-white shadow-lg">
+                      <div className="p-2">
+                        <div className="relative">
+                          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+                          <input
+                            type="text"
+                            placeholder="Поиск тега..."
+                            value={tagSearch}
+                            onChange={(e) => setTagSearch(e.target.value)}
+                            className="w-full rounded-md border border-zinc-200 py-1.5 pl-8 pr-3 text-xs focus:border-zinc-400 focus:outline-none"
+                            autoFocus
+                          />
+                        </div>
+                      </div>
+                      <div key={`tags-${q}`} className="max-h-48 overflow-y-auto px-1 pb-1">
+                        {searchedTags.length === 0 ? (
+                          <div className="px-3 py-3 text-center text-xs text-zinc-400">Ничего не найдено</div>
+                        ) : (
+                          searchedTags.map((t) => (
+                            <button
+                              key={t.id}
+                              onClick={() => { setFilterTagId(t.id); setTagDropdownOpen(false); }}
+                              className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs transition-colors ${
+                                filterTagId === t.id
+                                  ? 'bg-zinc-100 font-semibold text-zinc-900'
+                                  : 'text-zinc-700 hover:bg-zinc-50'
+                              }`}
+                            >
+                              {getTagDisplayName(t)}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="mb-2 flex gap-2">
                 <button
-                  onClick={() => setSelectedAccounts(accounts.filter(a => a.status === 1).map(a => a.email))}
+                  onClick={() => {
+                    const active = filteredAccounts.filter(a => a.status === 1).map(a => a.email);
+                    setSelectedAccounts((prev) => [...new Set([...prev, ...active])]);
+                  }}
                   className="text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
                 >
-                  Выбрать все активные
+                  Выбрать все активные{filterTagId ? ' (в теге)' : ''}
                 </button>
                 <button
                   onClick={() => setSelectedAccounts([])}
@@ -229,7 +343,7 @@ export default function CreateCampaignPage() {
                 </button>
               </div>
               <div className="max-h-60 overflow-y-auto space-y-1">
-                {accounts.map((acc) => (
+                {filteredAccounts.map((acc) => (
                   <label
                     key={acc.email}
                     className={`flex items-center gap-3 rounded-lg px-3 py-2 cursor-pointer transition-colors text-sm ${
@@ -260,7 +374,10 @@ export default function CreateCampaignPage() {
                   </label>
                 ))}
               </div>
-              <p className="mt-2 text-xs text-zinc-400">{selectedAccounts.length} выбрано</p>
+              <p className="mt-2 text-xs text-zinc-400">
+                {selectedAccounts.length} выбрано
+                {filterTagId && ` · ${filteredAccounts.length} в теге`}
+              </p>
             </>
           )}
         </div>

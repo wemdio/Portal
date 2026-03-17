@@ -20,7 +20,7 @@ type ScoreBriefCompaniesOptions = {
   signal?: AbortSignal;
 };
 
-export const DEFAULT_BRIEF_SCORING_MODEL = 'google/gemini-3-flash-preview';
+export const DEFAULT_BRIEF_SCORING_MODEL = 'policy/gemini-flash';
 
 const SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенерации и квалификации компаний для email-аутрича.
 
@@ -134,7 +134,7 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
   }
 
   const userMessage = buildUserMessage(briefText, companies);
-  const shouldRetryStatus = (status: number) => [429, 502, 503, 504].includes(status);
+  const shouldRetryStatus = (status: number) => [502, 503, 504].includes(status);
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     let response: Response;

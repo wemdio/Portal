@@ -1230,8 +1230,12 @@ export function ProjectList() {
                                 value={editingContactsValue}
                                 onChange={(e) => setEditingContactsValue(e.target.value)}
                                 onBlur={() => {
-                                  void commitProjectUpdate(project, { contacts_done: editingContactsValue });
+                                  const val = editingContactsValue;
+                                  setProjects((prev) =>
+                                    prev.map((p) => p.id === project.id ? { ...p, contacts_done: val } : p),
+                                  );
                                   setEditingContactsId(null);
+                                  void commitProjectUpdate(project, { contacts_done: val });
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') e.currentTarget.blur();
@@ -1261,6 +1265,8 @@ export function ProjectList() {
                                     <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                                   </div>
                                 </>
+                              ) : done > 0 ? (
+                                <span className="text-xs font-medium text-zinc-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
                               ) : (
                                 <span className="text-zinc-300">—</span>
                               )}

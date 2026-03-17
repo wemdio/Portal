@@ -1287,7 +1287,7 @@ async def ensure_tables() -> None:
             );
         """)
 
-        env_model = os.environ.get("OPENROUTER_ATMOS_MODEL", "google/gemini-2.0-flash-001")
+        env_model = os.environ.get("OPENROUTER_ATMOS_MODEL", "policy/gemini-flash")
         env_check = int(os.environ.get("ATMOS_CHECK_INTERVAL_SEC", "300"))
         env_stats = int(os.environ.get("ATMOS_STATS_INTERVAL_SEC", "300"))  # 300 = каждые 5 мин (тест), 3600 = раз в час
         env_thresh = float(os.environ.get("ATMOS_NEGATIVE_THRESHOLD", "0.30"))

@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 
 const OPENROUTER_PERSONALIZATION_API_KEY =
   process.env.OPENROUTER_PERSONALIZATION_API_KEY ?? process.env.OPENROUTER_BRIEF_API_KEY ?? '';
-const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
+const OPENROUTER_MODEL = 'policy/gemini-flash';
 const OPENROUTER_TIMEOUT_MS = 70_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1200;
@@ -131,7 +131,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ proposal });
     }
 
-    const shouldRetry = [429, 500, 502, 503, 504].includes(response.status);
+    const shouldRetry = [500, 502, 503, 504].includes(response.status);
     if (shouldRetry && attempt < MAX_RETRIES) {
       await sleep(RETRY_BASE_DELAY * Math.pow(2, attempt));
       continue;
