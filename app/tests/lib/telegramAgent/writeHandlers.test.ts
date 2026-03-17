@@ -18,6 +18,12 @@ import {
   updateTaskFields,
   updateReviewStatus,
   launchHhParser,
+  launchSearchParser,
+  launchYandexMapsParser,
+  launchEmailSearch,
+  launchEmailValidation,
+  launchLprSearch,
+  launchBriefScoring,
 } from '@/lib/telegramAgent/writeHandlers';
 import type { AgentUser } from '@/lib/telegramAgent/types';
 
@@ -171,6 +177,111 @@ describe('writeHandlers', () => {
 
       const result = await launchHhParser({ text: 'Test' }, testUser);
       expect(result).toContain('Ошибка');
+    });
+  });
+
+  describe('launchSearchParser', () => {
+    it('creates job with queries', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'sj-1', status: 'pending' }, error: null }));
+      const result = await launchSearchParser({ queries: 'стоматологии Москва\nклиники СПб' }, testUser);
+      expect(result).toContain('sj-1');
+      expect(result).toContain('2 запрос');
+    });
+
+    it('creates job with brief', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'sj-2', status: 'pending' }, error: null }));
+      const result = await launchSearchParser({ brief: 'IT компании в Москве' }, testUser);
+      expect(result).toContain('sj-2');
+      expect(result).toContain('бриф');
+    });
+
+    it('rejects empty input', async () => {
+      const result = await launchSearchParser({}, testUser);
+      expect(result).toContain('queries');
+    });
+  });
+
+  describe('launchYandexMapsParser', () => {
+    it('creates job with search URLs', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'ym-1', status: 'pending' }, error: null }));
+      const result = await launchYandexMapsParser({ search_urls: 'https://yandex.ru/maps/?text=test' }, testUser);
+      expect(result).toContain('ym-1');
+      expect(result).toContain('1');
+    });
+
+    it('rejects missing URLs', async () => {
+      const result = await launchYandexMapsParser({}, testUser);
+      expect(result).toContain('URL');
+    });
+  });
+
+  describe('launchEmailSearch', () => {
+    it('creates job and queue', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'es-1' }, error: null }));
+      const result = await launchEmailSearch({ urls: 'https://a.ru\nhttps://b.ru' }, testUser);
+      expect(result).toContain('es-1');
+      expect(result).toContain('2');
+    });
+
+    it('rejects missing URLs', async () => {
+      const result = await launchEmailSearch({}, testUser);
+      expect(result).toContain('URL');
+    });
+  });
+
+  describe('launchEmailValidation', () => {
+    it('creates job and queue', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'ev-1' }, error: null }));
+      const result = await launchEmailValidation({ emails: 'a@b.ru\nc@d.ru\ne@f.ru' }, testUser);
+      expect(result).toContain('ev-1');
+      expect(result).toContain('3');
+    });
+
+    it('rejects missing emails', async () => {
+      const result = await launchEmailValidation({}, testUser);
+      expect(result).toContain('email');
+    });
+  });
+
+  describe('launchLprSearch', () => {
+    it('creates job with domain', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'lpr-1', status: 'pending' }, error: null }));
+      const result = await launchLprSearch({ domain: 'company.ru' }, testUser);
+      expect(result).toContain('lpr-1');
+      expect(result).toContain('company.ru');
+    });
+
+    it('creates job with company name', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'lpr-2', status: 'pending' }, error: null }));
+      const result = await launchLprSearch({ company_name: 'ООО Ромашка' }, testUser);
+      expect(result).toContain('lpr-2');
+      expect(result).toContain('Ромашка');
+    });
+
+    it('rejects empty params', async () => {
+      const result = await launchLprSearch({}, testUser);
+      expect(result).toContain('domain');
+    });
+  });
+
+  describe('launchBriefScoring', () => {
+    it('creates job with brief and companies', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'bs-1' }, error: null }));
+      const result = await launchBriefScoring({ brief_text: 'IT компании', companies: 'Яндекс\nВК' }, testUser);
+      expect(result).toContain('bs-1');
+      expect(result).toContain('2');
+    });
+
+    it('creates job with brief only', async () => {
+      mockFrom.mockReturnValue(createMockQuery({ data: { id: 'bs-2' }, error: null }));
+      const result = await launchBriefScoring({ brief_text: 'Стоматологии Москвы' }, testUser);
+      expect(result).toContain('bs-2');
+      expect(result).toContain('портале');
+    });
+
+    it('rejects missing brief', async () => {
+      const result = await launchBriefScoring({}, testUser);
+      expect(result).toContain('обязателен');
     });
   });
 });
