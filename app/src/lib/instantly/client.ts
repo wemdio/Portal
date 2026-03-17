@@ -235,6 +235,10 @@ export async function getLeadsByEmail(params: { email: string }) {
   return request<Lead[]>('/leads/by-email', { params: params as Record<string, string> });
 }
 
+export async function deleteLeadsByCampaign(campaignId: string) {
+  return request<{ count: number }>('/leads', { method: 'DELETE', body: { campaign_id: campaignId } });
+}
+
 // ─── Lead Lists ───────────────────────────────────────────────────────────────
 
 export async function listLeadLists(params?: PaginationParams) {
