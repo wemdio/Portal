@@ -6,7 +6,6 @@ export const dynamic = 'force-dynamic';
 
 const DADATA_API_KEY = process.env.DADATA_API_KEY ?? '';
 const DADATA_FIND_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party';
-const DADATA_SUGGEST_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party';
 
 type EnrichRow = { rowIndex: number; query: string };
 
@@ -140,15 +139,14 @@ export async function POST(req: NextRequest) {
 
   if (!DADATA_API_KEY) return jsonError('DaData API key not configured', 500);
 
-  let body: { rows?: EnrichRow[]; mode?: 'inn' | 'name' };
+  let body: { rows?: EnrichRow[] };
   try {
-    body = (await req.json()) as { rows?: EnrichRow[]; mode?: 'inn' | 'name' };
+    body = (await req.json()) as { rows?: EnrichRow[] };
   } catch {
     return jsonError('Invalid JSON body', 400);
   }
 
   const rows = body.rows ?? [];
-  const mode = body.mode ?? 'inn';
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return jsonError('No rows provided', 400);
@@ -157,7 +155,7 @@ export async function POST(req: NextRequest) {
     return jsonError('Too many rows per batch (max 50)', 400);
   }
 
-  const dadataUrl = mode === 'inn' ? DADATA_FIND_URL : DADATA_SUGGEST_URL;
+  const dadataUrl = DADATA_FIND_URL;
 
   const results: Array<{
     rowIndex: number;
@@ -179,18 +177,6 @@ export async function POST(req: NextRequest) {
       if (!suggestion) {
         results.push({ rowIndex: row.rowIndex, found: false, data: null });
         continue;
-      }
-
-      if (mode === 'name' && suggestion.data.inn) {
-        try {
-          const detailed = await callDadata(DADATA_FIND_URL, suggestion.data.inn);
-          if (detailed) {
-            results.push({ rowIndex: row.rowIndex, found: true, data: extractFields(detailed) });
-            continue;
-          }
-        } catch {
-          // fall through to use suggest data
-        }
       }
 
       results.push({ rowIndex: row.rowIndex, found: true, data: extractFields(suggestion) });
