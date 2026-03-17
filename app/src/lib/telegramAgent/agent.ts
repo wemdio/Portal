@@ -10,6 +10,7 @@ import { identifyUser } from './auth';
 import { handleLinkCommand } from './link';
 import { setPending, getPending, clearPending, isConfirmation, isCancellation } from './pendingActions';
 import { logError, logAudit } from '@/lib/loggerServer';
+import { transcribeVoiceMessage } from './voice';
 
 const MAX_TOOL_ITERATIONS = 3;
 
@@ -29,6 +30,12 @@ function buildConfirmationText(tool: string, args: Record<string, unknown>): str
     },
     update_review_status: (a) => `Изменить статус ревью → <b>${a.new_status}</b>`,
     launch_hh_parser: (a) => `Запустить HH-парсер: «${a.text}»${a.area ? ` (регион: ${a.area})` : ''}${a.salary_from ? ` от ${a.salary_from}₽` : ''}`,
+    launch_search_parser: (a) => `Запустить поисковый парсер${a.queries ? `: ${String(a.queries).split('\n').length} запрос(ов)` : ''}${a.brief ? ` по брифу` : ''}`,
+    launch_yandex_maps_parser: (a) => `Запустить парсер Яндекс.Карт: ${String(a.search_urls ?? '').split('\n').filter(Boolean).length} URL`,
+    launch_email_search: (a) => `Найти email на ${String(a.urls ?? '').split('\n').filter(Boolean).length} сайтах`,
+    launch_email_validation: (a) => `Валидировать ${String(a.emails ?? '').split(/[\n,;]+/).filter(Boolean).length} email`,
+    launch_lpr_search: (a) => `Найти ЛПР: ${a.domain ?? a.company_name ?? a.linkedin_url ?? ''}`,
+    launch_brief_scoring: (a) => `Скоринг ЦА по брифу: «${String(a.brief_text ?? '').slice(0, 50)}...»`,
   };
 
   const fn = descriptions[tool];
@@ -169,12 +176,30 @@ export async function handleAgentMessage(msg: {
   chat: { id: number };
   from?: { id: number };
   text?: string;
+  voice?: { file_id: string; duration: number };
 }): Promise<void> {
   const chatId = msg.chat.id;
   const telegramId = msg.from?.id;
-  const text = msg.text?.trim();
+  if (!telegramId) return;
 
-  if (!text || !telegramId) return;
+  let text = msg.text?.trim() ?? '';
+
+  if (!text && msg.voice) {
+    await sendChatAction(chatId);
+    const transcribed = await transcribeVoiceMessage(msg.voice.file_id, msg.voice.duration);
+    if (!transcribed) {
+      await sendMessage(
+        chatId,
+        msg.voice.duration > 300
+          ? '⚠️ Голосовое слишком длинное (макс. 5 минут). Попробуйте короче или текстом.'
+          : '⚠️ Не удалось распознать голосовое. Попробуйте ещё раз или напишите текстом.',
+      );
+      return;
+    }
+    text = transcribed;
+  }
+
+  if (!text) return;
 
   const linkPrefix = '/start lnk';
   if (text.startsWith(linkPrefix)) {
