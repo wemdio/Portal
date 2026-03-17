@@ -138,7 +138,7 @@ export default function CreateCampaignPage() {
           name: 'Default',
           timing: { from: scheduleFrom, to: scheduleTo },
           days: Object.fromEntries(Object.entries(scheduleDays).map(([k, v]) => [k, v])) as Record<string, boolean>,
-          timezone: 'Europe/Moscow',
+          timezone: 'Europe/Kirov',
         }],
       },
       sequences: [{
