@@ -272,6 +272,7 @@ const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
+const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
 const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
@@ -5119,6 +5120,7 @@ export function DatabaseSpreadsheet() {
       let consecutiveErrors = 0;
       let lastProgressTime = Date.now();
       let token = currentToken;
+      let lastProcessed = processedCount;
       const signal = emailScrapingAbortRef.current?.signal;
       const pendingUpdates: Map<number, string> = new Map();
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5192,6 +5194,10 @@ export function DatabaseSpreadsheet() {
 
           const processed = data.job?.processed ?? 0;
           const jobTotal = data.job?.total ?? total;
+          if (processed > lastProcessed) {
+            lastProcessed = processed;
+            lastProgressTime = Date.now();
+          }
           setEmailScraping((prev) => ({
             ...prev,
             currentRow: Math.min(processed, jobTotal),
@@ -5203,8 +5209,8 @@ export function DatabaseSpreadsheet() {
             break;
           }
 
-          if (Date.now() - lastProgressTime > ENRICHMENT_STALL_TIMEOUT_MS) {
-            throw new Error('Процесс завис — нет новых результатов');
+          if (Date.now() - lastProgressTime > EMAIL_SCRAPING_STALL_TIMEOUT_MS) {
+            throw new Error('Поиск почт не продвигается более 10 минут');
           }
 
           await new Promise((r) => setTimeout(r, ENRICHMENT_PROGRESS_INTERVAL_MS));
@@ -8634,7 +8640,7 @@ export function DatabaseSpreadsheet() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-500 px-1">
-                  В ячейках должны быть URL компаний (example.com или https://...)
+                  В ячейках могут быть один или несколько URL компаний: через запятую, точку с запятой или перенос строки
                 </p>
               </div>
 
