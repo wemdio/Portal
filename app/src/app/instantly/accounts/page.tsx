@@ -154,7 +154,6 @@ export default function AccountsPage() {
   const accountTagsMap = React.useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const mapping of mappings) {
-      if (mapping.resource_type !== 'account') continue;
       if (!m.has(mapping.resource_id)) m.set(mapping.resource_id, new Set());
       m.get(mapping.resource_id)!.add(mapping.tag_id);
     }

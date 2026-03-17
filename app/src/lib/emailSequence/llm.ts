@@ -161,7 +161,7 @@ async function callOpenRouter({
         return content;
       }
 
-      const retryable = [429, 500, 502, 503, 504].includes(res.status);
+      const retryable = [502, 503, 504].includes(res.status);
       if (retryable && attempt < maxRetries) {
         await sleep(1200 * Math.pow(2, attempt));
         continue;

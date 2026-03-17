@@ -137,22 +137,29 @@ export async function shareCampaign(id: string) {
 // ─── Campaign Analytics ──────────────────────────────────────────────────────
 
 export async function getCampaignAnalytics(params?: { id?: string; campaign_id?: string }) {
-  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: params as Record<string, string> });
+  const effectiveId = params?.id ?? params?.campaign_id;
+  const query: Record<string, string> = {};
+  if (effectiveId) query.id = effectiveId;
+  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: query });
 }
 
 export async function getCampaignAnalyticsOverview(params?: { campaign_id?: string }) {
-  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', {
-    params: params as Record<string, string>,
-  });
+  const query: Record<string, string> = {};
+  if (params?.campaign_id) query.id = params.campaign_id;
+  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', { params: query });
 }
 
 export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string; start_date?: string; end_date?: string }) {
-  return request<unknown>('/campaigns/analytics/daily', { params: params as Record<string, string> });
+  const query: Record<string, string> = {};
+  if (params?.campaign_id) query.id = params.campaign_id;
+  if (params?.start_date) query.start_date = params.start_date;
+  if (params?.end_date) query.end_date = params.end_date;
+  return request<unknown>('/campaigns/analytics/daily', { params: query });
 }
 
 export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
-    params: params as Record<string, string>,
+    params: { id: params.campaign_id } as Record<string, string>,
   });
 }
 
@@ -271,22 +278,34 @@ export async function updateBlockListEntry(id: string, payload: { value?: string
 
 // ─── Custom Tags ──────────────────────────────────────────────────────────────
 
+function normalizeTag(raw: Record<string, unknown>): CustomTag {
+  return {
+    ...raw,
+    name: (raw.name as string) || (raw.label as string) || '',
+  } as CustomTag;
+}
+
 export async function listCustomTags(params?: PaginationParams) {
-  return request<PaginatedResponse<CustomTag>>('/custom-tags', {
+  const res = await request<PaginatedResponse<CustomTag>>('/custom-tags', {
     params: params as Record<string, string | number>,
   });
+  res.items = res.items?.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
+  return res;
 }
 
 export async function listAllCustomTags(): Promise<CustomTag[]> {
-  return fetchAllPages<CustomTag>('/custom-tags');
+  const tags = await fetchAllPages<CustomTag>('/custom-tags');
+  return tags.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
 }
 
 export async function createCustomTag(payload: { name: string }) {
-  return request<CustomTag>('/custom-tags', { method: 'POST', body: payload });
+  const raw = await request<Record<string, unknown>>('/custom-tags', { method: 'POST', body: { label: payload.name } });
+  return normalizeTag(raw);
 }
 
 export async function updateCustomTag(id: string, payload: { name: string }) {
-  return request<CustomTag>(`/custom-tags/${id}`, { method: 'PATCH', body: payload });
+  const raw = await request<Record<string, unknown>>(`/custom-tags/${id}`, { method: 'PATCH', body: { label: payload.name } });
+  return normalizeTag(raw);
 }
 
 export async function toggleTagResource(body: { tag_id: string; resource_id: string; resource_type: string }) {

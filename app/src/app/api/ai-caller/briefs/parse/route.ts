@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
-const OPENROUTER_MODEL = 'google/gemini-2.5-flash';
+const OPENROUTER_MODEL = 'policy/gemini-flash';
 
 import {
   VOICEMAIL_DETECTION_BLOCK,
@@ -100,6 +100,14 @@ function sanitizeCompanyForSpeech(raw: string): string {
   return text;
 }
 
+function normalizeExtractedBriefText(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
   const binary = buffer.toString('binary');
   const textParts: string[] = [];
@@ -148,7 +156,13 @@ async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
 
   extractTjText(binary);
 
-  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+  return normalizeExtractedBriefText(textParts.join(' ').replace(/\s+/g, ' ').trim());
+}
+
+async function extractTextFromDocxBuffer(buffer: Buffer): Promise<string> {
+  const mammoth = await import('mammoth');
+  const result = await mammoth.extractRawText({ buffer });
+  return normalizeExtractedBriefText(result.value ?? '');
 }
 
 export async function POST(req: NextRequest) {
@@ -187,8 +201,16 @@ async function handlePost(req: NextRequest) {
       const body = await req.json();
       briefText = (body.text as string) ?? '';
       presetId = (body.presetId as string) ?? '';
+      const fileName = String(body.fileName ?? '').toLowerCase();
 
-      if (body.fileName?.toLowerCase().endsWith('.pdf') && briefText) {
+      if (fileName.endsWith('.docx') || fileName.endsWith('.doc')) {
+        return NextResponse.json(
+          { error: 'DOCX/DOC нужно загружать файлом. Обновите страницу и попробуйте снова.' },
+          { status: 400 },
+        );
+      }
+
+      if (fileName.endsWith('.pdf') && briefText) {
         briefText = briefText.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
       }
     } else {
@@ -199,15 +221,23 @@ async function handlePost(req: NextRequest) {
 
       if (file) {
         const buffer = Buffer.from(await file.arrayBuffer());
+        const lowerFileName = file.name.toLowerCase();
 
-        if (file.name.toLowerCase().endsWith('.pdf')) {
+        if (lowerFileName.endsWith('.pdf')) {
           briefText = await extractTextFromPdfBuffer(buffer);
           if (!briefText || briefText.length < 20) {
             const raw = buffer.toString('utf-8');
             briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
           }
+        } else if (lowerFileName.endsWith('.docx')) {
+          briefText = await extractTextFromDocxBuffer(buffer);
+        } else if (lowerFileName.endsWith('.doc')) {
+          return NextResponse.json(
+            { error: 'Формат .doc пока не поддерживается. Сохраните файл как .docx, .pdf или .txt.' },
+            { status: 400 },
+          );
         } else {
-          briefText = buffer.toString('utf-8');
+          briefText = normalizeExtractedBriefText(buffer.toString('utf-8'));
         }
       } else if (text) {
         briefText = text;

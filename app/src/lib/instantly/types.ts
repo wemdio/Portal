@@ -68,6 +68,8 @@ export interface SequenceStep {
   body?: string;
   type?: string;
   wait_days?: number;
+  delay?: number;
+  delay_unit?: 'minutes' | 'hours' | 'days' | string;
   variants?: SequenceVariant[];
 }
 
@@ -298,6 +300,8 @@ export interface LeadListVerificationStats {
 export interface CustomTag {
   id: string;
   name: string;
+  label?: string;
+  description?: string;
   resource_type?: string;
   timestamp_created?: string;
   timestamp_updated?: string;

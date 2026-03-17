@@ -1,6 +1,6 @@
 import type { OpenAISettings, DialogMessage } from './types';
 
-const OPENROUTER_MODEL = 'openai/gpt-4o-mini';
+const OPENROUTER_MODEL = 'policy/tg-outreach';
 
 interface OpenAIChatMessage {
   role: 'system' | 'user' | 'assistant';

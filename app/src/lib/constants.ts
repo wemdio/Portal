@@ -1,4 +1,4 @@
-export const OPENROUTER_MODEL = 'google/gemini-3-flash-preview';
+export const OPENROUTER_MODEL = 'policy/gemini-flash';
 export const OPENROUTER_API_KEY = process.env.OPENROUTER_SEARCH_PARSER_API_KEY || '';
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const TG_TRANSCRIBE_BOT_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN;

@@ -8,6 +8,7 @@ import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjec
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -51,6 +52,52 @@ function getStatusConfig(status: string | null | undefined) {
 
 function normalizeStatus(status: string | null | undefined): string {
   return (status || '').toLowerCase().replace(/ё/g, 'е');
+}
+
+function normalizeAssigneeName(value: string | null | undefined): string {
+  return value?.trim() || '';
+}
+
+function AssigneeAvatar({
+  name,
+  signedUrl,
+  publicUrl,
+  tone,
+}: {
+  name: string;
+  signedUrl?: string | null;
+  publicUrl?: string | null;
+  tone: 'specialist' | 'manager';
+}) {
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const normalizedPublicUrl = normalizePublicAvatarUrl(publicUrl);
+  const avatarUrl = (signedUrl && !failedUrls.has(signedUrl)) ? signedUrl
+    : (normalizedPublicUrl && !failedUrls.has(normalizedPublicUrl)) ? normalizedPublicUrl
+    : null;
+  const fallbackClass = tone === 'manager'
+    ? 'bg-blue-100 text-blue-700'
+    : 'bg-emerald-100 text-emerald-700';
+
+  if (avatarUrl) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        key={avatarUrl}
+        src={avatarUrl}
+        alt=""
+        className="w-5 h-5 rounded-full object-cover flex-shrink-0"
+        onError={() => setFailedUrls((prev) => new Set(prev).add(avatarUrl))}
+      />
+    );
+  }
+
+  return (
+    <span
+      className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0 ${fallbackClass}`}
+    >
+      {name.charAt(0).toUpperCase()}
+    </span>
+  );
 }
 
 function isCompletedStatus(status: string | null | undefined): boolean {
@@ -277,6 +324,7 @@ export function ProjectList() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
+  const [assigneePublicAvatars, setAssigneePublicAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
@@ -372,6 +420,13 @@ export function ProjectList() {
       if (error) throw error;
       const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles));
+      const publicAvatarMap = new Map<string, string>();
+      for (const profile of profiles) {
+        const name = normalizeAssigneeName(profile.full_name?.trim() || profile.email?.split('@')[0]?.trim());
+        const avatarUrl = typeof profile.avatar_url === 'string' ? profile.avatar_url.trim() : '';
+        if (name && avatarUrl) publicAvatarMap.set(name, avatarUrl);
+      }
+      setAssigneePublicAvatars(publicAvatarMap);
 
       void fetchSignedAvatars();
 
@@ -398,7 +453,8 @@ export function ProjectList() {
       const map = (await res.json()) as Record<string, string>;
       const avatarMap = new Map<string, string>();
       for (const [name, url] of Object.entries(map)) {
-        if (url) avatarMap.set(name, url);
+        const normalizedName = normalizeAssigneeName(name);
+        if (normalizedName && url) avatarMap.set(normalizedName, url);
       }
       setAssigneeAvatars(avatarMap);
     } catch {
@@ -788,7 +844,7 @@ export function ProjectList() {
   };
 
   return (
-    <div className={isTma ? 'space-y-4' : 'space-y-4'}>
+    <div className={isTma ? 'space-y-4' : 'flex flex-1 min-h-0 flex-col gap-4'}>
       {/* Header + Controls — single row */}
       <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-2'}>
         <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>Проекты</h1>
@@ -970,8 +1026,8 @@ export function ProjectList() {
 
       {/* Table View */}
       {!isTma && viewMode === 'table' && filteredProjects.length > 0 && (
-        <div className="relative overflow-hidden rounded-[24px] bg-white shadow-sm border border-zinc-200/80">
-          <div className="overflow-x-auto max-h-[calc(100vh-220px)]">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[24px] bg-white shadow-sm border border-zinc-200/80">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full divide-y divide-zinc-200/50 text-xs min-w-[1400px]">
               <thead className="bg-white/95 backdrop-blur sticky top-0 z-10">
                 <tr>
@@ -1232,8 +1288,12 @@ export function ProjectList() {
                                 value={editingContactsValue}
                                 onChange={(e) => setEditingContactsValue(e.target.value)}
                                 onBlur={() => {
-                                  void commitProjectUpdate(project, { contacts_done: editingContactsValue });
+                                  const val = editingContactsValue;
+                                  setProjects((prev) =>
+                                    prev.map((p) => p.id === project.id ? { ...p, contacts_done: val } : p),
+                                  );
                                   setEditingContactsId(null);
+                                  void commitProjectUpdate(project, { contacts_done: val });
                                 }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') e.currentTarget.blur();
@@ -1263,6 +1323,8 @@ export function ProjectList() {
                                     <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
                                   </div>
                                 </>
+                              ) : done > 0 ? (
+                                <span className="text-xs font-medium text-zinc-900 tabular-nums">{done.toLocaleString('ru-RU')}</span>
                               ) : (
                                 <span className="text-zinc-300">—</span>
                               )}
@@ -1284,26 +1346,12 @@ export function ProjectList() {
                         ) : (
                           readOnlySpecialist !== '—' ? (
                              <div className="flex items-center gap-1">
-                                {assigneeAvatars.get(readOnlySpecialist) ? (
-                                  // eslint-disable-next-line @next/next/no-img-element
-                                  <img
-                                    src={assigneeAvatars.get(readOnlySpecialist)}
-                                    alt=""
-                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
-                                    onError={(e) => {
-                                      const target = e.currentTarget;
-                                      target.style.display = 'none';
-                                      const fallback = target.nextElementSibling;
-                                      if (fallback) (fallback as HTMLElement).style.display = '';
-                                    }}
-                                  />
-                                ) : null}
-                                <span
-                                  className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-                                  style={assigneeAvatars.get(readOnlySpecialist) ? { display: 'none' } : undefined}
-                                >
-                                  {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </span>
+                                <AssigneeAvatar
+                                  name={readOnlySpecialist}
+                                  signedUrl={assigneeAvatars.get(normalizeAssigneeName(readOnlySpecialist))}
+                                  publicUrl={assigneePublicAvatars.get(normalizeAssigneeName(readOnlySpecialist))}
+                                  tone="specialist"
+                                />
                                 <span className="text-zinc-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-zinc-300">—</span>
@@ -1323,26 +1371,12 @@ export function ProjectList() {
                         ) : (
                            readOnlyManager !== '—' ? (
                              <div className="flex items-center gap-1">
-                                {assigneeAvatars.get(readOnlyManager) ? (
-                                  // eslint-disable-next-line @next/next/no-img-element
-                                  <img
-                                    src={assigneeAvatars.get(readOnlyManager)}
-                                    alt=""
-                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
-                                    onError={(e) => {
-                                      const target = e.currentTarget;
-                                      target.style.display = 'none';
-                                      const fallback = target.nextElementSibling;
-                                      if (fallback) (fallback as HTMLElement).style.display = '';
-                                    }}
-                                  />
-                                ) : null}
-                                <span
-                                  className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-                                  style={assigneeAvatars.get(readOnlyManager) ? { display: 'none' } : undefined}
-                                >
-                                  {readOnlyManager.charAt(0).toUpperCase()}
-                                </span>
+                                <AssigneeAvatar
+                                  name={readOnlyManager}
+                                  signedUrl={assigneeAvatars.get(normalizeAssigneeName(readOnlyManager))}
+                                  publicUrl={assigneePublicAvatars.get(normalizeAssigneeName(readOnlyManager))}
+                                  tone="manager"
+                                />
                                 <span className="text-zinc-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-zinc-300">—</span>

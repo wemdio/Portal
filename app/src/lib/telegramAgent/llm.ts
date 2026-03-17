@@ -1,6 +1,6 @@
 import type { ConversationMessage, ToolDefinition, LlmResponse, ToolCall } from './types';
 
-const MODEL = 'google/gemini-3-flash-preview';
+const MODEL = 'policy/gemini-flash';
 const TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 2;
 
@@ -89,7 +89,7 @@ export async function callLlm(
         return { content: content?.trim() || null, toolCalls };
       }
 
-      if ([429, 500, 502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
+      if ([502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
         await sleep(1500 * Math.pow(2, attempt));
         continue;
       }
