@@ -81,6 +81,7 @@ async function request<T>(
 async function fetchAllPages<T>(
   path: string,
   params?: Record<string, string | number | boolean | undefined>,
+  maxItems?: number,
 ): Promise<T[]> {
   const all: T[] = [];
   let startingAfter: string | undefined;
@@ -91,9 +92,9 @@ async function fetchAllPages<T>(
     });
     if (page.items?.length) all.push(...page.items);
     startingAfter = page.next_starting_after || undefined;
-  } while (startingAfter);
+  } while (startingAfter && (!maxItems || all.length < maxItems));
 
-  return all;
+  return maxItems ? all.slice(0, maxItems) : all;
 }
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
@@ -102,8 +103,8 @@ export async function listCampaigns(params?: PaginationParams & { status?: numbe
   return request<PaginatedResponse<Campaign>>('/campaigns', { params: params as Record<string, string | number> });
 }
 
-export async function listAllCampaigns(): Promise<Campaign[]> {
-  return fetchAllPages<Campaign>('/campaigns');
+export async function listAllCampaigns(maxItems?: number): Promise<Campaign[]> {
+  return fetchAllPages<Campaign>('/campaigns', undefined, maxItems);
 }
 
 export async function getCampaign(id: string) {
