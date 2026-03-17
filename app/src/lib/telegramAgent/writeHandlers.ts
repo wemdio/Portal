@@ -1,6 +1,9 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { WriteToolHandler } from './types';
 import { logAudit } from '@/lib/loggerServer';
+import { createPipeline, startPipeline } from './pipeline';
+import type { PipelineStep } from './pipeline';
+import { cleanCompanyNames } from './cleanNames';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
@@ -539,6 +542,46 @@ export const launchBriefScoring: WriteToolHandler = async (params, user) => {
   return `Скоринг ЦА запущен (ID: ${job.id}). Бриф: «${briefText.slice(0, 60)}...». ${companyInfo}`;
 };
 
+export const cleanNames: WriteToolHandler = async (params, user) => {
+  const jobId = params.job_id as string | undefined;
+  if (!jobId) return 'Необходимо указать job_id.';
+
+  const result = await cleanCompanyNames(jobId, params.parser_type as string | undefined);
+  if (typeof result === 'string') return result;
+
+  await logAudit('telegram-agent.write.clean-names', `Cleaned ${result.cleaned}/${result.total} company names`, {
+    jobId, cleaned: result.cleaned, total: result.total, userId: user.userId, userName: user.fullName,
+  });
+
+  return `Очищено ${result.cleaned} из ${result.total} названий компаний.`;
+};
+
+export const launchPipeline: WriteToolHandler = async (params, user) => {
+  const rawSteps = params.steps as { type: string; config?: Record<string, unknown> }[] | undefined;
+  if (!rawSteps?.length) return 'Необходимо указать хотя бы один шаг.';
+
+  const validTypes = new Set(['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'export']);
+  for (const s of rawSteps) {
+    if (!validTypes.has(s.type)) return `Неизвестный тип шага: ${s.type}. Допустимые: ${[...validTypes].join(', ')}`;
+  }
+
+  const steps: PipelineStep[] = rawSteps.map((s) => ({
+    type: s.type as PipelineStep['type'],
+    config: s.config ?? {},
+    status: 'pending',
+  }));
+
+  const name = (params.name as string) || steps.map((s) => s.type).join(' → ');
+
+  try {
+    const pipeline = await createPipeline(user, params._chatId as number, name, steps);
+    const result = await startPipeline(pipeline, user);
+    return result;
+  } catch (err) {
+    return `Ошибка создания пайплайна: ${err instanceof Error ? err.message : 'Unknown'}`;
+  }
+};
+
 export const writeToolHandlers: Record<string, WriteToolHandler> = {
   update_project_status: updateProjectStatus,
   update_project_fields: updateProjectFields,
@@ -554,4 +597,6 @@ export const writeToolHandlers: Record<string, WriteToolHandler> = {
   launch_email_validation: launchEmailValidation,
   launch_lpr_search: launchLprSearch,
   launch_brief_scoring: launchBriefScoring,
+  clean_company_names: cleanNames,
+  create_pipeline: launchPipeline,
 };

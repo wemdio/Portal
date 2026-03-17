@@ -3,16 +3,16 @@
 import { AGENT_TOOLS, WRITE_TOOLS, ALL_TOOLS, TOOL_NAMES, WRITE_TOOL_NAMES } from '@/lib/telegramAgent/tools';
 
 describe('telegramAgent/tools', () => {
-  it('defines 12 read tools', () => {
-    expect(AGENT_TOOLS).toHaveLength(12);
+  it('defines 14 read tools', () => {
+    expect(AGENT_TOOLS).toHaveLength(14);
   });
 
-  it('defines 14 write tools', () => {
-    expect(WRITE_TOOLS).toHaveLength(14);
+  it('defines 16 write tools', () => {
+    expect(WRITE_TOOLS).toHaveLength(16);
   });
 
   it('ALL_TOOLS = read + write', () => {
-    expect(ALL_TOOLS).toHaveLength(26);
+    expect(ALL_TOOLS).toHaveLength(30);
   });
 
   it('all tools have type "function"', () => {
@@ -46,7 +46,7 @@ describe('telegramAgent/tools', () => {
     for (const tool of WRITE_TOOLS) {
       expect(WRITE_TOOL_NAMES.has(tool.function.name)).toBe(true);
     }
-    expect(WRITE_TOOL_NAMES.size).toBe(14);
+    expect(WRITE_TOOL_NAMES.size).toBe(16);
   });
 
   it.each([
@@ -58,10 +58,12 @@ describe('telegramAgent/tools', () => {
     'get_task_board_summary',
     'get_parser_jobs',
     'get_parser_results_summary',
+    'export_parser_results',
     'get_instantly_campaigns',
     'get_review_requests',
     'get_team_workload',
     'get_weekly_summary',
+    'get_pipeline_status',
     'update_project_status',
     'update_project_fields',
     'create_project',
@@ -76,6 +78,8 @@ describe('telegramAgent/tools', () => {
     'launch_email_validation',
     'launch_lpr_search',
     'launch_brief_scoring',
+    'clean_company_names',
+    'create_pipeline',
   ])('includes tool "%s"', (name) => {
     expect(TOOL_NAMES).toContain(name);
   });

@@ -31,6 +31,9 @@ switch (kind) {
   case 'tgoutreach':
     run('./tgOutreach');
     break;
+  case 'salescopilot':
+    run('./salesCopilot');
+    break;
   case 'all':
   default:
     run('./index');

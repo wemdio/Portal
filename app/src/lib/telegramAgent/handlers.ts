@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { ToolHandler } from './types';
+import { getPipelineStatus, advanceAllPipelines } from './pipeline';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
@@ -347,6 +348,11 @@ const getWeeklySummary: ToolHandler = async () => {
   });
 };
 
+const getAgentPipelineStatus: ToolHandler = async (params) => {
+  await advanceAllPipelines().catch(() => {});
+  return getPipelineStatus(params.pipeline_id as string | undefined, params._userId as string | undefined);
+};
+
 export const toolHandlers: Record<string, ToolHandler> = {
   get_projects: getProjects,
   get_project_detail: getProjectDetail,
@@ -360,4 +366,5 @@ export const toolHandlers: Record<string, ToolHandler> = {
   get_review_requests: getReviewRequests,
   get_team_workload: getTeamWorkload,
   get_weekly_summary: getWeeklySummary,
+  get_pipeline_status: getAgentPipelineStatus,
 };

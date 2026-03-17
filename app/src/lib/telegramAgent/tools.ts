@@ -116,6 +116,21 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'export_parser_results',
+      description: 'Экспортировать результаты парсера в CSV-файл и отправить пользователю. Не требует подтверждения.',
+      parameters: {
+        type: 'object',
+        properties: {
+          job_id: { type: 'string', description: 'UUID парсер-задачи (обязательно)' },
+          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
+        },
+        required: ['job_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_instantly_campaigns',
       description: 'Получить список кампаний Instantly (email-аутрич)',
       parameters: {
@@ -161,6 +176,19 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       parameters: {
         type: 'object',
         properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_pipeline_status',
+      description: 'Получить статус пайплайна(ов). Без параметров — показать последние пайплайны текущего пользователя.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pipeline_id: { type: 'string', description: 'UUID пайплайна' },
+        },
       },
     },
   },
@@ -406,6 +434,53 @@ export const WRITE_TOOLS: ToolDefinition[] = [
           companies: { type: 'string', description: 'Названия компаний через перенос строки. Пример: "ООО Ромашка\\nАО Тюльпан"' },
         },
         required: ['brief_text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'clean_company_names',
+      description: 'Очистить названия компаний в результатах парсера (убрать ООО, ИП, АО, GmbH, скобки, символы, привести к красивому виду). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          job_id: { type: 'string', description: 'UUID парсер-задачи (обязательно)' },
+          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
+        },
+        required: ['job_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_pipeline',
+      description: 'Создать автоматический пайплайн из нескольких шагов (парсинг → обогащение → валидация → экспорт). Шаги выполняются последовательно, результаты передаются между ними, файл отправляется в чат. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Краткое название пайплайна' },
+          steps: {
+            type: 'array',
+            description: 'Шаги пайплайна. Типы: parse_hh, parse_search, parse_yandex_maps, clean_names, enrich_emails, validate_emails, export. Export добавляется автоматически если не указан.',
+            items: {
+              type: 'object',
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'export'],
+                },
+                config: {
+                  type: 'object',
+                  description: 'parse_hh: {text, area?, salary_from?, fetch_employers?}. parse_search: {queries?: string[], brief?}. parse_yandex_maps: {search_urls: string[]}. clean_names/enrich_emails/validate_emails/export: {} (данные из предыдущих шагов).',
+                },
+              },
+              required: ['type'],
+            },
+          },
+        },
+        required: ['steps'],
       },
     },
   },

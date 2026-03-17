@@ -1,15 +1,18 @@
 /** @jest-environment node */
 
-import { setPending, getPending, clearPending, isConfirmation, isCancellation } from '@/lib/telegramAgent/pendingActions';
+import { setPending, getPending, clearPending, addPendingItem } from '@/lib/telegramAgent/pendingActions';
+import type { AgentUser } from '@/lib/telegramAgent/types';
+
+const testUser: AgentUser = {
+  userId: 'u1', fullName: 'Test', role: 'admin', email: 'a@b.c', telegramId: 1,
+};
 
 describe('telegramAgent/pendingActions', () => {
   afterEach(() => clearPending(1));
 
   const action = {
-    tool: 'create_task',
-    args: { title: 'Test' },
-    description: 'Create task',
-    user: { userId: 'u1', fullName: 'Test', role: 'admin', email: 'a@b.c', telegramId: 1 },
+    items: [{ tool: 'create_task', args: { title: 'Test' }, description: 'Create task' }],
+    user: testUser,
     createdAt: Date.now(),
   };
 
@@ -40,20 +43,31 @@ describe('telegramAgent/pendingActions', () => {
   });
 });
 
-describe('confirmation patterns', () => {
-  it.each(['да', 'Да', 'ДА', 'yes', 'подтверждаю', 'ок', 'ага', 'конечно', 'давай', 'go'])
-    ('recognizes "%s" as confirmation', (text) => {
-      expect(isConfirmation(text)).toBe(true);
-    });
+describe('addPendingItem (batch)', () => {
+  afterEach(() => clearPending(2));
 
-  it.each(['нет', 'Нет', 'НЕТ', 'no', 'отмена', 'не надо', 'стоп', 'cancel'])
-    ('recognizes "%s" as cancellation', (text) => {
-      expect(isCancellation(text)).toBe(true);
-    });
+  it('creates new pending with single item', () => {
+    addPendingItem(2, { tool: 'create_task', args: { title: 'A' }, description: 'Task A' }, testUser);
+    const pending = getPending(2);
+    expect(pending).not.toBeNull();
+    expect(pending!.items).toHaveLength(1);
+    expect(pending!.items[0].tool).toBe('create_task');
+  });
 
-  it.each(['привет', 'какие проекты', '123', 'может быть'])
-    ('does not match "%s" as confirmation or cancellation', (text) => {
-      expect(isConfirmation(text)).toBe(false);
-      expect(isCancellation(text)).toBe(false);
-    });
+  it('appends to existing pending', () => {
+    addPendingItem(2, { tool: 'create_task', args: { title: 'A' }, description: 'Task A' }, testUser);
+    addPendingItem(2, { tool: 'launch_hh_parser', args: { text: 'Python' }, description: 'HH parse' }, testUser);
+    const pending = getPending(2);
+    expect(pending).not.toBeNull();
+    expect(pending!.items).toHaveLength(2);
+    expect(pending!.items[0].tool).toBe('create_task');
+    expect(pending!.items[1].tool).toBe('launch_hh_parser');
+  });
+
+  it('creates batch of 3 items', () => {
+    addPendingItem(2, { tool: 'a', args: {}, description: 'A' }, testUser);
+    addPendingItem(2, { tool: 'b', args: {}, description: 'B' }, testUser);
+    addPendingItem(2, { tool: 'c', args: {}, description: 'C' }, testUser);
+    expect(getPending(2)!.items).toHaveLength(3);
+  });
 });

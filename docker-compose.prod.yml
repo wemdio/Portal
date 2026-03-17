@@ -165,6 +165,23 @@ services:
     networks:
       - portal-network
 
+  worker-sales-copilot:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-sales-copilot
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=salescopilot
+    stop_grace_period: 5m
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   transcribe-worker:
     image: ${DOCKER_USERNAME}/portal-transcribe-worker:prod
     container_name: portal-transcribe-worker

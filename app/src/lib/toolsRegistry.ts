@@ -38,6 +38,7 @@ export const ALL_TOOL_IDS = [
   'linkedin-bot',
   'tg-parser',
   'cis-lead-finder',
+  'sales-copilot',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -184,6 +185,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'TG User Parser',
     description: 'Парсинг пользователей из Telegram: сообщения в чатах, участники, комментарии. Экспорт в Excel/CSV.',
     href: '/tools/tg-parser',
+    accentColor: 'blue',
+  },
+  'sales-copilot': {
+    id: 'sales-copilot',
+    title: 'Sales Copilot',
+    description: 'AI-подсказки для менеджеров: черновики ответов в TG и реанимация холодных диалогов.',
+    href: '/tools/sales-copilot',
     accentColor: 'blue',
   },
 };
