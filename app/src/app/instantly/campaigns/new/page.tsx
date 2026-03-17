@@ -16,6 +16,65 @@ interface StepDraft {
   wait_days: number;
 }
 
+const HTML_TAG_RE = /<\/?[a-z][^>]*>/i;
+const MARKDOWN_LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+const RAW_URL_RE = /\bhttps?:\/\/[^\s<]+/g;
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function linkToHtml(url: string, label?: string): string {
+  return `<a href="${escapeHtml(url)}">${escapeHtml(label ?? url)}</a>`;
+}
+
+function renderInlineInstantlyHtml(text: string): string {
+  const replacements: string[] = [];
+
+  let value = text.replace(MARKDOWN_LINK_RE, (_, label: string, url: string) => {
+    const token = `__INSTANTLY_LINK_${replacements.length}__`;
+    replacements.push(linkToHtml(url, label));
+    return token;
+  });
+
+  value = value.replace(RAW_URL_RE, (rawUrl) => {
+    const trailing = rawUrl.match(/[.,!?;:]+$/)?.[0] ?? '';
+    const cleanUrl = trailing ? rawUrl.slice(0, -trailing.length) : rawUrl;
+    const token = `__INSTANTLY_LINK_${replacements.length}__`;
+    replacements.push(linkToHtml(cleanUrl));
+    return `${token}${trailing}`;
+  });
+
+  return escapeHtml(value).replace(/__INSTANTLY_LINK_(\d+)__/g, (_, index: string) => {
+    const replacement = replacements[Number(index)];
+    return replacement ?? '';
+  });
+}
+
+function formatBodyForInstantly(body: string, textOnly: boolean): string {
+  const normalized = body.replace(/\r\n?/g, '\n');
+  if (!normalized.trim()) return normalized;
+
+  if (textOnly) {
+    return normalized.replace(MARKDOWN_LINK_RE, (_, label: string, url: string) => `${label}: ${url}`);
+  }
+
+  if (HTML_TAG_RE.test(normalized)) {
+    return normalized;
+  }
+
+  return normalized
+    .trim()
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${paragraph.split('\n').map(renderInlineInstantlyHtml).join('<br />')}</p>`)
+    .join('');
+}
+
 export default function CreateCampaignPage() {
   const router = useRouter();
   const [creating, setCreating] = useState(false);
@@ -146,10 +205,11 @@ export default function CreateCampaignPage() {
           type: 'email' as const,
           delay: i < steps.length - 1 ? steps[i + 1].wait_days : 1,
           delay_unit: 'days' as const,
-          variants: [{ subject: s.subject, body: s.body }],
+          variants: [{ subject: s.subject, body: formatBodyForInstantly(s.body, textOnly) }],
         })),
       }],
       email_list: selectedAccounts.length > 0 ? selectedAccounts : undefined,
+      email_tag_list: filterTagId ? [filterTagId] : undefined,
       daily_limit: dailyLimit ? Number(dailyLimit) : undefined,
       daily_max_leads: dailyMaxLeads ? Number(dailyMaxLeads) : undefined,
       email_gap: emailGap ? Number(emailGap) : undefined,
@@ -170,7 +230,7 @@ export default function CreateCampaignPage() {
     } finally {
       setCreating(false);
     }
-  }, [name, steps, selectedAccounts, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
+  }, [name, steps, selectedAccounts, filterTagId, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
 
   const DAY_NAMES = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
@@ -202,7 +262,13 @@ export default function CreateCampaignPage() {
         {/* Steps/Sequences */}
         <div className="rounded-xl border border-zinc-200 bg-white p-5">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-zinc-900">Письма</h2>
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-900">Письма</h2>
+              <p className="mt-1 text-xs text-zinc-400">
+                Переносы строк сохраняются. Ссылка в тексте: `[текст ссылки](https://site.com?utm_source=portal)`.
+                Для кликабельного текста выключи `Только текст`.
+              </p>
+            </div>
             <button
               onClick={addStep}
               className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"

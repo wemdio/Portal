@@ -137,22 +137,29 @@ export async function shareCampaign(id: string) {
 // ─── Campaign Analytics ──────────────────────────────────────────────────────
 
 export async function getCampaignAnalytics(params?: { id?: string; campaign_id?: string }) {
-  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: params as Record<string, string> });
+  const effectiveId = params?.id ?? params?.campaign_id;
+  const query: Record<string, string> = {};
+  if (effectiveId) query.id = effectiveId;
+  return request<CampaignAnalytics[]>('/campaigns/analytics', { params: query });
 }
 
 export async function getCampaignAnalyticsOverview(params?: { campaign_id?: string }) {
-  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', {
-    params: params as Record<string, string>,
-  });
+  const query: Record<string, string> = {};
+  if (params?.campaign_id) query.id = params.campaign_id;
+  return request<CampaignAnalyticsOverview>('/campaigns/analytics/overview', { params: query });
 }
 
 export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string; start_date?: string; end_date?: string }) {
-  return request<unknown>('/campaigns/analytics/daily', { params: params as Record<string, string> });
+  const query: Record<string, string> = {};
+  if (params?.campaign_id) query.id = params.campaign_id;
+  if (params?.start_date) query.start_date = params.start_date;
+  if (params?.end_date) query.end_date = params.end_date;
+  return request<unknown>('/campaigns/analytics/daily', { params: query });
 }
 
 export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
-    params: params as Record<string, string>,
+    params: { id: params.campaign_id } as Record<string, string>,
   });
 }
 
