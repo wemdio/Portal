@@ -16,30 +16,12 @@ interface ExtractedContact {
   title: string | null;
   phone: string | null;
   email: string | null;
+  context: string;
 }
 
 const PHONE_PATTERN = /(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}/g;
 
 const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-
-const TITLE_KEYWORDS = [
-  'директор', 'руководитель', 'генеральный', 'коммерческий', 'основатель',
-  'владелец', 'собственник', 'president', 'ceo', 'coo', 'cfo', 'cto',
-  'founder', 'owner', 'director', 'head',
-];
-
-const JOB_TITLE_PREFIX = new Set([
-  'директор', 'руководитель', 'генеральный', 'коммерческий', 'основатель',
-  'владелец', 'собственник', 'президент', 'учредитель', 'менеджер',
-]);
-
-function stripJobTitleFromName(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  while (parts.length >= 2 && JOB_TITLE_PREFIX.has(parts[0]!.toLowerCase())) {
-    parts.shift();
-  }
-  return parts.join(' ').trim();
-}
 
 /** «Фамилия Имя» — key for dedup; strips patronymic */
 function nameDedupeKey(fullName: string): string {
@@ -50,12 +32,137 @@ function nameDedupeKey(fullName: string): string {
   return fullName.toLowerCase();
 }
 
+type AiLprDecision = {
+  name: string;
+  is_lpr: boolean;
+  role: string;
+  title: string | null;
+  confidence: number;
+};
+
+function hasLprAiKey(): boolean {
+  return (process.env.OPENROUTER_LPR_VERIFY_API_KEY_V2 ?? process.env.OPENROUTER_EMAIL_SEQUENCE_API_KEY ?? '').trim().length > 0;
+}
+
+async function decideLprWithAI(candidates: Array<{ name: string; context: string }>): Promise<Map<string, AiLprDecision>> {
+  const key = (process.env.OPENROUTER_LPR_VERIFY_API_KEY_V2 ?? process.env.OPENROUTER_EMAIL_SEQUENCE_API_KEY ?? '').trim();
+  const out = new Map<string, AiLprDecision>();
+  if (!key || candidates.length === 0) return out;
+
+  const extractJson = (text: string): unknown | null => {
+    const raw = String(text ?? '').trim();
+    if (!raw) return null;
+
+    // Strip fenced code blocks like ```json ... ``` or ``` ... ```
+    const unfenced = raw
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+
+    // Try direct parse first
+    try {
+      return JSON.parse(unfenced);
+    } catch {
+      // fallthrough
+    }
+
+    // Try to locate a JSON array/object inside the text.
+    const firstArray = unfenced.indexOf('[');
+    const lastArray = unfenced.lastIndexOf(']');
+    if (firstArray !== -1 && lastArray !== -1 && lastArray > firstArray) {
+      const slice = unfenced.slice(firstArray, lastArray + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {
+        // ignore
+      }
+    }
+
+    const firstObj = unfenced.indexOf('{');
+    const lastObj = unfenced.lastIndexOf('}');
+    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
+      const slice = unfenced.slice(firstObj, lastObj + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {
+        // ignore
+      }
+    }
+
+    return null;
+  };
+
+  const payload = candidates.slice(0, 12).map((c, idx) => ({
+    id: idx + 1,
+    name: c.name,
+    context: c.context.slice(0, 280),
+  }));
+
+  const prompt = `Ты помогаешь CRM найти ЛПР (лицо, принимающее решение) по компании по фрагментам текста из поиска.
+Для каждого кандидата реши, является ли это человек-ЛПР/руководитель/владелец или релевантное руководство, а не случайное упоминание/лауреат/организация.
+
+Верни ТОЛЬКО валидный JSON-массив, без пояснений. Формат элемента:
+{"name": string, "is_lpr": boolean, "role": "owner|ceo|commercial|director|it|hr|sales|marketing|ops|other", "title": string|null, "confidence": number}
+
+Правила:
+- name — как во входе
+- confidence 0..1
+- title — должность (если можно извлечь из контекста), иначе null
+
+Вход:
+${JSON.stringify(payload, null, 2)}`;
+
+  try {
+    const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+        'HTTP-Referer': 'https://portal.local',
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 700,
+        temperature: 0,
+      }),
+      signal: (() => {
+        const c = new AbortController();
+        setTimeout(() => c.abort(), 20000);
+        return c.signal;
+      })(),
+    });
+    if (!res.ok) return out;
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = (data.choices?.[0]?.message?.content ?? '').trim();
+    const parsedAny = extractJson(text);
+    const parsed = Array.isArray(parsedAny) ? (parsedAny as AiLprDecision[]) : null;
+    if (!parsed) return out;
+    for (const row of parsed) {
+      if (!row || typeof row !== 'object') continue;
+      const name = String((row as { name?: unknown }).name ?? '').trim();
+      if (!name) continue;
+      out.set(name, {
+        name,
+        is_lpr: Boolean((row as { is_lpr?: unknown }).is_lpr),
+        role: String((row as { role?: unknown }).role ?? 'other'),
+        title: typeof (row as { title?: unknown }).title === 'string' ? String((row as { title?: unknown }).title).trim() : null,
+        confidence: Math.max(0, Math.min(1, Number((row as { confidence?: unknown }).confidence ?? 0.5) || 0.5)),
+      });
+    }
+    return out;
+  } catch (e) {
+    console.warn('[cis-leads] AI LPR decision failed:', e instanceof Error ? e.message : e);
+    return out;
+  }
+}
+
 /**
  * Универсальная AI-проверка: только ФИО, без чёрных списков.
  * LLM решает, что является именем человека.
  */
 async function filterPersonNamesWithAI(candidates: string[]): Promise<Set<string>> {
-  const key = (process.env.OPENROUTER_LPR_VERIFY_API_KEY ?? process.env.OPENROUTER_EMAIL_SEQUENCE_API_KEY ?? '').trim();
+  const key = (process.env.OPENROUTER_LPR_VERIFY_API_KEY_V2 ?? process.env.OPENROUTER_EMAIL_SEQUENCE_API_KEY ?? '').trim();
   if (!key || candidates.length === 0) return new Set(candidates);
 
   const list = candidates.slice(0, 20).join('\n');
@@ -111,8 +218,8 @@ ${list}
 }
 
 /**
- * Only extract names that appear within ±60 chars of a title keyword.
- * Requires explicit mention of job title nearby.
+ * Extract person names from snippets (no static title keyword lists).
+ * AI later decides if they're an LPR and which role.
  */
 function extractContactsFromSnippets(snippets: string[]): ExtractedContact[] {
   const byKey = new Map<string, ExtractedContact>();
@@ -121,53 +228,28 @@ function extractContactsFromSnippets(snippets: string[]): ExtractedContact[] {
     const text = snippet.replace(/\s+/g, ' ');
     const phones = text.match(PHONE_PATTERN) ?? [];
     const emails = text.match(EMAIL_PATTERN) ?? [];
-    const lower = text.toLowerCase();
-
-    const titlePositions: Array<{ pos: number; keyword: string }> = [];
-    for (const kw of TITLE_KEYWORDS) {
-      let idx = lower.indexOf(kw);
-      while (idx !== -1) {
-        titlePositions.push({ pos: idx, keyword: kw });
-        idx = lower.indexOf(kw, idx + kw.length);
-      }
-    }
-    if (titlePositions.length === 0) continue;
 
     const RU_NAME_PATTERN = /([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)/g;
     let match: RegExpExecArray | null;
     while ((match = RU_NAME_PATTERN.exec(text)) !== null) {
-      let trimmed = match[1]!.trim();
-      trimmed = stripJobTitleFromName(trimmed);
+      const trimmed = match[1]!.trim();
       if (trimmed.length < 5 || !hasFioStructure(trimmed)) continue;
 
       const namePos = match.index;
-      const nearTitle = titlePositions.some(
-        (t) => Math.abs(t.pos - namePos) < 60,
-      );
-      if (!nearTitle) continue;
-
       const key = nameDedupeKey(trimmed);
       const existing = byKey.get(key);
-
-      let title: string | null = null;
-      const closest = titlePositions.reduce((best, t) =>
-        Math.abs(t.pos - namePos) < Math.abs(best.pos - namePos) ? t : best,
-      );
-      let rawTitle = text.slice(closest.pos, closest.pos + closest.keyword.length + 35).trim();
-      rawTitle = rawTitle.replace(/\s*[-–—]\s*.*$/, '').trim();
-      rawTitle = rawTitle.replace(/[.,;:].*$/, '').trim();
-      title = rawTitle.length > 2 && rawTitle.length < 80 ? rawTitle : null;
+      const context = text.slice(Math.max(0, namePos - 90), Math.min(text.length, namePos + trimmed.length + 140)).trim();
 
       const phone = phones[0]?.replace(/[\s()-]/g, '') ?? null;
       const email = emails[0]?.toLowerCase() ?? null;
 
       if (existing) {
         if (trimmed.length > existing.full_name.length) existing.full_name = trimmed;
-        if (!existing.title && title) existing.title = title;
+        if (!existing.context && context) existing.context = context;
         if (!existing.phone && phone) existing.phone = phone;
         if (!existing.email && email) existing.email = email;
       } else {
-        byKey.set(key, { full_name: trimmed, title, phone, email });
+        byKey.set(key, { full_name: trimmed, title: null, phone, email, context });
       }
     }
   }
@@ -234,8 +316,22 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
         extracted = extracted.filter((c) => approved.has(c.full_name));
       }
 
-      for (const contact of extracted.slice(0, 5)) {
-        const role = guessLprRoleFromPost(contact.title);
+      const aiMap = hasLprAiKey()
+        ? await decideLprWithAI(extracted.map((c) => ({ name: c.full_name, context: c.context })))
+        : new Map<string, AiLprDecision>();
+
+      for (const contact of extracted.slice(0, 8)) {
+        const ai = aiMap.get(contact.full_name) ?? null;
+        if (ai && !ai.is_lpr) continue;
+
+        const role = ai?.role
+          ? ai.role
+          : guessLprRoleFromPost(contact.title);
+        const title = (ai?.title ?? contact.title) || null;
+        const confidence = ai?.confidence ?? 0.5;
+        const baseScore = role === 'owner' ? 80 : role === 'ceo' ? 75 : role === 'commercial' ? 65 : role === 'director' ? 55 : 45;
+        const score = Math.round(baseScore + confidence * 10);
+
         const { error } = await supabaseAdmin
           .from('company_contacts')
           .upsert(
@@ -246,14 +342,14 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
               full_name: contact.full_name,
               first_name: null,
               last_name: null,
-              title: contact.title,
+              title,
               role_guess: role,
               channel_phone: contact.phone,
               channel_tg_username: null,
               channel_email: contact.email,
               source_url: results[0]?.link ?? null,
-              score: 55,
-              confidence: 0.5,
+              score,
+              confidence,
             },
             { onConflict: 'user_id,company_id,full_name' },
           );

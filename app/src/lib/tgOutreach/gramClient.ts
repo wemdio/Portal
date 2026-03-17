@@ -1,6 +1,7 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import type { OutreachAccount, OutreachProxy } from './types';
+import { createRequire } from 'module';
 
 export interface ActiveClient {
   client: TelegramClient;
@@ -37,8 +38,10 @@ export async function createGramClient(
     session = new StringSession(account.session_data);
   } else if (account.session_file_path && downloadSessionFile) {
     const localPath = await downloadSessionFile(account.session_file_path);
-    const mod = await import('gramjs-sqlitesession');
-    const SQLiteSession = (typeof mod === 'function' ? mod : mod.default ?? mod) as new (path: string) => import('telegram/sessions').Session;
+    // Use CJS require to avoid Next/TS module interop issues with gramjs-sqlitesession
+    const require = createRequire(import.meta.url);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const SQLiteSession = require('gramjs-sqlitesession') as new (path: string) => import('telegram/sessions').Session;
     session = new SQLiteSession(localPath);
   } else {
     throw new Error('Нет session_data или session_file_path');

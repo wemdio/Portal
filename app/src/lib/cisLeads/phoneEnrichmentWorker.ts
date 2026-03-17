@@ -182,8 +182,13 @@ async function upsertIdentity(params: {
     );
 }
 
+/** Phone -> company_contact ids to update with tg_username when found */
+const phoneToContactIds = new Map<string, string[]>();
+
 export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> {
   if (!supabaseAdmin) return { processed: 0 };
+
+  phoneToContactIds.clear();
 
   const { data: leads } = await supabaseAdmin
     .from('raw_leads')
@@ -199,16 +204,53 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
     .map(normalizePhone)
     .filter((p): p is string => Boolean(p));
 
-  const unique = Array.from(new Set(normalized)).slice(0, 120);
+  const uniqueFromLeads = Array.from(new Set(normalized));
+
+  const { data: contactsWithPhone } = await supabaseAdmin
+    .from('company_contacts')
+    .select('id, channel_phone')
+    .not('channel_phone', 'is', null)
+    .is('channel_tg_username', null)
+    .limit(2000);
+
+  for (const row of (contactsWithPhone ?? []) as Array<{ id: string; channel_phone: string }>) {
+    const phone = normalizePhone(row.channel_phone);
+    if (!phone) continue;
+    const list = phoneToContactIds.get(phone) ?? [];
+    if (!list.includes(row.id)) list.push(row.id);
+    phoneToContactIds.set(phone, list);
+  }
+
+  const fromContacts = Array.from(phoneToContactIds.keys());
+  const unique = Array.from(new Set([...uniqueFromLeads, ...fromContacts])).slice(0, 120);
   if (unique.length === 0) return { processed: 0 };
 
   const { data: existing } = await supabaseAdmin
     .from('phone_identities')
-    .select('phone_normalized')
+    .select('phone_normalized, tg_username')
     .in('phone_normalized', unique);
 
   const existingSet = new Set((existing ?? []).map((r) => String((r as { phone_normalized?: unknown }).phone_normalized ?? '')));
+  const existingTgByPhone = new Map(
+    (existing ?? []).map((r) => [
+      String((r as { phone_normalized?: unknown }).phone_normalized ?? ''),
+      String((r as { tg_username?: unknown }).tg_username ?? '').trim() || null,
+    ]),
+  );
+
   const toCheck = unique.filter((p) => !existingSet.has(p)).slice(0, 50);
+
+  for (const phone of fromContacts) {
+    if (toCheck.includes(phone)) continue;
+    const tg = existingTgByPhone.get(phone);
+    if (!tg) continue;
+    const ids = phoneToContactIds.get(phone);
+    if (!ids?.length) continue;
+    for (const id of ids) {
+      await supabaseAdmin.from('company_contacts').update({ channel_tg_username: tg }).eq('id', id);
+    }
+  }
+
   if (toCheck.length === 0) return { processed: 0 };
 
   await withClient(async (client) => {
@@ -250,14 +292,21 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
         if (!phone || !u) continue;
 
         foundPhones.add(phone);
+        const tgUsername = u.username ?? null;
         await upsertIdentity({
           phone,
           status: 'found',
           tg_user_id: Number(u.id),
-          tg_username: u.username ?? null,
+          tg_username: tgUsername,
           first_name: u.firstName ?? null,
           last_name: u.lastName ?? null,
         });
+        const contactIds = phoneToContactIds.get(phone);
+        if (tgUsername && contactIds?.length) {
+          for (const contactId of contactIds) {
+            await supabaseAdmin!.from('company_contacts').update({ channel_tg_username: tgUsername }).eq('id', contactId);
+          }
+        }
       }
 
       for (const phone of toCheck) {

@@ -167,6 +167,21 @@ async function parseTeamPages(siteUrl: string): Promise<ParsedPerson[]> {
   return allPeople;
 }
 
+/** Normalized key for matching site person to existing company_contact (same logic as API dedupe). */
+function contactNameKey(fullName: string): string {
+  const raw = String(fullName ?? '').trim().toLowerCase();
+  if (!raw || !hasFioStructure(fullName)) return '';
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const withoutPatronymic = parts.filter((p) => {
+    const s = p.replace(/[.,]/g, '');
+    return !(
+      s.endsWith('вич') || s.endsWith('вна') || s.endsWith('ична') || s.endsWith('оглы') || s.endsWith('кызы')
+    );
+  });
+  const normalized = (withoutPatronymic.length ? withoutPatronymic : parts).slice(0, 3).sort().join(' ');
+  return normalized;
+}
+
 export async function runWebsiteTeamEnrichment(jobId: string, userId: string): Promise<{ processed: number; contactsFound: number }> {
   if (!supabaseAdmin) return { processed: 0, contactsFound: 0 };
 
@@ -200,7 +215,37 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
     try {
       const people = await parseTeamPages(company.site);
 
+      const { data: existingContacts } = await supabaseAdmin
+        .from('company_contacts')
+        .select('id, full_name, channel_phone, channel_email')
+        .eq('user_id', userId)
+        .eq('company_id', company.id);
+
+      const keyToContact = new Map<string, { id: string; full_name: string; channel_phone: string | null; channel_email: string | null }>();
+      for (const c of (existingContacts ?? []) as Array<{ id: string; full_name: string; channel_phone: string | null; channel_email: string | null }>) {
+        const key = contactNameKey(c.full_name);
+        if (key && !keyToContact.has(key)) keyToContact.set(key, c);
+      }
+
       for (const person of people.slice(0, 5)) {
+        const key = contactNameKey(person.name);
+        const existing = key ? keyToContact.get(key) : undefined;
+
+        if (existing && (person.phone || person.email)) {
+          const update: Record<string, string | null> = {};
+          if (person.phone && !existing.channel_phone) update.channel_phone = person.phone;
+          if (person.email && !existing.channel_email) update.channel_email = person.email;
+          if (Object.keys(update).length > 0) {
+            const { error } = await supabaseAdmin
+              .from('company_contacts')
+              .update(update)
+              .eq('id', existing.id)
+              .eq('user_id', userId);
+            if (!error) contactsFound++;
+          }
+          continue;
+        }
+
         const role = guessLprRoleFromPost(person.title);
         const { error } = await supabaseAdmin
           .from('company_contacts')

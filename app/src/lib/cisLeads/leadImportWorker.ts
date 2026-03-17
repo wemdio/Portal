@@ -6,6 +6,8 @@ import { findByInn, hasDadataKey, suggestByName, type DadataFounder, type Dadata
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
+import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
+import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { guessLprRoleFromPost, normalizeInn } from '@/lib/cisLeads/lprRole';
 import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportRow';
@@ -444,6 +446,12 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
   } catch (e) { logErr('serperLprEnrichment', e); }
 
   try {
+    log('lprContactSerperEnrichment start');
+    const personalSerper = await runLprContactSerperEnrichment(jobId, userId);
+    log('lprContactSerperEnrichment done', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
+  } catch (e) { logErr('lprContactSerperEnrichment', e); }
+
+  try {
     log('websiteTeamEnrichment start');
     const siteResult = await runWebsiteTeamEnrichment(jobId, userId);
     log('websiteTeamEnrichment done', { processed: siteResult.processed, contacts: siteResult.contactsFound });
@@ -454,6 +462,12 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
     const phoneResult = await runPhoneEnrichmentBatch();
     log('phoneEnrichment done', { processed: phoneResult.processed });
   } catch (e) { logErr('phoneEnrichment', e); }
+
+  try {
+    log('socialProfileEnrichment start');
+    const socialResult = await runSocialProfileEnrichment(jobId, userId);
+    log('socialProfileEnrichment done', { processed: socialResult.processed, linksFound: socialResult.linksFound });
+  } catch (e) { logErr('socialProfileEnrichment', e); }
 
   try {
     log('contactAggregation start');

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
 
 type ImportJob = {
   id: string;
@@ -42,6 +43,7 @@ type ContactRow = {
   channel_phone: string | null;
   channel_tg_username: string | null;
   channel_email: string | null;
+  profile_links?: Record<string, string> | null;
   score: number;
   confidence: number;
   created_at: string;
@@ -310,6 +312,114 @@ export default function CisLeadFinderPage() {
     if (src === 'raw_import' || src === 'manual') return 'Импорт';
     return src;
   };
+
+  const isPersonLike = (fullName: string): boolean => {
+    const raw = String(fullName ?? '').trim();
+    if (!raw) return false;
+    if (raw.startsWith('@')) return true;
+    if (/[А-ЯЁа-яё]/.test(raw)) return hasFioStructure(raw);
+    return false;
+  };
+
+  const contactNameKey = (fullName: string): string => {
+    const raw = String(fullName ?? '').trim().toLowerCase();
+    if (!raw) return '';
+    const parts = raw.split(/\s+/).filter(Boolean);
+
+    // Drop likely patronymic so "Фамилия Имя Отчество" ~= "Имя Фамилия"
+    const withoutPatronymic = parts.filter((p) => {
+      const s = p.replace(/[.,]/g, '');
+      return !(
+        s.endsWith('вич') ||
+        s.endsWith('вна') ||
+        s.endsWith('ична') ||
+        s.endsWith('оглы') ||
+        s.endsWith('кызы')
+      );
+    });
+
+    // Order-insensitive key to handle "Имя Фамилия" vs "Фамилия Имя"
+    const normalized = (withoutPatronymic.length ? withoutPatronymic : parts)
+      .slice(0, 3)
+      .sort()
+      .join(' ');
+
+    return normalized;
+  };
+
+  const lprNowAndPrev = useMemo(() => {
+    const likelyExec = contacts.filter((c) => {
+      const role = String(c.role_guess ?? '').toLowerCase();
+      const title = String(c.title ?? '').toLowerCase();
+      return (
+        role === 'ceo' ||
+        role === 'director' ||
+        title.includes('генеральн') ||
+        title.includes('директор')
+      );
+    });
+
+    const sourceWeight = (src: string): number => {
+      // Prefer official registry data for "current"
+      if (src === 'dadata_management') return 100;
+      if (src === 'phone_tg') return 70;
+      if (src === 'website_team') return 60;
+      if (src === 'serper_search') return 40;
+      if (src === 'manual' || src === 'raw_import') return 20;
+      return 10;
+    };
+
+    const sorted = [...likelyExec].sort((a, b) => {
+      const sa = (Number(a.score) || 0) + sourceWeight(String(a.source ?? ''));
+      const sb = (Number(b.score) || 0) + sourceWeight(String(b.source ?? ''));
+      return sb - sa;
+    });
+
+    const now = sorted[0] ?? null;
+    const nowKey = now ? contactNameKey(now.full_name) : null;
+    const prev =
+      nowKey
+        ? (sorted.find((c) => contactNameKey(c.full_name) !== nowKey) ?? null)
+        : (sorted[1] ?? null);
+
+    return { nowId: now?.id ?? null, prevId: prev?.id ?? null };
+  }, [contacts]);
+
+  const orderedContacts = useMemo(() => {
+    if (!contacts.length) return contacts;
+    const { nowId, prevId } = lprNowAndPrev;
+    if (!nowId && !prevId) return contacts;
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+    const picked: ContactRow[] = [];
+    const used = new Set<string>();
+    for (const id of [nowId, prevId]) {
+      if (!id) continue;
+      const row = byId.get(id);
+      if (row && !used.has(row.id)) {
+        picked.push(row);
+        used.add(row.id);
+      }
+    }
+    const rest = contacts.filter((c) => !used.has(c.id));
+    // Hide non-person "contacts" (org/brand names) from web/google sources.
+    const combined = [...picked, ...rest].filter((c) => {
+      if (isPersonLike(c.full_name)) return true;
+      const src = String(c.source ?? '');
+      return !(src === 'serper_search' || src === 'website_team');
+    });
+
+    // Soft dedupe: avoid showing the same person multiple times (often happens across sources).
+    const seenPerson = new Set<string>();
+    const out: ContactRow[] = [];
+    for (const c of combined) {
+      const key = contactNameKey(c.full_name);
+      if (!key) continue;
+      if (seenPerson.has(key)) continue;
+      seenPerson.add(key);
+      out.push(c);
+    }
+    return out;
+  }, [contacts, lprNowAndPrev]);
 
   return (
     <div className="space-y-6 text-left max-w-full">
@@ -621,9 +731,13 @@ export default function CisLeadFinderPage() {
                   )
                 ) : (
                   <div className="space-y-2">
-                    {contacts.map((p) => {
+                    {orderedContacts.map((p) => {
                       const role = roleLabel(p.role_guess);
                       const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email;
+                      const profileLinks = (p.profile_links && typeof p.profile_links === 'object' ? p.profile_links : {}) as Record<string, string>;
+                      const hasProfileLinks = Object.keys(profileLinks).length > 0;
+                      const isNow = lprNowAndPrev.nowId === p.id;
+                      const isPrev = !isNow && lprNowAndPrev.prevId === p.id;
                       return (
                         <div key={p.id} className="rounded-xl border border-gray-200 p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
@@ -631,6 +745,20 @@ export default function CisLeadFinderPage() {
                               <div className="font-semibold text-gray-900 truncate">{p.full_name}</div>
                               {(p.title ?? '').trim() ? (
                                 <div className="text-xs text-gray-600 mt-0.5">{p.title}</div>
+                              ) : null}
+                              {isNow || isPrev ? (
+                                <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                                  {isNow ? (
+                                    <span className="inline-flex items-center rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 text-[11px] font-medium">
+                                      Текущий ЛПР
+                                    </span>
+                                  ) : null}
+                                  {isPrev ? (
+                                    <span className="inline-flex items-center rounded-md bg-gray-50 text-gray-700 border border-gray-200 px-2 py-0.5 text-[11px] font-medium">
+                                      Предыдущий ЛПР
+                                    </span>
+                                  ) : null}
+                                </div>
                               ) : null}
                             </div>
                             <span className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium ${role.color}`}>
@@ -680,6 +808,34 @@ export default function CisLeadFinderPage() {
                           ) : (
                             <div className="text-xs text-gray-400 italic">Контактные данные пока не найдены</div>
                           )}
+
+                          {hasProfileLinks ? (
+                            <div className="flex gap-2 flex-wrap">
+                              {Object.entries(profileLinks).map(([key, url]) =>
+                                url ? (
+                                  <a
+                                    key={key}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 rounded-lg bg-gray-50 border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-100 transition-colors capitalize"
+                                    title={key}
+                                  >
+                                    {key === 'linkedin' && (
+                                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-[#0A66C2]" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                                    )}
+                                    {key === 'vk' && (
+                                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-[#0077FF]" fill="currentColor"><path d="M15.684 0H8.316C1.592 0 0 1.592 0 8.316v7.368C0 22.408 1.592 24 8.316 24h7.368C22.408 24 24 22.408 24 15.684V8.316C24 1.592 22.408 0 15.684 0zm3.692 17.123h-1.744c-.66 0-.864-.525-2.05-1.727-1.033-1-1.49-1.135-1.744-1.135-.356 0-.458.102-.458.593v1.575c0 .424-.135.678-1.253.678-1.846 0-3.896-1.118-5.335-3.202C4.624 10.857 4 8.57 4 8.096c0-.254.102-.491.593-.491h1.744c.44 0 .61.203.78.677.863 2.49 2.303 4.675 2.896 4.675.22 0 .322-.102.322-.66V9.721c-.068-1.186-.695-1.287-.695-1.71 0-.203.17-.407.44-.407h2.744c.373 0 .508.203.508.643v3.473c0 .372.17.508.271.678.102.17.203.254.44.254.22 0 .407-.085.78-.457 1.423-1.643 2.44-4.165 2.44-4.165.135-.271.34-.457.745-.457h1.744c.525 0 .644.27.525.643-.22 1.017-2.354 4.031-2.354 4.031-.186.305-.254.44 0 .78.186.254.796.779 1.203 1.253.745.847 1.32 1.558 1.473 2.05.17.49-.085.744-.576.744z"/></svg>
+                                    )}
+                                    {key === 'telegram' && (
+                                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-[#0088cc]" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+                                    )}
+                                    <span className="capitalize">{key}</span>
+                                  </a>
+                                ) : null
+                              )}
+                            </div>
+                          ) : null}
 
                           <div className="text-[11px] text-gray-400">
                             Источник: {sourceLabel(p.source)}
