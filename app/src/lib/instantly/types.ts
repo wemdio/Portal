@@ -68,6 +68,8 @@ export interface SequenceStep {
   body?: string;
   type?: string;
   wait_days?: number;
+  delay?: number;
+  delay_unit?: 'minutes' | 'hours' | 'days' | string;
   variants?: SequenceVariant[];
 }
 

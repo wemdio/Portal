@@ -8,6 +8,7 @@ import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjec
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -51,6 +52,52 @@ function getStatusConfig(status: string | null | undefined) {
 
 function normalizeStatus(status: string | null | undefined): string {
   return (status || '').toLowerCase().replace(/ё/g, 'е');
+}
+
+function normalizeAssigneeName(value: string | null | undefined): string {
+  return value?.trim() || '';
+}
+
+function AssigneeAvatar({
+  name,
+  signedUrl,
+  publicUrl,
+  tone,
+}: {
+  name: string;
+  signedUrl?: string | null;
+  publicUrl?: string | null;
+  tone: 'specialist' | 'manager';
+}) {
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const normalizedPublicUrl = normalizePublicAvatarUrl(publicUrl);
+  const avatarUrl = (signedUrl && !failedUrls.has(signedUrl)) ? signedUrl
+    : (normalizedPublicUrl && !failedUrls.has(normalizedPublicUrl)) ? normalizedPublicUrl
+    : null;
+  const fallbackClass = tone === 'manager'
+    ? 'bg-blue-100 text-blue-700'
+    : 'bg-emerald-100 text-emerald-700';
+
+  if (avatarUrl) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        key={avatarUrl}
+        src={avatarUrl}
+        alt=""
+        className="w-5 h-5 rounded-full object-cover flex-shrink-0"
+        onError={() => setFailedUrls((prev) => new Set(prev).add(avatarUrl))}
+      />
+    );
+  }
+
+  return (
+    <span
+      className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0 ${fallbackClass}`}
+    >
+      {name.charAt(0).toUpperCase()}
+    </span>
+  );
 }
 
 function isCompletedStatus(status: string | null | undefined): boolean {
@@ -277,6 +324,7 @@ export function ProjectList() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
+  const [assigneePublicAvatars, setAssigneePublicAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
@@ -372,6 +420,13 @@ export function ProjectList() {
       if (error) throw error;
       const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles));
+      const publicAvatarMap = new Map<string, string>();
+      for (const profile of profiles) {
+        const name = normalizeAssigneeName(profile.full_name?.trim() || profile.email?.split('@')[0]?.trim());
+        const avatarUrl = typeof profile.avatar_url === 'string' ? profile.avatar_url.trim() : '';
+        if (name && avatarUrl) publicAvatarMap.set(name, avatarUrl);
+      }
+      setAssigneePublicAvatars(publicAvatarMap);
 
       void fetchSignedAvatars();
 
@@ -398,7 +453,8 @@ export function ProjectList() {
       const map = (await res.json()) as Record<string, string>;
       const avatarMap = new Map<string, string>();
       for (const [name, url] of Object.entries(map)) {
-        if (url) avatarMap.set(name, url);
+        const normalizedName = normalizeAssigneeName(name);
+        if (normalizedName && url) avatarMap.set(normalizedName, url);
       }
       setAssigneeAvatars(avatarMap);
     } catch {
@@ -1288,26 +1344,12 @@ export function ProjectList() {
                         ) : (
                           readOnlySpecialist !== '—' ? (
                              <div className="flex items-center gap-1">
-                                {assigneeAvatars.get(readOnlySpecialist) ? (
-                                  // eslint-disable-next-line @next/next/no-img-element
-                                  <img
-                                    src={assigneeAvatars.get(readOnlySpecialist)}
-                                    alt=""
-                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
-                                    onError={(e) => {
-                                      const target = e.currentTarget;
-                                      target.style.display = 'none';
-                                      const fallback = target.nextElementSibling;
-                                      if (fallback) (fallback as HTMLElement).style.display = '';
-                                    }}
-                                  />
-                                ) : null}
-                                <span
-                                  className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-                                  style={assigneeAvatars.get(readOnlySpecialist) ? { display: 'none' } : undefined}
-                                >
-                                  {readOnlySpecialist.charAt(0).toUpperCase()}
-                                </span>
+                                <AssigneeAvatar
+                                  name={readOnlySpecialist}
+                                  signedUrl={assigneeAvatars.get(normalizeAssigneeName(readOnlySpecialist))}
+                                  publicUrl={assigneePublicAvatars.get(normalizeAssigneeName(readOnlySpecialist))}
+                                  tone="specialist"
+                                />
                                 <span className="text-zinc-700 truncate">{readOnlySpecialist}</span>
                              </div>
                           ) : <span className="text-zinc-300">—</span>
@@ -1327,26 +1369,12 @@ export function ProjectList() {
                         ) : (
                            readOnlyManager !== '—' ? (
                              <div className="flex items-center gap-1">
-                                {assigneeAvatars.get(readOnlyManager) ? (
-                                  // eslint-disable-next-line @next/next/no-img-element
-                                  <img
-                                    src={assigneeAvatars.get(readOnlyManager)}
-                                    alt=""
-                                    className="w-5 h-5 rounded-full object-cover flex-shrink-0"
-                                    onError={(e) => {
-                                      const target = e.currentTarget;
-                                      target.style.display = 'none';
-                                      const fallback = target.nextElementSibling;
-                                      if (fallback) (fallback as HTMLElement).style.display = '';
-                                    }}
-                                  />
-                                ) : null}
-                                <span
-                                  className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-                                  style={assigneeAvatars.get(readOnlyManager) ? { display: 'none' } : undefined}
-                                >
-                                  {readOnlyManager.charAt(0).toUpperCase()}
-                                </span>
+                                <AssigneeAvatar
+                                  name={readOnlyManager}
+                                  signedUrl={assigneeAvatars.get(normalizeAssigneeName(readOnlyManager))}
+                                  publicUrl={assigneePublicAvatars.get(normalizeAssigneeName(readOnlyManager))}
+                                  tone="manager"
+                                />
                                 <span className="text-zinc-700 truncate">{readOnlyManager}</span>
                              </div>
                           ) : <span className="text-zinc-300">—</span>
