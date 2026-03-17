@@ -298,6 +298,8 @@ export interface LeadListVerificationStats {
 export interface CustomTag {
   id: string;
   name: string;
+  label?: string;
+  description?: string;
   resource_type?: string;
   timestamp_created?: string;
   timestamp_updated?: string;

@@ -271,22 +271,34 @@ export async function updateBlockListEntry(id: string, payload: { value?: string
 
 // ─── Custom Tags ──────────────────────────────────────────────────────────────
 
+function normalizeTag(raw: Record<string, unknown>): CustomTag {
+  return {
+    ...raw,
+    name: (raw.name as string) || (raw.label as string) || '',
+  } as CustomTag;
+}
+
 export async function listCustomTags(params?: PaginationParams) {
-  return request<PaginatedResponse<CustomTag>>('/custom-tags', {
+  const res = await request<PaginatedResponse<CustomTag>>('/custom-tags', {
     params: params as Record<string, string | number>,
   });
+  res.items = res.items?.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
+  return res;
 }
 
 export async function listAllCustomTags(): Promise<CustomTag[]> {
-  return fetchAllPages<CustomTag>('/custom-tags');
+  const tags = await fetchAllPages<CustomTag>('/custom-tags');
+  return tags.map((t) => normalizeTag(t as unknown as Record<string, unknown>));
 }
 
 export async function createCustomTag(payload: { name: string }) {
-  return request<CustomTag>('/custom-tags', { method: 'POST', body: payload });
+  const raw = await request<Record<string, unknown>>('/custom-tags', { method: 'POST', body: { label: payload.name } });
+  return normalizeTag(raw);
 }
 
 export async function updateCustomTag(id: string, payload: { name: string }) {
-  return request<CustomTag>(`/custom-tags/${id}`, { method: 'PATCH', body: payload });
+  const raw = await request<Record<string, unknown>>(`/custom-tags/${id}`, { method: 'PATCH', body: { label: payload.name } });
+  return normalizeTag(raw);
 }
 
 export async function toggleTagResource(body: { tag_id: string; resource_id: string; resource_type: string }) {
