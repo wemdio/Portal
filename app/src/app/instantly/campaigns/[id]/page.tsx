@@ -9,7 +9,7 @@ import {
   Mail, Clock, Settings,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, CampaignAnalytics, CampaignStepAnalytics } from '@/lib/instantly/types';
+import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
 function statusBadgeClass(status: number): string {
@@ -41,6 +41,43 @@ function MetricCard({ label, value, sub }: { label: string; value: number | stri
   );
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function stripHtmlForPreview(value?: string): string {
+  if (!value) return '';
+
+  return decodeHtmlEntities(
+    value
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+      .replace(/<p[^>]*>/gi, '')
+      .replace(/<\/p>/gi, '')
+      .replace(/<[^>]+>/g, ''),
+  ).trim();
+}
+
+function getStepDisplay(step: SequenceStep) {
+  const primaryVariant = step.variants?.[0];
+  const subject = step.subject ?? primaryVariant?.subject ?? '';
+  const body = stripHtmlForPreview(step.body ?? primaryVariant?.body);
+  const waitDays = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
+
+  return {
+    subject,
+    body,
+    waitDays,
+    variantsCount: step.variants?.length ?? 0,
+  };
+}
+
 export default function CampaignDetailPage() {
   const params = useParams<{ id: string }>();
   const campaignId = params.id;
@@ -48,6 +85,7 @@ export default function CampaignDetailPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
   const [steps, setSteps] = useState<CampaignStepAnalytics[]>([]);
+  const [allTags, setAllTags] = useState<CustomTag[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
@@ -61,7 +99,7 @@ export default function CampaignDetailPage() {
     setLoading(true);
     setError('');
     try {
-      const [c, a, s] = await Promise.all([
+      const [c, a, s, tags] = await Promise.all([
         instantlyFetch<Campaign>(`/campaigns/${campaignId}`),
         instantlyFetch<CampaignAnalytics[] | { data: CampaignAnalytics[] }>(
           `/analytics?type=campaigns&campaign_id=${campaignId}`,
@@ -72,6 +110,7 @@ export default function CampaignDetailPage() {
           console.warn('[instantly] steps analytics error:', err);
           return [];
         }),
+        instantlyFetch<{ items: CustomTag[] }>('/tags?limit=all').catch(() => ({ items: [] })),
       ]);
       setCampaign(c);
 
@@ -80,6 +119,7 @@ export default function CampaignDetailPage() {
 
       const stepsArr = Array.isArray(s) ? s : Array.isArray((s as { data?: unknown }).data) ? (s as { data: CampaignStepAnalytics[] }).data : [];
       setSteps(stepsArr);
+      setAllTags(tags.items ?? []);
 
       setEditName(c.name);
       setEditDailyLimit(String(c.daily_limit ?? ''));
@@ -152,6 +192,10 @@ export default function CampaignDetailPage() {
   const bouncedCount = analytics?.bounced_count ?? 0;
   const openRate = sentCount > 0 ? ((openCount / sentCount) * 100).toFixed(1) : '0';
   const replyRate = contactedCount > 0 ? ((replyCount / contactedCount) * 100).toFixed(1) : '0';
+  const getTagDisplayName = (tagId: string) => {
+    const tag = allTags.find((item) => item.id === tagId);
+    return tag?.name ?? tag?.label ?? tagId;
+  };
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -253,13 +297,29 @@ export default function CampaignDetailPage() {
               <h3 className="mb-3 text-sm font-semibold text-zinc-900 flex items-center gap-2">
                 <Mail className="h-4 w-4 text-zinc-400" /> Аккаунты отправки
               </h3>
-              {campaign.email_list && campaign.email_list.length > 0 ? (
-                <div className="space-y-1.5">
-                  {campaign.email_list.map((email) => (
-                    <div key={email} className="rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-700 truncate">
-                      {email}
+              {(campaign.email_list && campaign.email_list.length > 0) || (campaign.email_tag_list && campaign.email_tag_list.length > 0) ? (
+                <div className="space-y-3">
+                  {campaign.email_tag_list && campaign.email_tag_list.length > 0 && (
+                    <div>
+                      <p className="mb-2 text-xs text-zinc-400">Теги отправки</p>
+                      <div className="flex flex-wrap gap-2">
+                        {campaign.email_tag_list.map((tagId) => (
+                          <span key={tagId} className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-700">
+                            {getTagDisplayName(tagId)}
+                          </span>
+                        ))}
+                      </div>
                     </div>
-                  ))}
+                  )}
+                  {campaign.email_list && campaign.email_list.length > 0 && (
+                    <div className="space-y-1.5">
+                      {campaign.email_list.map((email) => (
+                        <div key={email} className="rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-700 truncate">
+                          {email}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-sm text-zinc-400 py-4 text-center">Нет привязанных аккаунтов</p>
@@ -271,29 +331,32 @@ export default function CampaignDetailPage() {
             <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-5">
               <h3 className="mb-4 text-sm font-semibold text-zinc-900">Последовательность писем</h3>
               <div className="space-y-3">
-                {campaign.sequences[0].steps.map((step, i) => (
-                  <div key={i} className="rounded-lg border border-zinc-100 p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
-                        Шаг {i + 1}
-                      </span>
-                      {step.wait_days != null && step.wait_days > 0 && (
-                        <span className="flex items-center gap-1 text-xs text-zinc-400">
-                          <Clock className="h-3 w-3" /> ждать {step.wait_days} дн.
+                {campaign.sequences[0].steps.map((step, i) => {
+                  const display = getStepDisplay(step);
+                  return (
+                    <div key={i} className="rounded-lg border border-zinc-100 p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+                          Шаг {i + 1}
                         </span>
+                        {display.waitDays != null && display.waitDays > 0 && (
+                          <span className="flex items-center gap-1 text-xs text-zinc-400">
+                            <Clock className="h-3 w-3" /> ждать {display.waitDays} дн.
+                          </span>
+                        )}
+                      </div>
+                      {display.subject && (
+                        <p className="text-sm font-medium text-zinc-800 mb-1">Тема: {display.subject}</p>
+                      )}
+                      {display.body && (
+                        <div className="text-xs text-zinc-500 line-clamp-3 whitespace-pre-wrap">{display.body}</div>
+                      )}
+                      {display.variantsCount > 0 && (
+                        <p className="mt-1 text-xs text-zinc-400">{display.variantsCount} вариант(ов)</p>
                       )}
                     </div>
-                    {step.subject && (
-                      <p className="text-sm font-medium text-zinc-800 mb-1">Тема: {step.subject}</p>
-                    )}
-                    {step.body && (
-                      <div className="text-xs text-zinc-500 line-clamp-3 whitespace-pre-wrap">{step.body}</div>
-                    )}
-                    {step.variants && step.variants.length > 0 && (
-                      <p className="mt-1 text-xs text-zinc-400">{step.variants.length} вариант(ов)</p>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -306,23 +369,26 @@ export default function CampaignDetailPage() {
             <div className="p-5">
               <p className="mb-4 text-xs text-zinc-400">Аналитика по шагам пока недоступна. Последовательность писем:</p>
               <div className="space-y-3">
-                {campaign.sequences[0].steps.map((step, i) => (
-                  <div key={i} className="rounded-lg border border-zinc-100 p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">Шаг {i + 1}</span>
-                      {step.wait_days != null && step.wait_days > 0 && (
-                        <span className="flex items-center gap-1 text-xs text-zinc-400">
-                          <Clock className="h-3 w-3" /> ждать {step.wait_days} дн.
-                        </span>
+                {campaign.sequences[0].steps.map((step, i) => {
+                  const display = getStepDisplay(step);
+                  return (
+                    <div key={i} className="rounded-lg border border-zinc-100 p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">Шаг {i + 1}</span>
+                        {display.waitDays != null && display.waitDays > 0 && (
+                          <span className="flex items-center gap-1 text-xs text-zinc-400">
+                            <Clock className="h-3 w-3" /> ждать {display.waitDays} дн.
+                          </span>
+                        )}
+                      </div>
+                      {display.subject && <p className="text-sm font-medium text-zinc-800 mb-1">Тема: {display.subject}</p>}
+                      {display.body && <div className="text-xs text-zinc-500 line-clamp-3 whitespace-pre-wrap">{display.body}</div>}
+                      {display.variantsCount > 0 && (
+                        <p className="mt-1 text-xs text-zinc-400">{display.variantsCount} вариант(ов)</p>
                       )}
                     </div>
-                    {step.subject && <p className="text-sm font-medium text-zinc-800 mb-1">Тема: {step.subject}</p>}
-                    {step.body && <div className="text-xs text-zinc-500 line-clamp-3 whitespace-pre-wrap">{step.body}</div>}
-                    {step.variants && step.variants.length > 0 && (
-                      <p className="mt-1 text-xs text-zinc-400">{step.variants.length} вариант(ов)</p>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : steps.length === 0 ? (

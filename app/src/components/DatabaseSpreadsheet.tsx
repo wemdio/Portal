@@ -7752,7 +7752,7 @@ export function DatabaseSpreadsheet() {
                               className={`w-full bg-transparent px-1 py-px text-[11px] text-gray-900 outline-none resize-none min-h-[18px] leading-tight ring-2 ring-blue-500 ring-inset z-10 relative ${
                                 effectiveWrapCells
                                   ? 'whitespace-pre-wrap break-words overflow-hidden'
-                                  : 'whitespace-nowrap overflow-x-auto overflow-y-hidden'
+                                  : 'whitespace-nowrap overflow-x-auto overflow-y-hidden no-scrollbar'
                               }`}
                               />
                             ) : (
