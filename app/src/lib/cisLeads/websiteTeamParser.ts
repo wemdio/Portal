@@ -4,6 +4,7 @@ import * as cheerio from 'cheerio';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { guessLprRoleFromPost } from '@/lib/cisLeads/lprRole';
 import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
+import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
 
 const FETCH_TIMEOUT_MS = 8_000;
 const SITE_BATCH_LIMIT = 30;
@@ -75,7 +76,7 @@ function extractPeopleFromJsonLd(html: string): ParsedPerson[] {
         people.push({
           name,
           title: String(node['jobTitle'] ?? node['role'] ?? '').trim() || null,
-          email: typeof node['email'] === 'string' ? node['email'].trim() : null,
+          email: sanitizeContactEmail(typeof node['email'] === 'string' ? node['email'] : null),
           phone: typeof node['telephone'] === 'string' ? node['telephone'].trim() : null,
         });
       }
@@ -129,7 +130,7 @@ function extractPeopleFromHtml(html: string): ParsedPerson[] {
       people.push({
         name,
         title,
-        email: emailMatch?.[0]?.toLowerCase() ?? null,
+        email: sanitizeContactEmail(emailMatch?.[0] ?? null),
         phone: phoneMatch?.[0]?.replace(/[\s()-]/g, '') ?? null,
       });
     });

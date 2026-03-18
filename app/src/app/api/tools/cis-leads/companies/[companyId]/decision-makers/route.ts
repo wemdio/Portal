@@ -25,7 +25,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ companyId: 
 
       const { data: contacts, error } = await auth.supabase
         .from('company_contacts')
-        .select('id,company_id,source,full_name,first_name,last_name,title,role_guess,channel_phone,channel_tg_username,channel_email,profile_links,score,confidence,created_at')
+        .select('id,company_id,source,full_name,first_name,last_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,profile_links,score,confidence,created_at')
         .eq('user_id', auth.user.id)
         .eq('company_id', companyId)
         .order('score', { ascending: false })
@@ -52,6 +52,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ companyId: 
         role_guess: c.role_guess,
         channel_phone: c.channel_phone,
         channel_tg_username: c.channel_tg_username,
+        channel_tg_user_id: (c as { channel_tg_user_id?: number | null }).channel_tg_user_id ?? null,
         channel_email: c.channel_email,
         profile_links: c.profile_links,
         score: c.score,

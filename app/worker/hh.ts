@@ -10,16 +10,13 @@ const running = new Set<Promise<void>>();
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const now = new Date().toISOString();
-  const errorMsg = 'Прервано перезапуском worker-сервиса';
-
   const { data: hhJobs, error: hhErr } = await db
     .from('parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
+    .update({ status: 'pending' })
     .eq('status', 'running')
     .select('id');
   if (hhErr) log('warn', 'Startup recovery: parser_jobs update failed', hhErr);
-  else if (hhJobs?.length) log('info', `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
+  else if (hhJobs?.length) log('info', `Startup recovery: reset ${hhJobs.length} parser_jobs to pending`);
 }
 
 async function claimHHJob(): Promise<string | null> {

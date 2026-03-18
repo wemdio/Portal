@@ -11,11 +11,11 @@ async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
   const { data: jobs, error } = await db
     .from('yandex_maps_jobs')
-    .update({ status: 'failed', error_message: 'Прервано перезапуском worker-сервиса' })
+    .update({ status: 'pending' })
     .eq('status', 'running')
     .select('id');
   if (error) log('warn', 'Startup recovery: yandex_maps_jobs update failed', error);
-  else if (jobs?.length) log('info', `Startup recovery: marked ${jobs.length} yandex_maps_jobs as failed`);
+  else if (jobs?.length) log('info', `Startup recovery: reset ${jobs.length} yandex_maps_jobs to pending`);
 }
 
 async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'parse' } | null> {
@@ -24,7 +24,6 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
     .from('yandex_maps_jobs')
     .select('id, progress_stage')
     .eq('status', 'pending')
-    .in('progress_stage', ['pending', 'ready_to_parse'])
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -36,12 +35,17 @@ async function claimYandexMapsJob(): Promise<{ id: string; stage: 'collect' | 'p
     .update({ status: 'running', started_at: new Date().toISOString() })
     .eq('id', pending.id)
     .eq('status', 'pending')
-    .eq('progress_stage', pending.progress_stage)
     .select('id, progress_stage')
     .maybeSingle();
 
   if (!claimed) return null;
-  const stage = (claimed.progress_stage as string) === 'ready_to_parse' ? 'parse' : 'collect';
+  const stageValue = String(claimed.progress_stage ?? 'pending');
+  const stage =
+    stageValue === 'ready_to_parse' ||
+    stageValue === 'links_collected' ||
+    stageValue.startsWith('parsing_organizations')
+      ? 'parse'
+      : 'collect';
   return { id: claimed.id as string, stage };
 }
 

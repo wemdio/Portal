@@ -46,6 +46,7 @@ type ContactRow = {
   role_guess: string | null;
   channel_phone: string | null;
   channel_tg_username: string | null;
+  channel_tg_user_id: number | null;
   channel_email: string | null;
   profile_links?: Record<string, string> | null;
   score: number;
@@ -64,6 +65,20 @@ function phoneToWhatsApp(phone: string): string | null {
   if (digits.length === 11 && digits.startsWith('7')) return digits;
   if (digits.length === 10) return `7${digits}`;
   return digits.length >= 10 ? digits : null;
+}
+
+function getTgProfileLink(contact: Pick<ContactRow, 'channel_tg_username' | 'channel_tg_user_id'>): string | null {
+  const username = String(contact.channel_tg_username ?? '').trim().replace(/^@/, '');
+  if (username) return `https://t.me/${username}`;
+  const userId = Number(contact.channel_tg_user_id ?? 0) || 0;
+  if (userId > 0) return `tg://user?id=${userId}`;
+  return null;
+}
+
+function getTgProfileLabel(contact: Pick<ContactRow, 'channel_tg_username' | 'channel_tg_user_id'>): string {
+  const username = String(contact.channel_tg_username ?? '').trim();
+  if (username) return username.startsWith('@') ? username : `@${username}`;
+  return `id:${contact.channel_tg_user_id}`;
 }
 
 function ConfirmDeleteModal({
@@ -268,10 +283,10 @@ export default function CisLeadFinderPage() {
     await refreshJobs();
   }, [deleteTarget, selectedJobId]);
 
-  async function exportCsv(jobId: string) {
+  async function exportContacts(jobId: string, format: 'csv' | 'xlsx') {
     const token = await getToken();
     if (!token) return;
-    const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export`, {
+    const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export?format=${format}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return;
@@ -279,7 +294,7 @@ export default function CisLeadFinderPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `cis_leads_${jobId}.csv`;
+    a.download = `cis_leads_${jobId}.${format}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -629,10 +644,18 @@ export default function CisLeadFinderPage() {
               <div className="text-xs text-gray-500">{companies.length > 0 ? `${filteredCompanies.length} из ${companies.length}` : ''}</div>
               {selectedJobId ? (
                 <button
-                  onClick={() => void exportCsv(selectedJobId)}
+                  onClick={() => void exportContacts(selectedJobId, 'csv')}
                   className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
                 >
                   Экспорт CSV
+                </button>
+              ) : null}
+              {selectedJobId ? (
+                <button
+                  onClick={() => void exportContacts(selectedJobId, 'xlsx')}
+                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
+                >
+                  Экспорт Excel
                 </button>
               ) : null}
             </div>
@@ -705,6 +728,7 @@ export default function CisLeadFinderPage() {
                     {orderedContacts.map((p) => {
                       const role = roleLabel(p.role_guess);
                       const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email;
+                      const tgProfileLink = getTgProfileLink(p);
                       const profileLinks = (p.profile_links && typeof p.profile_links === 'object' ? p.profile_links : {}) as Record<string, string>;
                       const hasProfileLinks = Object.keys(profileLinks).length > 0;
                       return (
@@ -753,9 +777,9 @@ export default function CisLeadFinderPage() {
                                   })()}
                                 </>
                               ) : null}
-                              {p.channel_tg_username ? (
+                              {tgProfileLink ? (
                                 <a
-                                  href={`https://t.me/${p.channel_tg_username.replace(/^@/, '')}`}
+                                  href={tgProfileLink}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="inline-flex items-center gap-1 rounded-lg bg-sky-50 border border-sky-200 px-2.5 py-1 text-xs text-sky-700 hover:bg-sky-100 transition-colors"
@@ -763,7 +787,7 @@ export default function CisLeadFinderPage() {
                                   <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
                                     <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
                                   </svg>
-                                  {p.channel_tg_username}
+                                  {getTgProfileLabel(p)}
                                 </a>
                               ) : null}
                               {p.channel_email ? (
@@ -836,6 +860,20 @@ export default function CisLeadFinderPage() {
                               );
                             })()
                           )}
+
+                          {tgProfileLink ? (
+                            <div className="text-[11px] text-gray-500">
+                              TG profile:{' '}
+                              <a
+                                href={tgProfileLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sky-700 hover:text-sky-800 underline break-all"
+                              >
+                                {tgProfileLink}
+                              </a>
+                            </div>
+                          ) : null}
 
                           {hasProfileLinks ? (
                             <div className="flex gap-2 flex-wrap">

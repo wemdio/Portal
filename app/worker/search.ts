@@ -9,31 +9,28 @@ const running = new Set<Promise<void>>();
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const now = new Date().toISOString();
-  const errorMsg = 'Прервано перезапуском worker-сервиса';
-
   const searchUpdate = await db
     .from('search_parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
+    .update({ status: 'pending' })
     .eq('status', 'running')
     .select('id');
   const searchErr = searchUpdate.error as { code?: string; message?: string } | null;
   if (searchErr?.code === 'PGRST204' && (searchErr.message ?? '').includes("progress_stage")) {
     const fallbackUpdate = await db
       .from('search_parser_jobs')
-      .update({ status: 'failed', completed_at: now, error_message: errorMsg })
+      .update({ status: 'pending' })
       .eq('status', 'running')
       .select('id');
     if (fallbackUpdate.error) log('warn', 'Startup recovery: search_parser_jobs update failed', fallbackUpdate.error);
     else if (fallbackUpdate.data?.length) {
-      log('info', `Startup recovery: marked ${fallbackUpdate.data.length} search_parser_jobs as failed`);
+      log('info', `Startup recovery: reset ${fallbackUpdate.data.length} search_parser_jobs to pending`);
     }
     return;
   }
 
   if (searchUpdate.error) log('warn', 'Startup recovery: search_parser_jobs update failed', searchUpdate.error);
   else if (searchUpdate.data?.length) {
-    log('info', `Startup recovery: marked ${searchUpdate.data.length} search_parser_jobs as failed`);
+    log('info', `Startup recovery: reset ${searchUpdate.data.length} search_parser_jobs to pending`);
   }
 }
 
