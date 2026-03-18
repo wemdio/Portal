@@ -227,14 +227,17 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
 
   const { data: existing } = await supabaseAdmin
     .from('phone_identities')
-    .select('phone_normalized, tg_username')
+    .select('phone_normalized, tg_username, tg_user_id')
     .in('phone_normalized', unique);
 
   const existingSet = new Set((existing ?? []).map((r) => String((r as { phone_normalized?: unknown }).phone_normalized ?? '')));
   const existingTgByPhone = new Map(
     (existing ?? []).map((r) => [
       String((r as { phone_normalized?: unknown }).phone_normalized ?? ''),
-      String((r as { tg_username?: unknown }).tg_username ?? '').trim() || null,
+      {
+        tgUsername: String((r as { tg_username?: unknown }).tg_username ?? '').trim() || null,
+        tgUserId: Number((r as { tg_user_id?: unknown }).tg_user_id ?? 0) || null,
+      },
     ]),
   );
 
@@ -242,12 +245,18 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
 
   for (const phone of fromContacts) {
     if (toCheck.includes(phone)) continue;
-    const tg = existingTgByPhone.get(phone);
-    if (!tg) continue;
+    const identity = existingTgByPhone.get(phone);
+    if (!identity?.tgUsername && !identity?.tgUserId) continue;
     const ids = phoneToContactIds.get(phone);
     if (!ids?.length) continue;
     for (const id of ids) {
-      await supabaseAdmin.from('company_contacts').update({ channel_tg_username: tg }).eq('id', id);
+      await supabaseAdmin
+        .from('company_contacts')
+        .update({
+          channel_tg_username: identity.tgUsername,
+          channel_tg_user_id: identity.tgUserId,
+        })
+        .eq('id', id);
     }
   }
 
@@ -293,18 +302,25 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
 
         foundPhones.add(phone);
         const tgUsername = u.username ?? null;
+        const tgUserId = Number(u.id);
         await upsertIdentity({
           phone,
           status: 'found',
-          tg_user_id: Number(u.id),
+          tg_user_id: tgUserId,
           tg_username: tgUsername,
           first_name: u.firstName ?? null,
           last_name: u.lastName ?? null,
         });
         const contactIds = phoneToContactIds.get(phone);
-        if (tgUsername && contactIds?.length) {
+        if ((tgUsername || tgUserId) && contactIds?.length) {
           for (const contactId of contactIds) {
-            await supabaseAdmin!.from('company_contacts').update({ channel_tg_username: tgUsername }).eq('id', contactId);
+            await supabaseAdmin!
+              .from('company_contacts')
+              .update({
+                channel_tg_username: tgUsername,
+                channel_tg_user_id: tgUserId,
+              })
+              .eq('id', contactId);
           }
         }
       }

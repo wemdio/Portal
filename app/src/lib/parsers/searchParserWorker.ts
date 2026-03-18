@@ -624,7 +624,7 @@ export async function runSearchParserJob(jobId: string) {
     // 2. Set running
     await admin
       .from('search_parser_jobs')
-      .update({ status: 'running', started_at: new Date().toISOString() })
+      .update({ status: 'running', started_at: job.started_at ?? new Date().toISOString() })
       .eq('id', jobId);
 
     const rawConfig =
@@ -676,17 +676,23 @@ export async function runSearchParserJob(jobId: string) {
         progress_percent: 5,
       });
     } else {
+      const alreadyProcessed = Math.max(0, Number(job.processed_queries ?? 0));
+      const clampedProcessed = Math.min(alreadyProcessed, queries.length);
+      const initialProgressPercent = queries.length > 0 ? Math.round((clampedProcessed / queries.length) * 100) : 0;
       await safeUpdateSearchJob(admin, jobId, {
         total_queries: queries.length,
+        processed_queries: clampedProcessed,
         progress_stage: 'searching',
-        progress_percent: 0,
+        progress_percent: initialProgressPercent,
       });
     }
 
+    const resumeFrom = Math.min(Math.max(0, Number(job.processed_queries ?? 0)), queries.length);
+    const remainingQueries = queries.slice(resumeFrom);
     const totalQueries = queries.length;
 
-    let totalResults = 0;
-    let processedQueries = 0;
+    let totalResults = Math.max(0, Number(job.total_results ?? 0));
+    let processedQueries = resumeFrom;
     // NOTE: we prefer completing with a warning over failing the whole job
     // when search engines temporarily rate-limit or challenge the scraper.
     let hadFailures = false;
@@ -697,11 +703,28 @@ export async function runSearchParserJob(jobId: string) {
     let ddgBlockedCount = 0;
     let lastBlockedHint: string | null = null;
     let cancelled = false;
+    let cancelledByStatus: string | null = null;
     const withLock = createAsyncLock();
     const scheduleGoogle = createRateLimiter();
     const scheduleDdg = createRateLimiter();
     const scheduleBing = createRateLimiter();
     const scheduleMojeek = createRateLimiter();
+
+    if (resumeFrom > 0) {
+      try {
+        const { data: existingRows } = await admin
+          .from('search_results')
+          .select('site')
+          .eq('job_id', jobId)
+          .limit(50000);
+        for (const row of existingRows ?? []) {
+          const site = String((row as { site?: unknown }).site ?? '').trim().toLowerCase();
+          if (site) seenSites.add(site);
+        }
+      } catch {
+        // Backward compatibility: if old schema has no `site` column, resume still works by query index.
+      }
+    }
 
     if (usedFallbackQueries) {
       void logWarn(
@@ -714,7 +737,7 @@ export async function runSearchParserJob(jobId: string) {
     void logInfo(
       'parser.search.job.start',
       'Search parser job started',
-      { jobId, totalQueries, queries: queries.slice(0, 10) },
+      { jobId, totalQueries, resumeFrom, remainingQueries: remainingQueries.length, queries: remainingQueries.slice(0, 10) },
       logMeta,
     );
 
@@ -722,13 +745,14 @@ export async function runSearchParserJob(jobId: string) {
       name: 'search.execute',
       input: {
         jobId,
-        queries,
+        queries: remainingQueries,
         totalQueries,
+        resumeFrom,
         userId: job.user_id,
         requestId,
         route: 'search_parser_worker',
       },
-      message: `Парсинг поиска: ${queries[0] ?? 'без запросов'}`,
+      message: `Парсинг поиска: ${remainingQueries[0] ?? queries[0] ?? 'без запросов'}`,
       userId: job.user_id,
       searchJobId: jobId,
     });
@@ -737,7 +761,7 @@ export async function runSearchParserJob(jobId: string) {
     let googleBlockedForJob = false;
 
     // 3. Process queries (parallel workers: 2-3 by default)
-    await mapWithConcurrency(queries, QUERY_CONCURRENCY, async (query, index) => {
+    await mapWithConcurrency(remainingQueries, QUERY_CONCURRENCY, async (query, index) => {
       if (cancelled) return;
 
       // Check for cancellation (best-effort)
@@ -746,14 +770,16 @@ export async function runSearchParserJob(jobId: string) {
         .select('status')
         .eq('id', jobId)
         .single();
-      if (currentJob?.status === 'failed') {
+      if (currentJob?.status && currentJob.status !== 'running') {
         cancelled = true;
+        cancelledByStatus = String(currentJob.status);
         return;
       }
 
+      const absoluteIndex = resumeFrom + index;
       const querySpan = await trace?.startChild({
         name: 'search.query',
-        input: { query, index: index + 1, total: queries.length },
+        input: { query, index: absoluteIndex + 1, total: totalQueries },
         message: `Запрос: ${query}`,
       });
 
@@ -1280,7 +1306,7 @@ export async function runSearchParserJob(jobId: string) {
             {
               job_id: jobId,
               query,
-              query_index: index,
+              query_index: absoluteIndex,
               provider: statsProvider,
               last_google_page: statsLastGooglePage,
               results_count: insertedCount,
@@ -1292,6 +1318,23 @@ export async function runSearchParserJob(jobId: string) {
         }
       }
     });
+
+    if (cancelled) {
+      const progressPercent = totalQueries > 0 ? Math.round((processedQueries / totalQueries) * 100) : null;
+      if (cancelledByStatus === 'pending') {
+        await safeUpdateSearchJob(admin, jobId, {
+          status: 'pending',
+          processed_queries: processedQueries,
+          total_results: totalResults,
+          progress_percent: progressPercent,
+          progress_stage: 'searching',
+        });
+        await trace?.cancel('Пауза на время технических работ. Задача автоматически продолжится после деплоя.');
+        return;
+      }
+      // If job was switched to failed/cancelled externally, don't overwrite external status.
+      return;
+    }
 
     // Prefer completing with a meaningful hint if we saw blocks.
     const hint =

@@ -12,6 +12,7 @@ type YandexMapsJobRow = {
   user_id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
   config: unknown;
+  progress_stage: string | null;
   started_at: string | null;
   proxy_enabled: boolean;
   proxy_protocol: string | null;
@@ -42,7 +43,7 @@ async function getJob(jobId: string) {
   if (!supabaseAdmin) return null;
   const { data } = await supabaseAdmin
     .from('yandex_maps_jobs')
-    .select('id,user_id,status,config,started_at,proxy_enabled,proxy_protocol,proxy_host,proxy_port,proxy_credentials_encrypted')
+    .select('id,user_id,status,config,progress_stage,started_at,proxy_enabled,proxy_protocol,proxy_host,proxy_port,proxy_credentials_encrypted')
     .eq('id', jobId)
     .single();
   return (data ?? null) as YandexMapsJobRow | null;
@@ -94,17 +95,35 @@ export async function runYandexMapsCollectLinks(jobId: string) {
   });
 
   try {
+    const progressStage = String(job.progress_stage ?? 'pending');
+    const isResumeCollect = progressStage.startsWith('collecting_links') || progressStage === 'links_collected';
+
+    if (!isResumeCollect) {
+      await supabaseAdmin.from('yandex_maps_links').delete().eq('job_id', jobId);
+      await supabaseAdmin.from('yandex_maps_organizations').delete().eq('job_id', jobId);
+    }
+
+    const { data: existingLinksRows, error: existingLinksError } = await supabaseAdmin
+      .from('yandex_maps_links')
+      .select('link')
+      .eq('job_id', jobId);
+    if (existingLinksError) throw new Error(existingLinksError.message);
+    const existingLinks = normalizeYandexOrgUrls(
+      (existingLinksRows ?? [])
+        .map((r) => String((r as { link?: unknown }).link ?? ''))
+        .filter(Boolean),
+    );
+    const allLinksSet = new Set(existingLinks);
+    const allLinks: string[] = [...allLinksSet];
+
     await setJobPatch(jobId, {
       status: 'running',
       progress_stage: 'collecting_links',
       started_at: job.started_at ?? new Date().toISOString(),
-      processed_links: 0,
-      total_links: 0,
+      processed_links: allLinks.length,
+      total_links: allLinks.length,
       error_message: null,
     });
-
-    await supabaseAdmin.from('yandex_maps_links').delete().eq('job_id', jobId);
-    await supabaseAdmin.from('yandex_maps_organizations').delete().eq('job_id', jobId);
 
     const cfg = (job.config && typeof job.config === 'object') ? (job.config as Record<string, unknown>) : {};
     const MAX_SEARCH_URLS = 500;
@@ -134,8 +153,6 @@ export async function runYandexMapsCollectLinks(jobId: string) {
 
     void logInfo('parser.yandexmaps.collect.start', 'YandexMaps collect-links started', { jobId, searchUrlsCount: searchUrls.length }, logMeta);
 
-    const allLinks: string[] = [];
-    const allLinksSet = new Set<string>();
     const collectConcurrency = Number(process.env.YANDEXMAPS_COLLECT_CONCURRENCY ?? '4');
     let completedUrls = 0;
     const proxy = buildProxy(job);
@@ -243,15 +260,6 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
   });
 
   try {
-    await setJobPatch(jobId, {
-      status: 'running',
-      progress_stage: 'parsing_organizations',
-      started_at: job.started_at ?? new Date().toISOString(),
-      processed_organizations: 0,
-      total_organizations: 0,
-      error_message: null,
-    });
-
     const cfg = job.config ?? {};
     const headless = (cfg as { headless?: unknown }).headless !== false;
 
@@ -269,6 +277,28 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       return;
     }
 
+    const { data: existingOrgRows, error: existingOrgError } = await supabaseAdmin
+      .from('yandex_maps_organizations')
+      .select('card_url')
+      .eq('job_id', jobId);
+    if (existingOrgError) throw new Error(existingOrgError.message);
+
+    const parsedCardUrls = new Set(
+      (existingOrgRows ?? [])
+        .map((row) => String((row as { card_url?: unknown }).card_url ?? '').trim())
+        .filter(Boolean),
+    );
+    const remainingLinks = links.filter((link) => !parsedCardUrls.has(link));
+
+    await setJobPatch(jobId, {
+      status: 'running',
+      progress_stage: 'parsing_organizations',
+      started_at: job.started_at ?? new Date().toISOString(),
+      processed_organizations: parsedCardUrls.size,
+      total_organizations: links.length,
+      error_message: null,
+    });
+
     const serviceHealthy = await yandexMapsHealth();
     if (!serviceHealthy) {
       const msg = 'Сервис yandexmaps недоступен (health check failed). Проверьте, что контейнер yandexmaps запущен.';
@@ -278,12 +308,16 @@ export async function runYandexMapsParseOrganizations(jobId: string) {
       return;
     }
 
-    const chunks = chunk(links, 15);
-    await setJobPatch(jobId, { total_organizations: links.length });
+    const chunks = chunk(remainingLinks, 15);
 
-    void logInfo('parser.yandexmaps.parse.start', 'YandexMaps parse-orgs started', { jobId, totalLinks: links.length }, logMeta);
+    void logInfo(
+      'parser.yandexmaps.parse.start',
+      'YandexMaps parse-orgs started',
+      { jobId, totalLinks: links.length, alreadyParsed: parsedCardUrls.size, remaining: remainingLinks.length },
+      logMeta,
+    );
 
-    let processed = 0;
+    let processed = parsedCardUrls.size;
     for (let i = 0; i < chunks.length; i++) {
       const current = await getJob(jobId);
       if (current?.status === 'failed') {
