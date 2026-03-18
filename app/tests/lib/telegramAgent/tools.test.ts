@@ -1,20 +1,28 @@
 /** @jest-environment node */
 
-import { AGENT_TOOLS, TOOL_NAMES } from '@/lib/telegramAgent/tools';
+import { AGENT_TOOLS, WRITE_TOOLS, ALL_TOOLS, TOOL_NAMES, WRITE_TOOL_NAMES } from '@/lib/telegramAgent/tools';
 
 describe('telegramAgent/tools', () => {
-  it('defines exactly 12 tools', () => {
+  it('defines 12 read tools', () => {
     expect(AGENT_TOOLS).toHaveLength(12);
   });
 
+  it('defines 14 write tools', () => {
+    expect(WRITE_TOOLS).toHaveLength(14);
+  });
+
+  it('ALL_TOOLS = read + write', () => {
+    expect(ALL_TOOLS).toHaveLength(26);
+  });
+
   it('all tools have type "function"', () => {
-    for (const tool of AGENT_TOOLS) {
+    for (const tool of ALL_TOOLS) {
       expect(tool.type).toBe('function');
     }
   });
 
   it('all tools have name, description, and parameters', () => {
-    for (const tool of AGENT_TOOLS) {
+    for (const tool of ALL_TOOLS) {
       expect(typeof tool.function.name).toBe('string');
       expect(tool.function.name.length).toBeGreaterThan(0);
       expect(typeof tool.function.description).toBe('string');
@@ -29,9 +37,16 @@ describe('telegramAgent/tools', () => {
     expect(unique.size).toBe(TOOL_NAMES.length);
   });
 
-  it('TOOL_NAMES matches AGENT_TOOLS names', () => {
-    const names = AGENT_TOOLS.map((t) => t.function.name);
+  it('TOOL_NAMES matches ALL_TOOLS names', () => {
+    const names = ALL_TOOLS.map((t) => t.function.name);
     expect(TOOL_NAMES).toEqual(names);
+  });
+
+  it('WRITE_TOOL_NAMES contains all write tools', () => {
+    for (const tool of WRITE_TOOLS) {
+      expect(WRITE_TOOL_NAMES.has(tool.function.name)).toBe(true);
+    }
+    expect(WRITE_TOOL_NAMES.size).toBe(14);
   });
 
   it.each([
@@ -47,6 +62,20 @@ describe('telegramAgent/tools', () => {
     'get_review_requests',
     'get_team_workload',
     'get_weekly_summary',
+    'update_project_status',
+    'update_project_fields',
+    'create_project',
+    'create_task',
+    'update_task_status',
+    'update_task_fields',
+    'update_review_status',
+    'launch_hh_parser',
+    'launch_search_parser',
+    'launch_yandex_maps_parser',
+    'launch_email_search',
+    'launch_email_validation',
+    'launch_lpr_search',
+    'launch_brief_scoring',
   ])('includes tool "%s"', (name) => {
     expect(TOOL_NAMES).toContain(name);
   });

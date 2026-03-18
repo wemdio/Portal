@@ -128,6 +128,10 @@ type PersonalizationState = {
   isOpen: boolean;
   sourceCol: number;
   prompt: string;
+  activePreset: string | null;
+  briefText: string;
+  briefFileName: string;
+  isBriefUploading: boolean;
   isGenerating: boolean;
   progress: number;
   totalRows: number;
@@ -148,6 +152,7 @@ type WebsiteEnrichmentState = {
 };
 
 type BriefScoringState = {
+  showPreCheck: boolean;
   isOpen: boolean;
   inputMode: 'pdf' | 'text';
   briefText: string;
@@ -226,7 +231,7 @@ type DadataFieldOption = {
 type DadataEnrichmentState = {
   isOpen: boolean;
   sourceCol: number;
-  mode: 'inn' | 'name';
+  mode: 'inn';
   selectedFields: string[];
   isProcessing: boolean;
   progress: number;
@@ -266,12 +271,31 @@ const PERSONALIZATION_BATCH_SIZE = 2;
 const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
 const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
+
+const PERSONALIZATION_PRESETS = [
+  {
+    id: 'pain-point',
+    label: 'Занимаетесь X, боль - Y',
+    needsBrief: true,
+    prompt: `На основе данных о компании определи:
+1. X - чем конкретно занимается компания, на что делает ставку (кратко, 3-7 слов)
+2. Y - какая настоящая, глубинная боль у такого бизнеса (не очевидная, а та что лежит глубже)
+
+Сформулируй ответ СТРОГО в формате:
+"По сайту видно, что вы делаете ставку на [X]. В таких бизнесах обычно основная боль - [Y], а не то, что лежит на поверхности."
+
+Замени [X] и [Y] на конкретные значения. Убери квадратные скобки. Пиши одним абзацем, 1-2 предложения.
+Если данных недостаточно для определения боли - напиши нейтральную, но правдоподобную формулировку исходя из сферы.
+При определении боли учитывай контекст из брифа компании-отправителя (приложен ниже) - боль должна быть релевантна тому, что мы можем решить.`,
+  },
+] as const;
 const ENRICHMENT_PROGRESS_INTERVAL_MS = 200;
 const ENRICHMENT_UPDATE_FLUSH_MS = 250;
 const ENRICHMENT_UPDATE_BATCH = 20;
 const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
+const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
 const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
@@ -311,6 +335,8 @@ const MIN_COLUMN_WIDTH = 30;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 const HEADER_LABEL_HINT_REGEX =
   /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
+const ENRICHMENT_COLUMN_REGEX =
+  /(обогащен|описан|description|about|сфера|industry|сотрудник|employee|штат|revenue|оборот|инн|телефон|phone|dadata|фнс|город|city|регион|region)/i;
 
 const DEFAULT_ROWS = 20;
 const DEFAULT_COLS = 10;
@@ -869,9 +895,11 @@ export function DatabaseSpreadsheet() {
     leadListId: string;
     pushing: boolean;
     result: string;
-  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '' });
-  const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string }>>([]);
+    loadingLists: boolean;
+  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: false });
+  const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string; ts?: string }>>([]);
   const [instantlyLeadLists, setInstantlyLeadLists] = useState<Array<{ id: string; name: string }>>([]);
+  const [instantlyCampaignSearch, setInstantlyCampaignSearch] = useState('');
   const [projectsList, setProjectsList] = useState<Array<{ id: string; name: string }>>([]);
   const [reviewPublish, setReviewPublish] = useState<{
     isOpen: boolean;
@@ -944,6 +972,10 @@ export function DatabaseSpreadsheet() {
     isOpen: false,
     sourceCol: 0,
     prompt: '',
+    activePreset: null,
+    briefText: '',
+    briefFileName: '',
+    isBriefUploading: false,
     isGenerating: false,
     progress: 0,
     totalRows: 0,
@@ -951,6 +983,7 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const personalizationAbortRef = useRef<AbortController | null>(null);
+  const personalizationBriefInputRef = useRef<HTMLInputElement | null>(null);
   const [websiteEnrichment, setWebsiteEnrichment] = useState<WebsiteEnrichmentState>({
     isOpen: false,
     sourceCol: 0,
@@ -967,6 +1000,7 @@ export function DatabaseSpreadsheet() {
   const resumeEnrichmentRef = useRef<string | null>(null);
   const resumeBriefScoringRef = useRef<string | null>(null);
   const [briefScoring, setBriefScoring] = useState<BriefScoringState>({
+    showPreCheck: false,
     isOpen: false,
     inputMode: 'pdf',
     briefText: '',
@@ -2987,6 +3021,10 @@ export function DatabaseSpreadsheet() {
       isOpen: true,
       sourceCol: 0,
       prompt: '',
+      activePreset: null,
+      briefText: '',
+      briefFileName: '',
+      isBriefUploading: false,
       isGenerating: false,
       progress: 0,
       totalRows: 0,
@@ -3006,6 +3044,66 @@ export function DatabaseSpreadsheet() {
       isGenerating: false,
       error: null,
     }));
+  };
+
+  const handlePersonalizationBriefUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+
+    setPersonalization((prev) => ({ ...prev, isBriefUploading: true, briefFileName: file.name, briefText: '', error: null }));
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      const userId = session?.user?.id;
+      if (!token || !userId) {
+        setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: 'Необходима авторизация' }));
+        return;
+      }
+
+      const isPdf = file.type.includes('pdf') || file.name.toLowerCase().endsWith('.pdf');
+      if (!isPdf) {
+        setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: 'Файл должен быть PDF' }));
+        return;
+      }
+      if (file.size > MAX_BRIEF_FILE_BYTES) {
+        setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: 'Файл слишком большой (макс. 20MB)' }));
+        return;
+      }
+
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const uploadPath = `${BRIEF_STORAGE_PREFIX}/${userId}/${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage
+        .from(BRIEF_STORAGE_BUCKET)
+        .upload(uploadPath, file, { cacheControl: '3600', upsert: false, contentType: file.type || 'application/pdf' });
+
+      if (uploadError) {
+        setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: `Не удалось загрузить PDF: ${uploadError.message}` }));
+        return;
+      }
+
+      const res = await fetch('/api/brief-scoring/parse-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bucket: BRIEF_STORAGE_BUCKET, path: uploadPath, fileName: file.name }),
+      });
+
+      let resData: { text?: string; error?: string } | null = null;
+      try {
+        const text = await res.text();
+        if (text) resData = JSON.parse(text) as { text?: string; error?: string };
+      } catch { resData = null; }
+
+      if (!res.ok || !resData || resData.error) {
+        setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: resData?.error || `Ошибка при обработке PDF (${res.status})` }));
+        return;
+      }
+
+      setPersonalization((prev) => ({ ...prev, isBriefUploading: false, briefText: resData!.text ?? '' }));
+    } catch (err) {
+      setPersonalization((prev) => ({ ...prev, isBriefUploading: false, error: err instanceof Error ? err.message : 'Ошибка при загрузке файла' }));
+    }
   };
 
   const generatePersonalizedProposals = async (
@@ -3091,10 +3189,15 @@ export function DatabaseSpreadsheet() {
       return;
     }
 
-    if (!personalization.prompt.trim()) {
+    const hasPresetWithBrief = personalization.activePreset && personalization.briefText.trim();
+    const effectivePrompt = hasPresetWithBrief
+      ? `${personalization.prompt.trim()}\n\nБриф компании-отправителя:\n${personalization.briefText.trim()}`
+      : personalization.prompt.trim();
+
+    if (!effectivePrompt) {
       setPersonalization((prev) => ({
         ...prev,
-        error: 'Введите промпт для генерации',
+        error: personalization.activePreset ? 'Загрузите бриф для пресета' : 'Введите промпт для генерации',
       }));
       return;
     }
@@ -3180,7 +3283,7 @@ export function DatabaseSpreadsheet() {
             try {
               const proposal = await generatePersonalizedProposals(
                 sourceValue,
-                personalization.prompt,
+                effectivePrompt,
                 token,
               );
               return { rowIndex, proposal, error: null };
@@ -3864,13 +3967,23 @@ export function DatabaseSpreadsheet() {
   };
 
   // ── Brief Scoring (ЦА по брифу) ──────────────────────────────
+  const hasEnrichmentColumns = useMemo(() => {
+    if (!activeTab) return false;
+    const headers = activeTab.data[0] ?? [];
+    return headers.some((h) => {
+      const v = h?.trim();
+      return v ? ENRICHMENT_COLUMN_REGEX.test(v) : false;
+    });
+  }, [activeTab]);
+
   const openBriefScoringModal = () => {
     setBriefScoring((prev) => {
       if (prev.isScoring) {
         return { ...prev, isOpen: true, error: null };
       }
       return {
-        isOpen: true,
+        showPreCheck: true,
+        isOpen: false,
         inputMode: 'pdf',
         briefText: '',
         briefFileName: '',
@@ -3886,8 +3999,17 @@ export function DatabaseSpreadsheet() {
     });
   };
 
+  const confirmPreCheckAndProceed = () => {
+    setBriefScoring((prev) => ({ ...prev, showPreCheck: false, isOpen: true }));
+  };
+
+  const closePreCheckAndEnrich = () => {
+    setBriefScoring((prev) => ({ ...prev, showPreCheck: false }));
+    openWebsiteEnrichmentModal();
+  };
+
   const closeBriefScoringModal = () => {
-    setBriefScoring((prev) => ({ ...prev, isOpen: false, error: null }));
+    setBriefScoring((prev) => ({ ...prev, isOpen: false, showPreCheck: false, error: null }));
   };
 
   const handleBriefFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -5119,6 +5241,7 @@ export function DatabaseSpreadsheet() {
       let consecutiveErrors = 0;
       let lastProgressTime = Date.now();
       let token = currentToken;
+      let lastProcessed = processedCount;
       const signal = emailScrapingAbortRef.current?.signal;
       const pendingUpdates: Map<number, string> = new Map();
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5192,6 +5315,10 @@ export function DatabaseSpreadsheet() {
 
           const processed = data.job?.processed ?? 0;
           const jobTotal = data.job?.total ?? total;
+          if (processed > lastProcessed) {
+            lastProcessed = processed;
+            lastProgressTime = Date.now();
+          }
           setEmailScraping((prev) => ({
             ...prev,
             currentRow: Math.min(processed, jobTotal),
@@ -5203,8 +5330,8 @@ export function DatabaseSpreadsheet() {
             break;
           }
 
-          if (Date.now() - lastProgressTime > ENRICHMENT_STALL_TIMEOUT_MS) {
-            throw new Error('Процесс завис — нет новых результатов');
+          if (Date.now() - lastProgressTime > EMAIL_SCRAPING_STALL_TIMEOUT_MS) {
+            throw new Error('Поиск почт не продвигается более 10 минут');
           }
 
           await new Promise((r) => setTimeout(r, ENRICHMENT_PROGRESS_INTERVAL_MS));
@@ -6160,10 +6287,7 @@ export function DatabaseSpreadsheet() {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({
-            rows: batch,
-            mode: dadataEnrichment.mode,
-          }),
+          body: JSON.stringify({ rows: batch }),
           signal: dadataAbortRef.current?.signal,
         });
 
@@ -7224,23 +7348,44 @@ export function DatabaseSpreadsheet() {
         <button
           type="button"
           onClick={async () => {
-            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '' });
+            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: true });
+            setInstantlyCampaigns([]);
+            setInstantlyLeadLists([]);
+            setInstantlyCampaignSearch('');
             try {
               const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
-              const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+              const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+              const errors: string[] = [];
               const [cRes, lRes] = await Promise.all([
-                fetch('/api/instantly/campaigns?limit=all', { headers }),
+                fetch('/api/instantly/campaigns?limit=500', { headers }),
                 fetch('/api/instantly/lead-lists?limit=all', { headers }),
               ]);
               if (cRes.ok) {
                 const cd = await cRes.json();
-                setInstantlyCampaigns((cd.items ?? []).map((c: { id: string; name: string }) => ({ id: c.id, name: c.name })));
+                const raw = (cd.items ?? cd.data ?? (Array.isArray(cd) ? cd : [])) as Array<{ id: string; name: string; timestamp_created?: string }>;
+                const sorted = raw
+                  .map((c) => ({ id: c.id, name: c.name, ts: c.timestamp_created ?? '' }))
+                  .sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
+                setInstantlyCampaigns(sorted);
+              } else {
+                const errBody = await cRes.json().catch(() => ({ error: cRes.statusText }));
+                errors.push(`Кампании: ${errBody?.error ?? cRes.statusText}`);
               }
               if (lRes.ok) {
                 const ld = await lRes.json();
-                setInstantlyLeadLists((ld.items ?? []).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
+                setInstantlyLeadLists((ld.items ?? ld.data ?? (Array.isArray(ld) ? ld : [])).map((l: { id: string; name: string }) => ({ id: l.id, name: l.name })));
+              } else {
+                const errBody = await lRes.json().catch(() => ({ error: lRes.statusText }));
+                errors.push(`Lead-списки: ${errBody?.error ?? lRes.statusText}`);
               }
-            } catch {}
+              if (errors.length) {
+                setInstantlyPush((s) => ({ ...s, result: `Ошибка загрузки: ${errors.join('; ')}` }));
+              }
+            } catch (err) {
+              setInstantlyPush((s) => ({ ...s, result: `Ошибка: ${err instanceof Error ? err.message : 'не удалось загрузить данные'}` }));
+            } finally {
+              setInstantlyPush((s) => ({ ...s, loadingLists: false }));
+            }
           }}
           disabled={!activeTab || rowCount === 0}
           className="inline-flex items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -8267,7 +8412,7 @@ export function DatabaseSpreadsheet() {
               </button>
             </div>
 
-            <div className="space-y-6 px-6 py-6">
+            <div className="space-y-5 px-6 py-5 max-h-[65vh] overflow-y-auto">
               {personalization.error && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
                   {personalization.error}
@@ -8307,8 +8452,93 @@ export function DatabaseSpreadsheet() {
               </div>
 
               <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-700">Пресеты</label>
+                <div className="flex flex-wrap gap-2">
+                  {PERSONALIZATION_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() =>
+                        setPersonalization((prev) => {
+                          const deselect = prev.activePreset === preset.id;
+                          return {
+                            ...prev,
+                            activePreset: deselect ? null : preset.id,
+                            prompt: deselect ? '' : preset.prompt,
+                            error: null,
+                            ...(deselect ? { briefText: '', briefFileName: '' } : {}),
+                          };
+                        })
+                      }
+                      disabled={personalization.isGenerating}
+                      className={`rounded-lg border px-3 py-2 text-xs font-medium transition-all ${
+                        personalization.activePreset === preset.id
+                          ? 'border-gray-900 bg-gray-900 text-white shadow-sm'
+                          : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-gray-300 hover:bg-gray-100'
+                      } disabled:opacity-50`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-400">Пресет заполнит промпт автоматически. Или напишите свой промпт вручную.</p>
+              </div>
+
+              {personalization.activePreset != null && PERSONALIZATION_PRESETS.find((p) => p.id === personalization.activePreset)?.needsBrief && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-semibold text-gray-700">Бриф вашей компании (PDF)</label>
+                  <input
+                    ref={personalizationBriefInputRef}
+                    type="file"
+                    accept=".pdf"
+                    onChange={(e) => void handlePersonalizationBriefUpload(e)}
+                    className="hidden"
+                  />
+                  {!personalization.briefText ? (
+                    <button
+                      type="button"
+                      onClick={() => personalizationBriefInputRef.current?.click()}
+                      disabled={personalization.isBriefUploading || personalization.isGenerating}
+                      className="w-full rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 p-5 text-center transition hover:border-gray-400 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {personalization.isBriefUploading ? (
+                        <div className="flex flex-col items-center gap-1.5">
+                          <span className="animate-spin text-xl">⟳</span>
+                          <span className="text-xs text-gray-500">Загрузка {personalization.briefFileName}...</span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-1.5">
+                          <span className="text-2xl">📄</span>
+                          <span className="text-xs font-medium text-gray-600">Загрузите PDF бриф</span>
+                          <span className="text-[10px] text-gray-400">AI будет определять боли клиентов через призму вашего продукта</span>
+                        </div>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">✅</span>
+                          <span className="text-xs font-medium text-emerald-800">{personalization.briefFileName}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPersonalization((prev) => ({ ...prev, briefText: '', briefFileName: '', error: null }))}
+                          disabled={personalization.isGenerating}
+                          className="text-[10px] text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                        >
+                          Заменить
+                        </button>
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-gray-500 line-clamp-2">{personalization.briefText.slice(0, 200)}...</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-2">
                 <label className="block text-sm font-semibold text-gray-700">
-                  Промпт для генерации
+                  {personalization.activePreset ? 'Промпт (заполнен пресетом)' : 'Промпт для генерации'}
                 </label>
                 <div className="relative">
                   <textarea
@@ -8317,15 +8547,19 @@ export function DatabaseSpreadsheet() {
                       setPersonalization((prev) => ({
                         ...prev,
                         prompt: e.target.value,
+                        activePreset: null,
                         error: null,
                       }))
                     }
                     disabled={personalization.isGenerating}
                     placeholder="Например: Напиши короткое предложение о том, как наши услуги помогут компании..."
-                    rows={4}
-                    className="w-full resize-none rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-all placeholder:text-gray-400 focus:border-gray-400 disabled:opacity-60"
+                    rows={personalization.activePreset ? 4 : 6}
+                    className="w-full resize-y rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none transition-all placeholder:text-gray-400 focus:border-gray-400 disabled:opacity-60"
                   />
                 </div>
+                {personalization.activePreset && (
+                  <p className="text-[10px] text-gray-400">Промпт заполнен пресетом. Редактирование вручную отвяжет пресет.</p>
+                )}
               </div>
 
               {personalization.isGenerating && (
@@ -8365,7 +8599,7 @@ export function DatabaseSpreadsheet() {
                 <button
                   type="button"
                   onClick={() => void handleStartPersonalization()}
-                  disabled={personalization.isGenerating || !personalization.prompt.trim()}
+                  disabled={personalization.isGenerating || !personalization.prompt.trim() || personalization.isBriefUploading || (!!personalization.activePreset && PERSONALIZATION_PRESETS.find((p) => p.id === personalization.activePreset)?.needsBrief === true && !personalization.briefText.trim())}
                   className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-gray-900/20 transition-all hover:bg-gray-800 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
                 >
                   {personalization.isGenerating ? (
@@ -8634,7 +8868,7 @@ export function DatabaseSpreadsheet() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-500 px-1">
-                  В ячейках должны быть URL компаний (example.com или https://...)
+                  В ячейках могут быть один или несколько URL компаний: через запятую, точку с запятой или перенос строки
                 </p>
               </div>
 
@@ -8871,6 +9105,89 @@ export function DatabaseSpreadsheet() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Brief Scoring Pre-Check ─────────────────────────── */}
+      {briefScoring.showPreCheck && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500 text-white shadow-sm text-lg">
+                  💡
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Перед оценкой ЦА</h3>
+                  <p className="text-xs text-gray-500 font-medium">Проверка готовности базы</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBriefScoring((prev) => ({ ...prev, showPreCheck: false }))}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div className="rounded-xl border border-amber-100 bg-amber-50/60 p-4 text-sm text-gray-700 space-y-2.5">
+                <p className="font-semibold text-gray-900">Как работает оценка ЦА?</p>
+                <p>
+                  AI анализирует <span className="font-medium">данные о каждой компании</span> в таблице
+                  и сравнивает их с вашим брифом/описанием ЦА. Чем больше информации о компании — тем точнее оценка.
+                </p>
+                <p>
+                  Если в таблице только названия и сайты — AI не сможет качественно оценить релевантность.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4 text-sm text-gray-700 space-y-2">
+                <p className="font-semibold text-gray-900">Какие данные улучшают оценку?</p>
+                <ul className="list-disc pl-5 space-y-1 text-gray-600">
+                  <li>Описание компании (с сайта или из DaData)</li>
+                  <li>Сфера деятельности / отрасль</li>
+                  <li>Количество сотрудников</li>
+                  <li>Город / регион</li>
+                  <li>ИНН, оборот и другие данные</li>
+                </ul>
+                <p className="text-xs text-gray-500 mt-1">
+                  Используйте кнопки <span className="font-medium">&laquo;Обогатить&raquo;</span> или{' '}
+                  <span className="font-medium">&laquo;DaData&raquo;</span> для автоматического получения этих данных.
+                </p>
+              </div>
+
+              {hasEnrichmentColumns ? (
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-800">
+                  <span>✅</span>
+                  <span>В таблице обнаружены колонки с обогащающими данными</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg bg-orange-50 border border-orange-200 px-3 py-2 text-sm text-orange-800">
+                  <span>⚠️</span>
+                  <span>Колонки с обогащёнными данными не найдены — результат может быть неточным</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <button
+                type="button"
+                onClick={closePreCheckAndEnrich}
+                className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-medium text-blue-700 transition hover:bg-blue-100"
+              >
+                Сначала обогатить
+              </button>
+              <button
+                type="button"
+                onClick={confirmPreCheckAndProceed}
+                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0"
+              >
+                Данные есть, продолжить
+              </button>
             </div>
           </div>
         </div>
@@ -9655,28 +9972,91 @@ export function DatabaseSpreadsheet() {
                 {instantlyPush.result}
               </div>
             )}
-            <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
-            <select
-              value={instantlyPush.campaignId}
-              onChange={(e) => setInstantlyPush((s) => ({ ...s, campaignId: e.target.value, leadListId: '' }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">— Выберите кампанию —</option>
-              {instantlyCampaigns.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
-            <select
-              value={instantlyPush.leadListId}
-              onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">— Выберите lead-список —</option>
-              {instantlyLeadLists.map((l) => (
-                <option key={l.id} value={l.id}>{l.name}</option>
-              ))}
-            </select>
+            {instantlyPush.loadingLists ? (
+              <div className="flex items-center gap-2 py-6 justify-center text-sm text-gray-400">
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                Загрузка кампаний и списков…
+              </div>
+            ) : (
+              <>
+                <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
+                <div className="relative mb-3">
+                  <input
+                    type="text"
+                    placeholder={instantlyPush.campaignId
+                      ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
+                      : 'Поиск кампании…'}
+                    value={instantlyCampaignSearch}
+                    onChange={(e) => {
+                      setInstantlyCampaignSearch(e.target.value);
+                      if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
+                    }}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {instantlyPush.campaignId && !instantlyCampaignSearch && (
+                    <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                      <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
+                        {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
+                      </span>
+                    </div>
+                  )}
+                  {instantlyPush.campaignId && (
+                    <button
+                      type="button"
+                      onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }}
+                      className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                  )}
+                </div>
+                {!instantlyPush.campaignId && (() => {
+                  const q = instantlyCampaignSearch.toLowerCase().trim();
+                  const filtered = q
+                    ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q))
+                    : instantlyCampaigns;
+                  return (
+                    <div className="mb-3 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+                      {filtered.length === 0 ? (
+                        <p className="px-3 py-3 text-sm text-gray-400 text-center">
+                          {q ? 'Ничего не найдено' : 'Нет кампаний'}
+                        </p>
+                      ) : (
+                        filtered.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' }));
+                              setInstantlyCampaignSearch('');
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate">{c.name}</span>
+                            {c.ts && (
+                              <span className="shrink-0 text-[10px] text-gray-400">
+                                {new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}
+                              </span>
+                            )}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  );
+                })()}
+                <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
+                <select
+                  value={instantlyPush.leadListId}
+                  onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">— Выберите lead-список —</option>
+                  {instantlyLeadLists.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+              </>
+            )}
             <div className="flex justify-end gap-2">
               <button
                 type="button"
@@ -9860,7 +10240,7 @@ export function DatabaseSpreadsheet() {
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-gray-900">DaData — обогащение</h3>
-                  <p className="text-xs text-gray-500 font-medium">Поиск компаний по ИНН или названию</p>
+                  <p className="text-xs text-gray-500 font-medium">Поиск компаний по ИНН</p>
                 </div>
               </div>
               <button
@@ -9880,29 +10260,8 @@ export function DatabaseSpreadsheet() {
               )}
 
               <div className="space-y-2">
-                <label className="block text-sm font-semibold text-gray-700">Режим поиска</label>
-                <div className="flex gap-2">
-                  {(['inn', 'name'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setDadataEnrichment((prev) => ({ ...prev, mode: m, error: null }))}
-                      disabled={dadataEnrichment.isProcessing}
-                      className={`flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition-all ${
-                        dadataEnrichment.mode === m
-                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700 shadow-sm'
-                          : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
-                      } disabled:opacity-60`}
-                    >
-                      {m === 'inn' ? 'По ИНН' : 'По названию'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-2">
                 <label className="block text-sm font-semibold text-gray-700">
-                  Столбец с {dadataEnrichment.mode === 'inn' ? 'ИНН' : 'названиями'}
+                  Столбец с ИНН
                 </label>
                 <div className="relative">
                   <select
@@ -9977,14 +10336,6 @@ export function DatabaseSpreadsheet() {
                   ))}
                 </div>
               </div>
-
-              {dadataEnrichment.mode === 'name' && (
-                <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
-                  <p className="text-xs text-amber-700 leading-relaxed">
-                    При поиске по названию берётся первый результат из подсказок DaData. Для точного поиска используйте режим «По ИНН».
-                  </p>
-                </div>
-              )}
 
               {!dadataEnrichment.isProcessing && (
                 <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">

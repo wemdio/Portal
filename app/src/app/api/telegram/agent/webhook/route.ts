@@ -20,10 +20,10 @@ export async function POST(req: NextRequest) {
   }
 
   const msg = update.message as
-    | { message_id: number; chat: { id: number }; from?: { id: number }; text?: string }
+    | { message_id: number; chat: { id: number }; from?: { id: number }; text?: string; voice?: { file_id: string; duration: number } }
     | undefined;
 
-  if (msg?.text && msg?.from?.id) {
+  if (msg?.from?.id && (msg.text || msg.voice)) {
     void handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
   }
 

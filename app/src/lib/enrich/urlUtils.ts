@@ -1,4 +1,27 @@
 const URL_TOKEN_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/i;
+const URL_TOKEN_GLOBAL_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/gi;
+
+function normalizeUrlCandidate(candidate: string, rawForError: string): string {
+  const cleaned = candidate.replace(/[),.;]+$/g, '');
+  const withScheme = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new Error(`Невалидный URL: ${rawForError}`);
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error(`Неподдерживаемый протокол: ${parsed.protocol}`);
+  }
+
+  if (!parsed.hostname.includes('.')) {
+    throw new Error(`Невалидный домен: ${parsed.hostname}`);
+  }
+
+  return parsed.href;
+}
 
 /**
  * Normalise a raw string into a valid `https://` URL.
@@ -9,24 +32,32 @@ export function normalizeUrl(raw: string): string {
   if (!trimmed) throw new Error('Пустой URL');
   const tokenMatch = trimmed.match(URL_TOKEN_REGEX);
   const candidate = tokenMatch ? tokenMatch[0] : trimmed;
-  const cleaned = candidate.replace(/[),.;]+$/g, '');
-  const withScheme = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+  return normalizeUrlCandidate(candidate, trimmed);
+}
 
-  let parsed: URL;
-  try {
-    parsed = new URL(withScheme);
-  } catch {
-    throw new Error(`Невалидный URL: ${trimmed}`);
+/**
+ * Extract and normalize all URL-like tokens from a cell.
+ * Useful for rows where several sites are listed in one string.
+ */
+export function extractNormalizedUrls(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+
+  const matches = Array.from(trimmed.matchAll(URL_TOKEN_GLOBAL_REGEX), (match) => match[0]);
+  const candidates = matches.length > 0 ? matches : [trimmed];
+  const unique = new Set<string>();
+
+  for (const candidate of candidates) {
+    try {
+      unique.add(normalizeUrlCandidate(candidate, trimmed));
+    } catch {
+      // Ignore broken fragments when the same cell contains other valid URLs.
+    }
   }
 
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error(`Неподдерживаемый протокол: ${parsed.protocol}`);
+  if (unique.size > 0) {
+    return Array.from(unique);
   }
 
-  // Basic hostname check: at least one dot
-  if (!parsed.hostname.includes('.')) {
-    throw new Error(`Невалидный домен: ${parsed.hostname}`);
-  }
-
-  return parsed.href;
+  return [normalizeUrl(trimmed)];
 }

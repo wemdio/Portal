@@ -156,7 +156,7 @@ function isHtmlLikeContentType(contentType: string | null): boolean {
   );
 }
 
-export { normalizeUrl } from '@/lib/enrich/urlUtils';
+export { extractNormalizedUrls, normalizeUrl } from '@/lib/enrich/urlUtils';
 
 function normalizeBrandCandidate(value: string) {
   return value
