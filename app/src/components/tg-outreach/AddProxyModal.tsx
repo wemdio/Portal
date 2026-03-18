@@ -5,6 +5,37 @@ import { X } from 'lucide-react';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 import type { ProxyType, TgOutreachTag } from '@/lib/tgOutreach/types';
 
+function parseProxyString(raw: string): {
+  ip: string; port: string; login: string; password: string; type: ProxyType;
+} | null {
+  const value = raw.trim();
+  if (!value) return null;
+
+  if (value.includes('://')) {
+    try {
+      const url = new URL(value);
+      const proto = url.protocol.replace(':', '').toUpperCase();
+      const type: ProxyType = proto === 'SOCKS5' ? 'SOCKS5' : proto === 'SOCKS4' ? 'SOCKS4' : 'HTTP';
+      if (!url.hostname || !url.port) return null;
+      return {
+        ip: url.hostname,
+        port: url.port,
+        login: decodeURIComponent(url.username || ''),
+        password: decodeURIComponent(url.password || ''),
+        type,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const parts = value.split(':').map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  const [ip, portStr, login = '', password = ''] = parts;
+  if (!ip || !portStr || isNaN(Number(portStr))) return null;
+  return { ip, port: portStr, login, password, type: 'HTTP' };
+}
+
 interface Props {
   allTags: TgOutreachTag[];
   onClose: () => void;
@@ -12,6 +43,7 @@ interface Props {
 }
 
 export function AddProxyModal({ allTags, onClose, onCreated }: Props) {
+  const [quickPaste, setQuickPaste] = useState('');
   const [ip, setIp] = useState('');
   const [port, setPort] = useState('');
   const [login, setLogin] = useState('');
@@ -21,6 +53,22 @@ export function AddProxyModal({ allTags, onClose, onCreated }: Props) {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [parseSuccess, setParseSuccess] = useState(false);
+
+  const handleQuickPaste = (value: string) => {
+    setQuickPaste(value);
+    setParseSuccess(false);
+    const parsed = parseProxyString(value);
+    if (parsed) {
+      setIp(parsed.ip);
+      setPort(parsed.port);
+      setLogin(parsed.login);
+      setPassword(parsed.password);
+      setType(parsed.type);
+      setError(null);
+      setParseSuccess(true);
+    }
+  };
 
   const handleSubmit = async () => {
     if (!ip.trim() || !port.trim()) {
@@ -66,6 +114,44 @@ export function AddProxyModal({ allTags, onClose, onCreated }: Props) {
         </div>
 
         <div className="space-y-4 px-6 py-5">
+          <div>
+            <label className="block text-sm text-gray-600 mb-1">
+              Вставьте строку прокси целиком (необязательно). Поддерживаемые форматы:
+            </label>
+            <p className="text-xs text-gray-400 mb-1.5">
+              http://логин:пароль@хост:порт &nbsp;·&nbsp; socks5://логин:пароль@хост:порт &nbsp;·&nbsp; хост:порт:логин:пароль
+            </p>
+            <input
+              value={quickPaste}
+              onChange={(e) => handleQuickPaste(e.target.value)}
+              onPaste={(e) => {
+                const text = e.clipboardData.getData('text');
+                if (text) {
+                  e.preventDefault();
+                  handleQuickPaste(text);
+                }
+              }}
+              placeholder="http://user:pass@host:port"
+              className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-1 ${
+                parseSuccess
+                  ? 'border-green-300 bg-green-50 focus:border-green-400 focus:ring-green-400'
+                  : 'border-gray-200 focus:border-blue-400 focus:ring-blue-400'
+              }`}
+            />
+            {parseSuccess && (
+              <p className="mt-1 text-xs text-green-600">Прокси распознана, поля заполнены автоматически</p>
+            )}
+          </div>
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center" aria-hidden="true">
+              <div className="w-full border-t border-gray-200" />
+            </div>
+            <div className="relative flex justify-center">
+              <span className="bg-white px-2 text-xs text-gray-400">или заполните вручную</span>
+            </div>
+          </div>
+
           <div>
             <label className="block text-sm text-gray-600 mb-1">
               IP адрес (только IP4, IP6 не поддерживаются!). Обычно формат такой: 190.123.22.11 или isp2.domen.com
