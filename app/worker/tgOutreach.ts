@@ -174,6 +174,7 @@ async function main() {
     pollIntervalMs: POLL_INTERVAL_MS,
     shouldStop,
     pollOnce,
+    realtimeTables: ['tg_outreach_jobs'],
   });
 
   log('info', 'Waiting for running campaigns to finish...');

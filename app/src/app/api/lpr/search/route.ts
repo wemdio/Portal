@@ -2,8 +2,6 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { hasApolloKey } from '@/lib/lpr/apolloClient';
-import { hasPdlKey } from '@/lib/lpr/pdlClient';
 import { discoverLpr } from '@/lib/lpr/lprDiscoveryService';
 import { LPR_CONFIG } from '@/lib/lpr/config';
 import type { LprSearchConfig, CompanyInput, LprSeniority, LprFunction } from '@/types/lpr';
@@ -23,8 +21,6 @@ export async function POST(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
 
   if (!supabaseAdmin) return jsonError('Server misconfigured: missing service role key', 500);
-  if (!hasApolloKey()) return jsonError('Apollo API key not configured', 500);
-  if (!hasPdlKey()) return jsonError('PDL API key not configured', 500);
 
   let body: {
     company?: CompanyInput;
@@ -113,8 +109,6 @@ export async function POST(req: NextRequest) {
     if (result.candidates.length > 0) {
       const rows = result.candidates.map((c) => ({
         job_id: job.id,
-        apollo_id: c.apollo_id,
-        pdl_id: c.pdl_id,
         full_name: c.full_name,
         first_name: c.first_name,
         last_name: c.last_name,
@@ -128,8 +122,6 @@ export async function POST(req: NextRequest) {
         phone: c.phone,
         linkedin_url: c.linkedin_url,
         score: c.score,
-        enrichment_source: c.enrichment_source,
-        pdl_likelihood: c.pdl_likelihood,
         data_freshness: c.data_freshness,
       }));
 
@@ -144,8 +136,6 @@ export async function POST(req: NextRequest) {
         total_found: result.total_found,
         enriched_count: result.enriched_count,
         usable_count: result.usable_count,
-        apollo_credits: result.apollo_credits_used,
-        pdl_credits: result.pdl_credits_used,
         completed_at: new Date().toISOString(),
       })
       .eq('id', job.id);

@@ -335,7 +335,7 @@ export default function TgTranscribePage() {
           setScanResult(job);
         }
       }
-    }, 2000);
+    }, 5000);
   }, [fetchJobStatus, stopPolling]);
 
   useEffect(() => {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 
 export const dynamic = 'force-dynamic';
 
@@ -86,6 +87,11 @@ export async function POST(req: NextRequest) {
           file_size_bytes: arrayBuffer.byteLength,
         })
         .eq('id', job.id);
+
+      // Start processing right away so the job does not stay in pending.
+      void runLeadImportJob(job.id).catch((error) => {
+        console.error('CIS lead import worker failed:', error);
+      });
 
       return NextResponse.json({ job_id: job.id }, { status: 201 });
     },

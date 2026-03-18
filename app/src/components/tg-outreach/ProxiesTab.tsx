@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo } from 'react';
-import { Plus, Search, Trash2, Pencil, ChevronUp, ChevronDown, Loader2 } from 'lucide-react';
+import { useState, useMemo, type ChangeEvent } from 'react';
+import { Plus, Search, Trash2, Pencil, ChevronUp, ChevronDown, Loader2, Upload } from 'lucide-react';
 import { useTgOutreachProxies } from '@/lib/tgOutreach/hooks';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 import { AddProxyModal } from './AddProxyModal';
@@ -28,6 +28,8 @@ export function ProxiesTab({ allTags }: Props) {
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -79,6 +81,25 @@ export function ProxiesTab({ allTags }: Props) {
   const handleDelete = async (id: string) => {
     await tgOutreachFetch(`/proxies/${id}`, { method: 'DELETE' });
     reload();
+  };
+
+  const handleFilesUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (!files.length) return;
+
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const form = new FormData();
+      files.forEach((file) => form.append('files', file));
+      await tgOutreachFetch('/proxies/bulk-files', { method: 'POST', body: form });
+      reload();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Ошибка загрузки');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const uniqueTags = useMemo(() => {
@@ -142,8 +163,26 @@ export function ProxiesTab({ allTags }: Props) {
             <Plus className="h-4 w-4" />
             Добавить прокси
           </button>
+          <label className={`relative flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-zinc-50 ${uploading ? 'opacity-60' : ''}`}>
+            <input
+              type="file"
+              multiple
+              accept=".txt,.csv,.json"
+              className="absolute inset-0 cursor-pointer opacity-0"
+              onChange={handleFilesUpload}
+              disabled={uploading}
+              title="Загрузите .txt/.csv/.json с прокси"
+            />
+            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            Загрузить файлы
+          </label>
         </div>
       </div>
+      {uploadError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {uploadError}
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-20">

@@ -137,7 +137,7 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-4 border-b border-gray-100 px-6 shrink-0">
+        <div className="flex gap-6 border-b border-gray-100 px-6 shrink-0">
           {tabs.map((t) => (
             <button
               key={t.id}
