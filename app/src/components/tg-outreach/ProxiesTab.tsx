@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useMemo, type ChangeEvent } from 'react';
-import { Plus, Search, Trash2, Pencil, ChevronUp, ChevronDown, Loader2, Upload } from 'lucide-react';
+import { Plus, Search, Trash2, Pencil, ChevronUp, ChevronDown, Loader2, Upload, ClipboardPaste } from 'lucide-react';
 import { useTgOutreachProxies } from '@/lib/tgOutreach/hooks';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 import { AddProxyModal } from './AddProxyModal';
+import { BulkPasteProxyModal } from './BulkPasteProxyModal';
 import type { TgOutreachProxy, TgOutreachTag } from '@/lib/tgOutreach/types';
 
 type SortKey = 'ip' | 'port' | 'type' | 'created_at';
@@ -27,6 +28,7 @@ export function ProxiesTab({ allTags }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('created_at');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [showAdd, setShowAdd] = useState(false);
+  const [showBulkPaste, setShowBulkPaste] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -163,6 +165,13 @@ export function ProxiesTab({ allTags }: Props) {
             <Plus className="h-4 w-4" />
             Добавить прокси
           </button>
+          <button
+            onClick={() => setShowBulkPaste(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-zinc-50"
+          >
+            <ClipboardPaste className="h-4 w-4" />
+            Вставить списком
+          </button>
           <label className={`relative flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-zinc-50 ${uploading ? 'opacity-60' : ''}`}>
             <input
               type="file"
@@ -250,6 +259,13 @@ export function ProxiesTab({ allTags }: Props) {
         <AddProxyModal
           allTags={allTags}
           onClose={() => setShowAdd(false)}
+          onCreated={reload}
+        />
+      )}
+
+      {showBulkPaste && (
+        <BulkPasteProxyModal
+          onClose={() => setShowBulkPaste(false)}
           onCreated={reload}
         />
       )}

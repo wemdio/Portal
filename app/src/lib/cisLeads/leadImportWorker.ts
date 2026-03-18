@@ -9,6 +9,7 @@ import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
 import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
+import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
 import { runEmailGuesser } from '@/lib/cisLeads/emailGuesser';
 import { runYandexMapsEnrichment } from '@/lib/cisLeads/yandexMapsEnrichment';
 import { guessLprRoleFromPost, normalizeInn } from '@/lib/cisLeads/lprRole';
@@ -227,7 +228,12 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
     const outShort = String(sData.name?.short_with_opf ?? '').trim() || null;
     const outRegion = String(sData.address?.data?.region ?? lead.raw_region ?? '').trim() || null;
     const outCity = String(sData.address?.data?.city ?? lead.raw_city ?? '').trim() || null;
-    // Upsert by INN when available; otherwise insert best-effort row.
+
+    const dadataPhones = (sData.phones as Array<{ value?: string }> | undefined) ?? [];
+    const dadataEmails = (sData.emails as Array<{ value?: string }> | undefined) ?? [];
+    const outPhone = dadataPhones[0]?.value?.trim() || null;
+    const outEmail = dadataEmails[0]?.value?.trim()?.toLowerCase() || null;
+
     let companyId: string | null = null;
     if (outInn) {
       const { data: company, error: upsertErr } = await db
@@ -244,8 +250,8 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
             okved_main: null,
             employees_range: null,
             site: null,
-            phone: null,
-            email: null,
+            phone: outPhone,
+            email: outEmail,
             source: 'dadata',
             source_confidence: 1.0,
             updated_at: now,
@@ -269,8 +275,8 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
           okved_main: null,
           employees_range: null,
           site: null,
-          phone: null,
-          email: null,
+          phone: outPhone,
+          email: outEmail,
           source: 'dadata',
           source_confidence: 0.7,
           updated_at: now,
@@ -452,6 +458,12 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
     const personalSerper = await runLprContactSerperEnrichment(jobId, userId);
     log('lprContactSerperEnrichment done', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
   } catch (e) { logErr('lprContactSerperEnrichment', e); }
+
+  try {
+    log('siteDiscoveryEnrichment start');
+    const siteDiscovery = await runSiteDiscoveryEnrichment(jobId, userId);
+    log('siteDiscoveryEnrichment done', { processed: siteDiscovery.processed, sites: siteDiscovery.sitesFound });
+  } catch (e) { logErr('siteDiscoveryEnrichment', e); }
 
   try {
     log('websiteTeamEnrichment start');
