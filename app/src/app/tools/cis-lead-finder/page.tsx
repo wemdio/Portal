@@ -8,6 +8,8 @@ type ImportJob = {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
   display_status?: 'pending' | 'running' | 'completed' | 'failed';
+  perplexity_stage?: 'pending' | 'started' | 'done';
+  perplexity_contacts_found?: number;
   progress_ratio?: number;
   source_filename: string;
   source_label: string | null;
@@ -139,6 +141,12 @@ export default function CisLeadFinderPage() {
     return status;
   };
   const getDisplayStatus = (job: ImportJob): ImportJob['status'] => job.display_status ?? job.status;
+  const getPerplexityLabel = (job: ImportJob): string => {
+    const stage = job.perplexity_stage ?? 'pending';
+    if (stage === 'done') return 'завершен';
+    if (stage === 'started') return 'в процессе';
+    return 'ожидает';
+  };
   const selectedJobProgress = useMemo(() => {
     if (!selectedJob) return null;
     const total = Math.max(0, Number(selectedJob.total_rows) || 0);
@@ -564,6 +572,9 @@ export default function CisLeadFinderPage() {
                     )}
                     <span>•</span>
                     <span>контактов: {j.contacts_found ?? 0}</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-gray-500">
+                    Perplexity: {getPerplexityLabel(j)} • {(j.perplexity_contacts_found ?? 0)} контактов
                   </div>
                   <div className="mt-2 space-y-1">
                     <div className="flex items-center gap-2">
