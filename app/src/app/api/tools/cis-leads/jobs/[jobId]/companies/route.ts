@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
 
 export const dynamic = 'force-dynamic';
+const BATCH_SIZE = 80;
 
 function isPersonLikeName(fullName: string): boolean {
   const raw = String(fullName ?? '').trim();
@@ -78,20 +79,33 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       const pageIds = allCompanyIds.slice(from, from + pageSize);
       if (pageIds.length === 0) return NextResponse.json({ companies: [], page, page_size: pageSize, total: totalCompanies });
 
-      const { data: companies, error: compErr } = await supabaseAdmin
-        .from('companies')
-        .select('id,inn,name,short_name,region,city,site,phone,email,source,source_confidence,updated_at,created_at')
-        .in('id', pageIds)
-        .order('name', { ascending: true });
-      if (compErr) return jsonError(compErr.message, 500);
+      const companiesRows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < pageIds.length; i += BATCH_SIZE) {
+        const batchIds = pageIds.slice(i, i + BATCH_SIZE);
+        const { data: companiesBatch, error: compErr } = await supabaseAdmin
+          .from('companies')
+          .select('id,inn,name,short_name,region,city,site,phone,email,source,source_confidence,updated_at,created_at')
+          .in('id', batchIds);
+        if (compErr) return jsonError(compErr.message, 500);
+        companiesRows.push(...((companiesBatch ?? []) as Array<Record<string, unknown>>));
+      }
+      const companies = companiesRows.sort((a, b) =>
+        String(a.name ?? '').localeCompare(String(b.name ?? ''), 'ru'),
+      );
 
-      const { data: contacts } = await supabaseAdmin
-        .from('company_contacts')
-        .select('company_id,full_name')
-        .eq('user_id', auth.user.id)
-        .in('company_id', pageIds);
+      const contactsRows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < pageIds.length; i += BATCH_SIZE) {
+        const batchIds = pageIds.slice(i, i + BATCH_SIZE);
+        const { data: contactsBatch, error: contactsErr } = await supabaseAdmin
+          .from('company_contacts')
+          .select('company_id,full_name')
+          .eq('user_id', auth.user.id)
+          .in('company_id', batchIds);
+        if (contactsErr) return jsonError(contactsErr.message, 500);
+        contactsRows.push(...((contactsBatch ?? []) as Array<Record<string, unknown>>));
+      }
       const unique = new Map<string, Set<string>>();
-      for (const c of contacts ?? []) {
+      for (const c of contactsRows) {
         const companyId = String((c as { company_id?: unknown }).company_id ?? '');
         const fullName = String((c as { full_name?: unknown }).full_name ?? '');
         const key = contactNameKey(fullName);
