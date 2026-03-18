@@ -7,6 +7,7 @@ import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWor
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
+const JOB_CONTACTS_BATCH_SIZE = 80;
 
 export async function GET(req: NextRequest) {
   return withToolTrace(
@@ -107,19 +108,25 @@ export async function GET(req: NextRequest) {
       const contactCountsByCompany = new Map<string, number>();
       const perplexityCountsByCompany = new Map<string, number>();
       if (allCompanyIds.size > 0) {
-        const { data: contactRows } = await auth.supabase
-          .from('company_contacts')
-          .select('company_id,source')
-          .eq('user_id', auth.user.id)
-          .in('company_id', Array.from(allCompanyIds))
-          .limit(50000);
-        for (const row of contactRows ?? []) {
-          const typed = row as { company_id?: unknown; source?: unknown };
-          const companyId = String(typed.company_id ?? '');
-          if (!companyId) continue;
-          contactCountsByCompany.set(companyId, (contactCountsByCompany.get(companyId) ?? 0) + 1);
-          if (String(typed.source ?? '') === 'perplexity_search') {
-            perplexityCountsByCompany.set(companyId, (perplexityCountsByCompany.get(companyId) ?? 0) + 1);
+        const companyIds = Array.from(allCompanyIds);
+        for (let i = 0; i < companyIds.length; i += JOB_CONTACTS_BATCH_SIZE) {
+          const batchIds = companyIds.slice(i, i + JOB_CONTACTS_BATCH_SIZE);
+          const { data: contactRows, error: contactsErr } = await auth.supabase
+            .from('company_contacts')
+            .select('company_id,source')
+            .eq('user_id', auth.user.id)
+            .in('company_id', batchIds)
+            .limit(50000);
+          if (contactsErr) return jsonError(contactsErr.message, 500);
+
+          for (const row of contactRows ?? []) {
+            const typed = row as { company_id?: unknown; source?: unknown };
+            const companyId = String(typed.company_id ?? '');
+            if (!companyId) continue;
+            contactCountsByCompany.set(companyId, (contactCountsByCompany.get(companyId) ?? 0) + 1);
+            if (String(typed.source ?? '') === 'perplexity_search') {
+              perplexityCountsByCompany.set(companyId, (perplexityCountsByCompany.get(companyId) ?? 0) + 1);
+            }
           }
         }
       }
