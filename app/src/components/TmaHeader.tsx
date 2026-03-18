@@ -136,7 +136,7 @@ export function TmaHeader() {
         </Link>
       </div>
       <div className="px-4 pb-3">
-        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-2 overflow-x-auto">
           {items.map((item) => {
             const isActive = item.href === '/'
               ? pathname === '/'

@@ -125,7 +125,7 @@ export function YandexMapsParserView() {
         void refreshJobs();
         void loadLinks(activeJobId);
         void loadResults(activeJobId);
-      }, 2000);
+      }, 5000);
       return () => window.clearInterval(interval);
     }
   }, [activeJob, activeJobId, refreshJobs, loadLinks, loadResults]);

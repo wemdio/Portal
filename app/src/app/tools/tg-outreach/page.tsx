@@ -18,10 +18,8 @@ import {
   ChevronUp,
   Send,
   Download,
-  Upload,
   Search,
   X,
-  Globe,
   Network,
   Tag,
   Shield,
@@ -32,8 +30,6 @@ import { TagManager } from '@/components/tg-outreach/TagManager';
 import { useTgOutreachTags } from '@/lib/tgOutreach/hooks';
 import type {
   OutreachCampaign,
-  OutreachAccount,
-  OutreachProxy,
   OutreachDialog,
   OutreachProcessed,
   OutreachLog,
@@ -210,243 +206,6 @@ function SettingsTab({ campaign, onSave }: {
   );
 }
 
-/* =================== ACCOUNTS TAB =================== */
-function AccountsTab({ campaignId }: { campaignId: string }) {
-  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
-  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
-  const [showBulkProxy, setShowBulkProxy] = useState(false);
-  const [bulkText, setBulkText] = useState('');
-  const [form, setForm] = useState({ session_name: '', api_id: '', api_hash: '', phone: '', session_data: '', proxy_id: '' });
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    const token = await getToken();
-    const [aRes, pRes] = await Promise.all([
-      fetch(`${API_BASE}/accounts?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
-      fetch(`${API_BASE}/proxies?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
-    ]);
-    if (aRes.ok) { const d = await aRes.json() as { items: OutreachAccount[] }; setAccounts(d.items); }
-    if (pRes.ok) { const d = await pRes.json() as { items: OutreachProxy[] }; setProxies(d.items); }
-    setLoading(false);
-  }, [campaignId]);
-
-  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
-
-  const addAccount = async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/accounts`, {
-      method: 'POST', headers: authHeaders(token),
-      body: JSON.stringify({
-        ...form,
-        api_id: Number(form.api_id),
-        campaign_id: campaignId,
-        proxy_id: form.proxy_id || null,
-      }),
-    });
-    if (res.ok) { setShowAdd(false); setForm({ session_name: '', api_id: '', api_hash: '', phone: '', session_data: '', proxy_id: '' }); void load(); }
-  };
-
-  const deleteAccount = async (id: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE', headers: authHeaders(token) });
-    void load();
-  };
-
-  const toggleAccount = async (acc: OutreachAccount) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${acc.id}`, {
-      method: 'PUT', headers: authHeaders(token),
-      body: JSON.stringify({ is_active: !acc.is_active }),
-    });
-    void load();
-  };
-
-  const assignProxy = async (accId: string, proxyId: string | null) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${accId}`, {
-      method: 'PUT', headers: authHeaders(token),
-      body: JSON.stringify({ proxy_id: proxyId || null }),
-    });
-    void load();
-  };
-
-  const addProxy = async (url: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies`, {
-      method: 'POST', headers: authHeaders(token),
-      body: JSON.stringify({ campaign_id: campaignId, url, name: url.split('@').pop() ?? url }),
-    });
-    void load();
-  };
-
-  const bulkAddProxy = async () => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies/bulk`, {
-      method: 'POST', headers: authHeaders(token),
-      body: JSON.stringify({ campaign_id: campaignId, proxies_text: bulkText }),
-    });
-    setBulkText(''); setShowBulkProxy(false); void load();
-  };
-
-  const deleteProxy = async (id: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE', headers: authHeaders(token) });
-    void load();
-  };
-
-  const handleAccountsFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    const files = fileList ? Array.from(fileList) : [];
-    e.target.value = '';
-    if (!files.length) {
-      return;
-    }
-    setUploadError(null);
-    setUploading(true);
-    try {
-      const token = await getToken();
-      const form = new FormData();
-      for (let i = 0; i < files.length; i++) form.append('files', files[i]);
-      const res = await fetch(`${API_BASE}/accounts/bulk-files?campaign_id=${encodeURIComponent(campaignId)}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      });
-      const err = await res.json().catch(() => ({})) as { error?: string };
-      if (!res.ok) {
-        setUploadError(err.error ?? res.statusText ?? 'Ошибка загрузки');
-        return;
-      }
-      void load();
-    } catch {
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  if (loading) return <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>;
-
-  return (
-    <div className="space-y-6">
-      {/* Accounts */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <h3 className="text-sm font-semibold text-gray-800">Аккаунты ({accounts.length})</h3>
-          <div className="flex items-center gap-2">
-            <div className={`relative inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition ${uploading ? 'opacity-50' : ''}`}>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,.session"
-                multiple
-                className="absolute inset-0 opacity-0 cursor-pointer z-10"
-                onChange={handleAccountsFilesUpload}
-                disabled={uploading}
-                title="JSON (по одному аккаунту в файле) и опционально .session с тем же именем (77059642280.json + 77059642280.session)"
-              />
-              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin pointer-events-none" /> : <Upload className="h-3.5 w-3.5 pointer-events-none" />}
-              <span className="pointer-events-none">Загрузить JSON и .session</span>
-            </div>
-            <button type="button" onClick={() => setShowAdd(!showAdd)} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-              <Plus className="h-3.5 w-3.5" /> Добавить
-            </button>
-          </div>
-        </div>
-        {uploadError && (
-          <p className="text-xs text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{uploadError}</p>
-        )}
-
-        {showAdd && (
-          <div className="space-y-2 rounded-lg border border-gray-200 p-3">
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-              <input value={form.session_name} onChange={e => setForm(f => ({ ...f, session_name: e.target.value }))} placeholder="Session name" className="inp" />
-              <input value={form.api_id} onChange={e => setForm(f => ({ ...f, api_id: e.target.value }))} placeholder="API ID" className="inp" />
-              <input value={form.api_hash} onChange={e => setForm(f => ({ ...f, api_hash: e.target.value }))} placeholder="API Hash" className="inp" />
-              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} placeholder="Телефон" className="inp" />
-              <select value={form.proxy_id} onChange={e => setForm(f => ({ ...f, proxy_id: e.target.value }))} className="inp">
-                <option value="">Без прокси</option>
-                {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
-              </select>
-              <input value={form.session_data} onChange={e => setForm(f => ({ ...f, session_data: e.target.value }))} placeholder="Session string (GramJS)" className="inp col-span-2" />
-            </div>
-            <button type="button" onClick={addAccount} className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">Добавить</button>
-          </div>
-        )}
-
-        {accounts.length === 0 ? (
-          <p className="text-xs text-gray-400 py-4 text-center">Нет аккаунтов. Добавьте первый.</p>
-        ) : (
-          <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
-            {accounts.map(acc => (
-              <div key={acc.id} className="flex items-center gap-3 px-3 py-2.5 text-xs">
-                <button type="button" onClick={() => void toggleAccount(acc)} className={`h-2 w-2 rounded-full shrink-0 cursor-pointer hover:scale-125 transition ${acc.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`} title={acc.is_active ? 'Активен' : 'Отключен'} />
-                <span className="font-medium text-gray-800 w-32 truncate">{acc.session_name}</span>
-                <span className="text-gray-400 w-24 truncate">{acc.phone || '—'}</span>
-                <select value={acc.proxy_id ?? ''} onChange={e => void assignProxy(acc.id, e.target.value || null)}
-                  className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-700 w-44">
-                  <option value="">Без прокси</option>
-                  {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
-                </select>
-                <button type="button" onClick={() => void deleteAccount(acc.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Proxies */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2"><Network className="h-4 w-4 text-indigo-500" />Прокси ({proxies.length})</h3>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => {
-              const url = prompt('Прокси URL (socks5://user:pass@host:port)');
-              if (url) void addProxy(url);
-            }} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-              <Plus className="h-3.5 w-3.5" /> Добавить
-            </button>
-            <button type="button" onClick={() => setShowBulkProxy(!showBulkProxy)} className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-              <Upload className="h-3.5 w-3.5" /> Массово
-            </button>
-          </div>
-        </div>
-        {showBulkProxy && (
-          <div className="space-y-2 rounded-lg border border-gray-200 p-3">
-            <p className="text-xs text-gray-600">Или добавить несколько прокси (по одному на строку)</p>
-            <textarea
-              value={bulkText}
-              onChange={e => setBulkText(e.target.value)}
-              rows={4}
-              placeholder={'socks5://user:pass@host:port\nhttp://user:pass@host:port\n...'}
-              className="inp w-full font-mono text-[11px]"
-            />
-            <button type="button" onClick={bulkAddProxy} className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">Добавить все</button>
-          </div>
-        )}
-        {proxies.length > 0 && (
-          <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
-            {proxies.map(p => (
-              <div key={p.id} className="flex items-center gap-3 px-3 py-2 text-xs">
-                <Globe className="h-3.5 w-3.5 text-gray-400 shrink-0" />
-                <span className="text-gray-700 truncate flex-1">{p.url}</span>
-                <span className="text-gray-400">{p.name}</span>
-                <button type="button" onClick={() => void deleteProxy(p.id)} className="p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <style>{`.inp { display:block; border-radius:0.5rem; border:1px solid #e5e7eb; background:#f9fafb; padding:6px 10px; font-size:12px; color:#374151; outline:none; } .inp:focus { border-color:#818cf8; box-shadow:0 0 0 1px #818cf8; }`}</style>
-    </div>
-  );
-}
-
 /* =================== LOGS TAB =================== */
 function LogsTab({ campaignId }: { campaignId: string }) {
   const [logs, setLogs] = useState<OutreachLog[]>([]);
@@ -467,7 +226,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   useEffect(() => { queueMicrotask(() => { void fetchLogs(); }); }, [fetchLogs]);
 
   useEffect(() => {
-    const interval = setInterval(() => void fetchLogs(), 3000);
+    const interval = setInterval(() => void fetchLogs(), 5000);
     return () => clearInterval(interval);
   }, [fetchLogs]);
 
@@ -749,7 +508,6 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
-  { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
@@ -825,7 +583,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 
       <div>
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
-        {tab === 'accounts' && <AccountsTab campaignId={campaign.id} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}

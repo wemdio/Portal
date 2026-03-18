@@ -123,7 +123,7 @@ export default function DoneForYouPage() {
       }
     }
 
-    pollRef.current = setInterval(poll, 3000);
+    pollRef.current = setInterval(poll, 5000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeJob, loadHistory]);
 

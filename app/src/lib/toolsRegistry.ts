@@ -137,12 +137,11 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   'cis-lead-finder': {
     id: 'cis-lead-finder',
     title: 'CIS Lead Finder',
-    description: 'Импорт таблиц (ИНН/телефоны) → нормализация компаний → пробив Telegram → контакты ЛПР.',
+    description: 'Ищет ЛПР по ИНН и телефонам: нормализует компании и находит контакты.',
     href: '/tools/cis-lead-finder',
-    badge: 'В разработке',
-    badgeVariant: 'amber',
+    badge: 'Новое',
+    badgeVariant: 'emerald',
     accentColor: 'blue',
-    disabled: true,
   },
   rdp: {
     id: 'rdp',

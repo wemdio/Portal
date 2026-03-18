@@ -1,7 +1,7 @@
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
-const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 3;
 const DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const WORKER_ID = `hh-${process.pid}-${Date.now()}`;
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce });
+  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['parser_jobs'] });
 }
 
 main().catch((err) => {
