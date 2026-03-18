@@ -140,7 +140,7 @@ export default function AudioTranscribeToolPage() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
-  const [progressStage, setProgressStage] = useState<'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error' | null>(null);
+  const [_progressStage, setProgressStage] = useState<'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error' | null>(null);
   const [progressHint, setProgressHint] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);

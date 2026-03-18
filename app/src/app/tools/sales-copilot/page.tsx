@@ -25,7 +25,6 @@ import {
   Phone,
   ShieldCheck,
   KeyRound,
-  LogOut,
 } from 'lucide-react';
 import type {
   SalesCopilotConfig,
@@ -498,7 +497,6 @@ function DraftCard({
     setRegenerating(true);
     const newText = await onRegenerate(draft.id);
     if (newText) {
-      draft.draft_text = newText;
       setText(newText);
     }
     setRegenerating(false);

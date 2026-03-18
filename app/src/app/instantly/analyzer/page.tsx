@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   ChevronLeft, Loader2, Search, Trash2, ExternalLink, AlertTriangle,
-  ArrowUpDown, ArrowUp, ArrowDown, Users, Database, ShieldAlert,
+  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { getCurrentUserRole } from '@/lib/roles';
