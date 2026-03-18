@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
 
 const BATCH_LIMIT = 50;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -54,7 +55,7 @@ function parseContactsArray(arr: unknown[]): PerplexityContact[] {
       title: typeof row.title === 'string' ? row.title.trim() || null : null,
       role: String(row.role ?? 'director'),
       phone: typeof row.phone === 'string' ? row.phone.replace(/[\s()-]/g, '').trim() || null : null,
-      email: typeof row.email === 'string' ? row.email.trim().toLowerCase() || null : null,
+      email: sanitizeContactEmail(typeof row.email === 'string' ? row.email : null),
       linkedin: typeof row.linkedin === 'string' ? row.linkedin.trim() || null : null,
       confidence: Math.max(0, Math.min(1, Number(row.confidence ?? 0.6) || 0.6)),
     });
