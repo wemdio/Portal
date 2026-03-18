@@ -1,9 +1,13 @@
 import type { AgentUser } from './types';
 
-export type PendingAction = {
+export type PendingItem = {
   tool: string;
   args: Record<string, unknown>;
   description: string;
+};
+
+export type PendingAction = {
+  items: PendingItem[];
   user: AgentUser;
   createdAt: number;
 };
@@ -13,6 +17,15 @@ const store = new Map<number, PendingAction>();
 
 export function setPending(chatId: number, action: PendingAction): void {
   store.set(chatId, action);
+}
+
+export function addPendingItem(chatId: number, item: PendingItem, user: AgentUser): void {
+  const existing = getPending(chatId);
+  if (existing) {
+    existing.items.push(item);
+  } else {
+    setPending(chatId, { items: [item], user, createdAt: Date.now() });
+  }
 }
 
 export function getPending(chatId: number): PendingAction | null {
@@ -27,15 +40,4 @@ export function getPending(chatId: number): PendingAction | null {
 
 export function clearPending(chatId: number): void {
   store.delete(chatId);
-}
-
-const CONFIRM_PATTERNS = /^(да|yes|подтвер|ок$|ага|конечно|точно|давай$|go$)/i;
-const CANCEL_PATTERNS = /^(нет|no|отмен|не надо|стоп|cancel)/i;
-
-export function isConfirmation(text: string): boolean {
-  return CONFIRM_PATTERNS.test(text.trim());
-}
-
-export function isCancellation(text: string): boolean {
-  return CANCEL_PATTERNS.test(text.trim());
 }

@@ -74,16 +74,54 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
-export async function sendMessage(chatId: number, text: string): Promise<void> {
+export type InlineButton = { text: string; callback_data: string };
+
+export async function sendMessage(chatId: number, text: string, buttons?: InlineButton[][]): Promise<void> {
   const chunks = splitMessage(text);
-  for (const chunk of chunks) {
-    await tgApi('sendMessage', {
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const body: Record<string, unknown> = {
       chat_id: chatId,
-      text: chunk,
+      text: chunks[i],
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-    });
+    };
+    if (isLast && buttons) {
+      body.reply_markup = { inline_keyboard: buttons };
+    }
+    await tgApi('sendMessage', body);
   }
+}
+
+export async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+  await tgApi('answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    text: text ?? '',
+  });
+}
+
+export async function editMessageReplyMarkup(chatId: number, messageId: number): Promise<void> {
+  await tgApi('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+export async function sendDocument(chatId: number, filename: string, buffer: Buffer, caption?: string): Promise<void> {
+  const token = getToken();
+  if (!token) return;
+
+  const blob = new Blob([new Uint8Array(buffer)], { type: 'text/csv' });
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('document', blob, filename);
+  if (caption) form.append('caption', caption);
+
+  await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: 'POST',
+    body: form,
+  });
 }
 
 export { splitMessage as _splitMessage };

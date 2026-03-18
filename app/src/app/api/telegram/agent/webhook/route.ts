@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { handleAgentMessage } from '@/lib/telegramAgent/agent';
+import { handleAgentMessage, handleCallbackQuery } from '@/lib/telegramAgent/agent';
 import { logError } from '@/lib/loggerServer';
 import { isInAppBotEnabled } from '@/lib/adminBots/inAppState';
 
@@ -25,6 +25,14 @@ export async function POST(req: NextRequest) {
 
   if (msg?.from?.id && (msg.text || msg.voice)) {
     void handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
+  }
+
+  const cbq = update.callback_query as
+    | { id: string; from: { id: number }; message?: { chat: { id: number }; message_id: number }; data?: string }
+    | undefined;
+
+  if (cbq) {
+    void handleCallbackQuery(cbq).catch((err) => logError('telegram-agent.callback.webhook.error', err));
   }
 
   return NextResponse.json({ ok: true });
