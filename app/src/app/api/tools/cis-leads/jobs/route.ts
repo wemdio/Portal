@@ -156,6 +156,10 @@ export async function DELETE(req: NextRequest) {
       const auth = await authenticateRequest(req.headers.get('authorization'));
       if ('error' in auth) return auth.error;
 
+      if (!supabaseAdmin) {
+        return jsonError('Supabase admin client is not configured', 500);
+      }
+
       const jobId = new URL(req.url).searchParams.get('id');
       if (!jobId) return jsonError('Missing job id', 400);
 

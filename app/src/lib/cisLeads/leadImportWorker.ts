@@ -9,6 +9,8 @@ import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
 import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
+import { runEmailGuesser } from '@/lib/cisLeads/emailGuesser';
+import { runYandexMapsEnrichment } from '@/lib/cisLeads/yandexMapsEnrichment';
 import { guessLprRoleFromPost, normalizeInn } from '@/lib/cisLeads/lprRole';
 import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportRow';
 
@@ -456,6 +458,18 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
     const siteResult = await runWebsiteTeamEnrichment(jobId, userId);
     log('websiteTeamEnrichment done', { processed: siteResult.processed, contacts: siteResult.contactsFound });
   } catch (e) { logErr('websiteTeamEnrichment', e); }
+
+  try {
+    log('yandexMapsEnrichment start');
+    const ymResult = await runYandexMapsEnrichment(jobId, userId);
+    log('yandexMapsEnrichment done', { processed: ymResult.processed, updated: ymResult.updated });
+  } catch (e) { logErr('yandexMapsEnrichment', e); }
+
+  try {
+    log('emailGuesser start');
+    const emailResult = await runEmailGuesser(jobId, userId);
+    log('emailGuesser done', { processed: emailResult.processed, emails: emailResult.emailsFound });
+  } catch (e) { logErr('emailGuesser', e); }
 
   try {
     log('phoneEnrichment start');

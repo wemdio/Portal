@@ -25,8 +25,15 @@ interface ParsedPerson {
   phone: string | null;
 }
 
+interface SiteContacts {
+  phones: string[];
+  emails: string[];
+  whatsapp: string[];
+}
+
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 const PHONE_RE = /(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}/;
+const WA_LINK_RE = /(?:wa\.me|api\.whatsapp\.com\/send\?phone=)\/?\+?(\d{10,15})/gi;
 
 async function fetchHtml(url: string): Promise<string | null> {
   const controller = new AbortController();
@@ -133,22 +140,74 @@ function extractPeopleFromHtml(html: string): ParsedPerson[] {
   return people;
 }
 
-async function parseTeamPages(siteUrl: string): Promise<ParsedPerson[]> {
+function extractSiteContacts(html: string): SiteContacts {
+  const $ = cheerio.load(html);
+  const phones = new Set<string>();
+  const emails = new Set<string>();
+  const whatsapp = new Set<string>();
+
+  $('a[href^="tel:"]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const digits = href.replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 15) phones.add(digits);
+  });
+
+  $('a[href^="mailto:"]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const email = href.replace(/^mailto:/i, '').split('?')[0]?.trim().toLowerCase();
+    if (email && EMAIL_RE.test(email)) emails.add(email);
+  });
+
+  $('a[href*="wa.me"], a[href*="whatsapp.com"]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const m = href.match(/(\d{10,15})/);
+    if (m) whatsapp.add(m[1]!);
+  });
+
+  const bodyText = $('body').text();
+  let waMatch: RegExpExecArray | null;
+  while ((waMatch = WA_LINK_RE.exec(bodyText)) !== null) {
+    whatsapp.add(waMatch[1]!);
+  }
+
+  const metaDesc = $('meta[name="description"]').attr('content') ?? '';
+  const emailFromMeta = metaDesc.match(EMAIL_RE);
+  if (emailFromMeta) emails.add(emailFromMeta[0]!.toLowerCase());
+  const phoneFromMeta = metaDesc.match(PHONE_RE);
+  if (phoneFromMeta) phones.add(phoneFromMeta[0]!.replace(/[\s()-]/g, ''));
+
+  return {
+    phones: [...phones],
+    emails: [...emails],
+    whatsapp: [...whatsapp],
+  };
+}
+
+async function parseTeamPages(siteUrl: string): Promise<{ people: ParsedPerson[]; siteContacts: SiteContacts }> {
   let origin: string;
   try {
     origin = new URL(siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`).origin;
   } catch {
-    return [];
+    return { people: [], siteContacts: { phones: [], emails: [], whatsapp: [] } };
   }
 
   const allPeople: ParsedPerson[] = [];
   const seenNames = new Set<string>();
+  const mergedContacts: SiteContacts = { phones: [], emails: [], whatsapp: [] };
+  const seenPhones = new Set<string>();
+  const seenEmails = new Set<string>();
+  const seenWa = new Set<string>();
 
   for (const path of TEAM_PATHS) {
     if (allPeople.length >= 10) break;
     const url = `${origin}${path}`;
     const html = await fetchHtml(url);
     if (!html) continue;
+
+    const sc = extractSiteContacts(html);
+    for (const ph of sc.phones) { if (!seenPhones.has(ph)) { seenPhones.add(ph); mergedContacts.phones.push(ph); } }
+    for (const em of sc.emails) { if (!seenEmails.has(em)) { seenEmails.add(em); mergedContacts.emails.push(em); } }
+    for (const wa of sc.whatsapp) { if (!seenWa.has(wa)) { seenWa.add(wa); mergedContacts.whatsapp.push(wa); } }
 
     const fromJsonLd = extractPeopleFromJsonLd(html);
     const fromHtml = extractPeopleFromHtml(html);
@@ -164,7 +223,7 @@ async function parseTeamPages(siteUrl: string): Promise<ParsedPerson[]> {
     if (allPeople.length > 0) break;
   }
 
-  return allPeople;
+  return { people: allPeople, siteContacts: mergedContacts };
 }
 
 /** Normalized key for matching site person to existing company_contact (same logic as API dedupe). */
@@ -213,7 +272,20 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
     if (!company.site) continue;
 
     try {
-      const people = await parseTeamPages(company.site);
+      const { people, siteContacts } = await parseTeamPages(company.site);
+
+      if (siteContacts.phones.length > 0 || siteContacts.emails.length > 0) {
+        const companyUpdate: Record<string, string> = {};
+        if (siteContacts.phones[0]) companyUpdate.phone = siteContacts.phones[0];
+        if (siteContacts.emails[0]) companyUpdate.email = siteContacts.emails[0];
+        if (Object.keys(companyUpdate).length > 0) {
+          await supabaseAdmin
+            .from('companies')
+            .update(companyUpdate)
+            .eq('id', company.id)
+            .is('phone', null);
+        }
+      }
 
       const { data: existingContacts } = await supabaseAdmin
         .from('company_contacts')

@@ -1,43 +1,102 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { serperSearchDetailed } from '@/lib/parsers/serperSearch';
 
-const PERSONAL_SERPER_LIMIT = 25; // max contacts to enrich per job
-const QUERY_DELAY_MS = 400;
+const PERSONAL_LIMIT = 25;
+const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
+const PERPLEXITY_MODEL = 'perplexity/sonar-pro';
 
-const PHONE_PATTERN = /(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}/g;
-const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-
-function hasSerperKey(): boolean {
-  return (process.env.SERPER_API_KEY ?? '').trim().length > 0;
+function getLprKey(): string {
+  return (process.env.OPENROUTER_LPR_VERIFY_API_KEY ?? '').trim();
 }
 
-function extractPhoneFromText(text: string): string | null {
-  const m = text.match(PHONE_PATTERN);
-  if (!m?.[0]) return null;
-  const digits = m[0].replace(/\D/g, '');
-  if (digits.length === 10) return `+7${digits}`;
-  if (digits.length === 11 && digits.startsWith('8')) return `+7${digits.slice(1)}`;
-  if (digits.length === 11 && digits.startsWith('7')) return `+${digits}`;
-  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
+interface ContactChannels {
+  phone: string | null;
+  email: string | null;
+  linkedin: string | null;
+}
+
+function extractJson(text: string): unknown | null {
+  const raw = text.trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  try { return JSON.parse(raw); } catch { /* */ }
+  const o1 = raw.indexOf('{'), o2 = raw.lastIndexOf('}');
+  if (o1 !== -1 && o2 > o1) {
+    try { return JSON.parse(raw.slice(o1, o2 + 1)); } catch { /* */ }
+  }
   return null;
 }
 
-function extractEmailFromText(text: string): string | null {
-  const m = text.match(EMAIL_PATTERN);
-  return m?.[0]?.toLowerCase() ?? null;
+function parseChannels(text: string): ContactChannels {
+  const parsed = extractJson(text);
+  if (!parsed || typeof parsed !== 'object') return { phone: null, email: null, linkedin: null };
+  const row = parsed as Record<string, unknown>;
+  return {
+    phone: typeof row.phone === 'string' ? row.phone.replace(/[\s()-]/g, '').trim() || null : null,
+    email: typeof row.email === 'string' ? row.email.trim().toLowerCase() || null : null,
+    linkedin: typeof row.linkedin === 'string' ? row.linkedin.trim() || null : null,
+  };
 }
 
-/**
- * For LPRs that have only name (e.g. from EGRUL), run a personal Serper search
- * "ФИО" "Company" email телефон and fill channel_phone / channel_email.
- */
+async function findContactChannels(personName: string, companyName: string): Promise<ContactChannels> {
+  const key = getLprKey();
+  if (!key) return { phone: null, email: null, linkedin: null };
+
+  const prompt = `Найди контактные данные человека: ${personName}, компания "${companyName}".
+
+Ищи в открытых источниках: сайт компании, ЕГРЮЛ, hh.ru, LinkedIn, справочники, Rusprofile, Контур.Фокус.
+Если личный телефон не найден — подойдёт общий телефон компании или приёмной.
+Если личный email не найден — подойдёт общий email компании (info@, office@).
+
+Верни ТОЛЬКО валидный JSON-объект:
+{"phone": "+7XXXXXXXXXX или null", "email": "email или null", "linkedin": "url или null"}
+
+Без пояснений. Если ничего не найдено — {"phone": null, "email": null, "linkedin": null}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25_000);
+
+  try {
+    const res = await fetch(ROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+        'HTTP-Referer': 'https://portal.app',
+        'X-Title': 'Portal - LPR Contact Enrich - Perplexity',
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: PERPLEXITY_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 300,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`${res.status} ${body.slice(0, 200)}`);
+    }
+
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const text = (data.choices?.[0]?.message?.content ?? '').trim();
+    return parseChannels(text);
+  } catch (e) {
+    console.error(`[cis-leads] perplexity contact enrich failed for ${personName}:`, e instanceof Error ? e.message : e);
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function runLprContactSerperEnrichment(
   jobId: string,
   userId: string,
 ): Promise<{ processed: number; contactsUpdated: number }> {
-  if (!supabaseAdmin || !hasSerperKey()) return { processed: 0, contactsUpdated: 0 };
+  if (!supabaseAdmin || !getLprKey()) return { processed: 0, contactsUpdated: 0 };
 
   const { data: leadRows } = await supabaseAdmin
     .from('raw_leads')
@@ -60,12 +119,12 @@ export async function runLprContactSerperEnrichment(
     .is('channel_phone', null)
     .is('channel_email', null)
     .order('score', { ascending: false })
-    .limit(PERSONAL_SERPER_LIMIT * 2);
+    .limit(PERSONAL_LIMIT * 2);
 
   if (!contactsWithoutChannels?.length) return { processed: 0, contactsUpdated: 0 };
 
   const companyIdSet = new Set(companyIds);
-  const byCompany = new Map<string, typeof contactsWithoutChannels>();
+  const byCompany = new Map<string, Array<{ id: string; company_id: string; full_name: string }>>();
   for (const c of contactsWithoutChannels as Array<{ id: string; company_id: string; full_name: string }>) {
     if (!companyIdSet.has(c.company_id)) continue;
     const list = byCompany.get(c.company_id) ?? [];
@@ -76,7 +135,7 @@ export async function runLprContactSerperEnrichment(
   const toEnrich: Array<{ id: string; company_id: string; full_name: string }> = [];
   for (const list of byCompany.values()) {
     toEnrich.push(...list);
-    if (toEnrich.length >= PERSONAL_SERPER_LIMIT) break;
+    if (toEnrich.length >= PERSONAL_LIMIT) break;
   }
 
   const { data: companies } = await supabaseAdmin
@@ -98,15 +157,11 @@ export async function runLprContactSerperEnrichment(
     const companyName = company?.short_name || company?.name || '';
     if (!companyName.trim()) continue;
 
-    const query = `"${contact.full_name.replace(/"/g, ' ')}" "${companyName.replace(/"/g, ' ')}" email телефон`;
     try {
-      const { results } = await serperSearchDetailed(query, { num: 8, gl: 'ru', hl: 'ru' });
-      const text = results.map((r) => `${r.title} ${r.snippet}`).join(' ');
-      const phone = extractPhoneFromText(text);
-      const email = extractEmailFromText(text);
+      const channels = await findContactChannels(contact.full_name, companyName);
       const update: Record<string, string | null> = {};
-      if (phone) update.channel_phone = phone;
-      if (email) update.channel_email = email;
+      if (channels.phone) update.channel_phone = channels.phone;
+      if (channels.email) update.channel_email = channels.email;
       if (Object.keys(update).length === 0) continue;
 
       const { error } = await supabaseAdmin
@@ -115,16 +170,19 @@ export async function runLprContactSerperEnrichment(
         .eq('id', contact.id)
         .eq('user_id', userId);
 
-      if (!error) contactsUpdated++;
+      if (!error) {
+        contactsUpdated++;
+        console.log(`[cis-leads] perplexity contact enrich: ${contact.full_name} → phone=${channels.phone ?? '-'} email=${channels.email ?? '-'}`);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes('Not enough credits') || msg.includes('401') || msg.includes('403')) {
-        console.warn('[cis-leads] lprContactSerperEnrichment: API credits exhausted');
+      if (msg.includes('402') || msg.includes('403') || msg.includes('429') || msg.includes('blocked')) {
+        console.warn('[cis-leads] perplexity contact enrich: blocked/rate-limited, stopping');
         break;
       }
     }
 
-    await new Promise((r) => setTimeout(r, QUERY_DELAY_MS));
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   return { processed: toEnrich.length, contactsUpdated };

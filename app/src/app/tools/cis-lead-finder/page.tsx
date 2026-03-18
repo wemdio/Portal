@@ -29,6 +29,8 @@ type CompanyRow = {
   region: string | null;
   city: string | null;
   site: string | null;
+  phone: string | null;
+  email: string | null;
   source: string;
   source_confidence: number;
   contacts_count: number;
@@ -52,6 +54,14 @@ type ContactRow = {
 async function getToken(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token ?? null;
+}
+
+function phoneToWhatsApp(phone: string): string | null {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) return `7${digits.slice(1)}`;
+  if (digits.length === 11 && digits.startsWith('7')) return digits;
+  if (digits.length === 10) return `7${digits}`;
+  return digits.length >= 10 ? digits : null;
 }
 
 function ConfirmDeleteModal({
@@ -120,6 +130,7 @@ export default function CisLeadFinderPage() {
   const [contacts, setContacts] = useState<ContactRow[]>([]);
 
   const selectedJob = useMemo(() => jobs.find((j) => j.id === selectedJobId) ?? null, [jobs, selectedJobId]);
+  const selectedCompany = useMemo(() => companies.find((c) => c.id === selectedCompanyId) ?? null, [companies, selectedCompanyId]);
   const statusLabel = (status: ImportJob['status']) => {
     if (status === 'pending') return 'В очереди';
     if (status === 'running') return 'В работе';
@@ -306,6 +317,7 @@ export default function CisLeadFinderPage() {
     if (src === 'dadata_management') return 'ЕГРЮЛ';
     if (src === 'dadata_founder') return 'Учредитель';
     if (src === 'serper_search') return 'Google';
+    if (src === 'perplexity_search') return 'Perplexity';
     if (src === 'website_team') return 'Сайт';
     if (src === 'phone_tg') return 'Telegram';
     if (src === 'telegram') return 'Telegram';
@@ -347,65 +359,13 @@ export default function CisLeadFinderPage() {
     return normalized;
   };
 
-  const lprNowAndPrev = useMemo(() => {
-    const likelyExec = contacts.filter((c) => {
-      const role = String(c.role_guess ?? '').toLowerCase();
-      const title = String(c.title ?? '').toLowerCase();
-      return (
-        role === 'ceo' ||
-        role === 'director' ||
-        title.includes('генеральн') ||
-        title.includes('директор')
-      );
-    });
-
-    const sourceWeight = (src: string): number => {
-      // Prefer official registry data for "current"
-      if (src === 'dadata_management') return 100;
-      if (src === 'phone_tg') return 70;
-      if (src === 'website_team') return 60;
-      if (src === 'serper_search') return 40;
-      if (src === 'manual' || src === 'raw_import') return 20;
-      return 10;
-    };
-
-    const sorted = [...likelyExec].sort((a, b) => {
-      const sa = (Number(a.score) || 0) + sourceWeight(String(a.source ?? ''));
-      const sb = (Number(b.score) || 0) + sourceWeight(String(b.source ?? ''));
-      return sb - sa;
-    });
-
-    const now = sorted[0] ?? null;
-    const nowKey = now ? contactNameKey(now.full_name) : null;
-    const prev =
-      nowKey
-        ? (sorted.find((c) => contactNameKey(c.full_name) !== nowKey) ?? null)
-        : (sorted[1] ?? null);
-
-    return { nowId: now?.id ?? null, prevId: prev?.id ?? null };
-  }, [contacts]);
-
   const orderedContacts = useMemo(() => {
     if (!contacts.length) return contacts;
-    const { nowId, prevId } = lprNowAndPrev;
-    if (!nowId && !prevId) return contacts;
-    const byId = new Map(contacts.map((c) => [c.id, c]));
-    const picked: ContactRow[] = [];
-    const used = new Set<string>();
-    for (const id of [nowId, prevId]) {
-      if (!id) continue;
-      const row = byId.get(id);
-      if (row && !used.has(row.id)) {
-        picked.push(row);
-        used.add(row.id);
-      }
-    }
-    const rest = contacts.filter((c) => !used.has(c.id));
     // Hide non-person "contacts" (org/brand names) from web/google sources.
-    const combined = [...picked, ...rest].filter((c) => {
+    const combined = contacts.filter((c) => {
       if (isPersonLike(c.full_name)) return true;
       const src = String(c.source ?? '');
-      return !(src === 'serper_search' || src === 'website_team');
+      return !(src === 'serper_search' || src === 'perplexity_search' || src === 'website_team');
     });
 
     // Soft dedupe: avoid showing the same person multiple times (often happens across sources).
@@ -419,7 +379,7 @@ export default function CisLeadFinderPage() {
       out.push(c);
     }
     return out;
-  }, [contacts, lprNowAndPrev]);
+  }, [contacts]);
 
   return (
     <div className="space-y-6 text-left max-w-full">
@@ -736,8 +696,6 @@ export default function CisLeadFinderPage() {
                       const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email;
                       const profileLinks = (p.profile_links && typeof p.profile_links === 'object' ? p.profile_links : {}) as Record<string, string>;
                       const hasProfileLinks = Object.keys(profileLinks).length > 0;
-                      const isNow = lprNowAndPrev.nowId === p.id;
-                      const isPrev = !isNow && lprNowAndPrev.prevId === p.id;
                       return (
                         <div key={p.id} className="rounded-xl border border-gray-200 p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
@@ -745,20 +703,6 @@ export default function CisLeadFinderPage() {
                               <div className="font-semibold text-gray-900 truncate">{p.full_name}</div>
                               {(p.title ?? '').trim() ? (
                                 <div className="text-xs text-gray-600 mt-0.5">{p.title}</div>
-                              ) : null}
-                              {isNow || isPrev ? (
-                                <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-                                  {isNow ? (
-                                    <span className="inline-flex items-center rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 text-[11px] font-medium">
-                                      Текущий ЛПР
-                                    </span>
-                                  ) : null}
-                                  {isPrev ? (
-                                    <span className="inline-flex items-center rounded-md bg-gray-50 text-gray-700 border border-gray-200 px-2 py-0.5 text-[11px] font-medium">
-                                      Предыдущий ЛПР
-                                    </span>
-                                  ) : null}
-                                </div>
                               ) : null}
                             </div>
                             <span className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium ${role.color}`}>
@@ -769,15 +713,34 @@ export default function CisLeadFinderPage() {
                           {hasChannels ? (
                             <div className="flex gap-2 flex-wrap">
                               {p.channel_phone ? (
-                                <a
-                                  href={`tel:${p.channel_phone}`}
-                                  className="inline-flex items-center gap-1 rounded-lg bg-gray-50 border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 transition-colors"
-                                >
-                                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-gray-400">
-                                    <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
-                                  </svg>
-                                  {p.channel_phone}
-                                </a>
+                                <>
+                                  <a
+                                    href={`tel:${p.channel_phone}`}
+                                    className="inline-flex items-center gap-1 rounded-lg bg-gray-50 border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 transition-colors"
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-gray-400">
+                                      <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
+                                    </svg>
+                                    {p.channel_phone}
+                                  </a>
+                                  {(() => {
+                                    const waNum = phoneToWhatsApp(p.channel_phone);
+                                    return waNum ? (
+                                      <a
+                                        href={`https://wa.me/${waNum}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 rounded-lg bg-green-50 border border-green-200 px-2.5 py-1 text-xs text-green-700 hover:bg-green-100 transition-colors"
+                                        title="WhatsApp"
+                                      >
+                                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
+                                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                                        </svg>
+                                        WA
+                                      </a>
+                                    ) : null;
+                                  })()}
+                                </>
                               ) : null}
                               {p.channel_tg_username ? (
                                 <a
@@ -806,7 +769,61 @@ export default function CisLeadFinderPage() {
                               ) : null}
                             </div>
                           ) : (
-                            <div className="text-xs text-gray-400 italic">Контактные данные пока не найдены</div>
+                            (() => {
+                              const companyPhone = selectedCompany?.phone;
+                              const companyEmail = selectedCompany?.email;
+                              return (companyPhone || companyEmail) ? (
+                                <div className="space-y-1.5">
+                                  <div className="text-[11px] text-amber-600 font-medium">Контакты компании (общие):</div>
+                                  <div className="flex gap-2 flex-wrap">
+                                    {companyPhone ? (
+                                      <>
+                                        <a
+                                          href={`tel:${companyPhone}`}
+                                          className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-100 transition-colors"
+                                        >
+                                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-amber-400">
+                                            <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
+                                          </svg>
+                                          {companyPhone}
+                                        </a>
+                                        {(() => {
+                                          const waNum = phoneToWhatsApp(companyPhone);
+                                          return waNum ? (
+                                            <a
+                                              href={`https://wa.me/${waNum}`}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="inline-flex items-center gap-1 rounded-lg bg-green-50 border border-green-200 px-2.5 py-1 text-xs text-green-700 hover:bg-green-100 transition-colors"
+                                              title="WhatsApp"
+                                            >
+                                              <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
+                                                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                                              </svg>
+                                              WA
+                                            </a>
+                                          ) : null;
+                                        })()}
+                                      </>
+                                    ) : null}
+                                    {companyEmail ? (
+                                      <a
+                                        href={`mailto:${companyEmail}`}
+                                        className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-100 transition-colors"
+                                      >
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-amber-400">
+                                          <path d="M2.5 3A1.5 1.5 0 0 0 1 4.5v.793c.026.009.051.02.076.032L7.674 8.51c.206.1.446.1.652 0l6.598-3.185A.755.755 0 0 1 15 5.293V4.5A1.5 1.5 0 0 0 13.5 3h-11Z" />
+                                          <path d="M15 6.954 8.978 9.86a2.25 2.25 0 0 1-1.956 0L1 6.954V11.5A1.5 1.5 0 0 0 2.5 13h11a1.5 1.5 0 0 0 1.5-1.5V6.954Z" />
+                                        </svg>
+                                        {companyEmail}
+                                      </a>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="text-xs text-gray-400 italic">Контактные данные пока не найдены</div>
+                              );
+                            })()
                           )}
 
                           {hasProfileLinks ? (

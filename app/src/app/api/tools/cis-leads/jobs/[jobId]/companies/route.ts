@@ -80,7 +80,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
       const { data: companies, error: compErr } = await supabaseAdmin
         .from('companies')
-        .select('id,inn,name,short_name,region,city,site,source,source_confidence,updated_at,created_at')
+        .select('id,inn,name,short_name,region,city,site,phone,email,source,source_confidence,updated_at,created_at')
         .in('id', pageIds)
         .order('name', { ascending: true });
       if (compErr) return jsonError(compErr.message, 500);
