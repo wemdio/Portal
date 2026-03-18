@@ -4,112 +4,14 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'get_projects',
-      description: 'Получить список проектов с опциональными фильтрами по статусу, менеджеру, специалисту',
+      name: 'query_database',
+      description: 'Выполнить SQL SELECT-запрос к базе данных портала. Только чтение. Максимум 200 строк. Используй для любых вопросов о проектах, задачах, парсерах, пользователях, статистике и т.д. Схема БД описана в системном промпте.',
       parameters: {
         type: 'object',
         properties: {
-          status: { type: 'string', description: 'Фильтр по статусу: В работе, Тестирование, На паузе, Подготовка, Завершен, Отменен' },
-          manager: { type: 'string', description: 'Имя менеджера (частичное совпадение)' },
-          specialist: { type: 'string', description: 'Имя специалиста (частичное совпадение)' },
-          limit: { type: 'number', description: 'Макс. количество результатов (по умолчанию 20)' },
+          sql: { type: 'string', description: 'SQL SELECT запрос. Пример: SELECT name, status, specialist FROM projects WHERE status = \'В работе\' ORDER BY created_at DESC LIMIT 10' },
         },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_project_detail',
-      description: 'Получить полную информацию об одном проекте по ID или имени клиента',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'UUID проекта' },
-          client: { type: 'string', description: 'Имя клиента (частичное совпадение)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_overdue_projects',
-      description: 'Получить проекты с просроченным дедлайном (deadline < сегодня, статус не Завершен/Отменен)',
-      parameters: {
-        type: 'object',
-        properties: {
-          limit: { type: 'number', description: 'Макс. количество (по умолчанию 50)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_kpi_summary',
-      description: 'Получить сводку KPI план/факт по проектам, сгруппированную по менеджеру или специалисту',
-      parameters: {
-        type: 'object',
-        properties: {
-          group_by: { type: 'string', enum: ['manager', 'specialist'], description: 'Группировать по менеджеру или специалисту' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_tasks',
-      description: 'Получить список задач с фильтрами',
-      parameters: {
-        type: 'object',
-        properties: {
-          specialist: { type: 'string', description: 'Имя специалиста (частичное совпадение)' },
-          status: { type: 'string', enum: ['pending', 'in_progress', 'done'], description: 'Статус задачи' },
-          project_id: { type: 'string', description: 'UUID проекта' },
-          limit: { type: 'number', description: 'Макс. количество (по умолчанию 20)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_task_board_summary',
-      description: 'Получить сводку по доскам задач: количество задач в каждой колонке',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_parser_jobs',
-      description: 'Получить список последних парсер-задач',
-      parameters: {
-        type: 'object',
-        properties: {
-          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера' },
-          limit: { type: 'number', description: 'Макс. количество (по умолчанию 10)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_parser_results_summary',
-      description: 'Получить сводку результатов конкретного парсера по ID задачи',
-      parameters: {
-        type: 'object',
-        properties: {
-          job_id: { type: 'string', description: 'UUID парсер-задачи' },
-          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера' },
-        },
-        required: ['job_id', 'parser_type'],
+        required: ['sql'],
       },
     },
   },
@@ -125,57 +27,6 @@ export const AGENT_TOOLS: ToolDefinition[] = [
           parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
         },
         required: ['job_id'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_instantly_campaigns',
-      description: 'Получить список кампаний Instantly (email-аутрич)',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_review_requests',
-      description: 'Получить список запросов на ревью баз данных',
-      parameters: {
-        type: 'object',
-        properties: {
-          status: {
-            type: 'string',
-            enum: ['submitted', 'needs_rework', 'review_approved', 'sent_to_client', 'client_approved', 'client_requested_changes'],
-            description: 'Фильтр по статусу ревью',
-          },
-          limit: { type: 'number', description: 'Макс. количество (по умолчанию 20)' },
-        },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_team_workload',
-      description: 'Получить нагрузку команды: количество проектов, задач и просроченных по каждому специалисту/менеджеру',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_weekly_summary',
-      description: 'Получить агрегированную сводку за последнюю неделю: новые проекты, завершённые, KPI, парсеры',
-      parameters: {
-        type: 'object',
-        properties: {},
       },
     },
   },
@@ -244,8 +95,8 @@ export const WRITE_TOOLS: ToolDefinition[] = [
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Название проекта (обязательно)' },
-          client: { type: 'string', description: 'Клиент' },
-          status: { type: 'string', enum: ['В работе', 'Тестирование', 'На паузе', 'Подготовка'], description: 'По умолчанию: Подготовка' },
+          client: { type: 'string' },
+          status: { type: 'string', enum: ['В работе', 'Тестирование', 'На паузе', 'Подготовка'] },
           manager: { type: 'string' },
           specialist: { type: 'string' },
           deadline: { type: 'string', description: 'YYYY-MM-DD' },
@@ -270,7 +121,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
           specialist: { type: 'string' },
           project_id: { type: 'string', description: 'UUID проекта' },
           description: { type: 'string' },
-          status: { type: 'string', enum: ['pending', 'in_progress', 'done'], description: 'По умолчанию: pending' },
+          status: { type: 'string', enum: ['pending', 'in_progress', 'done'] },
           deadline: { type: 'string', description: 'YYYY-MM-DD' },
         },
         required: ['title'],
@@ -296,7 +147,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'update_task_fields',
-      description: 'Обновить поля задачи (название, специалист, описание, результат, дедлайн). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Обновить поля задачи. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
@@ -315,7 +166,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'update_review_status',
-      description: 'Изменить статус ревью базы данных. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ. Допустимые переходы: submitted→review_approved|needs_rework, needs_rework→submitted, review_approved→sent_to_client|needs_rework, sent_to_client→client_approved|client_requested_changes, client_requested_changes→submitted.',
+      description: 'Изменить статус ревью базы данных. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ. Допустимые переходы: submitted→review_approved|needs_rework, review_approved→sent_to_client|needs_rework, sent_to_client→client_approved|client_requested_changes.',
       parameters: {
         type: 'object',
         properties: {
@@ -331,16 +182,16 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_hh_parser',
-      description: 'Запустить парсер вакансий HeadHunter (hh.ru). Результаты появятся на портале у пользователя. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Запустить парсер вакансий HeadHunter (hh.ru). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          text: { type: 'string', description: 'Поисковый запрос (обязательно). Пример: "Python разработчик", "менеджер по продажам"' },
-          area: { type: 'string', description: 'Код региона HH (1=Москва, 2=Санкт-Петербург). Можно несколько через запятую' },
+          text: { type: 'string', description: 'Поисковый запрос (обязательно)' },
+          area: { type: 'string', description: 'Код региона HH (1=Москва, 2=СПб)' },
           salary_from: { type: 'number', description: 'Минимальная зарплата' },
-          date_from: { type: 'string', description: 'Дата начала поиска (YYYY-MM-DD)' },
-          date_to: { type: 'string', description: 'Дата окончания поиска (YYYY-MM-DD)' },
-          fetch_employers: { type: 'boolean', description: 'Загружать детали работодателей (сайт, описание, индустрии). По умолчанию false — быстрее' },
+          date_from: { type: 'string', description: 'YYYY-MM-DD' },
+          date_to: { type: 'string', description: 'YYYY-MM-DD' },
+          fetch_employers: { type: 'boolean', description: 'Загружать детали работодателей' },
         },
         required: ['text'],
       },
@@ -350,13 +201,13 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_search_parser',
-      description: 'Запустить поисковый парсер (Google через Serper). Ищет сайты по запросам. Результаты появятся на портале. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Запустить поисковый парсер (Google через Serper). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          queries: { type: 'string', description: 'Поисковые запросы через перенос строки. Пример: "стоматологии Москва\\nклиники СПб"' },
-          brief: { type: 'string', description: 'Описание целевой аудитории — система сгенерирует запросы автоматически' },
-          search_depth: { type: 'number', description: 'Глубина поиска 1-10 (по умолчанию 5)' },
+          queries: { type: 'string', description: 'Поисковые запросы через перенос строки' },
+          brief: { type: 'string', description: 'Описание ЦА — система сгенерирует запросы' },
+          search_depth: { type: 'number', description: 'Глубина поиска 1-10' },
         },
       },
     },
@@ -365,12 +216,12 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_yandex_maps_parser',
-      description: 'Запустить парсер Яндекс.Карт. Собирает организации по поисковому URL. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Запустить парсер Яндекс.Карт. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          search_urls: { type: 'string', description: 'URL-ы поиска Яндекс.Карт через перенос строки (обязательно). Пример: "https://yandex.ru/maps/?text=стоматологии+москва"' },
-          max_results: { type: 'number', description: 'Макс. организаций (по умолчанию 500, максимум 5000)' },
+          search_urls: { type: 'string', description: 'URL-ы поиска Яндекс.Карт через перенос строки' },
+          max_results: { type: 'number', description: 'Макс. организаций (по умолчанию 500)' },
         },
         required: ['search_urls'],
       },
@@ -380,11 +231,11 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_email_search',
-      description: 'Запустить поиск email-адресов по списку сайтов. Парсит страницы и извлекает контакты. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Запустить поиск email по списку сайтов. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          urls: { type: 'string', description: 'Список URL сайтов через перенос строки (обязательно). Пример: "https://company1.ru\\nhttps://company2.ru"' },
+          urls: { type: 'string', description: 'URL сайтов через перенос строки' },
         },
         required: ['urls'],
       },
@@ -394,11 +245,11 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_email_validation',
-      description: 'Запустить валидацию email-адресов. Проверяет существование и доставляемость. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Валидировать email-адреса. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          emails: { type: 'string', description: 'Список email через перенос строки (обязательно). Пример: "info@company1.ru\\nsales@company2.ru"' },
+          emails: { type: 'string', description: 'Email через перенос строки' },
         },
         required: ['emails'],
       },
@@ -408,16 +259,16 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_lpr_search',
-      description: 'Найти ЛПР (лицо, принимающее решения) в компании. Использует Apollo + PDL. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Найти ЛПР в компании (Apollo + PDL). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          domain: { type: 'string', description: 'Домен компании (например company.ru)' },
-          company_name: { type: 'string', description: 'Название компании' },
-          linkedin_url: { type: 'string', description: 'URL LinkedIn компании' },
-          seniorities: { type: 'string', description: 'Уровни: owner,c_suite,vp,director,manager (через запятую)' },
-          functions: { type: 'string', description: 'Отделы: sales,marketing,operations,finance,engineering,hr (через запятую)' },
-          max_candidates: { type: 'number', description: 'Макс. кандидатов (по умолчанию 10)' },
+          domain: { type: 'string', description: 'Домен компании' },
+          company_name: { type: 'string' },
+          linkedin_url: { type: 'string' },
+          seniorities: { type: 'string', description: 'owner,c_suite,vp,director,manager' },
+          functions: { type: 'string', description: 'sales,marketing,operations,finance' },
+          max_candidates: { type: 'number' },
         },
       },
     },
@@ -426,12 +277,12 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_brief_scoring',
-      description: 'Запустить оценку компаний под бриф (скоринг ЦА). Оценивает релевантность компаний для целевой аудитории. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Оценить компании под бриф (скоринг ЦА). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          brief_text: { type: 'string', description: 'Описание целевой аудитории / бриф (обязательно)' },
-          companies: { type: 'string', description: 'Названия компаний через перенос строки. Пример: "ООО Ромашка\\nАО Тюльпан"' },
+          brief_text: { type: 'string', description: 'Описание ЦА / бриф (обязательно)' },
+          companies: { type: 'string', description: 'Названия компаний через перенос строки' },
         },
         required: ['brief_text'],
       },
@@ -441,12 +292,12 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'clean_company_names',
-      description: 'Очистить названия компаний в результатах парсера (убрать ООО, ИП, АО, GmbH, скобки, символы, привести к красивому виду). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Очистить названия компаний в парсере (убрать ООО, ИП, скобки). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          job_id: { type: 'string', description: 'UUID парсер-задачи (обязательно)' },
-          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
+          job_id: { type: 'string', description: 'UUID парсер-задачи' },
+          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'] },
         },
         required: ['job_id'],
       },
@@ -456,14 +307,14 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'deduplicate_results',
-      description: 'Убрать дубликаты в результатах парсера по email или по сайту. Оставляет строку с наибольшим заполнением. Может также удалить строки без email/сайта. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Убрать дубликаты в парсере по email или сайту. Может удалить строки без значения. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          job_id: { type: 'string', description: 'UUID парсер-задачи (обязательно)' },
-          field: { type: 'string', enum: ['email', 'site'], description: 'По какому полю дедуплицировать. По умолчанию: email (если доступно)' },
-          remove_empty: { type: 'boolean', description: 'Удалить строки, у которых указанное поле пустое. По умолчанию: false' },
-          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'], description: 'Тип парсера. Если не указан — определится автоматически' },
+          job_id: { type: 'string', description: 'UUID парсер-задачи' },
+          field: { type: 'string', enum: ['email', 'site'] },
+          remove_empty: { type: 'boolean', description: 'Удалить строки с пустым полем' },
+          parser_type: { type: 'string', enum: ['hh', 'search', 'yandex_maps'] },
         },
         required: ['job_id'],
       },
@@ -473,14 +324,14 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'create_pipeline',
-      description: 'Создать автоматический пайплайн из нескольких шагов (парсинг → обогащение → валидация → экспорт). Шаги выполняются последовательно, результаты передаются между ними, файл отправляется в чат. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Создать пайплайн: парсинг → очистка → обогащение → валидация → дедупликация → экспорт. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'Краткое название пайплайна' },
+          name: { type: 'string', description: 'Название пайплайна' },
           steps: {
             type: 'array',
-            description: 'Шаги пайплайна. Типы: parse_hh, parse_search, parse_yandex_maps, clean_names, enrich_emails, validate_emails, deduplicate, export. Export добавляется автоматически если не указан.',
+            description: 'Шаги. Типы: parse_hh, parse_search, parse_yandex_maps, clean_names, enrich_emails, validate_emails, deduplicate, export.',
             items: {
               type: 'object',
               properties: {
@@ -488,10 +339,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
                   type: 'string',
                   enum: ['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'deduplicate', 'export'],
                 },
-                config: {
-                  type: 'object',
-                  description: 'parse_hh: {text, area?, salary_from?, fetch_employers?}. parse_search: {queries?: string[], brief?}. parse_yandex_maps: {search_urls: string[]}. clean_names/enrich_emails/validate_emails/deduplicate/export: {} (данные из предыдущих шагов).',
-                },
+                config: { type: 'object', description: 'Конфиг шага. parse_hh: {text, area?}. parse_search: {queries?, brief?}. parse_yandex_maps: {search_urls}. Остальные: {}.' },
               },
               required: ['type'],
             },

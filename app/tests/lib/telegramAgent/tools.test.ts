@@ -3,8 +3,8 @@
 import { AGENT_TOOLS, WRITE_TOOLS, ALL_TOOLS, TOOL_NAMES, WRITE_TOOL_NAMES } from '@/lib/telegramAgent/tools';
 
 describe('telegramAgent/tools', () => {
-  it('defines 14 read tools', () => {
-    expect(AGENT_TOOLS).toHaveLength(14);
+  it('defines 3 read tools', () => {
+    expect(AGENT_TOOLS).toHaveLength(3);
   });
 
   it('defines 17 write tools', () => {
@@ -12,7 +12,7 @@ describe('telegramAgent/tools', () => {
   });
 
   it('ALL_TOOLS = read + write', () => {
-    expect(ALL_TOOLS).toHaveLength(31);
+    expect(ALL_TOOLS).toHaveLength(20);
   });
 
   it('all tools have type "function"', () => {
@@ -49,20 +49,14 @@ describe('telegramAgent/tools', () => {
     expect(WRITE_TOOL_NAMES.size).toBe(17);
   });
 
+  it('query_database is a read tool', () => {
+    expect(TOOL_NAMES).toContain('query_database');
+    expect(WRITE_TOOL_NAMES.has('query_database')).toBe(false);
+  });
+
   it.each([
-    'get_projects',
-    'get_project_detail',
-    'get_overdue_projects',
-    'get_kpi_summary',
-    'get_tasks',
-    'get_task_board_summary',
-    'get_parser_jobs',
-    'get_parser_results_summary',
+    'query_database',
     'export_parser_results',
-    'get_instantly_campaigns',
-    'get_review_requests',
-    'get_team_workload',
-    'get_weekly_summary',
     'get_pipeline_status',
     'update_project_status',
     'update_project_fields',

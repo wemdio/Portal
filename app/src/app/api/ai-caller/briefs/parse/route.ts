@@ -21,26 +21,31 @@ const META_PROMPT = `Ты — эксперт по настройке AI-асси
 ЗАДАЧА:
 На основе предоставленного брифа компании-клиента создай системный промпт для AI-ассистента, который будет совершать исходящие звонки от имени этой компании.
 
+ИЗВЛЕЧЕНИЕ ДАННЫХ ИЗ БРИФА (КРИТИЧЕСКИ ВАЖНО):
+- Найди в брифе раздел "ОТ ЧЬЕГО ЛИЦА ВЕДЕМ ДИАЛОГ" или аналогичный — используй ОДНО из указанных имён (первое подходящее). Если указано несколько, выбери первое.
+- Если в брифе НЕ указаны имена — используй имя "Евгения".
+- Найди название компании (раздел "ОПИСАНИЕ КОМПАНИИ", сайт, домен, или другое упоминание). Используй ТОЧНОЕ название из брифа, НЕ придумывай.
+- НЕ ВЫДУМЫВАЙ имена и названия компаний. Бери ТОЛЬКО из брифа.
+
 ТРЕБОВАНИЯ К ПРОМПТУ:
-1. Определи имя персоны (женское имя, типичное для менеджера по продажам)
-2. Промпт должен быть на русском языке
-3. Укажи цель звонка (фоллоу-ап по email, холодный обзвон, и т.д.)
-4. Опиши стиль общения: профессиональный, вежливый, без навязчивости
-5. Включи ключевые аргументы и преимущества компании из брифа
-6. Добавь сценарий разговора: приветствие → уточнение → предложение → следующий шаг
-7. Укажи что делать при отказе (вежливо попрощаться)
-8. Фразы должны быть КОРОТКИЕ (1-2 предложения за раз)
-9. НИКАКИХ длинных монологов — это телефонный разговор
-10. Добавь правила: не повторять информацию, не спорить, не давить
-11. ОБЯЗАТЕЛЬНО включи в конце промпта следующий блок (дословно):
+1. Промпт должен быть на русском языке
+2. Укажи цель звонка (фоллоу-ап по email, холодный обзвон, и т.д.)
+3. Опиши стиль общения: профессиональный, вежливый, без навязчивости
+4. Включи ключевые аргументы и преимущества компании из брифа
+5. Добавь сценарий разговора: приветствие → уточнение → предложение → следующий шаг
+6. Укажи что делать при отказе (вежливо попрощаться)
+7. Фразы должны быть КОРОТКИЕ (1-2 предложения за раз)
+8. НИКАКИХ длинных монологов — это телефонный разговор
+9. Добавь правила: не повторять информацию, не спорить, не давить
+10. ОБЯЗАТЕЛЬНО включи в конце промпта следующий блок (дословно):
 ${VOICEMAIL_DETECTION_BLOCK}
 
 ФОРМАТ ОТВЕТА — верни JSON:
 {
-  "personaName": "Имя ассистента",
+  "personaName": "Имя ассистента (из брифа, НЕ выдуманное)",
   "systemPrompt": "Полный системный промпт...",
   "firstMessage": "Первая фраза при звонке...",
-  "companyName": "Название компании клиента"
+  "companyName": "Название компании из брифа (НЕ выдуманное)"
 }
 
 Верни ТОЛЬКО валидный JSON. Никакого текста до или после.`;
@@ -109,54 +114,23 @@ function normalizeExtractedBriefText(text: string): string {
 }
 
 async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
-  const binary = buffer.toString('binary');
-  const textParts: string[] = [];
+  if (!globalThis.DOMMatrix) {
+    const { default: DOMMatrix } = await import('@thednp/dommatrix');
+    globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
+  }
 
-  const decodePdfString = (s: string) =>
-    s
-      .replace(/\\n/g, '\n')
-      .replace(/\\r/g, '\r')
-      .replace(/\\t/g, '\t')
-      .replace(/\\\\/g, '\\')
-      .replace(/\\([()])/g, '$1');
+  const { PDFParse } = await import('pdf-parse');
+  const { getData } = await import('pdf-parse/worker');
+  PDFParse.setWorker(getData());
 
-  const extractTjText = (content: string) => {
-    const tj = /\(([^)]*)\)\s*Tj/g;
-    let m: RegExpExecArray | null;
-    while ((m = tj.exec(content)) !== null) textParts.push(decodePdfString(m[1]));
-
-    const tjArr = /\[([^\]]+)\]\s*TJ/gi;
-    while ((m = tjArr.exec(content)) !== null) {
-      const inner = /\(([^)]*)\)/g;
-      let im: RegExpExecArray | null;
-      while ((im = inner.exec(m[1])) !== null) textParts.push(decodePdfString(im[1]));
-    }
-  };
-
-  let zlibInflate: ((buf: Buffer) => Buffer) | null = null;
+  const parser = new PDFParse({ data: buffer });
+  let result: Awaited<ReturnType<typeof parser.getText>>;
   try {
-    const zlib = await import('node:zlib');
-    zlibInflate = (buf: Buffer) => zlib.inflateSync(buf);
-  } catch {
-    // zlib unavailable — skip decompression
+    result = await parser.getText();
+  } finally {
+    await parser.destroy().catch(() => undefined);
   }
-
-  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-  let sm: RegExpExecArray | null;
-  while ((sm = streamRe.exec(binary)) !== null) {
-    if (zlibInflate) {
-      try {
-        const decompressed = zlibInflate(Buffer.from(sm[1], 'binary')).toString('utf-8');
-        extractTjText(decompressed);
-        continue;
-      } catch { /* not FlateDecode */ }
-    }
-    extractTjText(sm[1]);
-  }
-
-  extractTjText(binary);
-
-  return normalizeExtractedBriefText(textParts.join(' ').replace(/\s+/g, ' ').trim());
+  return normalizeExtractedBriefText(result.text?.trim() ?? '');
 }
 
 async function extractTextFromDocxBuffer(buffer: Buffer): Promise<string> {
@@ -225,10 +199,6 @@ async function handlePost(req: NextRequest) {
 
         if (lowerFileName.endsWith('.pdf')) {
           briefText = await extractTextFromPdfBuffer(buffer);
-          if (!briefText || briefText.length < 20) {
-            const raw = buffer.toString('utf-8');
-            briefText = raw.replace(/[^\x20-\x7EА-Яа-яЁё\s]/g, ' ').replace(/\s+/g, ' ').trim();
-          }
         } else if (lowerFileName.endsWith('.docx')) {
           briefText = await extractTextFromDocxBuffer(buffer);
         } else if (lowerFileName.endsWith('.doc')) {
@@ -248,6 +218,8 @@ async function handlePost(req: NextRequest) {
     return NextResponse.json({ error: 'Не удалось прочитать файл' }, { status: 400 });
   }
 
+  console.log('[briefs/parse] extracted text length:', briefText.length, '| first 200 chars:', briefText.slice(0, 200));
+
   if (!briefText.trim()) {
     return NextResponse.json(
       { error: 'Бриф пустой. Загрузите PDF/TXT файл или введите текст.' },
@@ -261,12 +233,16 @@ async function handlePost(req: NextRequest) {
   const presetMetaPrompt = preset
     ? `Ты — эксперт по настройке AI-ассистентов для телефонных звонков.
 
+КРИТИЧЕСКИ ВАЖНО — извлекай данные ТОЛЬКО из брифа, НЕ выдумывай:
+- Найди раздел "ОТ ЧЬЕГО ЛИЦА ВЕДЕМ ДИАЛОГ" или аналогичный — используй ОДНО из указанных имён (первое подходящее). Если имён нет — используй "Евгения".
+- Найди название компании (раздел "ОПИСАНИЕ КОМПАНИИ", сайт, домен). Используй ТОЧНОЕ название из брифа.
+
 На основе брифа компании извлеки следующую информацию и верни JSON:
 {
-  "persona_name": "Женское имя менеджера (придумай подходящее, типичное для менеджера по продажам)",
-  "company_from": "Название компании-отправителя (от чьего имени звоним)",
+  "persona_name": "Имя менеджера ИЗ БРИФА (раздел 'от чьего лица', первое подходящее имя), НЕ выдуманное",
+  "company_from": "Название компании-отправителя ИЗ БРИФА, НЕ выдуманное",
   "offer_summary": "Одно очень короткое предложение для озвучки по телефону (до 12 слов, только русский язык, без английских слов, без цифр, без спецсимволов)",
-  "companyName": "Название компании-отправителя"
+  "companyName": "Название компании-отправителя ИЗ БРИФА"
 }
 
 Верни ТОЛЬКО валидный JSON. Никакого текста до или после.`
@@ -295,7 +271,7 @@ async function handlePost(req: NextRequest) {
             }`,
           },
         ],
-        temperature: 0.4,
+        temperature: 0.2,
         max_tokens: 4000,
         response_format: { type: 'json_object' },
       }),
@@ -326,6 +302,8 @@ async function handlePost(req: NextRequest) {
       }
       parsed = JSON.parse(jsonMatch[0]);
     }
+
+    console.log('[briefs/parse] AI extracted:', JSON.stringify(parsed).slice(0, 500));
 
     if (preset) {
       const templates = getPresetTemplatesForProvider(preset, provider);
