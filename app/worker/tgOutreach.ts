@@ -19,10 +19,10 @@ async function resetStuckJobs() {
     .eq('status', 'running');
 
   if (data?.length) {
-    log('info', `Resetting ${data.length} stuck running jobs to failed`);
+    log('info', `Resetting ${data.length} stuck running jobs to pending`);
     await db
       .from('tg_outreach_jobs')
-      .update({ status: 'failed', error_message: 'Worker restarted', finished_at: new Date().toISOString() })
+      .update({ status: 'pending', error_message: null, started_at: null, finished_at: null })
       .eq('status', 'running');
   }
 }
