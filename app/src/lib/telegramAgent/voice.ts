@@ -12,7 +12,7 @@ async function whisperTranscribe(mp3: Buffer): Promise<string | null> {
   const apiKey = getAgentApiKey();
   if (!apiKey) return null;
 
-  const blob = new Blob([mp3], { type: 'audio/mpeg' });
+  const blob = new Blob([Uint8Array.from(mp3)], { type: 'audio/mpeg' });
   const form = new FormData();
   form.append('file', blob, 'voice.mp3');
   form.append('model', 'openai/whisper-large-v3');
