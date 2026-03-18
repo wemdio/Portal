@@ -105,17 +105,22 @@ export async function GET(req: NextRequest) {
       }
 
       const contactCountsByCompany = new Map<string, number>();
+      const perplexityCountsByCompany = new Map<string, number>();
       if (allCompanyIds.size > 0) {
         const { data: contactRows } = await auth.supabase
           .from('company_contacts')
-          .select('company_id')
+          .select('company_id,source')
           .eq('user_id', auth.user.id)
           .in('company_id', Array.from(allCompanyIds))
           .limit(50000);
         for (const row of contactRows ?? []) {
-          const companyId = String((row as { company_id?: unknown }).company_id ?? '');
+          const typed = row as { company_id?: unknown; source?: unknown };
+          const companyId = String(typed.company_id ?? '');
           if (!companyId) continue;
           contactCountsByCompany.set(companyId, (contactCountsByCompany.get(companyId) ?? 0) + 1);
+          if (String(typed.source ?? '') === 'perplexity_search') {
+            perplexityCountsByCompany.set(companyId, (perplexityCountsByCompany.get(companyId) ?? 0) + 1);
+          }
         }
       }
 
@@ -132,15 +137,27 @@ export async function GET(req: NextRequest) {
         const displayStatus =
           job.status === 'completed' && linkRatio < 1 ? 'running' : job.status;
         let contactsFound = 0;
+        let perplexityContactsFound = 0;
         for (const companyId of companyIds) {
           contactsFound += contactCountsByCompany.get(companyId) ?? 0;
+          perplexityContactsFound += perplexityCountsByCompany.get(companyId) ?? 0;
         }
+        const perplexityStage =
+          job.status === 'completed'
+            ? 'done'
+            : parseRatio < 1
+              ? 'pending'
+              : linkedRows > 0
+                ? 'started'
+                : 'pending';
         return {
           ...job,
           display_status: displayStatus,
           progress_ratio: progressRatio,
           companies_found: detectedCompanies,
           contacts_found: contactsFound,
+          perplexity_contacts_found: perplexityContactsFound,
+          perplexity_stage: perplexityStage,
         };
       });
 
