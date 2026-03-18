@@ -2,7 +2,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-const PERSONAL_LIMIT = 25;
+const PERSONAL_LIMIT = 50;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
 const PERPLEXITY_MODEL = 'perplexity/sonar-pro';
 
@@ -40,20 +40,28 @@ function parseChannels(text: string): ContactChannels {
   };
 }
 
-async function findContactChannels(personName: string, companyName: string): Promise<ContactChannels> {
+async function findContactChannels(personName: string, companyName: string, title?: string | null): Promise<ContactChannels> {
   const key = getLprKey();
   if (!key) return { phone: null, email: null, linkedin: null };
 
-  const prompt = `Найди контактные данные человека: ${personName}, компания "${companyName}".
+  const titleHint = title ? `, должность: ${title}` : '';
+  const prompt = `Найди контактные данные: ${personName}${titleHint}, компания "${companyName}" (Россия).
 
-Ищи в открытых источниках: сайт компании, ЕГРЮЛ, hh.ru, LinkedIn, справочники, Rusprofile, Контур.Фокус.
-Если личный телефон не найден — подойдёт общий телефон компании или приёмной.
-Если личный email не найден — подойдёт общий email компании (info@, office@).
+Где искать (проверь ВСЕ источники):
+1. Сайт компании "${companyName}" — раздел "Контакты", "Команда", "О нас"
+2. rusprofile.ru — карточка компании, раздел руководство
+3. list-org.com — страница компании
+4. hh.ru — вакансии компании (контакты HR, иногда указан телефон приёмной)
+5. LinkedIn — профиль "${personName}"
+6. sbis.ru, checko.ru — карточка компании
+7. 2gis.ru, yandex.ru/maps — контакты организации
 
-Верни ТОЛЬКО валидный JSON-объект:
+ВАЖНО: если личный контакт не найден, верни общий телефон/email компании.
+
+Верни ТОЛЬКО JSON:
 {"phone": "+7XXXXXXXXXX или null", "email": "email или null", "linkedin": "url или null"}
 
-Без пояснений. Если ничего не найдено — {"phone": null, "email": null, "linkedin": null}`;
+Без пояснений.`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25_000);
@@ -113,7 +121,7 @@ export async function runLprContactSerperEnrichment(
 
   const { data: contactsWithoutChannels } = await supabaseAdmin
     .from('company_contacts')
-    .select('id, company_id, full_name')
+    .select('id, company_id, full_name, title')
     .eq('user_id', userId)
     .in('company_id', companyIds)
     .is('channel_phone', null)
@@ -124,15 +132,15 @@ export async function runLprContactSerperEnrichment(
   if (!contactsWithoutChannels?.length) return { processed: 0, contactsUpdated: 0 };
 
   const companyIdSet = new Set(companyIds);
-  const byCompany = new Map<string, Array<{ id: string; company_id: string; full_name: string }>>();
-  for (const c of contactsWithoutChannels as Array<{ id: string; company_id: string; full_name: string }>) {
+  const byCompany = new Map<string, Array<{ id: string; company_id: string; full_name: string; title: string | null }>>();
+  for (const c of contactsWithoutChannels as Array<{ id: string; company_id: string; full_name: string; title: string | null }>) {
     if (!companyIdSet.has(c.company_id)) continue;
     const list = byCompany.get(c.company_id) ?? [];
-    if (list.length < 2) list.push(c);
+    if (list.length < 3) list.push(c);
     byCompany.set(c.company_id, list);
   }
 
-  const toEnrich: Array<{ id: string; company_id: string; full_name: string }> = [];
+  const toEnrich: Array<{ id: string; company_id: string; full_name: string; title: string | null }> = [];
   for (const list of byCompany.values()) {
     toEnrich.push(...list);
     if (toEnrich.length >= PERSONAL_LIMIT) break;
@@ -158,7 +166,7 @@ export async function runLprContactSerperEnrichment(
     if (!companyName.trim()) continue;
 
     try {
-      const channels = await findContactChannels(contact.full_name, companyName);
+      const channels = await findContactChannels(contact.full_name, companyName, contact.title);
       const update: Record<string, string | null> = {};
       if (channels.phone) update.channel_phone = channels.phone;
       if (channels.email) update.channel_email = channels.email;

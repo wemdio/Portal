@@ -2,7 +2,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-const BATCH_LIMIT = 20;
+const BATCH_LIMIT = 50;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
 const PERPLEXITY_MODEL = 'perplexity/sonar-pro';
 
@@ -20,12 +20,21 @@ interface PerplexityContact {
   confidence: number;
 }
 
+interface PerplexityLprResult {
+  website: string | null;
+  contacts: PerplexityContact[];
+}
+
 function extractJson(text: string): unknown | null {
   const raw = text.trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/```$/i, '')
     .trim();
   try { return JSON.parse(raw); } catch { /* */ }
+  const o1 = raw.indexOf('{'), o2 = raw.lastIndexOf('}');
+  if (o1 !== -1 && o2 > o1) {
+    try { return JSON.parse(raw.slice(o1, o2 + 1)); } catch { /* */ }
+  }
   const a1 = raw.indexOf('['), a2 = raw.lastIndexOf(']');
   if (a1 !== -1 && a2 > a1) {
     try { return JSON.parse(raw.slice(a1, a2 + 1)); } catch { /* */ }
@@ -33,11 +42,9 @@ function extractJson(text: string): unknown | null {
   return null;
 }
 
-function parseContacts(text: string): PerplexityContact[] {
-  const parsed = extractJson(text);
-  if (!Array.isArray(parsed)) return [];
+function parseContactsArray(arr: unknown[]): PerplexityContact[] {
   const out: PerplexityContact[] = [];
-  for (const item of parsed) {
+  for (const item of arr) {
     if (!item || typeof item !== 'object') continue;
     const row = item as Record<string, unknown>;
     const name = String(row.full_name ?? row.name ?? '').trim();
@@ -55,33 +62,74 @@ function parseContacts(text: string): PerplexityContact[] {
   return out;
 }
 
-async function searchLprWithPerplexity(companyName: string, inn?: string | null): Promise<PerplexityContact[]> {
+function parseLprResult(text: string): PerplexityLprResult {
+  const parsed = extractJson(text);
+
+  if (Array.isArray(parsed)) {
+    return { website: null, contacts: parseContactsArray(parsed) };
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    const website = typeof obj.website === 'string' && obj.website.startsWith('http') ? obj.website.trim() : null;
+    const contacts = Array.isArray(obj.contacts) ? parseContactsArray(obj.contacts) : [];
+    return { website, contacts };
+  }
+
+  return { website: null, contacts: [] };
+}
+
+async function searchLprWithPerplexity(companyName: string, inn?: string | null): Promise<PerplexityLprResult> {
   const key = getLprKey();
-  if (!key) return [];
+  if (!key) return { website: null, contacts: [] };
 
   const innHint = inn ? ` (ИНН ${inn})` : '';
-  const prompt = `Найди руководителей и ЛПР (лиц, принимающих решения) компании "${companyName}"${innHint}.
+  const prompt = `Найди руководителей и ЛПР (лиц, принимающих решения) российской IT-компании "${companyName}"${innHint}.
 
-Мне нужны: генеральный директор, учредители, коммерческий директор, директор по продажам, CTO, и другие руководители.
+Мне нужно найти МАКСИМУМ людей. Ищи на:
+- rusprofile.ru, list-org.com, sbis.ru — директора, учредители
+- Сайт компании (раздел "Команда", "О нас", "Контакты") — все руководители
+- hh.ru — HR-контакты, иногда директора в описании компании
+- LinkedIn, VK — профили сотрудников
+- ЕГРЮЛ/ЕГРИП — юридические данные
 
-ВАЖНО: для каждого человека обязательно попытайся найти контактные данные:
-- Ищи рабочий телефон и email на сайте компании, в ЕГРЮЛ, на hh.ru, в справочниках, на LinkedIn, в публичных источниках
-- Телефон приёмной или общий телефон компании тоже подойдёт если личный не найден
-- Email вида info@company.ru или reception@company.ru тоже подойдёт как запасной вариант
+Нужны ВСЕ найденные руководители (до 10 человек):
+- Генеральный директор / CEO
+- Учредители / собственники
+- Коммерческий директор / директор по продажам
+- Технический директор / CTO
+- Директор по маркетингу / CMO
+- HR-директор
+- Финансовый директор / CFO
+- Другие директора и руководители отделов
 
-Для каждого человека верни:
-- full_name: ФИО полностью (Фамилия Имя Отчество)
-- title: должность
-- role: одно из owner/ceo/commercial/director/sales/marketing/it/ops/hr/other
-- phone: телефон (формат +7XXXXXXXXXX или 8XXXXXXXXXX)
-- email: email
-- linkedin: ссылка на LinkedIn профиль (если найдена)
-- confidence: уверенность 0-1
+КРИТИЧНО: для каждого человека ОБЯЗАТЕЛЬНО ищи контакты:
+- Рабочий телефон и email (сайт компании, rusprofile, справочники)
+- Общий телефон/email компании как запасной вариант
+- LinkedIn URL
 
-Ответь ТОЛЬКО валидным JSON-массивом без пояснений. Если никого не найдено — ответь [].`;
+Также найди ОФИЦИАЛЬНЫЙ САЙТ компании (основной домен, не rusprofile/list-org).
+
+Верни JSON-объект:
+{
+  "website": "https://example.com или null",
+  "contacts": [
+    {
+      "full_name": "Фамилия Имя Отчество",
+      "title": "должность",
+      "role": "owner/ceo/commercial/director/sales/marketing/it/ops/hr/other",
+      "phone": "+7XXXXXXXXXX или null",
+      "email": "email или null",
+      "linkedin": "url или null",
+      "confidence": 0.0-1.0
+    }
+  ]
+}
+
+Ответь ТОЛЬКО валидным JSON без пояснений. Если никого не найдено — {"website": null, "contacts": []}.`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), 35_000);
 
   try {
     const res = await fetch(ROUTER_URL, {
@@ -97,7 +145,7 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
         model: PERPLEXITY_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
-        max_tokens: 2500,
+        max_tokens: 3500,
       }),
     });
 
@@ -108,7 +156,7 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
 
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = (data.choices?.[0]?.message?.content ?? '').trim();
-    return parseContacts(text);
+    return parseLprResult(text);
   } catch (e) {
     console.error(`[cis-leads] perplexity LPR search failed for ${companyName}:`, e instanceof Error ? e.message : e);
     throw e;
@@ -147,16 +195,23 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
     .eq('user_id', userId)
     .in('company_id', companyIds);
 
-  const companiesWithChannels = new Set<string>();
+  const contactCountWithChannels = new Map<string, number>();
+  const totalContactCount = new Map<string, number>();
   for (const c of existingContacts ?? []) {
     const row = c as { company_id?: string; channel_phone?: string; channel_email?: string };
+    const cid = row.company_id ?? '';
+    totalContactCount.set(cid, (totalContactCount.get(cid) ?? 0) + 1);
     if (row.channel_phone || row.channel_email) {
-      companiesWithChannels.add(row.company_id ?? '');
+      contactCountWithChannels.set(cid, (contactCountWithChannels.get(cid) ?? 0) + 1);
     }
   }
 
+  const MIN_CONTACTS_TO_SKIP = 3;
   const toEnrich = (companiesData as Array<{ id: string; name: string; short_name: string | null; inn: string | null }>)
-    .filter((c) => !companiesWithChannels.has(c.id));
+    .filter((c) => {
+      const withChannels = contactCountWithChannels.get(c.id) ?? 0;
+      return withChannels < MIN_CONTACTS_TO_SKIP;
+    });
 
   if (toEnrich.length === 0) return { processed: 0, contactsFound: 0 };
 
@@ -167,9 +222,17 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
     const searchName = company.short_name || company.name;
 
     try {
-      const contacts = await searchLprWithPerplexity(searchName, company.inn);
+      const result = await searchLprWithPerplexity(searchName, company.inn);
 
-      for (const contact of contacts.slice(0, 5)) {
+      if (result.website) {
+        await supabaseAdmin
+          .from('companies')
+          .update({ site: result.website })
+          .eq('id', company.id)
+          .is('site', null);
+      }
+
+      for (const contact of result.contacts.slice(0, 8)) {
         const scoreBase = contact.role === 'owner' ? 80 : contact.role === 'ceo' ? 75 : contact.role === 'commercial' ? 65 : 55;
         const score = Math.round(scoreBase + contact.confidence * 10);
 
@@ -202,7 +265,7 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
       }
 
       processed++;
-      console.log(`[cis-leads] perplexity LPR: ${searchName} → ${contacts.length} contacts`);
+      console.log(`[cis-leads] perplexity LPR: ${searchName} → ${result.contacts.length} contacts, site=${result.website ?? '-'}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[cis-leads] perplexity LPR failed for ${searchName}:`, msg);

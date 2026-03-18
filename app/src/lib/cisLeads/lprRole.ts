@@ -23,8 +23,8 @@ export function guessRoleFromTitle(title: string | null): { role: string | null;
 export function isLikelyLpr(title: string | null, role: string | null): boolean {
   const t = String(title ?? '').toLowerCase();
   const r = String(role ?? '').toLowerCase();
-  if (['owner', 'ceo', 'commercial', 'director'].includes(r)) return true;
-  if (/\b(coo|cto|cfo|ceo)\b/.test(t)) return true;
+  if (['owner', 'ceo', 'commercial', 'director', 'sales', 'marketing', 'it', 'ops', 'hr'].includes(r)) return true;
+  if (/\b(coo|cto|cfo|ceo|cmo|ciso|cpo)\b/.test(t)) return true;
   const directTitleHints = [
     'собственник',
     'владел',
@@ -38,6 +38,17 @@ export function isLikelyLpr(title: string | null, role: string | null): boolean 
     'chief',
     'founder',
     'owner',
+    'учредител',
+    'основател',
+    'управляющ',
+    'начальник',
+    'заместител',
+    'замдиректор',
+    'вице-президент',
+    'продаж',
+    'маркетинг',
+    'партнёр',
+    'партнер',
   ];
   return directTitleHints.some((kw) => t.includes(kw));
 }

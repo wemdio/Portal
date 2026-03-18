@@ -2,7 +2,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-const SOCIAL_LIMIT = 15;
+const SOCIAL_LIMIT = 30;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
 const PERPLEXITY_MODEL = 'perplexity/sonar-pro';
 
