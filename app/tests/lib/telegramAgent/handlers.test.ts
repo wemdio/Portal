@@ -1,29 +1,14 @@
 /** @jest-environment node */
 
-function createMockQuery(result: { data: unknown; error: unknown } = { data: null, error: null }) {
-  const query: Record<string, unknown> = {};
-
-  const chainFn = () => query;
-  query.select = jest.fn(chainFn);
-  query.eq = jest.fn(chainFn);
-  query.ilike = jest.fn(chainFn);
-  query.lt = jest.fn(chainFn);
-  query.not = jest.fn(chainFn);
-  query.in = jest.fn(chainFn);
-  query.gte = jest.fn(chainFn);
-  query.order = jest.fn(chainFn);
-  query.limit = jest.fn(chainFn);
-  query.maybeSingle = jest.fn(() => Promise.resolve(result));
-  query.single = jest.fn(() => Promise.resolve(result));
-  query.then = (resolve: (v: unknown) => void) => { resolve(result); };
-
-  return query;
-}
-
-const mockFrom = jest.fn();
+const mockRpc = jest.fn();
 
 jest.mock('@/lib/supabaseAdmin', () => ({
-  supabaseAdmin: { from: (...args: unknown[]) => mockFrom(...args) },
+  supabaseAdmin: { rpc: (...args: unknown[]) => mockRpc(...args) },
+}));
+
+jest.mock('@/lib/telegramAgent/pipeline', () => ({
+  getPipelineStatus: jest.fn(() => Promise.resolve('Pipeline status')),
+  advanceAllPipelines: jest.fn(() => Promise.resolve(0)),
 }));
 
 import { toolHandlers } from '@/lib/telegramAgent/handlers';
@@ -33,174 +18,107 @@ beforeEach(() => {
 });
 
 describe('telegramAgent/handlers', () => {
-  describe('get_projects', () => {
-    it('returns formatted projects', async () => {
-      const projects = [{ id: '1', client: 'Альфа', name: 'Проект 1', status: 'В работе' }];
-      mockFrom.mockReturnValue(createMockQuery({ data: projects, error: null }));
-
-      const result = await toolHandlers.get_projects({});
-      expect(mockFrom).toHaveBeenCalledWith('projects');
-      const parsed = JSON.parse(result);
-      expect(parsed).toHaveLength(1);
-      expect(parsed[0].client).toBe('Альфа');
-    });
-
-    it('returns message when no projects found', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: [], error: null }));
-      const result = await toolHandlers.get_projects({});
-      expect(result).toBe('Проекты не найдены.');
-    });
-
-    it('applies status filter', async () => {
-      const q = createMockQuery({ data: [{ id: '1', status: 'На паузе' }], error: null });
-      mockFrom.mockReturnValue(q);
-      await toolHandlers.get_projects({ status: 'На паузе' });
-      expect(q.eq).toHaveBeenCalledWith('status', 'На паузе');
-    });
-
-    it('applies manager filter with ilike', async () => {
-      const q = createMockQuery({ data: [{ id: '1', manager: 'Аня' }], error: null });
-      mockFrom.mockReturnValue(q);
-      await toolHandlers.get_projects({ manager: 'Аня' });
-      expect(q.ilike).toHaveBeenCalledWith('manager', '%Аня%');
-    });
-
-    it('returns error message on query failure', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: null, error: { message: 'DB error' } }));
-      const result = await toolHandlers.get_projects({});
-      expect(result).toContain('Ошибка');
-    });
+  it('exports query_database and get_pipeline_status', () => {
+    expect(typeof toolHandlers.query_database).toBe('function');
+    expect(typeof toolHandlers.get_pipeline_status).toBe('function');
+    expect(Object.keys(toolHandlers)).toHaveLength(2);
   });
 
-  describe('get_project_detail', () => {
-    it('returns project by id', async () => {
-      const project = { id: 'p-1', client: 'Бета', status: 'В работе' };
-      mockFrom.mockReturnValue(createMockQuery({ data: project, error: null }));
-      const result = await toolHandlers.get_project_detail({ id: 'p-1' });
-      const parsed = JSON.parse(result);
-      expect(parsed.client).toBe('Бета');
+  describe('query_database', () => {
+    it('rejects empty query', async () => {
+      const result = await toolHandlers.query_database({});
+      expect(result).toContain('SQL');
     });
 
-    it('returns not found message', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: null, error: null }));
-      const result = await toolHandlers.get_project_detail({ id: 'nonexistent' });
-      expect(result).toBe('Проект не найден.');
+    it('rejects non-SELECT queries', async () => {
+      const result = await toolHandlers.query_database({ sql: 'DELETE FROM projects' });
+      expect(result).toContain('rejected');
     });
 
-    it('requires id or client', async () => {
-      const result = await toolHandlers.get_project_detail({});
-      expect(result).toContain('Укажите');
+    it('rejects INSERT queries', async () => {
+      const result = await toolHandlers.query_database({ sql: 'INSERT INTO projects VALUES (1)' });
+      expect(result).toContain('rejected');
     });
 
-    it('searches by client name with ilike', async () => {
-      const q = createMockQuery({ data: { id: 'p-2', client: 'Гамма' }, error: null });
-      mockFrom.mockReturnValue(q);
-      await toolHandlers.get_project_detail({ client: 'Гамма' });
-      expect(q.ilike).toHaveBeenCalledWith('client', '%Гамма%');
-    });
-  });
-
-  describe('get_overdue_projects', () => {
-    it('queries projects with deadline before today', async () => {
-      const q = createMockQuery({ data: [{ id: '1', deadline: '2025-01-01' }], error: null });
-      mockFrom.mockReturnValue(q);
-      const result = await toolHandlers.get_overdue_projects({});
-      expect(mockFrom).toHaveBeenCalledWith('projects');
-      expect(q.lt).toHaveBeenCalled();
-      const parsed = JSON.parse(result);
-      expect(parsed).toHaveLength(1);
+    it('rejects UPDATE queries', async () => {
+      const result = await toolHandlers.query_database({ sql: 'UPDATE projects SET name = \'x\'' });
+      expect(result).toContain('rejected');
     });
 
-    it('returns message when no overdue projects', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: [], error: null }));
-      const result = await toolHandlers.get_overdue_projects({});
-      expect(result).toBe('Просроченных проектов нет.');
+    it('rejects DROP queries', async () => {
+      const result = await toolHandlers.query_database({ sql: 'DROP TABLE projects' });
+      expect(result).toContain('rejected');
     });
-  });
 
-  describe('get_tasks', () => {
-    it('returns tasks', async () => {
-      mockFrom.mockReturnValue(createMockQuery({
-        data: [{ id: 't-1', title: 'Задача 1', status: 'pending' }],
+    it('rejects auth schema access', async () => {
+      const result = await toolHandlers.query_database({ sql: 'SELECT * FROM auth.users' });
+      expect(result).toContain('rejected');
+    });
+
+    it('allows keywords inside string literals', async () => {
+      mockRpc.mockResolvedValue({ data: [{ id: '1' }], error: null });
+      const result = await toolHandlers.query_database({
+        sql: "SELECT * FROM application_logs WHERE event = 'update' AND source = 'delete_handler'",
+      });
+      expect(mockRpc).toHaveBeenCalled();
+      expect(result).not.toContain('rejected');
+    });
+
+    it('still rejects real mutation with keyword in code position', async () => {
+      const result = await toolHandlers.query_database({
+        sql: "SELECT 1; DELETE FROM projects WHERE name = 'test'",
+      });
+      expect(result).toContain('rejected');
+    });
+
+    it('allows SELECT queries and calls RPC', async () => {
+      mockRpc.mockResolvedValue({
+        data: [{ id: '1', name: 'Project 1' }],
         error: null,
-      }));
-      const result = await toolHandlers.get_tasks({});
-      const parsed = JSON.parse(result);
-      expect(parsed[0].title).toBe('Задача 1');
+      });
+
+      const result = await toolHandlers.query_database({
+        sql: 'SELECT id, name FROM projects LIMIT 10',
+      });
+
+      expect(mockRpc).toHaveBeenCalledWith('agent_query_readonly', {
+        query_text: 'SELECT id, name FROM projects LIMIT 10',
+      });
+      expect(result).toContain('Project 1');
+      expect(result).toContain('1 строк');
     });
 
-    it('returns message when no tasks', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: [], error: null }));
-      const result = await toolHandlers.get_tasks({});
-      expect(result).toBe('Задачи не найдены.');
+    it('allows WITH (CTE) queries', async () => {
+      mockRpc.mockResolvedValue({ data: [{ cnt: 5 }], error: null });
+
+      const result = await toolHandlers.query_database({
+        sql: 'WITH active AS (SELECT * FROM projects WHERE status = \'В работе\') SELECT count(*) AS cnt FROM active',
+      });
+
+      expect(mockRpc).toHaveBeenCalled();
+      expect(result).toContain('5');
     });
 
-    it('applies specialist filter', async () => {
-      const q = createMockQuery({ data: [{ id: 't-1' }], error: null });
-      mockFrom.mockReturnValue(q);
-      await toolHandlers.get_tasks({ specialist: 'Маша' });
-      expect(q.ilike).toHaveBeenCalledWith('specialist', '%Маша%');
-    });
-  });
+    it('returns error message on RPC failure', async () => {
+      mockRpc.mockResolvedValue({ data: null, error: { message: 'permission denied' } });
 
-  describe('get_review_requests', () => {
-    it('returns review requests', async () => {
-      mockFrom.mockReturnValue(createMockQuery({
-        data: [{ id: 'r-1', status: 'submitted', tab_name: 'Лист1' }],
-        error: null,
-      }));
-      const result = await toolHandlers.get_review_requests({});
-      const parsed = JSON.parse(result);
-      expect(parsed[0].status).toBe('submitted');
+      const result = await toolHandlers.query_database({
+        sql: 'SELECT * FROM projects',
+      });
+      expect(result).toContain('SQL error');
     });
 
-    it('returns message when no reviews', async () => {
-      mockFrom.mockReturnValue(createMockQuery({ data: [], error: null }));
-      const result = await toolHandlers.get_review_requests({});
-      expect(result).toBe('Ревью-запросов не найдено.');
-    });
-
-    it('applies status filter', async () => {
-      const q = createMockQuery({ data: [{ id: 'r-1' }], error: null });
-      mockFrom.mockReturnValue(q);
-      await toolHandlers.get_review_requests({ status: 'submitted' });
-      expect(q.eq).toHaveBeenCalledWith('status', 'submitted');
+    it('handles empty results', async () => {
+      mockRpc.mockResolvedValue({ data: [], error: null });
+      const result = await toolHandlers.query_database({ sql: 'SELECT * FROM projects WHERE 1=0' });
+      expect(result).toContain('0 строк');
     });
   });
 
-  describe('get_parser_results_summary', () => {
-    it('requires job_id and parser_type', async () => {
-      const result = await toolHandlers.get_parser_results_summary({});
-      expect(result).toContain('Нужно указать');
+  describe('get_pipeline_status', () => {
+    it('returns pipeline status', async () => {
+      const result = await toolHandlers.get_pipeline_status({});
+      expect(result).toBe('Pipeline status');
     });
-  });
-
-  describe('get_kpi_summary', () => {
-    it('aggregates KPI by manager', async () => {
-      mockFrom.mockReturnValue(createMockQuery({
-        data: [
-          { manager: 'Аня', kpi_plan: 100, kpi_fact: 80, status: 'В работе' },
-          { manager: 'Аня', kpi_plan: 50, kpi_fact: 50, status: 'Тестирование' },
-        ],
-        error: null,
-      }));
-      const result = await toolHandlers.get_kpi_summary({ group_by: 'manager' });
-      const parsed = JSON.parse(result);
-      expect(parsed[0].manager).toBe('Аня');
-      expect(parsed[0].kpi_plan_total).toBe(150);
-      expect(parsed[0].kpi_fact_total).toBe(130);
-      expect(parsed[0].completion_percent).toBe(87);
-    });
-  });
-
-  it('exports all 12 handlers', () => {
-    const expected = [
-      'get_projects', 'get_project_detail', 'get_overdue_projects', 'get_kpi_summary',
-      'get_tasks', 'get_task_board_summary', 'get_parser_jobs', 'get_parser_results_summary',
-      'get_instantly_campaigns', 'get_review_requests', 'get_team_workload', 'get_weekly_summary',
-    ];
-    for (const name of expected) {
-      expect(typeof toolHandlers[name]).toBe('function');
-    }
   });
 });

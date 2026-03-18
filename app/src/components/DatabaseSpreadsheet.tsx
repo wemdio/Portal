@@ -272,6 +272,42 @@ const PERSONALIZATION_MAX_RETRIES = 3;
 const PERSONALIZATION_RETRY_BASE_DELAY = 1200;
 const PERSONALIZATION_HIGHLIGHT_DURATION = 2500;
 
+const INSTANTLY_FIELD_OPTIONS = [
+  { value: 'email', label: 'Email' },
+  { value: 'first_name', label: 'Имя (First Name)' },
+  { value: 'last_name', label: 'Фамилия (Last Name)' },
+  { value: 'company_name', label: 'Компания (Company)' },
+  { value: 'phone', label: 'Телефон (Phone)' },
+  { value: 'website', label: 'Сайт (Website)' },
+  { value: 'linkedin_url', label: 'LinkedIn' },
+  { value: 'personalization', label: 'Персонализация (Personalization)' },
+  { value: 'custom_variable', label: '{{Переменная}}' },
+  { value: 'skip', label: '— Пропустить —' },
+] as const;
+
+type InstantlyFieldValue = (typeof INSTANTLY_FIELD_OPTIONS)[number]['value'];
+
+const INSTANTLY_AUTO_DETECT: Array<{ pattern: RegExp; field: InstantlyFieldValue }> = [
+  { pattern: /^e-?mail$/i, field: 'email' },
+  { pattern: /^(почта|эл[._\s]?почта|e-?mail\s*адрес)$/i, field: 'email' },
+  { pattern: /^(first[_\s]?name|имя|firstname)$/i, field: 'first_name' },
+  { pattern: /^(last[_\s]?name|фамилия|lastname|surname)$/i, field: 'last_name' },
+  { pattern: /^(company[_\s]?name|company|компания|название|организация)$/i, field: 'company_name' },
+  { pattern: /^(phone|телефон|тел|mobile|моб)$/i, field: 'phone' },
+  { pattern: /^(website|сайт|site|url|домен|domain)$/i, field: 'website' },
+  { pattern: /^(linkedin[_\s]?url|linkedin)$/i, field: 'linkedin_url' },
+  { pattern: /^(персонализаци|personalization)/i, field: 'personalization' },
+];
+
+function autoDetectInstantlyField(header: string): InstantlyFieldValue {
+  const trimmed = header.trim();
+  if (!trimmed) return 'skip';
+  for (const rule of INSTANTLY_AUTO_DETECT) {
+    if (rule.pattern.test(trimmed)) return rule.field;
+  }
+  return 'custom_variable';
+}
+
 const PERSONALIZATION_PRESETS = [
   {
     id: 'pain-point',
@@ -896,7 +932,9 @@ export function DatabaseSpreadsheet() {
     pushing: boolean;
     result: string;
     loadingLists: boolean;
-  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: false });
+    columnMapping: InstantlyFieldValue[];
+    mappingStep: boolean;
+  }>({ isOpen: false, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: false, columnMapping: [], mappingStep: false });
   const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string; ts?: string }>>([]);
   const [instantlyLeadLists, setInstantlyLeadLists] = useState<Array<{ id: string; name: string }>>([]);
   const [instantlyCampaignSearch, setInstantlyCampaignSearch] = useState('');
@@ -7348,7 +7386,9 @@ export function DatabaseSpreadsheet() {
         <button
           type="button"
           onClick={async () => {
-            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: true });
+            const hdrs = activeTab?.data[0] ?? [];
+            const initialMapping = hdrs.map((h) => autoDetectInstantlyField(String(h ?? '')));
+            setInstantlyPush({ isOpen: true, campaignId: '', leadListId: '', pushing: false, result: '', loadingLists: true, columnMapping: initialMapping, mappingStep: false });
             setInstantlyCampaigns([]);
             setInstantlyLeadLists([]);
             setInstantlyCampaignSearch('');
@@ -9961,179 +10001,244 @@ export function DatabaseSpreadsheet() {
 
       {/* Instantly push modal */}
       {instantlyPush.isOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' }))}>
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Push to Instantly</h3>
-            <p className="text-sm text-gray-500 mb-4">
-              Загрузить <strong>{rowCount}</strong> строк из вкладки <strong>{activeTab?.name}</strong> как лидов в Instantly.
-            </p>
-            {instantlyPush.result && (
-              <div className={`mb-4 rounded-lg p-3 text-sm ${instantlyPush.result.startsWith('Ошибка') ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
-                {instantlyPush.result}
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => { if (!instantlyPush.pushing) setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' })); }}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Push to Instantly</h3>
+                <p className="text-xs text-gray-500">
+                  {instantlyPush.mappingStep
+                    ? 'Шаг 2: Маппинг колонок'
+                    : 'Шаг 1: Выбор кампании'}
+                  {' · '}<strong>{rowCount}</strong> строк
+                </p>
               </div>
-            )}
-            {instantlyPush.loadingLists ? (
-              <div className="flex items-center gap-2 py-6 justify-center text-sm text-gray-400">
-                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                Загрузка кампаний и списков…
-              </div>
-            ) : (
-              <>
-                <label className="text-sm font-medium text-gray-700 mb-1 block">Кампания</label>
-                <div className="relative mb-3">
-                  <input
-                    type="text"
-                    placeholder={instantlyPush.campaignId
-                      ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
-                      : 'Поиск кампании…'}
-                    value={instantlyCampaignSearch}
-                    onChange={(e) => {
-                      setInstantlyCampaignSearch(e.target.value);
-                      if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
-                    }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  {instantlyPush.campaignId && !instantlyCampaignSearch && (
-                    <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                      <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
-                        {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
-                      </span>
-                    </div>
-                  )}
-                  {instantlyPush.campaignId && (
-                    <button
-                      type="button"
-                      onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }}
-                      className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600"
-                    >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
-                  )}
+              <button type="button" onClick={() => { if (!instantlyPush.pushing) setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' })); }} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 text-xl leading-none">&times;</button>
+            </div>
+
+            <div className="px-6 py-5 max-h-[65vh] overflow-y-auto space-y-4">
+              {instantlyPush.result && (
+                <div className={`rounded-lg p-3 text-sm ${instantlyPush.result.startsWith('Ошибка') ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                  {instantlyPush.result}
                 </div>
-                {!instantlyPush.campaignId && (() => {
-                  const q = instantlyCampaignSearch.toLowerCase().trim();
-                  const filtered = q
-                    ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q))
-                    : instantlyCampaigns;
-                  return (
-                    <div className="mb-3 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white">
-                      {filtered.length === 0 ? (
-                        <p className="px-3 py-3 text-sm text-gray-400 text-center">
-                          {q ? 'Ничего не найдено' : 'Нет кампаний'}
-                        </p>
-                      ) : (
-                        filtered.map((c) => (
-                          <button
-                            key={c.id}
-                            type="button"
-                            onClick={() => {
-                              setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' }));
-                              setInstantlyCampaignSearch('');
-                            }}
-                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2"
-                          >
-                            <span className="truncate">{c.name}</span>
-                            {c.ts && (
-                              <span className="shrink-0 text-[10px] text-gray-400">
-                                {new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}
-                              </span>
-                            )}
-                          </button>
-                        ))
-                      )}
+              )}
+
+              {!instantlyPush.mappingStep ? (
+                <>
+                  {instantlyPush.loadingLists ? (
+                    <div className="flex items-center gap-2 py-6 justify-center text-sm text-gray-400">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                      Загрузка кампаний и списков…
                     </div>
-                  );
-                })()}
-                <label className="text-sm font-medium text-gray-700 mb-1 block">Или lead-список</label>
-                <select
-                  value={instantlyPush.leadListId}
-                  onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  ) : (
+                    <>
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-gray-700 block">Кампания</label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            placeholder={instantlyPush.campaignId
+                              ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
+                              : 'Поиск кампании…'}
+                            value={instantlyCampaignSearch}
+                            onChange={(e) => {
+                              setInstantlyCampaignSearch(e.target.value);
+                              if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
+                            }}
+                            className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
+                          />
+                          {instantlyPush.campaignId && !instantlyCampaignSearch && (
+                            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                              <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
+                                {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
+                              </span>
+                            </div>
+                          )}
+                          {instantlyPush.campaignId && (
+                            <button type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }} className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600">
+                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {!instantlyPush.campaignId && (() => {
+                        const q = instantlyCampaignSearch.toLowerCase().trim();
+                        const filtered = q ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q)) : instantlyCampaigns;
+                        return (
+                          <div className="max-h-44 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+                            {filtered.length === 0 ? (
+                              <p className="px-3 py-3 text-sm text-gray-400 text-center">{q ? 'Ничего не найдено' : 'Нет кампаний'}</p>
+                            ) : (
+                              filtered.map((c) => (
+                                <button key={c.id} type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' })); setInstantlyCampaignSearch(''); }}
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2">
+                                  <span className="truncate">{c.name}</span>
+                                  {c.ts && <span className="shrink-0 text-[10px] text-gray-400">{new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}</span>}
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        );
+                      })()}
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-gray-700 block">Или lead-список</label>
+                        <select
+                          value={instantlyPush.leadListId}
+                          onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
+                        >
+                          <option value="">— Выберите lead-список —</option>
+                          {instantlyLeadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                        </select>
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-gray-500">
+                    Укажите, какому полю в Instantly соответствует каждая колонка. Автоматически определённые поля уже выбраны.
+                    Колонки с типом <span className="font-medium">{'{{Переменная}}'}</span> будут доступны как динамические переменные в шаблонах писем.
+                  </p>
+                  <div className="rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="grid grid-cols-[1fr_1fr] gap-0 text-xs font-semibold text-gray-500 uppercase bg-gray-50 px-3 py-2 border-b border-gray-200">
+                      <span>Колонка</span>
+                      <span>Поле Instantly</span>
+                    </div>
+                    <div className="divide-y divide-gray-100 max-h-[40vh] overflow-y-auto">
+                      {(activeTab?.data[0] ?? []).map((header, colIdx) => {
+                        const label = String(header ?? '').trim();
+                        if (!label) return null;
+                        const mapping = instantlyPush.columnMapping[colIdx] ?? 'skip';
+                        const isEmail = mapping === 'email';
+                        const isDuplicate = mapping !== 'skip' && mapping !== 'custom_variable'
+                          && instantlyPush.columnMapping.filter((m) => m === mapping).length > 1;
+                        return (
+                          <div key={colIdx} className={`grid grid-cols-[1fr_1fr] gap-2 items-center px-3 py-2 ${isEmail ? 'bg-blue-50/40' : ''} ${isDuplicate ? 'bg-amber-50/60' : ''}`}>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[10px] text-gray-400 font-mono shrink-0">{toColumnLabel(colIdx)}</span>
+                              <span className="text-sm text-gray-800 truncate" title={label}>{label}</span>
+                            </div>
+                            <select
+                              value={mapping}
+                              onChange={(e) => {
+                                const newMapping = [...instantlyPush.columnMapping];
+                                newMapping[colIdx] = e.target.value as InstantlyFieldValue;
+                                setInstantlyPush((s) => ({ ...s, columnMapping: newMapping, result: '' }));
+                              }}
+                              className={`w-full border rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 ${
+                                mapping === 'skip' ? 'border-gray-200 text-gray-400' : isEmail ? 'border-blue-300 text-blue-700 font-medium' : 'border-gray-200 text-gray-700'
+                              }`}
+                            >
+                              {INSTANTLY_FIELD_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {!instantlyPush.columnMapping.includes('email') && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      Не выбрана колонка с Email — это обязательное поле для загрузки лидов.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <button type="button" onClick={() => {
+                if (instantlyPush.mappingStep) {
+                  setInstantlyPush((s) => ({ ...s, mappingStep: false, result: '' }));
+                } else {
+                  setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' }));
+                }
+              }} className="text-sm text-gray-500 hover:text-gray-700 transition-colors">
+                {instantlyPush.mappingStep ? '← Назад' : 'Отмена'}
+              </button>
+
+              {!instantlyPush.mappingStep ? (
+                <button
+                  type="button"
+                  disabled={instantlyPush.loadingLists || (!instantlyPush.campaignId && !instantlyPush.leadListId)}
+                  onClick={() => setInstantlyPush((s) => ({ ...s, mappingStep: true, result: '' }))}
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-medium bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
-                  <option value="">— Выберите lead-список —</option>
-                  {instantlyLeadLists.map((l) => (
-                    <option key={l.id} value={l.id}>{l.name}</option>
-                  ))}
-                </select>
-              </>
-            )}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setInstantlyPush((s) => ({ ...s, isOpen: false, result: '' }))}
-                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                Отмена
-              </button>
-              <button
-                type="button"
-                disabled={instantlyPush.pushing || (!instantlyPush.campaignId && !instantlyPush.leadListId)}
-                onClick={async () => {
-                  if (!activeTab) return;
-                  setInstantlyPush((s) => ({ ...s, pushing: true, result: '' }));
-                  try {
-                    const headers = activeTab.data[0] ?? [];
-                    const emailColIdx = headers.findIndex((h) => /^email$/i.test(String(h).trim()));
-                    if (emailColIdx < 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: столбец email не найден в заголовках' })); return; }
-                    const fieldMap: Record<string, number> = {};
-                    headers.forEach((h, i) => {
-                      const norm = String(h).trim().toLowerCase();
-                      if (norm === 'first_name' || norm === 'firstname' || norm === 'имя') fieldMap['first_name'] = i;
-                      else if (norm === 'last_name' || norm === 'lastname' || norm === 'фамилия') fieldMap['last_name'] = i;
-                      else if (norm === 'company_name' || norm === 'company' || norm === 'компания') fieldMap['company_name'] = i;
-                      else if (norm === 'phone' || norm === 'телефон') fieldMap['phone'] = i;
-                      else if (norm === 'website' || norm === 'сайт') fieldMap['website'] = i;
-                      else if (norm === 'linkedin_url' || norm === 'linkedin') fieldMap['linkedin_url'] = i;
-                    });
-                    const leads = activeTab.data.slice(1).filter((row) => {
-                      const email = String(row[emailColIdx] ?? '').trim();
-                      return email && email.includes('@');
-                    }).map((row) => {
-                      const lead: Record<string, string> = { email: String(row[emailColIdx]).trim() };
-                      for (const [field, colIdx] of Object.entries(fieldMap)) {
-                        const v = String(row[colIdx] ?? '').trim();
-                        if (v) lead[field] = v;
+                  Далее: маппинг колонок →
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={instantlyPush.pushing || !instantlyPush.columnMapping.includes('email')}
+                  onClick={async () => {
+                    if (!activeTab) return;
+                    setInstantlyPush((s) => ({ ...s, pushing: true, result: '' }));
+                    try {
+                      const headers = activeTab.data[0] ?? [];
+                      const mapping = instantlyPush.columnMapping;
+                      const emailColIdx = mapping.indexOf('email');
+                      if (emailColIdx < 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: не назначена колонка Email' })); return; }
+
+                      const standardFields = ['first_name', 'last_name', 'company_name', 'phone', 'website', 'linkedin_url', 'personalization'] as const;
+                      const fieldColMap: Partial<Record<string, number>> = {};
+                      for (const f of standardFields) {
+                        const idx = mapping.indexOf(f);
+                        if (idx >= 0) fieldColMap[f] = idx;
                       }
-                      if (instantlyPush.campaignId) lead.campaign_id = instantlyPush.campaignId;
-                      if (instantlyPush.leadListId) lead.lead_list_id = instantlyPush.leadListId;
-                      const customVars: Record<string, string> = {};
-                      headers.forEach((h, i) => {
-                        if (i === emailColIdx || Object.values(fieldMap).includes(i)) return;
-                        const v = String(row[i] ?? '').trim();
-                        if (v) customVars[String(h).trim()] = v;
+
+                      const customVarCols: Array<{ colIdx: number; name: string }> = [];
+                      mapping.forEach((m, i) => {
+                        if (m === 'custom_variable') {
+                          customVarCols.push({ colIdx: i, name: String(headers[i] ?? '').trim() || `col_${i}` });
+                        }
                       });
-                      if (Object.keys(customVars).length > 0) lead.custom_variables = JSON.stringify(customVars);
-                      return lead;
-                    });
-                    if (leads.length === 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: нет валидных email в данных' })); return; }
-                    const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
-                    const BATCH = 500;
-                    let pushed = 0;
-                    for (let i = 0; i < leads.length; i += BATCH) {
-                      const batch = leads.slice(i, i + BATCH);
-                      const parsedBatch = batch.map((l) => {
-                        const cv = l.custom_variables;
-                        const rest = { ...l };
-                        delete rest.custom_variables;
-                        return { ...rest, custom_variables: cv ? JSON.parse(cv) : undefined };
+
+                      const leads = activeTab.data.slice(1).filter((row) => {
+                        const email = String(row[emailColIdx] ?? '').trim();
+                        return email && email.includes('@');
+                      }).map((row) => {
+                        const lead: Record<string, unknown> = { email: String(row[emailColIdx]).trim() };
+                        for (const [field, colIdx] of Object.entries(fieldColMap)) {
+                          const v = String(row[colIdx!] ?? '').trim();
+                          if (v) lead[field] = v;
+                        }
+                        if (instantlyPush.campaignId) lead.campaign_id = instantlyPush.campaignId;
+                        if (instantlyPush.leadListId) lead.lead_list_id = instantlyPush.leadListId;
+                        const cv: Record<string, string> = {};
+                        for (const { colIdx, name } of customVarCols) {
+                          const v = String(row[colIdx] ?? '').trim();
+                          if (v) cv[name] = v;
+                        }
+                        if (Object.keys(cv).length > 0) lead.custom_variables = cv;
+                        return lead;
                       });
-                      const res = await fetch('/api/instantly/leads', {
-                        method: 'POST',
-                        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ leads: parsedBatch, skip_if_in_workspace: true }),
-                      });
-                      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
-                      pushed += batch.length;
+
+                      if (leads.length === 0) { setInstantlyPush((s) => ({ ...s, pushing: false, result: 'Ошибка: нет валидных email в данных' })); return; }
+                      const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+                      const BATCH = 500;
+                      let pushed = 0;
+                      for (let i = 0; i < leads.length; i += BATCH) {
+                        const batch = leads.slice(i, i + BATCH);
+                        const res = await fetch('/api/instantly/leads', {
+                          method: 'POST',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ leads: batch, skip_if_in_workspace: true }),
+                        });
+                        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error((e as { error?: string }).error || `HTTP ${res.status}`); }
+                        pushed += batch.length;
+                      }
+                      setInstantlyPush((s) => ({ ...s, pushing: false, result: `Загружено ${pushed} лидов в Instantly` }));
+                    } catch (err) {
+                      setInstantlyPush((s) => ({ ...s, pushing: false, result: `Ошибка: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}` }));
                     }
-                    setInstantlyPush((s) => ({ ...s, pushing: false, result: `Загружено ${pushed} лидов в Instantly` }));
-                  } catch (err) {
-                    setInstantlyPush((s) => ({ ...s, pushing: false, result: `Ошибка: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}` }));
-                  }
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors"
-              >
-                {instantlyPush.pushing ? '⟳ Загрузка…' : 'Push'}
-              </button>
+                  }}
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {instantlyPush.pushing ? '⟳ Загрузка…' : `Push ${rowCount} лидов`}
+                </button>
+              )}
             </div>
           </div>
         </div>

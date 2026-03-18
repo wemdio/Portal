@@ -31,7 +31,7 @@ function parseAccountObj(a: Record<string, unknown>): { session_name: string; ap
 function parseAccountJson(text: string): { session_name: string; api_id: number; api_hash: string; phone: string }[] {
   const data = JSON.parse(text) as unknown;
   if (Array.isArray(data)) {
-    return data.map((item, i) => {
+    return data.map((item, _i) => {
       const a = item as Record<string, unknown>;
       return parseAccountObj(a);
     });

@@ -19,6 +19,7 @@ import {
   Briefcase,
   Building2,
   Users,
+  Bot,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -43,6 +44,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'habr-career': Briefcase,
   'linkedin-bot': Building2,
   'tg-parser': Users,
+  'sales-copilot': Bot,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {
