@@ -10,8 +10,12 @@ export async function authenticateRequest(authHeader: string | null) {
   if (!token) return { error: jsonError('Необходима авторизация', 401) } as const;
 
   const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: jsonError('Необходима авторизация', 401) } as const;
-
-  return { supabase, user } as const;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { error: jsonError('Необходима авторизация', 401) } as const;
+    return { supabase, user } as const;
+  } catch (error) {
+    console.error('[auth] supabase getUser failed', error);
+    return { error: jsonError('Сервис авторизации временно недоступен', 503) } as const;
+  }
 }
