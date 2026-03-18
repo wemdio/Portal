@@ -130,7 +130,7 @@ export async function cleanCompanyNames(
   if (!rows?.length) return 'Нет записей для очистки.';
 
   type Row = { id: string } & Record<string, unknown>;
-  const typedRows = rows as Row[];
+  const typedRows = rows as unknown as Row[];
   let cleanedCount = 0;
 
   for (let i = 0; i < typedRows.length; i += BATCH_SIZE) {

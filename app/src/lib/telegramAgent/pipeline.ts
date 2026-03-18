@@ -542,7 +542,7 @@ async function extractUrlsFromPreviousSteps(pipeline: Pipeline, currentIdx: numb
     if (!data?.length) continue;
 
     const urls = [...new Set(
-      (data as Record<string, unknown>[])
+      (data as unknown as Record<string, unknown>[])
         .map((r) => String(r[urlCol] ?? '').trim())
         .filter((u) => u.length > 0 && u.startsWith('http')),
     )];
@@ -592,7 +592,7 @@ async function extractEmailsFromPreviousSteps(pipeline: Pipeline, currentIdx: nu
       if (!data?.length) continue;
 
       const emails = [...new Set(
-        (data as Record<string, unknown>[])
+        (data as unknown as Record<string, unknown>[])
           .map((r) => String(r.email ?? '').trim().toLowerCase())
           .filter((e) => e.includes('@') && e.includes('.')),
       )];

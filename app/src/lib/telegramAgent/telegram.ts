@@ -112,7 +112,7 @@ export async function sendDocument(chatId: number, filename: string, buffer: Buf
   const token = getToken();
   if (!token) return;
 
-  const blob = new Blob([buffer], { type: 'text/csv' });
+  const blob = new Blob([new Uint8Array(buffer)], { type: 'text/csv' });
   const form = new FormData();
   form.append('chat_id', String(chatId));
   form.append('document', blob, filename);

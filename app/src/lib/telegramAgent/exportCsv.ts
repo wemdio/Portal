@@ -114,7 +114,7 @@ export async function exportParserResults(
     if (error) return `Ошибка при выборке данных: ${error.message}`;
     if (!data || data.length === 0) break;
 
-    allRows.push(...(data as Record<string, unknown>[]));
+    allRows.push(...(data as unknown as Record<string, unknown>[]));
     offset += data.length;
     hasMore = data.length === BATCH_SIZE;
   }
