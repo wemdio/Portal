@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Sales Copilot — Техническое задание</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+    max-width: 800px;
+    margin: 40px auto;
+    padding: 0 20px;
+  }
+  h1 { font-size: 20pt; color: #1a1a1a; margin-top: 30px; }
+  h2 { font-size: 16pt; color: #1a1a1a; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 13pt; color: #333; margin-top: 20px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #bbb; padding: 6px 10px; text-align: left; font-size: 10pt; }
+  th { background: #f0f0f0; font-weight: bold; }
+  code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; font-family: Consolas, monospace; font-size: 10pt; }
+  pre { background: #f4f4f4; padding: 12px; border-radius: 4px; overflow-x: auto; font-family: Consolas, monospace; font-size: 9.5pt; line-height: 1.4; }
+  ul, ol { margin: 6px 0; padding-left: 24px; }
+  li { margin: 3px 0; }
+  strong { color: #1a1a1a; }
+  .label { display: inline-block; background: #e8f0fe; color: #1a73e8; padding: 1px 6px; border-radius: 3px; font-size: 9pt; font-weight: bold; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 24px 0; }
+  .checkbox { margin: 4px 0; }
+  .checkbox input { margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Sales Copilot — Техническое задание</h1>
+
+<h2>1. Контекст</h2>
+
+<p>ОП (отдел продаж) ведёт переписку с клиентами через Telegram-аккаунты, которые управляются через модуль TG Outreach. Сейчас менеджеры сами придумывают что писать. Sales Copilot — AI-слой поверх этих переписок, который генерирует черновики ответов и предлагает реанимировать холодные диалоги.</p>
+
+<h3>Ограничения из обсуждения</h3>
+<ul>
+  <li>Черновики в TG (drafts) допустимы только для <strong>реактивного</strong> сценария (ответ на входящее), т.к. чат уже наверху списка</li>
+  <li><strong>Проактивный</strong> сценарий (реанимация) — только через портал, чтобы не засорять список чатов в TG</li>
+  <li>Copilot <strong>не должен</strong> помечать сообщения как прочитанные (использовать <code>getHistory</code> без <code>readHistory</code>)</li>
+</ul>
+
+<hr>
+
+<h2>2. Сценарии использования</h2>
+
+<h3>2.1 Реактивный — ответ на входящее сообщение</h3>
+
+<p><strong>Триггер:</strong> клиент написал новое сообщение в чат с аккаунтом ОП.</p>
+
+<p><strong>Флоу:</strong></p>
+<ol>
+  <li>Worker мониторит входящие сообщения через TG API (<code>getDialogs</code> → проверка <code>unreadCount</code>)</li>
+  <li>При новом сообщении — забирает историю диалога (<code>getMessages</code>, <strong>без</strong> <code>readHistory</code>)</li>
+  <li>Отправляет контекст в LLM → получает черновик ответа</li>
+  <li>Сохраняет черновик в БД (<code>sales_copilot_drafts</code>)</li>
+  <li>Опционально: устанавливает draft в TG через API (<code>saveDraft</code>)</li>
+  <li>Менеджер видит черновик в портале (и/или в TG как draft)</li>
+  <li>Менеджер правит → отправляет (через портал или вручную из TG)</li>
+</ol>
+
+<h3>2.2 Проактивный — реанимация холодных диалогов</h3>
+
+<p><strong>Триггер:</strong> диалог молчит дольше настроенного порога (напр. 7 дней).</p>
+
+<p><strong>Флоу:</strong></p>
+<ol>
+  <li>Worker периодически сканирует диалоги с <code>last_message_at</code> старше порога</li>
+  <li>Отправляет историю + контекст в LLM с промптом для реанимации</li>
+  <li>Сохраняет черновик в БД</li>
+  <li>Менеджер заходит в портал → раздел «Холодные диалоги» → видит очередь черновиков</li>
+  <li>Менеджер ревьюит → правит → отправляет из портала</li>
+  <li>(Черновик в TG <strong>не ставится</strong> — чтобы не засорять список)</li>
+</ol>
+
+<hr>
+
+<h2>3. Архитектура</h2>
+
+<h3>3.1 Связь с существующим модулем</h3>
+
+<p>Sales Copilot использует ту же инфраструктуру TG Outreach:</p>
+<ul>
+  <li>Аккаунты из <code>tg_pool_accounts</code> / <code>tg_outreach_accounts</code></li>
+  <li>Прокси из <code>tg_pool_proxies</code> / <code>tg_outreach_proxies</code></li>
+  <li>GramJS-клиенты из <code>gramClient.ts</code></li>
+  <li>OpenRouter для LLM из <code>openaiChat.ts</code></li>
+</ul>
+
+<p><strong>Новые сущности:</strong></p>
+<ul>
+  <li>Таблица <code>sales_copilot_configs</code> — настройки copilot для аккаунта</li>
+  <li>Таблица <code>sales_copilot_drafts</code> — сгенерированные черновики</li>
+  <li>Worker <code>salesCopilotWorker.ts</code> — фоновый процесс мониторинга</li>
+  <li>Новая страница в портале — UI для менеджера</li>
+</ul>
+
+<h3>3.2 Схема работы</h3>
+
+<table>
+  <tr>
+    <th>Компонент</th>
+    <th>Что делает</th>
+  </tr>
+  <tr>
+    <td><strong>Монитор входящих</strong> (reactive)</td>
+    <td>Проверяет <code>unreadCount</code> в диалогах → при новом сообщении генерирует черновик через LLM → сохраняет в БД → опционально ставит draft в TG</td>
+  </tr>
+  <tr>
+    <td><strong>Сканер холодных</strong> (proactive)</td>
+    <td>Находит диалоги с тишиной &gt; N дней → генерирует черновик реанимации через LLM → сохраняет в БД (без TG draft)</td>
+  </tr>
+  <tr>
+    <td><strong>Портал (UI)</strong></td>
+    <td>Показывает менеджеру pending-черновики в двух разделах: «Входящие» и «Холодные диалоги». Менеджер может отправить, править, пропустить, перегенерировать</td>
+  </tr>
+</table>
+
+<hr>
+
+<h2>4. Схема базы данных</h2>
+
+<h3>4.1 <code>sales_copilot_configs</code></h3>
+
+<p>Настройки copilot для каждого аккаунта.</p>
+
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>id</code></td><td>uuid PK</td><td>Идентификатор</td></tr>
+  <tr><td><code>user_id</code></td><td>uuid FK → profiles</td><td>Владелец конфига</td></tr>
+  <tr><td><code>account_id</code></td><td>uuid FK → tg_pool_accounts</td><td>TG-аккаунт</td></tr>
+  <tr><td><code>is_enabled</code></td><td>boolean</td><td>Вкл/выкл copilot (default: false)</td></tr>
+  <tr><td><code>llm_model</code></td><td>text</td><td>Модель LLM (default: openai/gpt-4o-mini)</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Реактивный сценарий</strong></td></tr>
+  <tr><td><code>reactive_enabled</code></td><td>boolean</td><td>Включить реактив (default: true)</td></tr>
+  <tr><td><code>reactive_system_prompt</code></td><td>text</td><td>System prompt для ответа</td></tr>
+  <tr><td><code>reactive_set_tg_draft</code></td><td>boolean</td><td>Ставить draft в TG (default: false)</td></tr>
+  <tr><td><code>reactive_history_limit</code></td><td>integer</td><td>Сколько сообщений из истории отправлять в LLM (default: 30)</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Проактивный сценарий</strong></td></tr>
+  <tr><td><code>proactive_enabled</code></td><td>boolean</td><td>Включить проактив (default: false)</td></tr>
+  <tr><td><code>proactive_system_prompt</code></td><td>text</td><td>System prompt для реанимации</td></tr>
+  <tr><td><code>proactive_silence_days</code></td><td>integer</td><td>Порог молчания в днях (default: 7)</td></tr>
+  <tr><td><code>proactive_max_drafts_per_scan</code></td><td>integer</td><td>Макс. черновиков за один скан (default: 10)</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Расписание и фильтры</strong></td></tr>
+  <tr><td><code>scan_interval_seconds</code></td><td>integer</td><td>Интервал сканирования (default: 300)</td></tr>
+  <tr><td><code>sleep_periods</code></td><td>text[]</td><td>Периоды сна (default: ['00:00-08:00'])</td></tr>
+  <tr><td><code>timezone_offset</code></td><td>integer</td><td>Часовой пояс (default: 3 — МСК)</td></tr>
+  <tr><td><code>ignore_bots</code></td><td>boolean</td><td>Игнорировать ботов (default: true)</td></tr>
+  <tr><td><code>ignore_no_username</code></td><td>boolean</td><td>Игнорировать без юзернейма (default: true)</td></tr>
+  <tr><td><code>excluded_chat_ids</code></td><td>bigint[]</td><td>Исключённые чаты</td></tr>
+  <tr><td><code>created_at</code></td><td>timestamptz</td><td></td></tr>
+  <tr><td><code>updated_at</code></td><td>timestamptz</td><td></td></tr>
+</table>
+<p><em>Unique constraint: (user_id, account_id)</em></p>
+
+<h3>4.2 <code>sales_copilot_drafts</code></h3>
+
+<p>Сгенерированные черновики.</p>
+
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>id</code></td><td>uuid PK</td><td>Идентификатор</td></tr>
+  <tr><td><code>config_id</code></td><td>uuid FK → configs</td><td>Привязка к конфигу</td></tr>
+  <tr><td><code>account_id</code></td><td>uuid FK → tg_pool_accounts</td><td>TG-аккаунт</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Адресат</strong></td></tr>
+  <tr><td><code>tg_user_id</code></td><td>bigint</td><td>Telegram ID клиента</td></tr>
+  <tr><td><code>tg_username</code></td><td>text</td><td>Username клиента</td></tr>
+  <tr><td><code>tg_display_name</code></td><td>text</td><td>Отображаемое имя</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Черновик</strong></td></tr>
+  <tr><td><code>draft_text</code></td><td>text</td><td>Сгенерированный текст</td></tr>
+  <tr><td><code>draft_type</code></td><td>text</td><td><code>reactive</code> | <code>proactive</code></td></tr>
+  <tr><td><code>status</code></td><td>text</td><td><code>pending</code> | <code>sent</code> | <code>edited_and_sent</code> | <code>dismissed</code> | <code>expired</code></td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Контекст</strong></td></tr>
+  <tr><td><code>chat_history</code></td><td>jsonb</td><td>Контекст переписки (для отладки)</td></tr>
+  <tr><td><code>last_incoming_text</code></td><td>text</td><td>Последнее сообщение клиента</td></tr>
+  <tr><td><code>silence_days</code></td><td>integer</td><td>Дней молчания (для proactive)</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Метаданные</strong></td></tr>
+  <tr><td><code>llm_model</code></td><td>text</td><td>Использованная модель</td></tr>
+  <tr><td><code>llm_tokens_used</code></td><td>integer</td><td>Потрачено токенов</td></tr>
+  <tr><td><code>tg_draft_set</code></td><td>boolean</td><td>Был ли поставлен draft в TG</td></tr>
+  <tr><td colspan="3" style="background:#f9f9f9"><strong>Действие менеджера</strong></td></tr>
+  <tr><td><code>edited_text</code></td><td>text</td><td>Отредактированный текст (если правил)</td></tr>
+  <tr><td><code>acted_at</code></td><td>timestamptz</td><td>Когда менеджер обработал черновик</td></tr>
+  <tr><td><code>created_at</code></td><td>timestamptz</td><td></td></tr>
+  <tr><td><code>expires_at</code></td><td>timestamptz</td><td>Когда черновик станет expired</td></tr>
+</table>
+
+<h3>4.3 <code>sales_copilot_jobs</code></h3>
+
+<p>Управление worker'ом (по аналогии с <code>tg_outreach_jobs</code>).</p>
+
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>id</code></td><td>uuid PK</td><td></td></tr>
+  <tr><td><code>config_id</code></td><td>uuid FK → configs</td><td></td></tr>
+  <tr><td><code>user_id</code></td><td>uuid FK → profiles</td><td></td></tr>
+  <tr><td><code>action</code></td><td>text</td><td><code>start</code> | <code>stop</code></td></tr>
+  <tr><td><code>status</code></td><td>text</td><td><code>pending</code> | <code>running</code> | <code>completed</code> | <code>failed</code></td></tr>
+  <tr><td><code>error_message</code></td><td>text</td><td></td></tr>
+  <tr><td><code>created_at</code></td><td>timestamptz</td><td></td></tr>
+  <tr><td><code>started_at</code></td><td>timestamptz</td><td></td></tr>
+  <tr><td><code>finished_at</code></td><td>timestamptz</td><td></td></tr>
+</table>
+
+<h3>4.4 <code>sales_copilot_logs</code></h3>
+
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>id</code></td><td>bigint (identity)</td><td></td></tr>
+  <tr><td><code>config_id</code></td><td>uuid FK → configs</td><td></td></tr>
+  <tr><td><code>level</code></td><td>text</td><td><code>info</code> | <code>warning</code> | <code>error</code></td></tr>
+  <tr><td><code>message</code></td><td>text</td><td></td></tr>
+  <tr><td><code>created_at</code></td><td>timestamptz</td><td></td></tr>
+</table>
+
+<h3>4.5 RLS-политики</h3>
+
+<p>Все таблицы — стандартная схема RLS через <code>user_id</code> (напрямую или через <code>sales_copilot_configs.user_id</code>). По аналогии с существующими таблицами <code>tg_outreach_*</code>.</p>
+
+<hr>
+
+<h2>5. Worker: salesCopilotWorker.ts</h2>
+
+<h3>5.1 Основной цикл</h3>
+
+<ol>
+  <li>Запрос pending jobs из <code>sales_copilot_jobs</code></li>
+  <li>Для каждого config с <code>is_enabled=true</code>:
+    <ol type="a">
+      <li>Подключить GramJS-клиент (из <code>tg_pool_accounts</code>)</li>
+      <li><strong>Реактивный сканер:</strong>
+        <ul>
+          <li><code>getDialogs(limit: 30)</code></li>
+          <li>Для каждого диалога с <code>unreadCount &gt; 0</code>:
+            <ul>
+              <li><code>getMessages</code> (<strong>БЕЗ</strong> <code>readHistory</code>!)</li>
+              <li>Проверить: нет ли уже pending-черновика для этого чата</li>
+              <li>Отправить историю в LLM → получить черновик</li>
+              <li>Сохранить в <code>sales_copilot_drafts</code> (type=<code>reactive</code>)</li>
+              <li>Если <code>reactive_set_tg_draft=true</code> → <code>saveDraft</code> в TG</li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li><strong>Проактивный сканер:</strong>
+        <ul>
+          <li>Найти диалоги где последнее сообщение &gt; <code>proactive_silence_days</code> назад</li>
+          <li>Для каждого (лимит <code>proactive_max_drafts_per_scan</code>):
+            <ul>
+              <li>Проверить: нет ли уже pending-черновика</li>
+              <li>Отправить историю + промпт реанимации в LLM</li>
+              <li>Сохранить в <code>sales_copilot_drafts</code> (type=<code>proactive</code>)</li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li>Пауза <code>scan_interval_seconds</code></li>
+    </ol>
+  </li>
+  <li>Повторить</li>
+</ol>
+
+<h3>5.2 Критичные моменты</h3>
+<ul>
+  <li><strong>Не вызывать <code>readHistory</code></strong> — сообщения должны остаться непрочитанными для менеджера</li>
+  <li><strong>Дедупликация</strong> — не генерировать новый черновик если pending-черновик для этого чата уже есть</li>
+  <li><strong>Expired</strong> — помечать старые pending-черновики как expired (24ч для reactive, 72ч для proactive)</li>
+  <li><strong>Rate limits</strong> — соблюдать задержки между запросами к TG API</li>
+  <li><strong>FloodWait</strong> — обрабатывать <code>FloodWaitError</code> с cooldown</li>
+</ul>
+
+<h3>5.3 TG Draft API</h3>
+
+<p>Установка черновика в Telegram (для реактивного сценария):</p>
+<pre>await client.invoke(new Api.messages.SaveDraft({
+  peer: entity,
+  message: draftText,
+}));</pre>
+
+<p>Удаление черновика (после отправки или dismiss):</p>
+<pre>await client.invoke(new Api.messages.SaveDraft({
+  peer: entity,
+  message: '',
+}));</pre>
+
+<hr>
+
+<h2>6. API-маршруты</h2>
+
+<p>Базовый путь: <code>/api/sales-copilot/</code></p>
+
+<h3>6.1 Configs</h3>
+
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/configs</code></td><td>Список конфигов текущего пользователя</td></tr>
+  <tr><td>POST</td><td><code>/configs</code></td><td>Создать конфиг для аккаунта</td></tr>
+  <tr><td>GET</td><td><code>/configs/[id]</code></td><td>Получить конфиг</td></tr>
+  <tr><td>PATCH</td><td><code>/configs/[id]</code></td><td>Обновить конфиг</td></tr>
+  <tr><td>DELETE</td><td><code>/configs/[id]</code></td><td>Удалить конфиг</td></tr>
+</table>
+
+<h3>6.2 Drafts</h3>
+
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/configs/[id]/drafts</code></td><td>Список черновиков (фильтр по type, status)</td></tr>
+  <tr><td>GET</td><td><code>/configs/[id]/drafts/stats</code></td><td>Статистика: pending, sent, dismissed по типам</td></tr>
+  <tr><td>POST</td><td><code>/configs/[id]/drafts/[draftId]/send</code></td><td>Отправить черновик (или отредактированную версию)</td></tr>
+  <tr><td>POST</td><td><code>/configs/[id]/drafts/[draftId]/dismiss</code></td><td>Отклонить черновик</td></tr>
+  <tr><td>POST</td><td><code>/configs/[id]/drafts/[draftId]/regenerate</code></td><td>Перегенерировать черновик</td></tr>
+</table>
+
+<h3>6.3 Jobs</h3>
+
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>POST</td><td><code>/configs/[id]/start</code></td><td>Запустить copilot для конфига</td></tr>
+  <tr><td>POST</td><td><code>/configs/[id]/stop</code></td><td>Остановить copilot</td></tr>
+  <tr><td>GET</td><td><code>/configs/[id]/status</code></td><td>Текущий статус (running/stopped)</td></tr>
+</table>
+
+<h3>6.4 Logs</h3>
+
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/configs/[id]/logs</code></td><td>Логи copilot (пагинация, фильтр по level)</td></tr>
+</table>
+
+<hr>
+
+<h2>7. Frontend: страница /tools/sales-copilot</h2>
+
+<h3>7.1 Структура</h3>
+
+<p>Отдельная страница в портале, зарегистрированная в <code>toolsRegistry.ts</code>.</p>
+
+<p><strong>Табы верхнего уровня:</strong></p>
+<ol>
+  <li><strong>Черновики</strong> — основной рабочий экран менеджера</li>
+  <li><strong>Настройки</strong> — конфигурация copilot</li>
+  <li><strong>Логи</strong> — журнал работы</li>
+</ol>
+
+<h3>7.2 Таб «Черновики»</h3>
+
+<p>Два подраздела:</p>
+
+<p><strong>Входящие (reactive):</strong></p>
+<ul>
+  <li>Список pending-черновиков, отсортированных по дате</li>
+  <li>Каждая карточка: аватар, имя чата, последнее сообщение клиента, черновик ответа</li>
+  <li>Действия: Отправить / Править и отправить / Пропустить / Перегенерировать</li>
+  <li>Бейдж с количеством pending</li>
+</ul>
+
+<p><strong>Холодные диалоги (proactive):</strong></p>
+<ul>
+  <li>Список диалогов, молчащих дольше порога</li>
+  <li>Каждая карточка: имя, дней молчания, краткий контекст, черновик реанимации</li>
+  <li>Действия: те же</li>
+</ul>
+
+<h3>7.3 Таб «Настройки»</h3>
+<ul>
+  <li>Выбор аккаунта (из пула <code>tg_pool_accounts</code>)</li>
+  <li>Вкл/выкл copilot</li>
+  <li>Модель LLM</li>
+  <li>Реактивный сценарий: system prompt, ставить draft в TG (да/нет), лимит истории</li>
+  <li>Проактивный сценарий: system prompt для реанимации, порог молчания (дни), макс. черновиков за скан</li>
+  <li>Расписание: интервал сканирования, sleep periods</li>
+  <li>Фильтры: игнор ботов, исключённые чаты</li>
+</ul>
+
+<h3>7.4 Таб «Логи»</h3>
+
+<p>Аналогично логам кампаний в TG Outreach — таблица с level, message, created_at.</p>
+
+<hr>
+
+<h2>8. Промпты LLM</h2>
+
+<h3>8.1 Реактивный (по умолчанию)</h3>
+
+<pre>Ты — помощник менеджера по продажам. Тебе дана переписка менеджера с клиентом в Telegram.
+
+Задача: написать черновик следующего ответа от имени менеджера.
+
+Правила:
+- Пиши естественно, как в мессенджере (без канцеляризмов)
+- Коротко — 1-3 предложения
+- Учитывай контекст всей переписки
+- Если клиент задал вопрос — ответь на него
+- Если клиент проявил интерес — двигай к следующему шагу (звонок/встреча)
+- Если клиент негативит — вежливо попрощайся
+- НЕ используй эмодзи если их нет в стиле менеджера</pre>
+
+<h3>8.2 Проактивный (по умолчанию)</h3>
+
+<pre>Ты — помощник менеджера по продажам. Тебе дана переписка менеджера с клиентом в Telegram. Диалог замолк {silence_days} дней назад.
+
+Задача: написать сообщение для возобновления диалога.
+
+Правила:
+- Пиши естественно, как в мессенджере
+- Коротко — 1-3 предложения
+- Не начинай с "Привет, давно не общались" — это банально
+- Привяжись к контексту прошлого разговора
+- Дай повод ответить (вопрос, новость, предложение)
+- Не будь навязчивым</pre>
+
+<hr>
+
+<h2>9. Отправка сообщения из портала</h2>
+
+<p>Когда менеджер нажимает «Отправить» в UI:</p>
+<ol>
+  <li>API получает <code>draft_id</code> и опциональный <code>edited_text</code></li>
+  <li>Подключает GramJS-клиент для аккаунта</li>
+  <li>Отправляет сообщение: <code>client.sendMessage(tgUserId, { message: text })</code></li>
+  <li>Обновляет draft: <code>status = 'sent'</code> или <code>'edited_and_sent'</code>, <code>acted_at = now()</code></li>
+  <li>Если был TG draft — удаляет его (<code>saveDraft</code> с пустым message)</li>
+  <li>Возвращает результат</li>
+</ol>
+
+<hr>
+
+<h2>10. Фазы реализации</h2>
+
+<h3>Фаза 1: MVP (1–2 недели)</h3>
+<div class="checkbox"><input type="checkbox"> Миграция БД: таблицы + RLS</div>
+<div class="checkbox"><input type="checkbox"> API: configs CRUD, drafts list/send/dismiss</div>
+<div class="checkbox"><input type="checkbox"> Worker: реактивный сканер (без TG drafts)</div>
+<div class="checkbox"><input type="checkbox"> UI: страница с черновиками + базовые настройки</div>
+<div class="checkbox"><input type="checkbox"> Регистрация в toolsRegistry + navigation</div>
+
+<h3>Фаза 2: TG Drafts + Проактив (1 неделя)</h3>
+<div class="checkbox"><input type="checkbox"> Worker: проактивный сканер</div>
+<div class="checkbox"><input type="checkbox"> Worker: установка/удаление TG drafts (для reactive)</div>
+<div class="checkbox"><input type="checkbox"> UI: раздел «Холодные диалоги»</div>
+<div class="checkbox"><input type="checkbox"> UI: кнопка «Перегенерировать»</div>
+
+<h3>Фаза 3: Улучшения (ongoing)</h3>
+<div class="checkbox"><input type="checkbox"> Аналитика: конверсия черновиков (sent vs dismissed), время реакции</div>
+<div class="checkbox"><input type="checkbox"> Обучение на стиле менеджера (анализ прошлых сообщений)</div>
+<div class="checkbox"><input type="checkbox"> Уведомления (пуш/TG-бот) о новых черновиках</div>
+<div class="checkbox"><input type="checkbox"> Множественные аккаунты на одном экране</div>
+<div class="checkbox"><input type="checkbox"> Bulk-действия (отправить все, пропустить все)</div>
+
+<hr>
+
+<h2>11. Ограничения и риски</h2>
+
+<table>
+  <tr><th>Риск</th><th>Митигация</th></tr>
+  <tr><td>TG API rate limits / FloodWait</td><td>Задержки между запросами, cooldown при ошибках</td></tr>
+  <tr><td>LLM генерирует неадекватный ответ</td><td>Менеджер всегда ревьюит перед отправкой</td></tr>
+  <tr><td>Copilot помечает сообщения прочитанными</td><td>Использовать <code>getMessages</code> без <code>readHistory</code></td></tr>
+  <tr><td>Много pending-черновиков копится</td><td>Auto-expire через 24ч (reactive) / 72ч (proactive)</td></tr>
+  <tr><td>Аккаунт заблокирован</td><td>Проверка статуса перед отправкой, graceful handling</td></tr>
+</table>
+
+</body>
+</html>

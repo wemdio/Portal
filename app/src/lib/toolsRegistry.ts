@@ -39,6 +39,7 @@ export const ALL_TOOL_IDS = [
   'tg-parser',
   'cis-lead-finder',
   'sales-copilot',
+  'knowledge-base',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -193,5 +194,12 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'AI-подсказки для менеджеров: черновики ответов в TG и реанимация холодных диалогов.',
     href: '/tools/sales-copilot',
     accentColor: 'blue',
+  },
+  'knowledge-base': {
+    id: 'knowledge-base',
+    title: 'База знаний',
+    description: 'Документы, переписки, расшифровки встреч — контекст для AI-инструментов.',
+    href: '/tools/knowledge-base',
+    accentColor: 'emerald',
   },
 };
