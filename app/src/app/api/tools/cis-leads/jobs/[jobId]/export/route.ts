@@ -19,6 +19,7 @@ const EXPORT_COLUMNS = [
   'title',
   'role_guess',
   'phone',
+  'wa_registered',
   'phone_source',
   'tg_username',
   'tg_user_id',
@@ -117,7 +118,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
       const { data: contacts, error: contErr } = await supabaseAdmin
         .from('company_contacts')
-        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,score,source,source_details,profile_links')
+        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,wa_registered,score,source,source_details,profile_links')
         .eq('user_id', auth.user.id)
         .in('company_id', companyIds)
         .order('score', { ascending: false })
@@ -141,6 +142,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
           title: String((c as { title?: unknown }).title ?? ''),
           role_guess: String((c as { role_guess?: unknown }).role_guess ?? ''),
           phone: String((c as { channel_phone?: unknown }).channel_phone ?? ''),
+          wa_registered: (c as { wa_registered?: boolean | null }).wa_registered === true ? 'да' : (c as { wa_registered?: boolean | null }).wa_registered === false ? 'нет' : '',
           phone_source: getSourceDetail(sd, 'phone'),
           tg_username: tgUsername,
           tg_user_id: tgUserId > 0 ? tgUserId : '',

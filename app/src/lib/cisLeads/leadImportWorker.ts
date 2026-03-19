@@ -10,8 +10,8 @@ import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEn
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
-import { runEmailGuesser } from '@/lib/cisLeads/emailGuesser';
 import { runYandexMapsEnrichment } from '@/lib/cisLeads/yandexMapsEnrichment';
+import { runWhatsAppCheckBatch } from '@/lib/cisLeads/whatsappCheckWorker';
 import { guessLprRoleFromPost, normalizeInn, isLegalEntityName } from '@/lib/cisLeads/lprRole';
 import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportRow';
 
@@ -446,8 +446,8 @@ const ENRICHMENT_STAGES = [
   'siteDiscoveryEnrichment',
   'websiteTeamEnrichment',
   'yandexMapsEnrichment',
-  'emailGuesser',
   'phoneEnrichment',
+  'whatsappCheck',
   'socialProfileEnrichment',
   'contactAggregation',
 ] as const;
@@ -522,18 +522,18 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
   } catch (e) { logErr('yandexMapsEnrichment', e); stageIdx++; }
 
   try {
-    log('emailGuesser start');
-    const emailResult = await runEmailGuesser(jobId, userId);
-    log('emailGuesser', { processed: emailResult.processed, emails: emailResult.emailsFound });
-    await advanceProgress('emailGuesser');
-  } catch (e) { logErr('emailGuesser', e); stageIdx++; }
-
-  try {
     log('phoneEnrichment start');
     const phoneResult = await runPhoneEnrichmentBatch();
     log('phoneEnrichment', { processed: phoneResult.processed });
     await advanceProgress('phoneEnrichment');
   } catch (e) { logErr('phoneEnrichment', e); stageIdx++; }
+
+  try {
+    log('whatsappCheck start');
+    const waResult = await runWhatsAppCheckBatch(jobId, userId);
+    log('whatsappCheck', { processed: waResult.processed, registered: waResult.registered });
+    await advanceProgress('whatsappCheck');
+  } catch (e) { logErr('whatsappCheck', e); stageIdx++; }
 
   try {
     log('socialProfileEnrichment start');
