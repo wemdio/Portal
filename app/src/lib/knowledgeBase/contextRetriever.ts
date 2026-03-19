@@ -27,14 +27,12 @@ export async function searchChunks(
   const tsQuery = toTsQuery(query);
   if (!tsQuery) return { chunks: [], total: 0 };
 
-  let rpc = db.rpc('kb_search_chunks', {
+  const { data, error } = await db.rpc('kb_search_chunks', {
     search_query: tsQuery,
     filter_category: category ?? null,
     result_limit: limit,
     result_offset: offset,
   });
-
-  const { data, error } = await rpc;
   if (error) throw new Error(`KB search error: ${error.message}`);
 
   return {
