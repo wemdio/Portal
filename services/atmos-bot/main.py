@@ -2,9 +2,9 @@
 Atmos-bot: Telegram chat atmosphere analyzer.
 
 Webhook server (aiohttp):
-  - Receives all messages from chats where the bot is added.
-  - Stores them in tg_atmos_messages for later analysis.
-  - Handles admin commands in private chat (/settings, /model, /chats, etc.)
+  - Handles admin commands only in private chat.
+  - Accepts updates only from users listed in ATMOS_ALLOWED_TG_USER_IDS.
+  - All other updates are ignored.
 
 Scheduled analysis (every N min, configurable):
   - For each tracked chat, fetches unprocessed messages.
@@ -50,6 +50,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_ATMOS_BOT_TOKEN")
 TEAM_CHAT_ID = os.environ.get("TELEGRAM_ATMOS_TEAM_CHAT_ID")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_ATMOS_API_KEY")
+ATMOS_ALLOWED_TG_USER_IDS = os.environ.get("ATMOS_ALLOWED_TG_USER_IDS", "")
 
 WEBHOOK_PORT = int(os.environ.get("ATMOS_WEBHOOK_PORT", "8090"))
 WEBHOOK_PATH = os.environ.get("ATMOS_WEBHOOK_PATH", "/webhook")
@@ -104,6 +105,19 @@ def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _parse_allowed_user_ids(raw_ids: str) -> frozenset[int]:
+    ids: set[int] = set()
+    for part in raw_ids.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        try:
+            ids.add(int(candidate))
+        except ValueError:
+            print(f"[atmos] WARN: invalid user id in ATMOS_ALLOWED_TG_USER_IDS: {candidate!r}")
+    return frozenset(ids)
+
+
 # ── Runtime config (mutable, loaded from DB) ───────────────────────────────
 
 @dataclass
@@ -117,6 +131,7 @@ class RuntimeConfig:
 
 _cfg = RuntimeConfig()
 _scheduler: AsyncIOScheduler | None = None
+ALLOWED_PRIVATE_USER_IDS = _parse_allowed_user_ids(ATMOS_ALLOWED_TG_USER_IDS)
 
 
 async def load_config_from_db() -> None:
@@ -615,29 +630,38 @@ async def _upsert_chat_state(parsed: IncomingMessage) -> None:
     )
 
 
-def _extract_private_command(update: dict[str, Any]) -> tuple[int, str] | None:
-    """Returns (chat_id, command_text) if this is a private-chat text message."""
+def _extract_private_command(update: dict[str, Any]) -> tuple[int, int, str] | None:
+    """Returns (chat_id, user_id, command_text) for private-chat text messages."""
     msg = update.get("message")
     if not msg:
         return None
     chat = msg.get("chat", {})
     if chat.get("type") != "private":
         return None
+    user_id = msg.get("from", {}).get("id", 0)
+    if not user_id:
+        return None
     text = (msg.get("text") or "").strip()
     if not text:
         return None
-    return chat.get("id", 0), text
+    return chat.get("id", 0), user_id, text
 
 
-def _extract_callback(update: dict[str, Any]) -> tuple[int, int, str, str] | None:
-    """Returns (chat_id, message_id, callback_id, data) for inline button presses."""
+def _extract_callback(update: dict[str, Any]) -> tuple[int, int, int, str, str] | None:
+    """Returns (chat_id, user_id, message_id, callback_id, data) for private callbacks."""
     cb = update.get("callback_query")
     if not cb:
         return None
     msg = cb.get("message", {})
     chat = msg.get("chat", {})
+    if chat.get("type") != "private":
+        return None
+    user_id = cb.get("from", {}).get("id", 0)
+    if not user_id:
+        return None
     return (
         chat.get("id", 0),
+        user_id,
         msg.get("message_id", 0),
         cb.get("id", ""),
         cb.get("data", ""),
@@ -770,7 +794,9 @@ async def handle_webhook(request: web.Request) -> web.Response:
     # 1. Callback query (inline button press)
     cb_data = _extract_callback(update)
     if cb_data:
-        chat_id, message_id, callback_id, data = cb_data
+        chat_id, user_id, message_id, callback_id, data = cb_data
+        if user_id not in ALLOWED_PRIVATE_USER_IDS:
+            return web.json_response({"ok": True})
         try:
             if data.startswith("model:"):
                 await cb_model_select(chat_id, message_id, callback_id, data[6:])
@@ -796,7 +822,9 @@ async def handle_webhook(request: web.Request) -> web.Response:
     # 2. Private chat command or prompt input
     private = _extract_private_command(update)
     if private:
-        chat_id, text = private
+        chat_id, user_id, text = private
+        if user_id not in ALLOWED_PRIVATE_USER_IDS:
+            return web.json_response({"ok": True})
 
         if chat_id in _awaiting_prompt and not text.startswith("/"):
             try:
@@ -823,18 +851,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
                 await _reply(chat_id, "❌ Ошибка при выполнении команды.")
         return web.json_response({"ok": True})
 
-    # 3. Group message -> save for analysis (skip team chat — it only receives alerts)
-    parsed = _parse_group_message(update)
-    if parsed and parsed.chat_id and parsed.message_id:
-        try:
-            team_id: int | None = int(TEAM_CHAT_ID) if TEAM_CHAT_ID else None
-            if team_id is not None and parsed.chat_id == team_id:
-                return web.json_response({"ok": True})
-            await _save_message(parsed)
-            await _upsert_chat_state(parsed)
-        except Exception as e:
-            print(f"[atmos] save error: {e}")
-
+    # 3. All non-private updates are ignored intentionally.
     return web.json_response({"ok": True})
 
 
@@ -1323,6 +1340,9 @@ async def main() -> None:
     _require("TELEGRAM_ATMOS_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     _require("TELEGRAM_ATMOS_TEAM_CHAT_ID", TEAM_CHAT_ID)
     _require("OPENROUTER_ATMOS_API_KEY", OPENROUTER_API_KEY)
+    if not ALLOWED_PRIVATE_USER_IDS:
+        print("[atmos] FATAL: ATMOS_ALLOWED_TG_USER_IDS not set or empty")
+        sys.exit(1)
 
     await ensure_tables()
     await load_config_from_db()
@@ -1362,7 +1382,8 @@ async def main() -> None:
         f"[atmos] Started: analysis every {_cfg.check_interval_sec}s, "
         f"daily summary at 20:00 MSK, "
         f"threshold={_cfg.negative_threshold:.0%}, "
-        f"model={_cfg.model}"
+        f"model={_cfg.model}, "
+        f"allowed_private_users={sorted(ALLOWED_PRIVATE_USER_IDS)}"
     )
 
     while True:
