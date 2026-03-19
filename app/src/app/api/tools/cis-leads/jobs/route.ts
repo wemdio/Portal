@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
       const activeOnly = new URL(req.url).searchParams.get('active') === '1';
       let q = auth.supabase
         .from('lead_import_jobs')
-        .select('id,status,source_filename,source_label,total_rows,processed_rows,error_message,created_at,started_at,completed_at')
+        .select('id,status,source_filename,source_label,total_rows,processed_rows,error_message,created_at,started_at,completed_at,enrichment_progress')
         .eq('user_id', auth.user.id)
         .order('created_at', { ascending: false })
         .limit(activeOnly ? 5 : 15);
@@ -62,6 +62,7 @@ export async function GET(req: NextRequest) {
         created_at: string;
         started_at: string | null;
         completed_at: string | null;
+        enrichment_progress: number;
       }>;
 
       const jobIds = jobs.map((j) => j.id);
@@ -106,27 +107,22 @@ export async function GET(req: NextRequest) {
       }
 
       const contactCountsByCompany = new Map<string, number>();
-      const perplexityCountsByCompany = new Map<string, number>();
       if (allCompanyIds.size > 0) {
         const companyIds = Array.from(allCompanyIds);
         for (let i = 0; i < companyIds.length; i += JOB_CONTACTS_BATCH_SIZE) {
           const batchIds = companyIds.slice(i, i + JOB_CONTACTS_BATCH_SIZE);
           const { data: contactRows, error: contactsErr } = await auth.supabase
             .from('company_contacts')
-            .select('company_id,source')
+            .select('company_id')
             .eq('user_id', auth.user.id)
             .in('company_id', batchIds)
             .limit(50000);
           if (contactsErr) return jsonError(contactsErr.message, 500);
 
           for (const row of contactRows ?? []) {
-            const typed = row as { company_id?: unknown; source?: unknown };
-            const companyId = String(typed.company_id ?? '');
+            const companyId = String((row as { company_id?: unknown }).company_id ?? '');
             if (!companyId) continue;
             contactCountsByCompany.set(companyId, (contactCountsByCompany.get(companyId) ?? 0) + 1);
-            if (String(typed.source ?? '') === 'perplexity_search') {
-              perplexityCountsByCompany.set(companyId, (perplexityCountsByCompany.get(companyId) ?? 0) + 1);
-            }
           }
         }
       }
@@ -134,37 +130,23 @@ export async function GET(req: NextRequest) {
       const jobsWithStats = jobs.map((job) => {
         const companyIds = companyIdsByJob.get(job.id) ?? new Set<string>();
         const detectedCompanies = companyIds.size;
-        const linkableRows = linkableRowsByJob.get(job.id) ?? 0;
-        const linkedRows = linkedRowsByJob.get(job.id) ?? 0;
-        const parseTotal = Math.max(0, Number(job.total_rows) || 0);
-        const parseProcessed = Math.max(0, Number(job.processed_rows) || 0);
-        const parseRatio = parseTotal > 0 ? Math.max(0, Math.min(1, parseProcessed / parseTotal)) : 0;
-        const linkRatio = linkableRows > 0 ? Math.max(0, Math.min(1, linkedRows / linkableRows)) : 1;
-        const progressRatio = parseRatio < 1 ? parseRatio : Math.max(0, Math.min(1, 0.7 + linkRatio * 0.3));
+        const enrichmentProgress = Math.max(0, Math.min(1, Number(job.enrichment_progress) || 0));
         const displayStatus =
-          job.status === 'completed' && linkRatio < 1 ? 'running' : job.status;
+          job.status === 'completed'
+            ? 'completed'
+            : job.status === 'running' && enrichmentProgress > 0 && enrichmentProgress < 1
+              ? 'running'
+              : job.status;
         let contactsFound = 0;
-        let perplexityContactsFound = 0;
         for (const companyId of companyIds) {
           contactsFound += contactCountsByCompany.get(companyId) ?? 0;
-          perplexityContactsFound += perplexityCountsByCompany.get(companyId) ?? 0;
         }
-        const perplexityStage =
-          job.status === 'completed'
-            ? 'done'
-            : parseRatio < 1
-              ? 'pending'
-              : linkedRows > 0
-                ? 'started'
-                : 'pending';
         return {
           ...job,
           display_status: displayStatus,
-          progress_ratio: progressRatio,
+          enrichment_progress: enrichmentProgress,
           companies_found: detectedCompanies,
           contacts_found: contactsFound,
-          perplexity_contacts_found: perplexityContactsFound,
-          perplexity_stage: perplexityStage,
         };
       });
 

@@ -10,9 +10,9 @@ import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEn
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
-import { runEmailGuesser } from '@/lib/cisLeads/emailGuesser';
 import { runYandexMapsEnrichment } from '@/lib/cisLeads/yandexMapsEnrichment';
-import { guessLprRoleFromPost, normalizeInn } from '@/lib/cisLeads/lprRole';
+import { runWhatsAppCheckBatch } from '@/lib/cisLeads/whatsappCheckWorker';
+import { guessLprRoleFromPost, normalizeInn, isLegalEntityName } from '@/lib/cisLeads/lprRole';
 import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportRow';
 
 const BUCKET = 'cis-lead-imports';
@@ -80,6 +80,7 @@ async function upsertDadataLprContact(params: {
   if (!supabaseAdmin) return false;
   const fullName = String(params.fullName ?? '').trim();
   if (!fullName) return false;
+  if (isLegalEntityName(fullName)) return false;
   const post = String(params.post ?? '').trim() || null;
   const role = guessLprRoleFromPost(post);
 
@@ -428,83 +429,125 @@ async function backfillRawInn(jobId: string, userId: string): Promise<void> {
   }
 }
 
+async function setEnrichmentProgress(jobId: string, progress: number): Promise<void> {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin
+    .from('lead_import_jobs')
+    .update({ enrichment_progress: Math.max(0, Math.min(1, progress)) })
+    .eq('id', jobId);
+}
+
+const ENRICHMENT_STAGES = [
+  'backfillRawInn',
+  'normalizeCompanies',
+  'fallbackLinkCompanies',
+  'serperLprEnrichment',
+  'lprContactSerperEnrichment',
+  'siteDiscoveryEnrichment',
+  'websiteTeamEnrichment',
+  'yandexMapsEnrichment',
+  'phoneEnrichment',
+  'whatsappCheck',
+  'socialProfileEnrichment',
+  'contactAggregation',
+] as const;
+
 async function runLeadPostProcessingInternal(jobId: string, userId: string): Promise<void> {
   const log = (step: string, detail?: unknown) =>
     console.log(`[cis-leads][${jobId}] ${step}`, detail ?? '');
   const logErr = (step: string, err: unknown) =>
     console.error(`[cis-leads][${jobId}] ${step} failed:`, err instanceof Error ? err.message : err);
 
+  const totalStages = ENRICHMENT_STAGES.length;
+  let stageIdx = 0;
+
+  const advanceProgress = async (stageName: string) => {
+    stageIdx++;
+    const progress = stageIdx / totalStages;
+    log(`${stageName} done — progress ${Math.round(progress * 100)}%`);
+    await setEnrichmentProgress(jobId, progress);
+  };
+
   try {
     log('backfillRawInn start');
     await backfillRawInn(jobId, userId);
-    log('backfillRawInn done');
-  } catch (e) { logErr('backfillRawInn', e); }
+    await advanceProgress('backfillRawInn');
+  } catch (e) { logErr('backfillRawInn', e); stageIdx++; }
 
   try {
     log('normalizeCompaniesForJob start');
     await normalizeCompaniesForJob(jobId, userId);
-    log('normalizeCompaniesForJob done');
-  } catch (e) { logErr('normalizeCompaniesForJob', e); }
+    await advanceProgress('normalizeCompaniesForJob');
+  } catch (e) { logErr('normalizeCompaniesForJob', e); stageIdx++; }
 
   try {
     log('fallbackLinkCompanies start');
     await fallbackLinkCompaniesFromRawLeads(jobId, userId);
-    log('fallbackLinkCompanies done');
-  } catch (e) { logErr('fallbackLinkCompanies', e); }
+    await advanceProgress('fallbackLinkCompanies');
+  } catch (e) { logErr('fallbackLinkCompanies', e); stageIdx++; }
 
   try {
     log('serperLprEnrichment start');
     const serperResult = await runSerperLprEnrichment(jobId, userId);
-    log('serperLprEnrichment done', { processed: serperResult.processed, contacts: serperResult.contactsFound });
-  } catch (e) { logErr('serperLprEnrichment', e); }
+    log('serperLprEnrichment', { processed: serperResult.processed, contacts: serperResult.contactsFound });
+    await advanceProgress('serperLprEnrichment');
+  } catch (e) { logErr('serperLprEnrichment', e); stageIdx++; }
 
   try {
     log('lprContactSerperEnrichment start');
     const personalSerper = await runLprContactSerperEnrichment(jobId, userId);
-    log('lprContactSerperEnrichment done', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
-  } catch (e) { logErr('lprContactSerperEnrichment', e); }
+    log('lprContactSerperEnrichment', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
+    await advanceProgress('lprContactSerperEnrichment');
+  } catch (e) { logErr('lprContactSerperEnrichment', e); stageIdx++; }
 
   try {
     log('siteDiscoveryEnrichment start');
     const siteDiscovery = await runSiteDiscoveryEnrichment(jobId, userId);
-    log('siteDiscoveryEnrichment done', { processed: siteDiscovery.processed, sites: siteDiscovery.sitesFound });
-  } catch (e) { logErr('siteDiscoveryEnrichment', e); }
+    log('siteDiscoveryEnrichment', { processed: siteDiscovery.processed, sites: siteDiscovery.sitesFound });
+    await advanceProgress('siteDiscoveryEnrichment');
+  } catch (e) { logErr('siteDiscoveryEnrichment', e); stageIdx++; }
 
   try {
     log('websiteTeamEnrichment start');
     const siteResult = await runWebsiteTeamEnrichment(jobId, userId);
-    log('websiteTeamEnrichment done', { processed: siteResult.processed, contacts: siteResult.contactsFound });
-  } catch (e) { logErr('websiteTeamEnrichment', e); }
+    log('websiteTeamEnrichment', { processed: siteResult.processed, contacts: siteResult.contactsFound });
+    await advanceProgress('websiteTeamEnrichment');
+  } catch (e) { logErr('websiteTeamEnrichment', e); stageIdx++; }
 
   try {
     log('yandexMapsEnrichment start');
     const ymResult = await runYandexMapsEnrichment(jobId, userId);
-    log('yandexMapsEnrichment done', { processed: ymResult.processed, updated: ymResult.updated });
-  } catch (e) { logErr('yandexMapsEnrichment', e); }
-
-  try {
-    log('emailGuesser start');
-    const emailResult = await runEmailGuesser(jobId, userId);
-    log('emailGuesser done', { processed: emailResult.processed, emails: emailResult.emailsFound });
-  } catch (e) { logErr('emailGuesser', e); }
+    log('yandexMapsEnrichment', { processed: ymResult.processed, updated: ymResult.updated });
+    await advanceProgress('yandexMapsEnrichment');
+  } catch (e) { logErr('yandexMapsEnrichment', e); stageIdx++; }
 
   try {
     log('phoneEnrichment start');
     const phoneResult = await runPhoneEnrichmentBatch();
-    log('phoneEnrichment done', { processed: phoneResult.processed });
-  } catch (e) { logErr('phoneEnrichment', e); }
+    log('phoneEnrichment', { processed: phoneResult.processed });
+    await advanceProgress('phoneEnrichment');
+  } catch (e) { logErr('phoneEnrichment', e); stageIdx++; }
+
+  try {
+    log('whatsappCheck start');
+    const waResult = await runWhatsAppCheckBatch(jobId, userId);
+    log('whatsappCheck', { processed: waResult.processed, registered: waResult.registered });
+    await advanceProgress('whatsappCheck');
+  } catch (e) { logErr('whatsappCheck', e); stageIdx++; }
 
   try {
     log('socialProfileEnrichment start');
     const socialResult = await runSocialProfileEnrichment(jobId, userId);
-    log('socialProfileEnrichment done', { processed: socialResult.processed, linksFound: socialResult.linksFound });
-  } catch (e) { logErr('socialProfileEnrichment', e); }
+    log('socialProfileEnrichment', { processed: socialResult.processed, linksFound: socialResult.linksFound });
+    await advanceProgress('socialProfileEnrichment');
+  } catch (e) { logErr('socialProfileEnrichment', e); stageIdx++; }
 
   try {
     log('contactAggregation start');
     const contactResult = await runContactAggregationBatch();
-    log('contactAggregation done', { processed: contactResult.processed });
-  } catch (e) { logErr('contactAggregation', e); }
+    log('contactAggregation', { processed: contactResult.processed });
+    await advanceProgress('contactAggregation');
+  } catch (e) { logErr('contactAggregation', e); stageIdx++; }
 }
 
 export async function runLeadPostProcessing(jobId: string): Promise<void> {
