@@ -6,11 +6,10 @@ import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import type { ParsedUser, ParseOptions, ParseSource, OnlineStatus, TgParserAccount } from './types';
 
-function getEnvCredentials(): { apiId: number; apiHash: string; sessionStr: string; proxyUrl: string } {
+function getEnvCredentials(): { apiId: number; apiHash: string; proxyUrl: string } {
   return {
     apiId: Number(process.env.TGPARS_API_ID || process.env.TELEGRAM_API_ID || '0'),
     apiHash: process.env.TGPARS_API_HASH || process.env.TELEGRAM_API_HASH || '',
-    sessionStr: process.env.TGPARS_SESSION_STRING?.trim() || '',
     proxyUrl: process.env.TGPARS_PROXY?.trim() || '',
   };
 }
@@ -99,18 +98,14 @@ async function getClient(account?: TgParserAccount): Promise<TelegramClient> {
     sessionStr = account.session_data;
     proxyUrl = account.proxy_url ?? '';
   } else {
-    const env = getEnvCredentials();
-    apiId = env.apiId;
-    apiHash = env.apiHash;
-    sessionStr = env.sessionStr;
-    proxyUrl = env.proxyUrl;
+    throw new Error('Аккаунт обязателен. Добавьте Telegram-аккаунт через UI.');
   }
 
   if (!apiId || !apiHash) {
-    throw new Error('API ID и API Hash обязательны. Добавьте аккаунт или настройте TELEGRAM_API_ID/TELEGRAM_API_HASH в .env');
+    throw new Error('API ID и API Hash обязательны. Добавьте аккаунт через UI.');
   }
   if (!sessionStr) {
-    throw new Error('Session string обязателен. Добавьте аккаунт через UI или настройте TGPARS_SESSION_STRING в .env');
+    throw new Error('Session string обязателен. Добавьте аккаунт через UI.');
   }
 
   const proxy = parseProxyUrl(proxyUrl);

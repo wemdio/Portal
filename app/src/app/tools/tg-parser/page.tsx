@@ -494,7 +494,7 @@ export default function TgParserPage() {
               <p className="text-sm text-gray-500 py-2">Загрузка аккаунтов...</p>
             ) : accounts.length === 0 ? (
               <p className="text-sm text-gray-500 py-2">
-                Нет аккаунтов. Добавьте Telegram-аккаунт для парсинга или используйте env-переменные (TGPARS_SESSION_STRING).
+                Нет аккаунтов. Добавьте Telegram-аккаунт для парсинга.
               </p>
             ) : (
               <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
@@ -545,14 +545,14 @@ export default function TgParserPage() {
               className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 min-w-[200px]"
               disabled={busy}
             >
-              <option value="">Сервер (env)</option>
+              <option value="">Выберите аккаунт</option>
               {accounts.filter((a) => a.is_active && a.session_data).map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name || `Account ${a.api_id}`}
                 </option>
               ))}
             </select>
-            <span className="text-xs text-gray-500">или env TGPARS_SESSION_STRING</span>
+            <span className="text-xs text-gray-500">выберите аккаунт для парсинга</span>
           </div>
         )}
 
