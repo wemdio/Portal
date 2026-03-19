@@ -140,8 +140,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'CIS Lead Finder',
     description: 'Ищет ЛПР по ИНН и телефонам: нормализует компании и находит контакты.',
     href: '/tools/cis-lead-finder',
-    badge: 'Новое',
-    badgeVariant: 'emerald',
     accentColor: 'blue',
   },
   rdp: {
