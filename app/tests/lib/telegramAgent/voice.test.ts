@@ -24,15 +24,15 @@ function whisperOk(text: string) {
   return new Response(JSON.stringify({ text }), { status: 200 });
 }
 
-function whisperFail() {
-  return new Response('error', { status: 500 });
-}
-
 function chatOk(text: string) {
   return new Response(
     JSON.stringify({ choices: [{ message: { content: text } }] }),
     { status: 200 },
   );
+}
+
+function fail(status = 500) {
+  return new Response('error', { status });
 }
 
 describe('telegramAgent/voice', () => {
@@ -43,25 +43,42 @@ describe('telegramAgent/voice', () => {
 
   afterEach(() => jest.clearAllMocks());
 
-  it('transcribes via Whisper API (primary)', async () => {
-    mockFetch.mockResolvedValueOnce(whisperOk('привет как дела'));
+  it('transcribes via Whisper (primary)', async () => {
+    mockFetch.mockResolvedValueOnce(whisperOk('привет'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBe('привет как дела');
-    expect(downloadVoiceFile).toHaveBeenCalledWith('file-123');
-    expect(extractOrConvertToMp3).toHaveBeenCalledWith({ bytes: expect.any(Buffer), inputExt: '.ogg' });
-
+    expect(result).toBe('привет');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain('requesty.ai');
     expect(url).toContain('/audio/transcriptions');
   });
 
-  it('falls back to chat completions if Whisper fails', async () => {
+  it('falls back to Gemini if Whisper fails', async () => {
     mockFetch
-      .mockResolvedValueOnce(whisperFail())
-      .mockResolvedValueOnce(chatOk('результат из фоллбека'));
-
+      .mockResolvedValueOnce(fail(404))
+      .mockResolvedValueOnce(chatOk('через гемини'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBe('результат из фоллбека');
+    expect(result).toBe('через гемини');
     expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to policy/transcription if both Whisper and Gemini fail', async () => {
+    mockFetch
+      .mockResolvedValueOnce(fail(404))
+      .mockResolvedValueOnce(fail(500))
+      .mockResolvedValueOnce(chatOk('через полиси'));
+    const result = await transcribeVoiceMessage('file-123', 10);
+    expect(result).toBe('через полиси');
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns null when all methods fail', async () => {
+    mockFetch
+      .mockResolvedValueOnce(fail(404))
+      .mockResolvedValueOnce(fail(500))
+      .mockResolvedValueOnce(fail(500));
+    const result = await transcribeVoiceMessage('file-123', 10);
+    expect(result).toBeNull();
   });
 
   it('returns null for duration over limit', async () => {
@@ -76,18 +93,17 @@ describe('telegramAgent/voice', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when both methods return empty', async () => {
-    mockFetch
-      .mockResolvedValueOnce(whisperOk('   '))
-      .mockResolvedValueOnce(chatOk(''));
-
+  it('returns null on ffmpeg conversion error', async () => {
+    (extractOrConvertToMp3 as jest.Mock).mockRejectedValueOnce(new Error('ffmpeg failed'));
     const result = await transcribeVoiceMessage('file-123', 10);
     expect(result).toBeNull();
   });
 
-  it('returns null on conversion error', async () => {
-    (extractOrConvertToMp3 as jest.Mock).mockRejectedValueOnce(new Error('ffmpeg failed'));
+  it('skips empty whisper result and tries next method', async () => {
+    mockFetch
+      .mockResolvedValueOnce(whisperOk('   '))
+      .mockResolvedValueOnce(chatOk('текст из гемини'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBeNull();
+    expect(result).toBe('текст из гемини');
   });
 });
