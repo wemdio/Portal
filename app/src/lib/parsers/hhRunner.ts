@@ -343,6 +343,30 @@ export async function runHHParserJob(jobId: string, drainTimeoutMs: number): Pro
   } catch (err: unknown) {
     if (err instanceof ParserJobCancelledError) {
       await updateStage('cancelled');
+      const { data: currentStatusRow } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
+      const currentStatus = String((currentStatusRow as { status?: unknown } | null)?.status ?? '');
+
+      // Deployment pause flow: running -> pending should not fail the job.
+      if (currentStatus === 'pending') {
+        await db
+          .from('parser_jobs')
+          .update({
+            status: 'pending',
+            completed_at: null,
+            error_message: null,
+            progress_percent: lastPercent ?? null,
+          })
+          .eq('id', jobId);
+        await trace?.cancel('Пауза на время технических работ. Задача автоматически продолжится после деплоя.');
+        await logAudit(
+          'parser.hh.execute.paused',
+          'HH parser execution paused for deploy',
+          { jobId, searchText, progress_percent: lastPercent ?? null },
+          logMeta,
+        );
+        return;
+      }
+
       const timeoutLabel = drainTimeoutMs >= 3_600_000
         ? `${Math.round(drainTimeoutMs / 3_600_000)} ч.`
         : `${Math.round(drainTimeoutMs / 60_000)} мин.`;

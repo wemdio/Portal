@@ -23,7 +23,7 @@ export type LprFunction =
   | 'legal'
   | 'executive';
 
-export type LprProvider = 'apollo_pdl' | 'cis';
+export type LprProvider = 'cis';
 
 export interface CompanyInput {
   domain?: string;
@@ -43,50 +43,15 @@ export interface LprSearchConfig {
   max_enrichments?: number;
   /**
    * Which backend provider to use for discovery.
-   * - 'apollo_pdl' (default) keeps existing global behaviour.
    * - 'cis' enables CIS-native discovery (Yandex/2GIS/etc.).
    */
   provider?: LprProvider;
-}
-
-/** Raw person from Apollo People Search (no emails/phones). */
-export interface ApolloPersonRaw {
-  apollo_id: string;
-  first_name: string;
-  last_name_obfuscated: string;
-  title: string | null;
-  organization_name: string | null;
-  last_refreshed_at: string | null;
-  has_email: boolean;
-  has_direct_phone: string | null;
-}
-
-/** Enriched person from PDL. */
-export interface PdlPersonEnriched {
-  pdl_id: string;
-  full_name: string;
-  first_name: string | null;
-  last_name: string | null;
-  job_title: string | null;
-  job_title_role: string | null;
-  job_title_levels: string[] | null;
-  job_company_name: string | null;
-  job_company_website: string | null;
-  linkedin_url: string | null;
-  work_email: string | null;
-  personal_emails: string[];
-  phone_numbers: string[];
-  location_name: string | null;
-  likelihood: number;
 }
 
 /** Unified candidate after mapping + scoring. */
 export interface ContactCandidate {
   id?: string;
   job_id: string;
-
-  apollo_id: string | null;
-  pdl_id: string | null;
 
   full_name: string;
   first_name: string | null;
@@ -104,8 +69,6 @@ export interface ContactCandidate {
   linkedin_url: string | null;
 
   score: number;
-  enrichment_source: 'apollo' | 'pdl' | 'both' | 'none';
-  pdl_likelihood: number | null;
   data_freshness: string | null;
 
   created_at?: string;
@@ -119,8 +82,6 @@ export interface LprJob {
   total_found: number;
   enriched_count: number;
   usable_count: number;
-  apollo_credits_used: number;
-  pdl_credits_used: number;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

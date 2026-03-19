@@ -46,6 +46,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
 HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "300"))
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
 SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "144.31.54.166")
+HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
+HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
@@ -105,6 +107,24 @@ def _format_exception_message(error: Exception, limit: int = 120) -> str:
     if message:
         return message[:limit]
     return f"{error.__class__.__name__}: no details"[:limit]
+
+
+def _normalize_network_error(error: Exception, limit: int = 120) -> str:
+    """Map noisy/empty transport errors to concise, actionable text."""
+    text = _format_exception_message(error, limit=limit)
+    lowered = text.lower()
+    if (
+        "temporary failure in name resolution" in lowered
+        or "name or service not known" in lowered
+        or "nodename nor servname provided" in lowered
+        or "getaddrinfo failed" in lowered
+    ):
+        return "DNS resolution failed"
+    if isinstance(error, httpx.TimeoutException) or "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    if "all connection attempts failed" in lowered:
+        return "connection attempts failed"
+    return text
 
 
 # ── Settings (mute alerts) ───────────────────────────────────────────────────
@@ -276,37 +296,61 @@ async def check_db() -> tuple[bool, str, int | None, int | None]:
     """Returns (ok, message, current_connections, max_connections)."""
     if not DATABASE_URL:
         return False, "DATABASE_URL not set", None, None
-    try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    last_error: Exception | None = None
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
         try:
-            await conn.execute("SELECT 1")
-            cur = await conn.fetchval(
-                "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()"
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+            try:
+                await conn.execute("SELECT 1")
+                cur = await conn.fetchval(
+                    "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()"
+                )
+                max_raw = await conn.fetchval("SHOW max_connections")
+                max_c = int(max_raw) if max_raw else None
+                return True, "OK", cur, max_c
+            finally:
+                await conn.close()
+        except Exception as e:
+            last_error = e
+            print(
+                f"[health] DB check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS} error: "
+                f"{type(e).__name__}: {repr(e)}"
             )
-            max_raw = await conn.fetchval("SHOW max_connections")
-            max_c = int(max_raw) if max_raw else None
-            return True, "OK", cur, max_c
-        finally:
-            await conn.close()
-    except Exception as e:
-        error_text = _format_exception_message(e)
-        print(f"[health] DB check error: {type(e).__name__}: {repr(e)}")
-        return False, error_text, None, None
+            if attempt < HEALTH_RETRY_ATTEMPTS and HEALTH_RETRY_DELAY_SEC > 0:
+                await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    if last_error is None:
+        return False, "unknown DB error", None, None
+    error_text = _normalize_network_error(last_error)
+    return False, error_text, None, None
 
 
 async def check_proxy(proxy_url: str) -> tuple[bool, str]:
     """Try to make a request through the proxy to httpbin."""
-    try:
-        async with httpx.AsyncClient(
-            proxy=proxy_url,
-            timeout=HTTP_TIMEOUT,
-        ) as c:
-            r = await c.get("https://httpbin.org/ip")
-            if r.status_code == 200:
-                return True, "OK"
-            return False, f"HTTP {r.status_code}"
-    except Exception as e:
-        return False, str(e)[:80]
+    last_error: Exception | None = None
+    last_http_status: int | None = None
+
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy_url,
+                timeout=HTTP_TIMEOUT,
+            ) as c:
+                r = await c.get("https://httpbin.org/ip")
+                if r.status_code == 200:
+                    return True, "OK"
+                last_http_status = r.status_code
+        except Exception as e:
+            last_error = e
+
+        if attempt < HEALTH_RETRY_ATTEMPTS and HEALTH_RETRY_DELAY_SEC > 0:
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    if last_http_status is not None:
+        return False, f"HTTP {last_http_status}"
+    if last_error is not None:
+        return False, _normalize_network_error(last_error, limit=80)
+    return False, "unknown proxy error"
 
 
 async def check_all_proxies() -> list[tuple[str, str, bool, str]]:

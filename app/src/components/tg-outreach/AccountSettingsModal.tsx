@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { X, RefreshCw, Shuffle } from 'lucide-react';
 import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
-import type { TgOutreachAccount, TgOutreachTag } from '@/lib/tgOutreach/types';
+import type { TgOutreachAccount, TgOutreachProxy, TgOutreachTag } from '@/lib/tgOutreach/types';
 
 type Tab = 'basic' | 'limits' | 'additional';
 
@@ -18,6 +18,9 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
   const [tab, setTab] = useState<Tab>('basic');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [proxies, setProxies] = useState<TgOutreachProxy[]>([]);
+  const [loadingProxies, setLoadingProxies] = useState(false);
+  const [proxyLoadError, setProxyLoadError] = useState<string | null>(null);
 
   // Basic fields
   const [firstName, setFirstName] = useState(account.first_name);
@@ -28,6 +31,7 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
   const [notes, setNotes] = useState(account.notes);
   const [avatarUrl, setAvatarUrl] = useState(account.avatar_url);
   const [replaceAvatar, setReplaceAvatar] = useState(false);
+  const [selectedProxyId, setSelectedProxyId] = useState<string>(account.proxy_id ?? '');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Limits
@@ -45,6 +49,30 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
   const toggleTag = (id: string) => {
     setSelectedTags((prev) => prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]);
   };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProxies = async () => {
+      setLoadingProxies(true);
+      setProxyLoadError(null);
+      try {
+        const data = await tgOutreachFetch<{ items?: TgOutreachProxy[] }>('/proxies');
+        if (cancelled) return;
+        setProxies(Array.isArray(data.items) ? data.items : []);
+      } catch (err) {
+        if (cancelled) return;
+        setProxyLoadError(err instanceof Error ? err.message : 'Не удалось загрузить список прокси');
+      } finally {
+        if (!cancelled) setLoadingProxies(false);
+      }
+    };
+
+    void loadProxies();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleAvatarUpload = async (file: File) => {
     const formData = new FormData();
@@ -87,6 +115,7 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
           bio,
           account_price: Number(accountPrice) || 0,
           notes,
+          proxy_id: selectedProxyId || null,
           max_invites_per_day: Number(maxInvites) || 0,
           max_messages_per_day: Number(maxMessages) || 0,
           max_chat_messages_per_day: Number(maxChatMessages) || 0,
@@ -105,10 +134,6 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
       setSaving(false);
     }
   };
-
-  const proxyLabel = account.proxy
-    ? `${account.proxy.ip}:${account.proxy.port}`
-    : '—';
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'basic', label: 'Основное' },
@@ -137,7 +162,7 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-4 border-b border-gray-100 px-6 shrink-0">
+        <div className="flex gap-6 border-b border-gray-100 px-6 shrink-0">
           {tabs.map((t) => (
             <button
               key={t.id}
@@ -159,9 +184,30 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Прокси</label>
-                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
-                  {proxyLabel}
-                </div>
+                <select
+                  value={selectedProxyId}
+                  onChange={(e) => setSelectedProxyId(e.target.value)}
+                  disabled={loadingProxies}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:bg-gray-50 disabled:text-gray-400"
+                >
+                  <option value="">Без прокси</option>
+                  {account.proxy_id && !proxies.some((p) => p.id === account.proxy_id) ? (
+                    <option value={account.proxy_id}>
+                      Текущий прокси недоступен в списке ({account.proxy?.ip}:{account.proxy?.port})
+                    </option>
+                  ) : null}
+                  {proxies.map((proxy) => (
+                    <option key={proxy.id} value={proxy.id}>
+                      {proxy.ip}:{proxy.port} ({proxy.type}){proxy.notes ? ` — ${proxy.notes}` : ''}
+                    </option>
+                  ))}
+                </select>
+                {loadingProxies ? (
+                  <p className="mt-1 text-xs text-gray-500">Загружаем список прокси...</p>
+                ) : null}
+                {proxyLoadError ? (
+                  <p className="mt-1 text-xs text-red-600">{proxyLoadError}</p>
+                ) : null}
               </div>
 
               <div>

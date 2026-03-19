@@ -25,6 +25,8 @@ type OutreachAccountRow = {
   is_active: boolean;
 };
 
+
+
 function normalizePhone(raw: string): string | null {
   const s = String(raw ?? '').trim();
   if (!s) return null;
@@ -68,7 +70,11 @@ async function getAnyActiveTelegramAccount(): Promise<OutreachAccountRow | null>
 
 async function withClient<T>(fn: (client: TelegramClient) => Promise<T>): Promise<T> {
   const account = await getAnyActiveTelegramAccount();
-  if (!account) throw new Error('Нет активного Telegram аккаунта для пробива (tg_outreach_accounts)');
+  if (!account) {
+    throw new Error(
+      'Нет активного Telegram аккаунта с сессией для пробива (tg_outreach_accounts или tg_pool_accounts)',
+    );
+  }
 
   const db = supabaseAdmin!;
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
@@ -127,8 +133,13 @@ async function upsertIdentity(params: {
     );
 }
 
+/** Phone -> company_contact ids to update with tg_username when found */
+const phoneToContactIds = new Map<string, string[]>();
+
 export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> {
   if (!supabaseAdmin) return { processed: 0 };
+
+  phoneToContactIds.clear();
 
   const { data: leads } = await supabaseAdmin
     .from('raw_leads')
@@ -144,28 +155,90 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
     .map(normalizePhone)
     .filter((p): p is string => Boolean(p));
 
-  const unique = Array.from(new Set(normalized)).slice(0, 120);
+  const uniqueFromLeads = Array.from(new Set(normalized));
+
+  const { data: contactsWithPhone } = await supabaseAdmin
+    .from('company_contacts')
+    .select('id, channel_phone')
+    .not('channel_phone', 'is', null)
+    .is('channel_tg_username', null)
+    .limit(2000);
+
+  for (const row of (contactsWithPhone ?? []) as Array<{ id: string; channel_phone: string }>) {
+    const phone = normalizePhone(row.channel_phone);
+    if (!phone) continue;
+    const list = phoneToContactIds.get(phone) ?? [];
+    if (!list.includes(row.id)) list.push(row.id);
+    phoneToContactIds.set(phone, list);
+  }
+
+  const fromContacts = Array.from(phoneToContactIds.keys());
+  const unique = Array.from(new Set([...uniqueFromLeads, ...fromContacts])).slice(0, 120);
   if (unique.length === 0) return { processed: 0 };
 
   const { data: existing } = await supabaseAdmin
     .from('phone_identities')
-    .select('phone_normalized')
+    .select('phone_normalized, tg_username, tg_user_id')
     .in('phone_normalized', unique);
 
   const existingSet = new Set((existing ?? []).map((r) => String((r as { phone_normalized?: unknown }).phone_normalized ?? '')));
+  const existingTgByPhone = new Map(
+    (existing ?? []).map((r) => [
+      String((r as { phone_normalized?: unknown }).phone_normalized ?? ''),
+      {
+        tgUsername: String((r as { tg_username?: unknown }).tg_username ?? '').trim() || null,
+        tgUserId: Number((r as { tg_user_id?: unknown }).tg_user_id ?? 0) || null,
+      },
+    ]),
+  );
+
   const toCheck = unique.filter((p) => !existingSet.has(p)).slice(0, 50);
+
+  for (const phone of fromContacts) {
+    if (toCheck.includes(phone)) continue;
+    const identity = existingTgByPhone.get(phone);
+    if (!identity?.tgUsername && !identity?.tgUserId) continue;
+    const ids = phoneToContactIds.get(phone);
+    if (!ids?.length) continue;
+    for (const id of ids) {
+      const { data: existing } = await supabaseAdmin
+        .from('company_contacts')
+        .select('source_details')
+        .eq('id', id)
+        .maybeSingle<{ source_details: Record<string, string> | null }>();
+      const existingDetails = (existing?.source_details && typeof existing.source_details === 'object' ? existing.source_details : {}) as Record<string, string>;
+      const mergedDetails = { ...existingDetails, tg: 'Telegram (MTProto)' };
+      await supabaseAdmin
+        .from('company_contacts')
+        .update({
+          channel_tg_username: identity.tgUsername,
+          channel_tg_user_id: identity.tgUserId,
+          source_details: mergedDetails,
+        })
+        .eq('id', id);
+    }
+  }
+
   if (toCheck.length === 0) return { processed: 0 };
 
   await withClient(async (client) => {
     // Telegram requires contacts import in batches; keep it small and safe.
-    const contacts = toCheck.map(
-      (p, i) =>
-        new Api.InputPhoneContact({
-          clientId: BigInt(Date.now() + i) as unknown as never,
+    const contactEntries = toCheck.map((p, i) => {
+      const clientId = BigInt(Date.now() + i);
+      return {
+        phone: p,
+        clientId,
+        contact: new Api.InputPhoneContact({
+          clientId: clientId as unknown as never,
           phone: p,
           firstName: 'Lead',
           lastName: 'Finder',
         }),
+      };
+    });
+    const contacts = contactEntries.map((entry) => entry.contact);
+    const phoneByClientId = new Map<string, string>(
+      contactEntries.map((entry) => [entry.clientId.toString(), entry.phone]),
     );
 
     try {
@@ -178,41 +251,50 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
         }
       }
 
-      // Imported entries map phone contacts to user_id.
       const foundPhones = new Set<string>();
-      for (const imp of res.imported) {
-        const userId = Number(imp.userId);
+      for (const imp of res.imported ?? []) {
+        const userId = Number((imp as { userId?: unknown }).userId ?? 0);
+        const clientId = String((imp as { clientId?: unknown }).clientId ?? '');
+        const phone = phoneByClientId.get(clientId);
         const u = userById.get(userId);
-        if (!u) continue;
+        if (!phone || !u) continue;
 
-        // We don't get phone back from Telegram in a stable way; assume order aligns with contacts list.
-        // Telegram returns `imported` in the same order as contacts in most cases, but not guaranteed.
-        // As a conservative fallback, mark as found without linking exact phone if uncertain.
+        foundPhones.add(phone);
+        const tgUsername = u.username ?? null;
+        const tgUserId = Number(u.id);
+        await upsertIdentity({
+          phone,
+          status: 'found',
+          tg_user_id: tgUserId,
+          tg_username: tgUsername,
+          first_name: u.firstName ?? null,
+          last_name: u.lastName ?? null,
+        });
+        const contactIds = phoneToContactIds.get(phone);
+        if ((tgUsername || tgUserId) && contactIds?.length) {
+          for (const contactId of contactIds) {
+            const { data: existingContact } = await supabaseAdmin!
+              .from('company_contacts')
+              .select('source_details')
+              .eq('id', contactId)
+              .maybeSingle<{ source_details: Record<string, string> | null }>();
+            const existingDet = (existingContact?.source_details && typeof existingContact.source_details === 'object' ? existingContact.source_details : {}) as Record<string, string>;
+            const mergedDet = { ...existingDet, tg: 'Telegram (MTProto)' };
+            await supabaseAdmin!
+              .from('company_contacts')
+              .update({
+                channel_tg_username: tgUsername,
+                channel_tg_user_id: tgUserId,
+                source_details: mergedDet,
+              })
+              .eq('id', contactId);
+          }
+        }
       }
 
-      // Pragmatic mapping: treat any returned users as found for some subset of phones.
-      // For reliability, we map by index: if user count matches, use positional mapping.
-      const returnedUsers = res.users.filter((u) => u instanceof Api.User) as Api.User[];
-      if (returnedUsers.length === toCheck.length) {
-        for (let i = 0; i < toCheck.length; i++) {
-          const phone = toCheck[i]!;
-          const u = returnedUsers[i]!;
-          foundPhones.add(phone);
-          await upsertIdentity({
-            phone,
-            status: 'found',
-            tg_user_id: Number(u.id),
-            tg_username: u.username ?? null,
-            first_name: u.firstName ?? null,
-            last_name: u.lastName ?? null,
-          });
-        }
-      } else {
-        // If mismatch, still persist "not_found" for all; can be retried later.
-        for (const phone of toCheck) {
-          if (foundPhones.has(phone)) continue;
-          await upsertIdentity({ phone, status: 'not_found' });
-        }
+      for (const phone of toCheck) {
+        if (foundPhones.has(phone)) continue;
+        await upsertIdentity({ phone, status: 'not_found' });
       }
 
     } catch (e) {

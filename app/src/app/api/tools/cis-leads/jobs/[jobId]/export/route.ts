@@ -11,6 +11,46 @@ function csvEscape(value: unknown): string {
   return s;
 }
 
+const EXPORT_COLUMNS = [
+  'company_name',
+  'inn',
+  'region',
+  'full_name',
+  'title',
+  'role_guess',
+  'phone',
+  'wa_registered',
+  'phone_source',
+  'tg_username',
+  'tg_user_id',
+  'tg_profile',
+  'tg_source',
+  'email',
+  'email_source',
+  'linkedin',
+  'linkedin_source',
+  'score',
+  'source',
+] as const;
+
+function buildTgProfileLink(tgUsername: unknown, tgUserId: unknown): string {
+  const username = String(tgUsername ?? '').trim().replace(/^@/, '');
+  if (username) return `https://t.me/${username}`;
+  const userId = Number(tgUserId ?? 0) || 0;
+  if (userId > 0) return `tg://user?id=${userId}`;
+  return '';
+}
+
+function getSourceDetail(details: Record<string, string> | null | undefined, key: string): string {
+  if (!details || typeof details !== 'object') return '';
+  return String(details[key] ?? '');
+}
+
+function getLinkedInUrl(profileLinks: Record<string, string> | null | undefined): string {
+  if (!profileLinks || typeof profileLinks !== 'object') return '';
+  return String(profileLinks.linkedin ?? '');
+}
+
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.cis-leads.jobs.export.get' },
@@ -20,6 +60,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
       const { jobId } = await ctx.params;
+      const { searchParams } = new URL(req.url);
+      const format = (searchParams.get('format') ?? 'csv').toLowerCase();
+      const isXlsx = format === 'xlsx' || format === 'excel';
 
       const { data: job, error: jobErr } = await auth.supabase
         .from('lead_import_jobs')
@@ -42,7 +85,22 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
         .filter(Boolean)));
 
       if (companyIds.length === 0) {
-        const header = 'company_name,inn,region,full_name,title,role_guess,phone,tg,email,score,source\n';
+        if (isXlsx) {
+          const mod = await import('xlsx');
+          const XLSX = mod.default ?? mod;
+          const ws = XLSX.utils.json_to_sheet([], { header: [...EXPORT_COLUMNS] });
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'CIS Leads');
+          const xlsxBody = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
+          return new NextResponse(xlsxBody, {
+            headers: {
+              'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              'Content-Disposition': `attachment; filename=\"cis_leads_${jobId}.xlsx\"`,
+            },
+          });
+        }
+
+        const header = `${EXPORT_COLUMNS.join(',')}\n`;
         return new NextResponse(header, {
           headers: {
             'Content-Type': 'text/csv; charset=utf-8',
@@ -60,34 +118,65 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
       const { data: contacts, error: contErr } = await supabaseAdmin
         .from('company_contacts')
-        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_email,score,source')
+        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,wa_registered,score,source,source_details,profile_links')
         .eq('user_id', auth.user.id)
         .in('company_id', companyIds)
         .order('score', { ascending: false })
         .limit(20000);
       if (contErr) return jsonError(contErr.message, 500);
 
-      const lines: string[] = [];
-      lines.push('company_name,inn,region,full_name,title,role_guess,phone,tg,email,score,source');
+      const exportRows: Record<(typeof EXPORT_COLUMNS)[number], string | number>[] = [];
 
       for (const c of contacts ?? []) {
         const companyId = String((c as { company_id?: unknown }).company_id ?? '');
         const comp = companyMap.get(companyId);
-        lines.push([
-          csvEscape(comp?.name ?? ''),
-          csvEscape(comp?.inn ?? ''),
-          csvEscape(comp?.region ?? ''),
-          csvEscape((c as { full_name?: unknown }).full_name ?? ''),
-          csvEscape((c as { title?: unknown }).title ?? ''),
-          csvEscape((c as { role_guess?: unknown }).role_guess ?? ''),
-          csvEscape((c as { channel_phone?: unknown }).channel_phone ?? ''),
-          csvEscape((c as { channel_tg_username?: unknown }).channel_tg_username ?? ''),
-          csvEscape((c as { channel_email?: unknown }).channel_email ?? ''),
-          csvEscape((c as { score?: unknown }).score ?? 0),
-          csvEscape((c as { source?: unknown }).source ?? ''),
-        ].join(','));
+        const tgUsername = String((c as { channel_tg_username?: unknown }).channel_tg_username ?? '').trim();
+        const tgUserId = Number((c as { channel_tg_user_id?: unknown }).channel_tg_user_id ?? 0) || 0;
+        const sd = (c as { source_details?: Record<string, string> | null }).source_details ?? null;
+        const pl = (c as { profile_links?: Record<string, string> | null }).profile_links ?? null;
+        exportRows.push({
+          company_name: String(comp?.name ?? ''),
+          inn: String(comp?.inn ?? ''),
+          region: String(comp?.region ?? ''),
+          full_name: String((c as { full_name?: unknown }).full_name ?? ''),
+          title: String((c as { title?: unknown }).title ?? ''),
+          role_guess: String((c as { role_guess?: unknown }).role_guess ?? ''),
+          phone: String((c as { channel_phone?: unknown }).channel_phone ?? ''),
+          wa_registered: (c as { wa_registered?: boolean | null }).wa_registered === true ? 'да' : (c as { wa_registered?: boolean | null }).wa_registered === false ? 'нет' : '',
+          phone_source: getSourceDetail(sd, 'phone'),
+          tg_username: tgUsername,
+          tg_user_id: tgUserId > 0 ? tgUserId : '',
+          tg_profile: buildTgProfileLink(tgUsername, tgUserId),
+          tg_source: getSourceDetail(sd, 'tg'),
+          email: String((c as { channel_email?: unknown }).channel_email ?? ''),
+          email_source: getSourceDetail(sd, 'email'),
+          linkedin: getLinkedInUrl(pl),
+          linkedin_source: getSourceDetail(sd, 'linkedin'),
+          score: Number((c as { score?: unknown }).score ?? 0) || 0,
+          source: String((c as { source?: unknown }).source ?? ''),
+        });
       }
 
+      if (isXlsx) {
+        const mod = await import('xlsx');
+        const XLSX = mod.default ?? mod;
+        const ws = XLSX.utils.json_to_sheet(exportRows, { header: [...EXPORT_COLUMNS] });
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'CIS Leads');
+        const xlsxBody = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
+        return new NextResponse(xlsxBody, {
+          headers: {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': `attachment; filename=\"cis_leads_${jobId}.xlsx\"`,
+          },
+        });
+      }
+
+      const lines: string[] = [];
+      lines.push(EXPORT_COLUMNS.join(','));
+      for (const row of exportRows) {
+        lines.push(EXPORT_COLUMNS.map((key) => csvEscape(row[key])).join(','));
+      }
       const body = `${lines.join('\n')}\n`;
       return new NextResponse(body, {
         headers: {
@@ -98,4 +187,3 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     },
   );
 }
-

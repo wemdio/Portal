@@ -1,19 +1,10 @@
 export const LPR_CONFIG = {
-  APOLLO_API_KEY: process.env.APOLLO_API_KEY ?? '',
-  PDL_API_KEY: process.env.PDL_API_KEY ?? '',
-
-  /**
-   * Default provider for LPR discovery when the client does not specify one explicitly.
-   * For backwards compatibility we keep Apollo/PDL as the default and let
-   * CIS mode be enabled per-request or by domain heuristics.
-   */
-  DEFAULT_PROVIDER: (process.env.LPR_DEFAULT_PROVIDER ?? 'apollo_pdl') as 'apollo_pdl' | 'cis',
+  DEFAULT_PROVIDER: 'cis' as const,
 
   MAX_CANDIDATES_PER_COMPANY: Number(process.env.LPR_MAX_CANDIDATES) || 25,
   MAX_ENRICHMENTS_PER_RUN: Number(process.env.LPR_MAX_ENRICHMENTS) || 10,
   TOP_N_RESULTS: Number(process.env.LPR_TOP_N) || 10,
 
-  PDL_MIN_LIKELIHOOD: Number(process.env.LPR_PDL_MIN_LIKELIHOOD) || 5,
   CACHE_TTL_HOURS: Number(process.env.LPR_CACHE_TTL_HOURS) || 168, // 7 days
 
   DEFAULT_SENIORITIES: ['owner', 'founder', 'c_suite', 'partner', 'vp', 'head', 'director'] as const,

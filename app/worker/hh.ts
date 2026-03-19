@@ -1,7 +1,7 @@
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
-const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 3;
 const DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const WORKER_ID = `hh-${process.pid}-${Date.now()}`;
@@ -10,16 +10,13 @@ const running = new Set<Promise<void>>();
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const now = new Date().toISOString();
-  const errorMsg = 'Прервано перезапуском worker-сервиса';
-
   const { data: hhJobs, error: hhErr } = await db
     .from('parser_jobs')
-    .update({ status: 'failed', completed_at: now, error_message: errorMsg, progress_stage: 'failed' })
+    .update({ status: 'pending' })
     .eq('status', 'running')
     .select('id');
   if (hhErr) log('warn', 'Startup recovery: parser_jobs update failed', hhErr);
-  else if (hhJobs?.length) log('info', `Startup recovery: marked ${hhJobs.length} parser_jobs as failed`);
+  else if (hhJobs?.length) log('info', `Startup recovery: reset ${hhJobs.length} parser_jobs to pending`);
 }
 
 async function claimHHJob(): Promise<string | null> {
@@ -72,7 +69,7 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce });
+  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['parser_jobs'] });
 }
 
 main().catch((err) => {

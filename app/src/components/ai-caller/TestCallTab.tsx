@@ -146,7 +146,7 @@ export function TestCallTab({
         } catch {
           // ignore polling errors
         }
-      }, 2500);
+      }, 5000);
     },
     [getToken, apiBase, addToHistory],
   );

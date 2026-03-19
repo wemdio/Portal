@@ -19,7 +19,7 @@ import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 
-const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const HH_DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
@@ -403,11 +403,55 @@ async function pollOnce(): Promise<boolean> {
 }
 
 // --------------------------------------------------------------------------
-// Main polling loop
+// Main polling loop (Realtime-aware)
 // --------------------------------------------------------------------------
 
+const REALTIME_TABLES = [
+  'parser_jobs',
+  'search_parser_jobs',
+  'website_enrichment_jobs',
+  'brief_scoring_jobs',
+  'yandex_maps_jobs',
+  'email_validation_jobs',
+  'lead_import_jobs',
+];
+const FALLBACK_POLL_MS = 30_000;
+
+function createWaiter(timeoutMs: number) {
+  let resolve: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  const timer = setTimeout(() => resolve!(), timeoutMs);
+  const wake = () => { clearTimeout(timer); resolve!(); };
+  const cleanup = () => clearTimeout(timer);
+  return { promise, wake, cleanup };
+}
+
 async function pollLoop(): Promise<void> {
-  log('info', 'Polling loop started');
+  const effectiveFallback = Math.max(POLL_INTERVAL_MS, FALLBACK_POLL_MS);
+  let currentWaiter: ReturnType<typeof createWaiter> | null = null;
+
+  let channel: import('@supabase/supabase-js').RealtimeChannel | null = null;
+  if (supabaseAdmin) {
+    channel = supabaseAdmin.channel('worker_all_jobs');
+    for (const table of REALTIME_TABLES) {
+      channel = channel.on(
+        'postgres_changes' as 'postgres_changes',
+        { event: 'INSERT', schema: 'public', table, filter: 'status=eq.pending' },
+        () => { currentWaiter?.wake(); },
+      );
+      channel = channel.on(
+        'postgres_changes' as 'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table, filter: 'status=eq.pending' },
+        () => { currentWaiter?.wake(); },
+      );
+    }
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') log('info', 'Realtime subscribed to job tables');
+      else if (status === 'CHANNEL_ERROR') log('warn', `Realtime error — fallback to ${effectiveFallback}ms polling`);
+    });
+  }
+
+  log('info', `Poll loop started (realtime + ${effectiveFallback}ms fallback)`);
 
   while (!shuttingDown) {
     try {
@@ -415,12 +459,24 @@ async function pollLoop(): Promise<void> {
 
       const found = await pollOnce();
       if (!found) {
-        await sleep(POLL_INTERVAL_MS);
+        if (channel) {
+          currentWaiter = createWaiter(effectiveFallback);
+          await currentWaiter.promise;
+          currentWaiter = null;
+        } else {
+          await sleep(POLL_INTERVAL_MS);
+        }
       }
     } catch (err) {
       log('error', 'Unexpected error in poll loop', err);
       await sleep(POLL_INTERVAL_MS);
     }
+  }
+
+  if (channel) {
+    currentWaiter?.cleanup();
+    await supabaseAdmin!.removeChannel(channel);
+    log('info', 'Realtime channel removed');
   }
 
   log('info', 'Poll loop exited (shutting down)');

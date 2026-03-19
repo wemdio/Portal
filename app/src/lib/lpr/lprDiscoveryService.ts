@@ -1,75 +1,10 @@
-import type {
-  LprSearchConfig,
-  ApolloPersonRaw,
-  ContactCandidate,
-  LprSeniority,
-  LprProvider,
-  LprFunction,
-} from '@/types/lpr';
-import { searchPeople } from './apolloClient';
-import { enrichPerson } from './pdlClient';
+import 'server-only';
+
+import type { LprSearchConfig, ContactCandidate } from '@/types/lpr';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { LPR_CONFIG } from './config';
-
-// ─── Title normalization helpers ─────────────────────────────────────────────
-
-function inferSeniority(title: string | null): string | null {
-  if (!title) return null;
-  const t = title.toLowerCase();
-  const seniorities: [string, string[]][] = [
-    ['c_suite', ['chief ', 'ceo', 'cfo', 'cto', 'coo', 'cmo', 'cio', 'ciso', 'cro', 'cpo']],
-    ['owner', ['owner']],
-    ['founder', ['founder', 'co-founder']],
-    ['partner', ['partner']],
-    ['vp', ['vice president', 'vp ']],
-    ['head', ['head of', 'head,']],
-    ['director', ['director']],
-    ['manager', ['manager']],
-    ['senior', ['senior', 'lead', 'principal']],
-  ];
-  for (const [level, keywords] of seniorities) {
-    if (keywords.some((kw) => t.includes(kw))) return level;
-  }
-  return null;
-}
-
-function inferFunction(title: string | null): string | null {
-  if (!title) return null;
-  const t = title.toLowerCase();
-  for (const [fn, keywords] of Object.entries(LPR_CONFIG.FUNCTION_KEYWORDS)) {
-    if (keywords.some((kw) => t.includes(kw))) return fn;
-  }
-  return null;
-}
-
-function seniorityScore(seniority: string | null): number {
-  if (!seniority) return 0;
-  return LPR_CONFIG.SENIORITY_WEIGHTS[seniority] ?? 0;
-}
-
-function computeScore(candidate: Omit<ContactCandidate, 'score'>): number {
-  let score = 0;
-
-  score += seniorityScore(candidate.seniority) * 10;
-
-  if (candidate.function_area) score += 15;
-
-  if (candidate.work_email) score += 20;
-  if (candidate.phone) score += 15;
-  if (candidate.linkedin_url) score += 5;
-
-  if (candidate.pdl_likelihood != null) {
-    score += candidate.pdl_likelihood * 2;
-  }
-
-  if (candidate.data_freshness) {
-    const ageMs = Date.now() - new Date(candidate.data_freshness).getTime();
-    const ageDays = ageMs / (1000 * 60 * 60 * 24);
-    if (ageDays < 90) score += 10;
-    else if (ageDays < 180) score += 5;
-  }
-
-  return score;
-}
+import { hasDadataKey, suggestByName } from '@/lib/enrich/dadataClient';
+import { guessLprRoleFromPost, guessRoleFromTitle, isLikelyLpr, normalizeInn } from '@/lib/cisLeads/lprRole';
 
 // ─── Provider-agnostic result ────────────────────────────────────────────────
 
@@ -78,180 +13,65 @@ export interface DiscoveryResult {
   total_found: number;
   enriched_count: number;
   usable_count: number;
-  apollo_credits_used: number;
-  pdl_credits_used: number;
 }
 
 // ─── Provider interface ──────────────────────────────────────────────────────
 
 interface LprDiscoveryProvider {
-  readonly name: LprProvider;
   discover(jobId: string, config: LprSearchConfig): Promise<DiscoveryResult>;
 }
 
-// ─── Apollo + PDL provider (existing behaviour) ─────────────────────────────
-
-class ApolloPdlProvider implements LprDiscoveryProvider {
-  readonly name: LprProvider = 'apollo_pdl';
-
+class CisProvider implements LprDiscoveryProvider {
   async discover(jobId: string, config: LprSearchConfig): Promise<DiscoveryResult> {
-    const seniorities = (config.seniorities?.length
-      ? config.seniorities
-      : [...LPR_CONFIG.DEFAULT_SENIORITIES]) as LprSeniority[];
-
-    const maxCandidates = config.max_candidates ?? LPR_CONFIG.MAX_CANDIDATES_PER_COMPANY;
-    const maxEnrichments = config.max_enrichments ?? LPR_CONFIG.MAX_ENRICHMENTS_PER_RUN;
-
-    // Step 1: Apollo People Search (does NOT consume credits)
-    const domains = config.company.domain ? [config.company.domain] : [];
-
-    const apolloResult = await searchPeople({
-      domains,
-      seniorities,
-      per_page: Math.min(maxCandidates, 100),
-      page: 1,
-    });
-
-    // Step 2: Filter and rank Apollo results
-    let filtered = apolloResult.people
-      .filter((p) => p.title != null && p.title.length > 0)
-      .map((p) => ({
-        raw: p,
-        seniority: inferSeniority(p.title),
-        function_area: inferFunction(p.title),
-      }));
-
-    if (config.functions?.length) {
-      const allowedFunctions = new Set<LprFunction>(config.functions);
-      const functionalFiltered = filtered.filter(
-        (f) => f.function_area != null && allowedFunctions.has(f.function_area as LprFunction),
-      );
-      if (functionalFiltered.length > 0) filtered = functionalFiltered;
+    if (!supabaseAdmin) {
+      return { candidates: [], total_found: 0, enriched_count: 0, usable_count: 0 };
     }
 
-    filtered.sort((a, b) => seniorityScore(b.seniority) - seniorityScore(a.seniority));
+    const { data: jobRow } = await supabaseAdmin
+      .from('lpr_jobs')
+      .select('user_id')
+      .eq('id', jobId)
+      .single<{ user_id: string }>();
+    const userId = jobRow?.user_id ?? null;
 
-    const shortlist = filtered.slice(0, maxEnrichments);
+    const maxCandidates = config.max_candidates ?? LPR_CONFIG.MAX_CANDIDATES_PER_COMPANY;
+    const maxResults = Math.min(LPR_CONFIG.TOP_N_RESULTS, maxCandidates);
 
-    // Step 3: PDL enrichment for shortlist only
-    let pdlCreditsUsed = 0;
-    const candidates: ContactCandidate[] = [];
+    const companyCandidates = await findCompanies(config);
+    const { companies, managementContact } = companyCandidates;
 
-    for (const item of shortlist) {
-      const raw = item.raw;
-
-      const candidateBase: Omit<ContactCandidate, 'score'> = {
-        job_id: jobId,
-        apollo_id: raw.apollo_id,
-        pdl_id: null,
-        full_name: `${raw.first_name} ${raw.last_name_obfuscated}`,
-        first_name: raw.first_name || null,
-        last_name: null,
-        title: raw.title,
-        seniority: item.seniority,
-        function_area: item.function_area,
-        company_name: raw.organization_name ?? config.company.company_name ?? null,
-        company_domain: config.company.domain ?? null,
-        work_email: null,
-        personal_email: null,
-        phone: null,
-        linkedin_url: null,
-        enrichment_source: 'apollo',
-        pdl_likelihood: null,
-        data_freshness: raw.last_refreshed_at,
-      };
-
-      try {
-        const enriched = await enrichPerson({
-          first_name: raw.first_name || undefined,
-          company: config.company.domain ?? config.company.company_name ?? undefined,
-          profile: config.company.linkedin_url ?? undefined,
-        });
-
-        if (enriched) {
-          pdlCreditsUsed += 1;
-          candidateBase.pdl_id = enriched.pdl_id;
-          candidateBase.full_name = enriched.full_name || candidateBase.full_name;
-          candidateBase.first_name = enriched.first_name ?? candidateBase.first_name;
-          candidateBase.last_name = enriched.last_name;
-          candidateBase.title = enriched.job_title ?? candidateBase.title;
-          candidateBase.seniority = inferSeniority(enriched.job_title) ?? item.seniority;
-          candidateBase.function_area = inferFunction(enriched.job_title) ?? item.function_area;
-          candidateBase.company_name = enriched.job_company_name ?? candidateBase.company_name;
-          candidateBase.company_domain = enriched.job_company_website ?? candidateBase.company_domain;
-          candidateBase.work_email = enriched.work_email;
-          candidateBase.personal_email = enriched.personal_emails?.[0] ?? null;
-          candidateBase.phone = enriched.phone_numbers?.[0] ?? null;
-          candidateBase.linkedin_url = enriched.linkedin_url;
-          candidateBase.enrichment_source = 'both';
-          candidateBase.pdl_likelihood = enriched.likelihood;
-        }
-      } catch {
-        // PDL enrichment failed for this person; keep Apollo-only data
-      }
-
-      candidates.push({
-        ...candidateBase,
-        score: computeScore(candidateBase),
+    if (managementContact && userId) {
+      await upsertManagementContact({
+        userId,
+        companyId: managementContact.companyId,
+        fullName: managementContact.fullName,
+        post: managementContact.post,
       });
     }
 
-    // Step 4: Final sort by score, dedup, return top-N
-    candidates.sort((a, b) => b.score - a.score);
-
-    const seen = new Set<string>();
-    const deduped = candidates.filter((c) => {
-      const key = `${c.full_name.toLowerCase()}|${(c.company_name ?? '').toLowerCase()}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    const contacts = await loadCompanyContacts({
+      userId,
+      companyIds: companies.map((c) => c.id),
+      limit: maxCandidates,
     });
 
-    const topN = deduped.slice(0, LPR_CONFIG.TOP_N_RESULTS);
+    const companyById = new Map(companies.map((c) => [c.id, c]));
+    const mapped = contacts
+      .filter((c) => isLikelyLpr(c.title, c.role_guess))
+      .map((c) => mapContactToCandidate(jobId, c, companyById.get(c.company_id) ?? null));
+
+    const filteredByConfig = applyConfigFilters(mapped, config);
+    const sorted = filteredByConfig.sort((a, b) => b.score - a.score);
+    const topN = sorted.slice(0, maxResults);
     const usable = topN.filter((c) => c.work_email || c.phone);
 
     return {
       candidates: topN,
-      total_found: apolloResult.total,
-      enriched_count: pdlCreditsUsed,
-      usable_count: usable.length,
-      apollo_credits_used: 0, // Apollo search is free
-      pdl_credits_used: pdlCreditsUsed,
-    };
-  }
-}
-
-// ─── CIS provider stub (implemented in subsequent steps) ─────────────────────
-
-/**
- * CIS-native provider.
- *
- * NOTE: Implementation is added in follow-up tasks (cis-company-discovery,
- * cis-decision-maker-extraction, email-synthesis-validation). For now this
- * class is a thin wrapper that will be extended to call the CIS pipelines.
- */
-class CisProvider implements LprDiscoveryProvider {
-  readonly name: LprProvider = 'cis';
-
-  async discover(): Promise<DiscoveryResult> {
-    // Placeholder implementation; will be replaced with full CIS pipeline.
-    return {
-      candidates: [],
-      total_found: 0,
+      total_found: filteredByConfig.length,
       enriched_count: 0,
-      usable_count: 0,
-      apollo_credits_used: 0,
-      pdl_credits_used: 0,
+      usable_count: usable.length,
     };
   }
-}
-
-function pickProvider(config: LprSearchConfig): LprDiscoveryProvider {
-  const requested = config.provider ?? LPR_CONFIG.DEFAULT_PROVIDER;
-  if (requested === 'cis') {
-    return new CisProvider();
-  }
-  return new ApolloPdlProvider();
 }
 
 // ─── Main discovery entrypoint ───────────────────────────────────────────────
@@ -260,11 +80,330 @@ export async function discoverLpr(
   jobId: string,
   config: LprSearchConfig,
 ): Promise<DiscoveryResult> {
-  const provider = pickProvider(config);
-  // For now we simply delegate; later we may add per-provider logging/metrics here.
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  const seniorities = (config.seniorities?.length
-    ? config.seniorities
-    : [...LPR_CONFIG.DEFAULT_SENIORITIES]) as LprSeniority[];
-  return provider.discover(jobId, { ...config, seniorities });
+  const provider = new CisProvider();
+  return provider.discover(jobId, config);
+}
+
+type CompanyRow = {
+  id: string;
+  name: string;
+  short_name: string | null;
+  brand_name: string | null;
+  site: string | null;
+};
+
+type CompanyContactRow = {
+  company_id: string;
+  full_name: string;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  role_guess: string | null;
+  channel_phone: string | null;
+  channel_email: string | null;
+  channel_tg_username: string | null;
+  score: number | null;
+};
+
+async function findCompanies(config: LprSearchConfig): Promise<{
+  companies: CompanyRow[];
+  managementContact: { companyId: string; fullName: string; post: string | null } | null;
+}> {
+  const companies = new Map<string, CompanyRow>();
+  const companyName = normalizeQuery(config.company.company_name ?? '');
+  const domain = normalizeDomain(config.company.domain ?? '');
+  const domainLabel = extractDomainLabel(domain);
+
+  if (companyName) {
+    const rows = await queryCompaniesByName(companyName);
+    rows.forEach((r) => companies.set(r.id, r));
+  }
+  if (domain) {
+    const rows = await queryCompaniesByDomain(domain, domainLabel);
+    rows.forEach((r) => companies.set(r.id, r));
+  }
+
+  let managementContact: { companyId: string; fullName: string; post: string | null } | null = null;
+
+  if (companies.size === 0 && hasDadataKey() && companyName) {
+    const suggestion = await suggestByName(companyName);
+    if (suggestion) {
+      const inn = normalizeInn(String(suggestion.data?.inn ?? ''));
+      const company = await upsertCompanyFromDadata(suggestion, inn);
+      if (company) companies.set(company.id, company);
+      const managerName = String(suggestion.data?.management?.name ?? '').trim();
+      const managerPost = String(suggestion.data?.management?.post ?? '').trim() || null;
+      if (company && managerName) {
+        managementContact = { companyId: company.id, fullName: managerName, post: managerPost };
+      }
+    }
+  }
+
+  return { companies: Array.from(companies.values()), managementContact };
+}
+
+async function queryCompaniesByName(name: string): Promise<CompanyRow[]> {
+  if (!supabaseAdmin) return [];
+  const { data } = await supabaseAdmin
+    .from('companies')
+    .select('id,name,short_name,brand_name,site')
+    .ilike('name', `%${name}%`)
+    .limit(10);
+  return (data ?? []) as CompanyRow[];
+}
+
+async function queryCompaniesByDomain(domain: string, label: string | null): Promise<CompanyRow[]> {
+  if (!supabaseAdmin) return [];
+  const results: CompanyRow[] = [];
+  const { data: bySite } = await supabaseAdmin
+    .from('companies')
+    .select('id,name,short_name,brand_name,site')
+    .ilike('site', `%${domain}%`)
+    .limit(10);
+  (bySite ?? []).forEach((r) => results.push(r as CompanyRow));
+  if (label) {
+    const { data: byName } = await supabaseAdmin
+      .from('companies')
+      .select('id,name,short_name,brand_name,site')
+      .ilike('name', `%${label}%`)
+      .limit(10);
+    (byName ?? []).forEach((r) => results.push(r as CompanyRow));
+  }
+  return dedupeCompanies(results);
+}
+
+function dedupeCompanies(rows: CompanyRow[]): CompanyRow[] {
+  const seen = new Set<string>();
+  const out: CompanyRow[] = [];
+  for (const r of rows) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    out.push(r);
+  }
+  return out;
+}
+
+async function upsertCompanyFromDadata(
+  suggestion: Awaited<ReturnType<typeof suggestByName>>,
+  inn: string | null,
+): Promise<CompanyRow | null> {
+  if (!supabaseAdmin || !suggestion) return null;
+  const data = suggestion.data ?? {};
+  const now = new Date().toISOString();
+  const name =
+    String(data.name?.full_with_opf ?? '').trim() ||
+    String(suggestion.value ?? '').trim();
+  const shortName = String(data.name?.short_with_opf ?? '').trim() || null;
+  const region = String(data.address?.data?.region ?? '').trim() || null;
+  const city = String(data.address?.data?.city ?? '').trim() || null;
+  const ogrn = String(data.ogrn ?? '').trim() || null;
+
+  if (!name) return null;
+
+  if (inn) {
+    const { data: row } = await supabaseAdmin
+      .from('companies')
+      .upsert(
+        {
+          inn,
+          ogrn,
+          name,
+          short_name: shortName,
+          brand_name: null,
+          region,
+          city,
+          okved_main: null,
+          employees_range: null,
+          site: null,
+          phone: null,
+          email: null,
+          source: 'dadata',
+          source_confidence: 1.0,
+          updated_at: now,
+        },
+        { onConflict: 'inn' },
+      )
+      .select('id,name,short_name,brand_name,site')
+      .single<CompanyRow>();
+    return row ?? null;
+  }
+
+  const { data: row } = await supabaseAdmin
+    .from('companies')
+    .insert({
+      inn: null,
+      ogrn,
+      name,
+      short_name: shortName,
+      brand_name: null,
+      region,
+      city,
+      okved_main: null,
+      employees_range: null,
+      site: null,
+      phone: null,
+      email: null,
+      source: 'dadata',
+      source_confidence: 0.7,
+      updated_at: now,
+    })
+    .select('id,name,short_name,brand_name,site')
+    .single<CompanyRow>();
+  return row ?? null;
+}
+
+async function upsertManagementContact(params: {
+  userId: string;
+  companyId: string;
+  fullName: string;
+  post: string | null;
+}) {
+  if (!supabaseAdmin) return;
+  const role = guessLprRoleFromPost(params.post);
+  await supabaseAdmin
+    .from('company_contacts')
+    .upsert(
+      {
+        user_id: params.userId,
+        company_id: params.companyId,
+        source: 'dadata_management',
+        full_name: params.fullName,
+        first_name: null,
+        last_name: null,
+        title: params.post,
+        role_guess: role,
+        channel_phone: null,
+        channel_tg_username: null,
+        channel_email: null,
+        source_url: null,
+        score: 78,
+        confidence: 0.85,
+      },
+      { onConflict: 'user_id,company_id,full_name' },
+    );
+}
+
+async function loadCompanyContacts(params: {
+  userId: string | null;
+  companyIds: string[];
+  limit: number;
+}): Promise<CompanyContactRow[]> {
+  if (!supabaseAdmin || params.companyIds.length === 0) return [];
+  let query = supabaseAdmin
+    .from('company_contacts')
+    .select('company_id,full_name,first_name,last_name,title,role_guess,channel_phone,channel_email,channel_tg_username,score')
+    .in('company_id', params.companyIds)
+    .order('score', { ascending: false })
+    .limit(params.limit);
+  if (params.userId) query = query.eq('user_id', params.userId);
+  const { data } = await query;
+  return (data ?? []) as CompanyContactRow[];
+}
+
+function mapContactToCandidate(
+  jobId: string,
+  contact: CompanyContactRow,
+  company: CompanyRow | null,
+): ContactCandidate {
+  const title = contact.title ?? null;
+  const role = contact.role_guess ?? null;
+  const roleMeta = guessRoleFromTitle(title);
+  const seniority = mapRoleToSeniority(role, title);
+  const functionArea = mapRoleToFunction(role, title);
+  const score = computeCandidateScore(contact, roleMeta.score);
+
+  return {
+    job_id: jobId,
+    full_name: contact.full_name,
+    first_name: contact.first_name,
+    last_name: contact.last_name,
+    title,
+    seniority,
+    function_area: functionArea,
+    company_name: company?.name ?? null,
+    company_domain: company?.site ?? null,
+    work_email: contact.channel_email ?? null,
+    personal_email: null,
+    phone: contact.channel_phone ?? null,
+    linkedin_url: null,
+    score,
+    data_freshness: null,
+  };
+}
+
+function computeCandidateScore(contact: CompanyContactRow, baseScore: number): number {
+  let score = contact.score ?? baseScore;
+  if (contact.channel_phone) score += 10;
+  if (contact.channel_email) score += 10;
+  if (contact.channel_tg_username) score += 5;
+  return score;
+}
+
+function mapRoleToSeniority(role: string | null, title: string | null): string | null {
+  const r = String(role ?? '').toLowerCase();
+  if (r === 'owner') return 'owner';
+  if (r === 'ceo') return 'c_suite';
+  if (r === 'commercial' || r === 'director') return 'director';
+  const t = String(title ?? '').toLowerCase();
+  if (t.includes('vp ') || t.includes('vice president')) return 'vp';
+  if (t.includes('head')) return 'head';
+  return null;
+}
+
+function mapRoleToFunction(role: string | null, title: string | null): string | null {
+  const r = String(role ?? '').toLowerCase();
+  if (r === 'sales' || r === 'commercial') return 'sales';
+  if (r === 'marketing') return 'marketing';
+  if (r === 'ops') return 'operations';
+  if (r === 'it') return 'it';
+  if (r === 'hr') return 'hr';
+  if (r === 'owner' || r === 'ceo' || r === 'director') return 'executive';
+  const t = String(title ?? '').toLowerCase();
+  if (t.includes('sales') || t.includes('продаж')) return 'sales';
+  if (t.includes('маркет')) return 'marketing';
+  if (t.includes('операц') || t.includes('operations')) return 'operations';
+  if (t.includes('it') || t.includes('cto') || t.includes('tech')) return 'it';
+  return null;
+}
+
+function applyConfigFilters(candidates: ContactCandidate[], config: LprSearchConfig): ContactCandidate[] {
+  let out = candidates;
+  if (config.seniorities?.length) {
+    const allowed = new Set(config.seniorities);
+    out = out.filter((c) => (c.seniority ? allowed.has(c.seniority as unknown as typeof config.seniorities[number]) : false));
+  }
+  if (config.functions?.length) {
+    const allowed = new Set(config.functions);
+    out = out.filter((c) => (c.function_area ? allowed.has(c.function_area as unknown as typeof config.functions[number]) : false));
+  }
+  return out;
+}
+
+function normalizeQuery(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeDomain(raw: string): string {
+  const input = normalizeQuery(raw);
+  if (!input) return '';
+  try {
+    const url = /^[a-z]+:\/\//i.test(input) ? input : `https://${input}`;
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function extractDomainLabel(domain: string): string | null {
+  if (!domain) return null;
+  const host = domain.replace(/^www\./i, '').toLowerCase();
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  const tld = parts[parts.length - 1];
+  const secondLevel = parts[parts.length - 2];
+  if (parts.length >= 3 && tld.length === 2 && ['co', 'com', 'org', 'net'].includes(secondLevel)) {
+    return parts[parts.length - 3];
+  }
+  return secondLevel;
 }

@@ -2,7 +2,7 @@ import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
-const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '3000');
+const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 2;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce });
+  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['website_enrichment_jobs', 'brief_scoring_jobs'] });
 }
 
 main().catch((err) => {

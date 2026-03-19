@@ -1,6 +1,8 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { guessRoleFromTitle, isLikelyLpr } from '@/lib/cisLeads/lprRole';
+import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
 
 function normalizePhone(raw: string | null | undefined): string | null {
   const s = String(raw ?? '').trim();
@@ -13,27 +15,6 @@ function normalizePhone(raw: string | null | undefined): string | null {
   return null;
 }
 
-function guessRole(title: string | null): { role: string | null; score: number } {
-  const t = String(title ?? '').toLowerCase();
-  if (!t) return { role: null, score: 0 };
-
-  const rules: Array<{ role: string; score: number; kw: string[] }> = [
-    { role: 'owner', score: 80, kw: ['собственник', 'владелец', 'owner', 'founder', 'сооснователь', 'основатель'] },
-    { role: 'ceo', score: 75, kw: ['генеральный', 'гендир', 'ceo', 'chief executive', 'президент'] },
-    { role: 'commercial', score: 65, kw: ['коммерческ', 'cсо', 'cro', 'директор по продаж', 'sales director'] },
-    { role: 'sales', score: 55, kw: ['продаж', 'sales', 'bizdev', 'business development', 'аккаунт', 'account'] },
-    { role: 'marketing', score: 50, kw: ['маркет', 'marketing', 'growth', 'pr', 'brand'] },
-    { role: 'ops', score: 45, kw: ['операц', 'operations', 'coo', 'логист', 'supply'] },
-    { role: 'it', score: 45, kw: ['it', 'cto', 'техн', 'разраб', 'engineering', 'security', 'ciso'] },
-    { role: 'hr', score: 30, kw: ['hr', 'кадр', 'персонал', 'recruit', 'talent'] },
-  ];
-
-  for (const r of rules) {
-    if (r.kw.some((k) => t.includes(k))) return { role: r.role, score: r.score };
-  }
-  if (t.includes('директор') || t.includes('head') || t.includes('руководит')) return { role: 'director', score: 40 };
-  return { role: 'other', score: 10 };
-}
 
 export async function runContactAggregationBatch(): Promise<{ processed: number }> {
   if (!supabaseAdmin) return { processed: 0 };
@@ -65,15 +46,19 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
     ),
   );
 
-  const identityByPhone = new Map<string, { tg_username: string | null; first_name: string | null; last_name: string | null }>();
+  const identityByPhone = new Map<
+    string,
+    { tg_user_id: number | null; tg_username: string | null; first_name: string | null; last_name: string | null }
+  >();
   if (phones.length > 0) {
     const { data: identities } = await supabaseAdmin
       .from('phone_identities')
-      .select('phone_normalized,tg_username,first_name,last_name,check_status')
+      .select('phone_normalized,tg_user_id,tg_username,first_name,last_name,check_status')
       .in('phone_normalized', phones)
       .eq('check_status', 'found');
     for (const row of identities ?? []) {
       identityByPhone.set(String((row as { phone_normalized: string }).phone_normalized), {
+        tg_user_id: Number((row as { tg_user_id?: unknown }).tg_user_id ?? 0) || null,
         tg_username: (row as { tg_username?: string | null }).tg_username ?? null,
         first_name: (row as { first_name?: string | null }).first_name ?? null,
         last_name: (row as { last_name?: string | null }).last_name ?? null,
@@ -92,16 +77,29 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
     const fallbackName =
       [identity?.first_name, identity?.last_name].filter(Boolean).join(' ').trim() || null;
 
-    const fullName = (lead.raw_contact_name ?? '').trim() || fallbackName;
+    const fullName =
+      (lead.raw_contact_name ?? '').trim() ||
+      fallbackName ||
+      tgUsername;
     if (!fullName) continue;
 
     const title = (lead.raw_position ?? '').trim() || null;
-    const role = guessRole(title);
+    const role = guessRoleFromTitle(title);
+    if (!isLikelyLpr(title, role.role)) continue;
 
     let score = role.score;
     if (tgUsername) score += 15;
     if (phone) score += 10;
-    if ((lead.raw_email ?? '').trim()) score += 10;
+    const leadEmail = sanitizeContactEmail(lead.raw_email);
+    if (leadEmail) score += 10;
+
+    const sourceDetails: Record<string, string> = {};
+    if (lead.raw_contact_name) sourceDetails.name = 'Импорт файла';
+    else if (fallbackName) sourceDetails.name = 'Telegram (MTProto)';
+    if (title) sourceDetails.title = 'Импорт файла';
+    if (phone) sourceDetails.phone = 'Импорт файла';
+    if (tgUsername) sourceDetails.tg = 'Telegram (MTProto)';
+    if (leadEmail) sourceDetails.email = 'Импорт файла';
 
     batch.push({
       user_id: lead.user_id,
@@ -114,10 +112,12 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
       role_guess: role.role,
       channel_phone: phone,
       channel_tg_username: tgUsername,
-      channel_email: (lead.raw_email ?? '').trim() || null,
+      channel_tg_user_id: identity?.tg_user_id ?? null,
+      channel_email: leadEmail,
       source_url: null,
       score,
       confidence: tgUsername ? 0.8 : 0.5,
+      source_details: sourceDetails,
     });
   }
 
@@ -129,7 +129,7 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
     const { error } = await supabaseAdmin
       .from('company_contacts')
       .upsert(slice, {
-        onConflict: 'user_id,company_id,full_name,channel_phone,channel_tg_username,channel_email',
+        onConflict: 'user_id,company_id,full_name',
       });
     if (!error) inserted += slice.length;
   }
