@@ -250,11 +250,19 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
     const ids = phoneToContactIds.get(phone);
     if (!ids?.length) continue;
     for (const id of ids) {
+      const { data: existing } = await supabaseAdmin
+        .from('company_contacts')
+        .select('source_details')
+        .eq('id', id)
+        .maybeSingle<{ source_details: Record<string, string> | null }>();
+      const existingDetails = (existing?.source_details && typeof existing.source_details === 'object' ? existing.source_details : {}) as Record<string, string>;
+      const mergedDetails = { ...existingDetails, tg: 'Telegram (MTProto)' };
       await supabaseAdmin
         .from('company_contacts')
         .update({
           channel_tg_username: identity.tgUsername,
           channel_tg_user_id: identity.tgUserId,
+          source_details: mergedDetails,
         })
         .eq('id', id);
     }
@@ -314,11 +322,19 @@ export async function runPhoneEnrichmentBatch(): Promise<{ processed: number }> 
         const contactIds = phoneToContactIds.get(phone);
         if ((tgUsername || tgUserId) && contactIds?.length) {
           for (const contactId of contactIds) {
+            const { data: existingContact } = await supabaseAdmin!
+              .from('company_contacts')
+              .select('source_details')
+              .eq('id', contactId)
+              .maybeSingle<{ source_details: Record<string, string> | null }>();
+            const existingDet = (existingContact?.source_details && typeof existingContact.source_details === 'object' ? existingContact.source_details : {}) as Record<string, string>;
+            const mergedDet = { ...existingDet, tg: 'Telegram (MTProto)' };
             await supabaseAdmin!
               .from('company_contacts')
               .update({
                 channel_tg_username: tgUsername,
                 channel_tg_user_id: tgUserId,
+                source_details: mergedDet,
               })
               .eq('id', contactId);
           }

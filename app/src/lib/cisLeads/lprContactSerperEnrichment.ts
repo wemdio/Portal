@@ -122,7 +122,7 @@ export async function runLprContactSerperEnrichment(
 
   const { data: contactsWithoutChannels } = await supabaseAdmin
     .from('company_contacts')
-    .select('id, company_id, full_name, title')
+    .select('id, company_id, full_name, title, source_details')
     .eq('user_id', userId)
     .in('company_id', companyIds)
     .is('channel_phone', null)
@@ -133,15 +133,15 @@ export async function runLprContactSerperEnrichment(
   if (!contactsWithoutChannels?.length) return { processed: 0, contactsUpdated: 0 };
 
   const companyIdSet = new Set(companyIds);
-  const byCompany = new Map<string, Array<{ id: string; company_id: string; full_name: string; title: string | null }>>();
-  for (const c of contactsWithoutChannels as Array<{ id: string; company_id: string; full_name: string; title: string | null }>) {
+  const byCompany = new Map<string, Array<{ id: string; company_id: string; full_name: string; title: string | null; source_details: Record<string, string> | null }>>();
+  for (const c of contactsWithoutChannels as Array<{ id: string; company_id: string; full_name: string; title: string | null; source_details: Record<string, string> | null }>) {
     if (!companyIdSet.has(c.company_id)) continue;
     const list = byCompany.get(c.company_id) ?? [];
     if (list.length < 3) list.push(c);
     byCompany.set(c.company_id, list);
   }
 
-  const toEnrich: Array<{ id: string; company_id: string; full_name: string; title: string | null }> = [];
+  const toEnrich: Array<{ id: string; company_id: string; full_name: string; title: string | null; source_details: Record<string, string> | null }> = [];
   for (const list of byCompany.values()) {
     toEnrich.push(...list);
     if (toEnrich.length >= PERSONAL_LIMIT) break;
@@ -168,10 +168,14 @@ export async function runLprContactSerperEnrichment(
 
     try {
       const channels = await findContactChannels(contact.full_name, companyName, contact.title);
-      const update: Record<string, string | null> = {};
-      if (channels.phone) update.channel_phone = channels.phone;
-      if (channels.email) update.channel_email = channels.email;
+      const update: Record<string, unknown> = {};
+      const existingDetails = (contact.source_details && typeof contact.source_details === 'object' ? contact.source_details : {}) as Record<string, string>;
+      const mergedDetails = { ...existingDetails };
+      if (channels.phone) { update.channel_phone = channels.phone; mergedDetails.phone = 'Perplexity персональный поиск'; }
+      if (channels.email) { update.channel_email = channels.email; mergedDetails.email = 'Perplexity персональный поиск'; }
+      if (channels.linkedin) { mergedDetails.linkedin = 'Perplexity персональный поиск'; }
       if (Object.keys(update).length === 0) continue;
+      update.source_details = mergedDetails;
 
       const { error } = await supabaseAdmin
         .from('company_contacts')

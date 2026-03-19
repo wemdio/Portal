@@ -110,7 +110,7 @@ export async function runSocialProfileEnrichment(
 
   const { data: contacts } = await supabaseAdmin
     .from('company_contacts')
-    .select('id, company_id, full_name, profile_links')
+    .select('id, company_id, full_name, profile_links, source_details')
     .eq('user_id', userId)
     .in('company_id', companyIds)
     .order('score', { ascending: false })
@@ -118,7 +118,7 @@ export async function runSocialProfileEnrichment(
 
   if (!contacts?.length) return { processed: 0, linksFound: 0 };
 
-  const withoutProfiles = (contacts as Array<{ id: string; company_id: string; full_name: string; profile_links: Record<string, string> | null }>)
+  const withoutProfiles = (contacts as Array<{ id: string; company_id: string; full_name: string; profile_links: Record<string, string> | null; source_details: Record<string, string> | null }>)
     .filter((c) => !c.profile_links || Object.keys(c.profile_links).length === 0)
     .slice(0, SOCIAL_LIMIT);
 
@@ -148,17 +148,20 @@ export async function runSocialProfileEnrichment(
       if (Object.keys(links).length === 0) continue;
 
       const existing = (contact.profile_links && typeof contact.profile_links === 'object' ? contact.profile_links : {}) as Record<string, string>;
+      const existingDetails = (contact.source_details && typeof contact.source_details === 'object' ? contact.source_details : {}) as Record<string, string>;
       const merged = { ...existing };
+      const mergedDetails = { ...existingDetails };
       for (const [k, v] of Object.entries(links)) {
         if (v && !merged[k]) {
           merged[k] = v;
+          mergedDetails[k] = 'Perplexity соцсети';
           linksFound++;
         }
       }
 
       await supabaseAdmin
         .from('company_contacts')
-        .update({ profile_links: merged })
+        .update({ profile_links: merged, source_details: mergedDetails })
         .eq('id', contact.id)
         .eq('user_id', userId);
 

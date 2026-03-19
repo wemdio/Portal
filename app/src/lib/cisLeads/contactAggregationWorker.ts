@@ -93,6 +93,14 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
     const leadEmail = sanitizeContactEmail(lead.raw_email);
     if (leadEmail) score += 10;
 
+    const sourceDetails: Record<string, string> = {};
+    if (lead.raw_contact_name) sourceDetails.name = 'Импорт файла';
+    else if (fallbackName) sourceDetails.name = 'Telegram (MTProto)';
+    if (title) sourceDetails.title = 'Импорт файла';
+    if (phone) sourceDetails.phone = 'Импорт файла';
+    if (tgUsername) sourceDetails.tg = 'Telegram (MTProto)';
+    if (leadEmail) sourceDetails.email = 'Импорт файла';
+
     batch.push({
       user_id: lead.user_id,
       company_id: lead.company_id,
@@ -109,6 +117,7 @@ export async function runContactAggregationBatch(): Promise<{ processed: number 
       source_url: null,
       score,
       confidence: tgUsername ? 0.8 : 0.5,
+      source_details: sourceDetails,
     });
   }
 
