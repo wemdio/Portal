@@ -80,6 +80,35 @@ export function guessLprRoleFromPost(post: string | null | undefined): string {
   return 'director';
 }
 
+/**
+ * Returns true if the name looks like a legal entity (ООО, ОАО, ЗАО, ПАО, etc.)
+ * rather than a person's name. Used to filter out company names from contact lists.
+ */
+export function isLegalEntityName(name: string | null | undefined): boolean {
+  const n = String(name ?? '').trim();
+  if (!n) return true;
+  const upper = n.toUpperCase();
+
+  // Direct prefixes
+  const legalPrefixes = [
+    'ООО', 'ОАО', 'ЗАО', 'ПАО', 'АО', 'НКО', 'НП',
+    'ФГУП', 'МУП', 'ГУП', 'ИП',
+    'ОБЩЕСТВО', 'АКЦИОНЕРНОЕ', 'ТОВАРИЩЕСТВО', 'КООПЕРАТИВ',
+    'ПРЕДПРИЯТИЕ', 'УЧРЕЖДЕНИЕ', 'ФОНД', 'АССОЦИАЦИЯ',
+  ];
+  for (const prefix of legalPrefixes) {
+    if (upper.startsWith(prefix + ' ') || upper.startsWith('"' + prefix) || upper === prefix) return true;
+  }
+
+  // Quoted company names
+  if (/^["«]/.test(n) && /["»]$/.test(n)) return true;
+
+  // All-caps words longer than typical names → likely a company name
+  if (n === n.toUpperCase() && n.length > 20) return true;
+
+  return false;
+}
+
 export function normalizeInn(raw: string | null | undefined): string | null {
   const digits = String(raw ?? '').replace(/\D/g, '');
   if (digits.length === 10 || digits.length === 12) return digits;

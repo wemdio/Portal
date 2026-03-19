@@ -57,7 +57,9 @@ async function findContactChannels(personName: string, companyName: string, titl
 6. sbis.ru, checko.ru — карточка компании
 7. 2gis.ru, yandex.ru/maps — контакты организации
 
-ВАЖНО: если личный контакт не найден, верни общий телефон/email компании.
+ВАЖНО: нужны ТОЛЬКО ЛИЧНЫЕ контакты этого конкретного человека.
+НЕ возвращай общий телефон приёмной или info@ email компании.
+Если личный контакт не найден — верни null.
 
 Верни ТОЛЬКО JSON:
 {"phone": "+7XXXXXXXXXX или null", "email": "email или null", "linkedin": "url или null"}

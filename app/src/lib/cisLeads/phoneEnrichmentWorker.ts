@@ -25,12 +25,7 @@ type OutreachAccountRow = {
   is_active: boolean;
 };
 
-type PoolAccountRow = {
-  id: string;
-  phone: string | null;
-  status: string | null;
-  session_data: unknown;
-};
+
 
 function normalizePhone(raw: string): string | null {
   const s = String(raw ?? '').trim();
@@ -70,51 +65,7 @@ async function getAnyActiveTelegramAccount(): Promise<OutreachAccountRow | null>
     .order('created_at', { ascending: false })
     .limit(20);
   const accounts = (data ?? []) as OutreachAccountRow[];
-  const outreach = accounts.find((a) => Boolean(a.session_data?.trim() || a.session_file_path)) ?? null;
-  if (outreach) return outreach;
-
-  // Fallback: allow using active accounts from TG pool as a source for CIS enrichment.
-  const apiId = Number(process.env.TG_API_ID ?? process.env.TELEGRAM_API_ID ?? '0');
-  const apiHash = String(process.env.TG_API_HASH ?? process.env.TELEGRAM_API_HASH ?? '').trim();
-  if (apiId <= 0 || !apiHash) return null;
-
-  const { data: poolData } = await supabaseAdmin
-    .from('tg_pool_accounts')
-    .select('id,phone,status,session_data')
-    .eq('status', 'active')
-    .order('created_at', { ascending: false })
-    .limit(20);
-  const poolAccounts = (poolData ?? []) as PoolAccountRow[];
-  const pool = poolAccounts.find((a) => {
-    const raw = a.session_data;
-    if (typeof raw === 'string') return raw.trim().length > 0;
-    if (raw && typeof raw === 'object') {
-      const sessionString = String((raw as { session_string?: unknown }).session_string ?? '').trim();
-      return sessionString.length > 0;
-    }
-    return false;
-  });
-  if (!pool) return null;
-
-  const sessionDataRaw = pool.session_data;
-  const poolSessionString =
-    typeof sessionDataRaw === 'string'
-      ? sessionDataRaw.trim()
-      : String((sessionDataRaw as { session_string?: unknown })?.session_string ?? '').trim();
-  if (!poolSessionString) return null;
-
-  return {
-    id: `pool:${pool.id}`,
-    campaign_id: 'tg-pool',
-    session_name: `pool_${pool.id}`,
-    api_id: apiId,
-    api_hash: apiHash,
-    phone: String(pool.phone ?? ''),
-    proxy_id: null,
-    session_data: poolSessionString,
-    session_file_path: null,
-    is_active: true,
-  };
+  return accounts.find((a) => Boolean(a.session_data?.trim() || a.session_file_path)) ?? null;
 }
 
 async function withClient<T>(fn: (client: TelegramClient) => Promise<T>): Promise<T> {
