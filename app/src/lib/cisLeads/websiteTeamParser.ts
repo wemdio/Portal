@@ -290,12 +290,12 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
 
       const { data: existingContacts } = await supabaseAdmin
         .from('company_contacts')
-        .select('id, full_name, channel_phone, channel_email')
+        .select('id, full_name, channel_phone, channel_email, source_details')
         .eq('user_id', userId)
         .eq('company_id', company.id);
 
-      const keyToContact = new Map<string, { id: string; full_name: string; channel_phone: string | null; channel_email: string | null }>();
-      for (const c of (existingContacts ?? []) as Array<{ id: string; full_name: string; channel_phone: string | null; channel_email: string | null }>) {
+      const keyToContact = new Map<string, { id: string; full_name: string; channel_phone: string | null; channel_email: string | null; source_details: Record<string, string> | null }>();
+      for (const c of (existingContacts ?? []) as Array<{ id: string; full_name: string; channel_phone: string | null; channel_email: string | null; source_details: Record<string, string> | null }>) {
         const key = contactNameKey(c.full_name);
         if (key && !keyToContact.has(key)) keyToContact.set(key, c);
       }
@@ -305,10 +305,13 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
         const existing = key ? keyToContact.get(key) : undefined;
 
         if (existing && (person.phone || person.email)) {
-          const update: Record<string, string | null> = {};
-          if (person.phone && !existing.channel_phone) update.channel_phone = person.phone;
-          if (person.email && !existing.channel_email) update.channel_email = person.email;
+          const update: Record<string, unknown> = {};
+          const existingDetails = (existing.source_details && typeof existing.source_details === 'object' ? existing.source_details : {}) as Record<string, string>;
+          const mergedDetails = { ...existingDetails };
+          if (person.phone && !existing.channel_phone) { update.channel_phone = person.phone; mergedDetails.phone = 'Сайт компании'; }
+          if (person.email && !existing.channel_email) { update.channel_email = person.email; mergedDetails.email = 'Сайт компании'; }
           if (Object.keys(update).length > 0) {
+            update.source_details = mergedDetails;
             const { error } = await supabaseAdmin
               .from('company_contacts')
               .update(update)
@@ -320,6 +323,11 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
         }
 
         const role = guessLprRoleFromPost(person.title);
+        const sourceDetails: Record<string, string> = {};
+        sourceDetails.name = 'Сайт компании';
+        if (person.title) sourceDetails.title = 'Сайт компании';
+        if (person.phone) sourceDetails.phone = 'Сайт компании';
+        if (person.email) sourceDetails.email = 'Сайт компании';
         const { error } = await supabaseAdmin
           .from('company_contacts')
           .upsert(
@@ -338,6 +346,7 @@ export async function runWebsiteTeamEnrichment(jobId: string, userId: string): P
               source_url: company.site,
               score: 50,
               confidence: 0.45,
+              source_details: sourceDetails,
             },
             { onConflict: 'user_id,company_id,full_name' },
           );

@@ -6,11 +6,14 @@ export function guessRoleFromTitle(title: string | null): { role: string | null;
     { role: 'owner', score: 80, kw: ['собственник', 'владелец', 'owner', 'founder', 'сооснователь', 'основатель'] },
     { role: 'ceo', score: 75, kw: ['генеральный', 'гендир', 'ceo', 'chief executive', 'президент'] },
     { role: 'commercial', score: 65, kw: ['коммерческ', 'cсо', 'cro', 'директор по продаж', 'sales director'] },
-    { role: 'sales', score: 55, kw: ['продаж', 'sales', 'bizdev', 'business development', 'аккаунт', 'account'] },
+    { role: 'sales', score: 55, kw: ['продаж', 'sales', 'bizdev', 'business development', 'аккаунт', 'account', 'менеджер по работе с клиент'] },
+    { role: 'finance', score: 50, kw: ['финанс', 'cfo', 'chief financial', 'бухгалтер', 'главный бухгалтер', 'главбух', 'казначе'] },
     { role: 'marketing', score: 50, kw: ['маркет', 'marketing', 'growth', 'pr', 'brand'] },
+    { role: 'procurement', score: 45, kw: ['закуп', 'снабжен', 'procurement', 'purchasing', 'тендер', 'поставк'] },
     { role: 'ops', score: 45, kw: ['операц', 'operations', 'coo', 'логист', 'supply'] },
     { role: 'it', score: 45, kw: ['it', 'cto', 'техн', 'разраб', 'engineering', 'security', 'ciso'] },
-    { role: 'hr', score: 30, kw: ['hr', 'кадр', 'персонал', 'recruit', 'talent'] },
+    { role: 'legal', score: 40, kw: ['юрист', 'юридическ', 'legal', 'counsel', 'правов'] },
+    { role: 'hr', score: 35, kw: ['hr', 'кадр', 'персонал', 'recruit', 'talent'] },
   ];
 
   for (const r of rules) {
@@ -23,7 +26,7 @@ export function guessRoleFromTitle(title: string | null): { role: string | null;
 export function isLikelyLpr(title: string | null, role: string | null): boolean {
   const t = String(title ?? '').toLowerCase();
   const r = String(role ?? '').toLowerCase();
-  if (['owner', 'ceo', 'commercial', 'director', 'sales', 'marketing', 'it', 'ops', 'hr'].includes(r)) return true;
+  if (['owner', 'ceo', 'commercial', 'director', 'sales', 'marketing', 'it', 'ops', 'hr', 'finance', 'procurement', 'legal'].includes(r)) return true;
   if (/\b(coo|cto|cfo|ceo|cmo|ciso|cpo)\b/.test(t)) return true;
   const directTitleHints = [
     'собственник',
@@ -49,6 +52,13 @@ export function isLikelyLpr(title: string | null, role: string | null): boolean 
     'маркетинг',
     'партнёр',
     'партнер',
+    'бухгалтер',
+    'главбух',
+    'финанс',
+    'закуп',
+    'снабжен',
+    'юрист',
+    'юридическ',
   ];
   return directTitleHints.some((kw) => t.includes(kw));
 }
@@ -59,6 +69,13 @@ export function guessLprRoleFromPost(post: string | null | undefined): string {
   if (p.includes('собствен') || p.includes('владел') || p.includes('founder') || p.includes('owner')) return 'owner';
   if (p.includes('генераль') || p.includes('гендир') || p.includes('ceo') || p.includes('chief executive')) return 'ceo';
   if (p.includes('коммерчес')) return 'commercial';
+  if (p.includes('продаж') || p.includes('sales')) return 'sales';
+  if (p.includes('бухгалтер') || p.includes('главбух') || p.includes('финанс') || p.includes('cfo')) return 'finance';
+  if (p.includes('закуп') || p.includes('снабжен') || p.includes('procurement')) return 'procurement';
+  if (p.includes('юрист') || p.includes('юридическ') || p.includes('legal')) return 'legal';
+  if (p.includes('маркет') || p.includes('marketing')) return 'marketing';
+  if (p.includes('hr') || p.includes('кадр') || p.includes('персонал')) return 'hr';
+  if (p.includes('it') || p.includes('cto') || p.includes('техн')) return 'it';
   if (p.includes('директор') || p.includes('руковод')) return 'director';
   return 'director';
 }

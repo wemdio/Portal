@@ -94,14 +94,17 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
 - LinkedIn, VK — профили сотрудников
 - ЕГРЮЛ/ЕГРИП — юридические данные
 
-Нужны ВСЕ найденные руководители (до 10 человек):
+Нужны ВСЕ найденные руководители и ключевые сотрудники (до 12 человек):
 - Генеральный директор / CEO
 - Учредители / собственники
 - Коммерческий директор / директор по продажам
+- Руководитель отдела продаж / Head of Sales
 - Технический директор / CTO
 - Директор по маркетингу / CMO
-- HR-директор
-- Финансовый директор / CFO
+- HR-директор / руководитель отдела кадров
+- Финансовый директор / CFO / Главный бухгалтер
+- Руководитель отдела закупок / снабжения
+- Юрист / руководитель юридического отдела
 - Другие директора и руководители отделов
 
 КРИТИЧНО: для каждого человека ОБЯЗАТЕЛЬНО ищи контакты:
@@ -118,7 +121,7 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
     {
       "full_name": "Фамилия Имя Отчество",
       "title": "должность",
-      "role": "owner/ceo/commercial/director/sales/marketing/it/ops/hr/other",
+      "role": "owner/ceo/commercial/director/sales/marketing/it/ops/hr/finance/procurement/legal/other",
       "phone": "+7XXXXXXXXXX или null",
       "email": "email или null",
       "linkedin": "url или null",
@@ -233,12 +236,19 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
           .is('site', null);
       }
 
-      for (const contact of result.contacts.slice(0, 8)) {
+      for (const contact of result.contacts.slice(0, 10)) {
         const scoreBase = contact.role === 'owner' ? 80 : contact.role === 'ceo' ? 75 : contact.role === 'commercial' ? 65 : 55;
         const score = Math.round(scoreBase + contact.confidence * 10);
 
         const profileLinks: Record<string, string> = {};
         if (contact.linkedin) profileLinks.linkedin = contact.linkedin;
+
+        const sourceDetails: Record<string, string> = {};
+        sourceDetails.name = 'Perplexity поиск';
+        if (contact.title) sourceDetails.title = 'Perplexity поиск';
+        if (contact.phone) sourceDetails.phone = 'Perplexity поиск';
+        if (contact.email) sourceDetails.email = 'Perplexity поиск';
+        if (contact.linkedin) sourceDetails.linkedin = 'Perplexity поиск';
 
         const { error } = await supabaseAdmin
           .from('company_contacts')
@@ -258,6 +268,7 @@ export async function runSerperLprEnrichment(jobId: string, userId: string): Pro
               source_url: null,
               score,
               confidence: contact.confidence,
+              source_details: sourceDetails,
               ...(Object.keys(profileLinks).length > 0 ? { profile_links: profileLinks } : {}),
             },
             { onConflict: 'user_id,company_id,full_name' },

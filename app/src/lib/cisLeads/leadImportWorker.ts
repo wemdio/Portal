@@ -83,6 +83,10 @@ async function upsertDadataLprContact(params: {
   const post = String(params.post ?? '').trim() || null;
   const role = guessLprRoleFromPost(post);
 
+  const sourceName = params.source === 'dadata_founder' ? 'DaData ЕГРЮЛ (учредитель)' : 'DaData ЕГРЮЛ';
+  const sourceDetails: Record<string, string> = { name: sourceName };
+  if (post) sourceDetails.title = sourceName;
+
   const { error } = await supabaseAdmin
     .from('company_contacts')
     .upsert(
@@ -101,6 +105,7 @@ async function upsertDadataLprContact(params: {
         source_url: null,
         score: 78,
         confidence: 0.85,
+        source_details: sourceDetails,
       },
       { onConflict: 'user_id,company_id,full_name' },
     );
