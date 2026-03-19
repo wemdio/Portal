@@ -21,6 +21,7 @@ create index if not exists idx_agent_pipelines_status on public.agent_pipelines(
 
 alter table public.agent_pipelines enable row level security;
 
+drop policy if exists "Users see own pipelines" on public.agent_pipelines;
 create policy "Users see own pipelines"
   on public.agent_pipelines for select
   using (auth.uid() = user_id);

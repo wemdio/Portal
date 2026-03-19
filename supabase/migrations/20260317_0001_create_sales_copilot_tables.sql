@@ -37,12 +37,16 @@ create index if not exists sales_copilot_configs_user_idx
 
 alter table public.sales_copilot_configs enable row level security;
 
+drop policy if exists sales_copilot_configs_select_own on public.sales_copilot_configs;
 create policy sales_copilot_configs_select_own on public.sales_copilot_configs
   for select to authenticated using (user_id = auth.uid());
+drop policy if exists sales_copilot_configs_insert_own on public.sales_copilot_configs;
 create policy sales_copilot_configs_insert_own on public.sales_copilot_configs
   for insert to authenticated with check (user_id = auth.uid());
+drop policy if exists sales_copilot_configs_update_own on public.sales_copilot_configs;
 create policy sales_copilot_configs_update_own on public.sales_copilot_configs
   for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists sales_copilot_configs_delete_own on public.sales_copilot_configs;
 create policy sales_copilot_configs_delete_own on public.sales_copilot_configs
   for delete to authenticated using (user_id = auth.uid());
 
@@ -85,16 +89,20 @@ create index if not exists sales_copilot_drafts_account_user_idx
 
 alter table public.sales_copilot_drafts enable row level security;
 
+drop policy if exists sales_copilot_drafts_select_own on public.sales_copilot_drafts;
 create policy sales_copilot_drafts_select_own on public.sales_copilot_drafts
   for select to authenticated
   using (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()));
+drop policy if exists sales_copilot_drafts_insert_own on public.sales_copilot_drafts;
 create policy sales_copilot_drafts_insert_own on public.sales_copilot_drafts
   for insert to authenticated
   with check (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()));
+drop policy if exists sales_copilot_drafts_update_own on public.sales_copilot_drafts;
 create policy sales_copilot_drafts_update_own on public.sales_copilot_drafts
   for update to authenticated
   using (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()))
   with check (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()));
+drop policy if exists sales_copilot_drafts_delete_own on public.sales_copilot_drafts;
 create policy sales_copilot_drafts_delete_own on public.sales_copilot_drafts
   for delete to authenticated
   using (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()));
@@ -120,8 +128,10 @@ create index if not exists sales_copilot_jobs_status_idx
 
 alter table public.sales_copilot_jobs enable row level security;
 
+drop policy if exists sales_copilot_jobs_select_own on public.sales_copilot_jobs;
 create policy sales_copilot_jobs_select_own on public.sales_copilot_jobs
   for select to authenticated using (user_id = auth.uid());
+drop policy if exists sales_copilot_jobs_insert_own on public.sales_copilot_jobs;
 create policy sales_copilot_jobs_insert_own on public.sales_copilot_jobs
   for insert to authenticated with check (user_id = auth.uid());
 
@@ -140,6 +150,7 @@ create index if not exists sales_copilot_logs_config_created_idx
 
 alter table public.sales_copilot_logs enable row level security;
 
+drop policy if exists sales_copilot_logs_select_own on public.sales_copilot_logs;
 create policy sales_copilot_logs_select_own on public.sales_copilot_logs
   for select to authenticated
   using (exists (select 1 from public.sales_copilot_configs c where c.id = config_id and c.user_id = auth.uid()));
