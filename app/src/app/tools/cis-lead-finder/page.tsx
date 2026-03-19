@@ -8,9 +8,7 @@ type ImportJob = {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
   display_status?: 'pending' | 'running' | 'completed' | 'failed';
-  perplexity_stage?: 'pending' | 'started' | 'done';
-  perplexity_contacts_found?: number;
-  progress_ratio?: number;
+  enrichment_progress?: number;
   source_filename: string;
   source_label: string | null;
   total_rows: number;
@@ -145,6 +143,7 @@ export default function CisLeadFinderPage() {
   const [companySearch, setCompanySearch] = useState('');
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [contacts, setContacts] = useState<ContactRow[]>([]);
+  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
 
   const selectedJob = useMemo(() => jobs.find((j) => j.id === selectedJobId) ?? null, [jobs, selectedJobId]);
   const selectedCompany = useMemo(() => companies.find((c) => c.id === selectedCompanyId) ?? null, [companies, selectedCompanyId]);
@@ -156,12 +155,6 @@ export default function CisLeadFinderPage() {
     return status;
   };
   const getDisplayStatus = (job: ImportJob): ImportJob['status'] => job.display_status ?? job.status;
-  const getPerplexityLabel = (job: ImportJob): string => {
-    const stage = job.perplexity_stage ?? 'pending';
-    if (stage === 'done') return 'завершен';
-    if (stage === 'started') return 'в процессе';
-    return 'ожидает';
-  };
   const selectedJobProgress = useMemo(() => {
     if (!selectedJob) return null;
     const total = Math.max(0, Number(selectedJob.total_rows) || 0);
@@ -284,21 +277,27 @@ export default function CisLeadFinderPage() {
   }, [deleteTarget, selectedJobId]);
 
   async function exportContacts(jobId: string, format: 'csv' | 'xlsx') {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export?format=${format}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `cis_leads_${jobId}.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    if (exporting) return;
+    setExporting(format);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export?format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cis_leads_${jobId}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } finally {
+      setExporting(null);
+    }
   }
 
   useEffect(() => {
@@ -541,16 +540,12 @@ export default function CisLeadFinderPage() {
             ) : (
               jobs.map((j) => (
                 (() => {
-                  const total = Math.max(0, Number(j.total_rows) || 0);
-                  const processed = Math.max(0, Number(j.processed_rows) || 0);
                   const displayStatus = getDisplayStatus(j);
-                  const ratio = typeof j.progress_ratio === 'number'
-                    ? Math.max(0, Math.min(1, j.progress_ratio))
-                    : displayStatus === 'completed'
-                      ? 1
-                      : total > 0
-                      ? Math.max(0, Math.min(1, processed / total))
-                      : null;
+                  const enrichProg = Math.max(0, Math.min(1, Number(j.enrichment_progress) || 0));
+                  const progressPercent = displayStatus === 'completed' ? 100
+                    : displayStatus === 'pending' ? 0
+                    : Math.round(enrichProg * 100);
+                  const isRunning = displayStatus === 'running';
                   return (
                 <div
                   key={j.id}
@@ -580,46 +575,28 @@ export default function CisLeadFinderPage() {
                   <div className="text-xs text-gray-600 flex gap-2 flex-wrap">
                     <span>{statusLabel(displayStatus)}</span>
                     <span>•</span>
-                    {displayStatus === 'completed' ? (
-                      <span>компаний: {j.companies_found ?? 0}</span>
-                    ) : (
-                      <span>{j.processed_rows}/{j.total_rows}</span>
-                    )}
+                    <span>компаний: {j.companies_found ?? 0}</span>
                     <span>•</span>
                     <span>контактов: {j.contacts_found ?? 0}</span>
                   </div>
-                  <div className="mt-1 text-[11px] text-gray-500">
-                    Perplexity: {getPerplexityLabel(j)} • {(j.perplexity_contacts_found ?? 0)} контактов
-                  </div>
-                  <div className="mt-2 space-y-1">
+                  <div className="mt-2">
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-gray-400 w-14 shrink-0">импорт</span>
-                      <div className="h-1.5 flex-1 rounded-full bg-gray-100 overflow-hidden">
-                        {ratio === null ? (
-                          <div className="h-full w-1/2 bg-emerald-500/70 animate-pulse" />
+                      <div className="h-2 flex-1 rounded-full bg-gray-100 overflow-hidden">
+                        {displayStatus === 'pending' ? (
+                          <div className="h-full w-0" />
+                        ) : isRunning && progressPercent === 0 ? (
+                          <div className="h-full w-1/4 bg-emerald-400/60 animate-pulse rounded-full" />
                         ) : (
                           <div
-                            className="h-full bg-emerald-600 transition-[width] duration-300"
-                            style={{ width: `${Math.round(ratio * 100)}%` }}
+                            className={`h-full rounded-full transition-[width] duration-500 ${displayStatus === 'completed' ? 'bg-emerald-500' : displayStatus === 'failed' ? 'bg-red-400' : 'bg-emerald-500'}`}
+                            style={{ width: `${progressPercent}%` }}
                           />
                         )}
                       </div>
+                      <span className="text-[10px] text-gray-500 w-8 text-right shrink-0">
+                        {displayStatus === 'completed' ? '✓' : displayStatus === 'failed' ? '✗' : displayStatus === 'pending' ? '' : `${progressPercent}%`}
+                      </span>
                     </div>
-                    {displayStatus === 'completed' ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 w-14 shrink-0">контакты</span>
-                        <div className="h-1.5 flex-1 rounded-full bg-gray-100 overflow-hidden">
-                          {(j.companies_found ?? 0) > 0 ? (
-                            <div
-                              className={`h-full transition-[width] duration-300 ${(j.contacts_found ?? 0) > 0 ? 'bg-violet-500' : 'bg-violet-400/60 animate-pulse'}`}
-                              style={{ width: (j.contacts_found ?? 0) > 0 ? '100%' : '40%' }}
-                            />
-                          ) : (
-                            <div className="h-full w-0 bg-violet-500" />
-                          )}
-                        </div>
-                      </div>
-                    ) : null}
                   </div>
                   {j.error_message ? (
                     <div className="text-xs text-red-600 mt-1 line-clamp-2">{j.error_message}</div>
@@ -645,17 +622,19 @@ export default function CisLeadFinderPage() {
               {selectedJobId ? (
                 <button
                   onClick={() => void exportContacts(selectedJobId, 'csv')}
-                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
+                  disabled={!!exporting}
+                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Экспорт CSV
+                  {exporting === 'csv' ? 'Экспортируем...' : 'Экспорт CSV'}
                 </button>
               ) : null}
               {selectedJobId ? (
                 <button
                   onClick={() => void exportContacts(selectedJobId, 'xlsx')}
-                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
+                  disabled={!!exporting}
+                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Экспорт Excel
+                  {exporting === 'xlsx' ? 'Экспортируем...' : 'Экспорт Excel'}
                 </button>
               ) : null}
             </div>

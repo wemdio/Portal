@@ -2,6 +2,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
+import { isLegalEntityName } from '@/lib/cisLeads/lprRole';
 
 const BATCH_LIMIT = 50;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -50,6 +51,7 @@ function parseContactsArray(arr: unknown[]): PerplexityContact[] {
     const row = item as Record<string, unknown>;
     const name = String(row.full_name ?? row.name ?? '').trim();
     if (!name || name.length < 4) continue;
+    if (isLegalEntityName(name)) continue;
     out.push({
       full_name: name,
       title: typeof row.title === 'string' ? row.title.trim() || null : null,
@@ -107,10 +109,10 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
 - Юрист / руководитель юридического отдела
 - Другие директора и руководители отделов
 
-КРИТИЧНО: для каждого человека ОБЯЗАТЕЛЬНО ищи контакты:
+КРИТИЧНО: для каждого человека ОБЯЗАТЕЛЬНО ищи ЛИЧНЫЕ контакты:
 - Рабочий телефон и email (сайт компании, rusprofile, справочники)
-- Общий телефон/email компании как запасной вариант
 - LinkedIn URL
+- НЕ дублируй общий телефон приёмной или info@ email компании для разных людей. Если личный контакт не найден — верни null.
 
 Также найди ОФИЦИАЛЬНЫЙ САЙТ компании (основной домен, не rusprofile/list-org).
 
