@@ -24,6 +24,7 @@ import {
   launchEmailValidation,
   launchLprSearch,
   launchBriefScoring,
+  deduplicateResults,
 } from '@/lib/telegramAgent/writeHandlers';
 import type { AgentUser } from '@/lib/telegramAgent/types';
 
@@ -282,6 +283,38 @@ describe('writeHandlers', () => {
     it('rejects missing brief', async () => {
       const result = await launchBriefScoring({}, testUser);
       expect(result).toContain('обязателен');
+    });
+  });
+
+  describe('deduplicateResults', () => {
+    it('rejects missing job_id', async () => {
+      const result = await deduplicateResults({}, testUser);
+      expect(result).toContain('job_id');
+    });
+
+    it('deduplicates search results by email', async () => {
+      const rows = [
+        { id: 'r1', email: 'a@b.com', site: 'a.com', name: 'A', job_id: 'j1' },
+        { id: 'r2', email: 'a@b.com', site: 'a2.com', name: '', job_id: 'j1' },
+        { id: 'r3', email: 'c@d.com', site: 'c.com', name: 'C', job_id: 'j1' },
+      ];
+
+      let callCount = 0;
+      mockFrom.mockImplementation((table: string) => {
+        if (table === 'search_parser_jobs') {
+          return createMockQuery({ data: { id: 'j1' }, error: null });
+        }
+        if (table === 'search_results') {
+          callCount++;
+          if (callCount <= 2) return createMockQuery({ data: rows, error: null });
+          return createMockQuery({ data: null, error: null });
+        }
+        return createMockQuery({ data: null, error: null });
+      });
+
+      const result = await deduplicateResults({ job_id: 'j1' }, testUser);
+      expect(result).toContain('1 из 3');
+      expect(result).toContain('Осталось 2');
     });
   });
 });

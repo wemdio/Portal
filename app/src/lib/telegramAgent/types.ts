@@ -32,9 +32,17 @@ export type TgMessage = {
   date: number;
 };
 
+export type TgCallbackQuery = {
+  id: string;
+  from: TgFrom;
+  message?: TgMessage;
+  data?: string;
+};
+
 export type TgUpdate = {
   update_id: number;
   message?: TgMessage;
+  callback_query?: TgCallbackQuery;
 };
 
 export type ToolDefinition = {
