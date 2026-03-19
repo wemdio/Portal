@@ -81,7 +81,7 @@ export async function runEmailGuesser(jobId: string, userId: string): Promise<{ 
 
   const { data: contactsWithoutEmail } = await supabaseAdmin
     .from('company_contacts')
-    .select('id, company_id, full_name')
+    .select('id, company_id, full_name, source_details')
     .eq('user_id', userId)
     .in('company_id', companyIds)
     .is('channel_email', null)
@@ -120,7 +120,7 @@ export async function runEmailGuesser(jobId: string, userId: string): Promise<{ 
   let processed = 0;
   let emailsFound = 0;
 
-  const toProcess = (contactsWithoutEmail as Array<{ id: string; company_id: string; full_name: string }>)
+  const toProcess = (contactsWithoutEmail as Array<{ id: string; company_id: string; full_name: string; source_details: Record<string, string> | null }>)
     .filter((c) => domainByCompany.has(c.company_id))
     .slice(0, BATCH_LIMIT);
 
@@ -138,9 +138,11 @@ export async function runEmailGuesser(jobId: string, userId: string): Promise<{ 
     const bestCandidate = candidates[0];
     if (!bestCandidate) { processed++; continue; }
 
+    const existingDetails = (contact.source_details && typeof contact.source_details === 'object' ? contact.source_details : {}) as Record<string, string>;
+    const mergedDetails = { ...existingDetails, email: 'Email угадан (генерация)' };
     const { error } = await supabaseAdmin
       .from('company_contacts')
-      .update({ channel_email: bestCandidate })
+      .update({ channel_email: bestCandidate, source_details: mergedDetails })
       .eq('id', contact.id)
       .eq('user_id', userId);
 

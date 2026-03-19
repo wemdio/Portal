@@ -19,10 +19,15 @@ const EXPORT_COLUMNS = [
   'title',
   'role_guess',
   'phone',
+  'phone_source',
   'tg_username',
   'tg_user_id',
   'tg_profile',
+  'tg_source',
   'email',
+  'email_source',
+  'linkedin',
+  'linkedin_source',
   'score',
   'source',
 ] as const;
@@ -33,6 +38,16 @@ function buildTgProfileLink(tgUsername: unknown, tgUserId: unknown): string {
   const userId = Number(tgUserId ?? 0) || 0;
   if (userId > 0) return `tg://user?id=${userId}`;
   return '';
+}
+
+function getSourceDetail(details: Record<string, string> | null | undefined, key: string): string {
+  if (!details || typeof details !== 'object') return '';
+  return String(details[key] ?? '');
+}
+
+function getLinkedInUrl(profileLinks: Record<string, string> | null | undefined): string {
+  if (!profileLinks || typeof profileLinks !== 'object') return '';
+  return String(profileLinks.linkedin ?? '');
 }
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
@@ -102,7 +117,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
       const { data: contacts, error: contErr } = await supabaseAdmin
         .from('company_contacts')
-        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,score,source')
+        .select('company_id,full_name,title,role_guess,channel_phone,channel_tg_username,channel_tg_user_id,channel_email,score,source,source_details,profile_links')
         .eq('user_id', auth.user.id)
         .in('company_id', companyIds)
         .order('score', { ascending: false })
@@ -116,6 +131,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
         const comp = companyMap.get(companyId);
         const tgUsername = String((c as { channel_tg_username?: unknown }).channel_tg_username ?? '').trim();
         const tgUserId = Number((c as { channel_tg_user_id?: unknown }).channel_tg_user_id ?? 0) || 0;
+        const sd = (c as { source_details?: Record<string, string> | null }).source_details ?? null;
+        const pl = (c as { profile_links?: Record<string, string> | null }).profile_links ?? null;
         exportRows.push({
           company_name: String(comp?.name ?? ''),
           inn: String(comp?.inn ?? ''),
@@ -124,10 +141,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
           title: String((c as { title?: unknown }).title ?? ''),
           role_guess: String((c as { role_guess?: unknown }).role_guess ?? ''),
           phone: String((c as { channel_phone?: unknown }).channel_phone ?? ''),
+          phone_source: getSourceDetail(sd, 'phone'),
           tg_username: tgUsername,
           tg_user_id: tgUserId > 0 ? tgUserId : '',
           tg_profile: buildTgProfileLink(tgUsername, tgUserId),
+          tg_source: getSourceDetail(sd, 'tg'),
           email: String((c as { channel_email?: unknown }).channel_email ?? ''),
+          email_source: getSourceDetail(sd, 'email'),
+          linkedin: getLinkedInUrl(pl),
+          linkedin_source: getSourceDetail(sd, 'linkedin'),
           score: Number((c as { score?: unknown }).score ?? 0) || 0,
           source: String((c as { source?: unknown }).source ?? ''),
         });
@@ -163,4 +185,3 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     },
   );
 }
-
