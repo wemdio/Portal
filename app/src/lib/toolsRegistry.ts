@@ -38,6 +38,7 @@ export const ALL_TOOL_IDS = [
   'linkedin-bot',
   'tg-parser',
   'cis-lead-finder',
+  'li-outreach',
   'sales-copilot',
 ] as const;
 
@@ -140,6 +141,13 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'CIS Lead Finder',
     description: 'Ищет ЛПР по ИНН и телефонам: нормализует компании и находит контакты.',
     href: '/tools/cis-lead-finder',
+    accentColor: 'blue',
+  },
+  'li-outreach': {
+    id: 'li-outreach',
+    title: 'LinkedIn Outreach',
+    description: 'LinkedIn-аутрич: кампании, AI-персонализация, скрапинг лидов через Unipile.',
+    href: '/tools/li-outreach',
     accentColor: 'blue',
   },
   rdp: {

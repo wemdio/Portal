@@ -38,6 +38,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
    'audio-transcribe': Waves,
   'tg-transcribe': Video,
   'cis-lead-finder': Building2,
+  'li-outreach': Users,
   rdp: FileText,
   instantly: Send,
   'tg-outreach': MessageSquareMore,
