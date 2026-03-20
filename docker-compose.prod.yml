@@ -13,7 +13,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/host.env
-    # Allow non-root app user to access Docker socket via host docker group GID.
     group_add:
       - "${DOCKER_GID:-999}"
     environment:
