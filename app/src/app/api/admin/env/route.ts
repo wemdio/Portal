@@ -9,7 +9,22 @@ import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
-const ENV_PATH = path.resolve(process.cwd(), '..', '.env');
+async function resolveEnvPath(): Promise<string> {
+  const candidates = [
+    process.env.ENV_FILE_PATH,
+    path.resolve(process.cwd(), '..', '.env'),
+    path.resolve(process.cwd(), '.env'),
+    '/home/Portal/prod/.env',
+  ].filter(Boolean) as string[];
+
+  for (const p of candidates) {
+    try {
+      await fs.access(p);
+      return p;
+    } catch { /* try next */ }
+  }
+  return candidates[0];
+}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -41,9 +56,10 @@ export async function GET(req: NextRequest) {
   const auth = await requireAdmin(req);
   if ('error' in auth) return auth.error;
 
+  const envPath = await resolveEnvPath();
   try {
-    const content = await fs.readFile(ENV_PATH, 'utf-8');
-    return NextResponse.json({ content, path: ENV_PATH });
+    const content = await fs.readFile(envPath, 'utf-8');
+    return NextResponse.json({ content, path: envPath });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to read .env';
     return jsonError(msg, 500);
@@ -54,6 +70,7 @@ export async function PUT(req: NextRequest) {
   const auth = await requireAdmin(req);
   if ('error' in auth) return auth.error;
 
+  const envPath = await resolveEnvPath();
   try {
     const body = await req.json() as { content?: string };
     if (typeof body.content !== 'string') {
@@ -62,7 +79,7 @@ export async function PUT(req: NextRequest) {
 
     const normalized = body.content.replace(/\r\n/g, '\n');
 
-    await fs.writeFile(ENV_PATH, normalized, 'utf-8');
+    await fs.writeFile(envPath, normalized, 'utf-8');
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to write .env';
