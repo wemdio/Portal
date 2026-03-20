@@ -11,7 +11,7 @@ blocks:
     dependencies: []
     task:
       secrets:
-        - name: portal-secrets
+        - name: portal_secrets
       prologue:
         commands:
           - checkout

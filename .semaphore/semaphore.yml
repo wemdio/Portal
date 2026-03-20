@@ -13,7 +13,7 @@ blocks:
       when: branch != 'main' AND branch != 'test'
     task:
       secrets:
-        - name: portal-secrets
+        - name: portal_secrets
       prologue:
         commands:
           - checkout
@@ -41,7 +41,7 @@ blocks:
       when: branch = 'main'
     task:
       secrets:
-        - name: portal-secrets
+        - name: portal_secrets
       prologue:
         commands:
           - checkout
