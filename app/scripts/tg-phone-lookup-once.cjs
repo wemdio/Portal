@@ -173,23 +173,10 @@ async function loadTelegramCredentials() {
     };
   }
 
-  const envApiId = Number(process.env.TGPARS_API_ID || process.env.TELEGRAM_API_ID || "0");
-  const envApiHash = String(process.env.TGPARS_API_HASH || process.env.TELEGRAM_API_HASH || "").trim();
-  const envSession = String(process.env.TGPARS_SESSION_STRING || "").trim();
-  if (envApiId && envApiHash && envSession) {
-    return {
-      apiId: envApiId,
-      apiHash: envApiHash,
-      sessionKind: "string",
-      sessionValue: envSession,
-      source: "env",
-    };
-  }
-
   const databaseUrl = String(process.env.DATABASE_URL || "").trim();
   if (!databaseUrl) {
     throw new Error(
-      "Нет полной Telegram-сессии в .env и отсутствует DATABASE_URL. Нужен TGPARS_SESSION_STRING или запись в tg_parser_accounts."
+      "Отсутствует DATABASE_URL. Нужна запись в tg_parser_accounts."
     );
   }
 
@@ -336,7 +323,7 @@ async function loadTelegramCredentials() {
     }
 
     throw new Error(
-      "В БД не найдено активной Telegram-сессии. Добавьте аккаунт в TG Parser/TG Outreach UI или заполните TGPARS_SESSION_STRING в .env."
+      "В БД не найдено активной Telegram-сессии. Добавьте аккаунт в TG Parser/TG Outreach UI."
     );
   } finally {
     await pg.end();

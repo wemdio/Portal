@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls -la /c/Users/dimak/PycharmProjects/Portal/app/src/lib/*.ts)"
+      "Bash(ls -la /c/Users/dimak/PycharmProjects/Portal/app/src/lib/*.ts)",
+      "Bash(npx tsc --noEmit --pretty)"
     ]
   }
 }

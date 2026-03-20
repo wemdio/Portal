@@ -153,9 +153,9 @@ const EMPLOYER_REQUEST_TIMEOUT_MS = (() => {
 })();
 const PROXY_URLS = (() => {
   const urls: string[] = [];
-  if (process.env.HH_PROXY_URLS) {
+  if (process.env.PROXY_URLS) {
     try {
-      const parsed = JSON.parse(process.env.HH_PROXY_URLS);
+      const parsed = JSON.parse(process.env.PROXY_URLS);
       if (Array.isArray(parsed)) {
         urls.push(...parsed.filter((u) => typeof u === 'string'));
       }
