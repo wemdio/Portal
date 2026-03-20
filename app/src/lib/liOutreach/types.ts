@@ -58,6 +58,7 @@ export interface LiSettings {
   openai_api_key: string;
   openai_model: string;
   webhook_secret: string;
+  proxy_url: string;
   created_at: string;
   updated_at: string;
 }

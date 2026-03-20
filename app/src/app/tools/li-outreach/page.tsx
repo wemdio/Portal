@@ -13,7 +13,7 @@ type LiLead = { id: string; name: string; first_name: string | null; last_name: 
 type LiCampaign = { id: string; name: string; account_id: string | null; lead_list_id: string | null; steps: unknown[]; status: string; use_ai: boolean; daily_invite_limit: number; created_at: string; updated_at: string };
 type LiTask = { id: string; type: string; status: string; progress: number; total: number; error_message: string | null; created_at: string };
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
-type LiSettings = { unipile_dsn: string; unipile_api_key: string; openai_api_key: string; openai_model: string; webhook_secret: string };
+type LiSettings = { unipile_dsn: string; unipile_api_key: string; openai_api_key: string; openai_model: string; webhook_secret: string; proxy_url: string };
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -54,7 +54,7 @@ export default function LiOutreachPage() {
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'gpt-4o-mini', webhook_secret: '' });
+  const [settingsForm, setSettingsForm] = useState<LiSettings>({ unipile_dsn: '', unipile_api_key: '', openai_api_key: '', openai_model: 'gpt-4o-mini', webhook_secret: '', proxy_url: '' });
 
   // Scraper form
   const [scraperUrl, setScraperUrl] = useState('');
@@ -328,12 +328,8 @@ export default function LiOutreachPage() {
               <input type="password" value={settingsForm.unipile_api_key} onChange={(e) => setSettingsForm({ ...settingsForm, unipile_api_key: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
             </div>
             <div>
-              <label className="text-xs text-gray-600">OpenAI API Key (опционально)</label>
-              <input type="password" value={settingsForm.openai_api_key} onChange={(e) => setSettingsForm({ ...settingsForm, openai_api_key: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-600">OpenAI Model</label>
-              <input type="text" value={settingsForm.openai_model} onChange={(e) => setSettingsForm({ ...settingsForm, openai_model: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
+              <label className="text-xs text-gray-600">Proxy (HTTP/HTTPS)</label>
+              <input type="text" placeholder="http://user:pass@host:port" value={settingsForm.proxy_url} onChange={(e) => setSettingsForm({ ...settingsForm, proxy_url: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm mt-1" />
             </div>
           </div>
           <button onClick={() => void saveSettings()} disabled={savingSettings} className="rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50">

@@ -25,7 +25,7 @@ export async function PUT(req: NextRequest) {
     if ('error' in auth) return auth.error;
 
     const body = (await req.json()) as Record<string, unknown>;
-    const allowed = ['unipile_dsn', 'unipile_api_key', 'openai_api_key', 'openai_model', 'webhook_secret'];
+    const allowed = ['unipile_dsn', 'unipile_api_key', 'openai_api_key', 'openai_model', 'webhook_secret', 'proxy_url'];
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) {
       if (key in body) patch[key] = body[key];
