@@ -155,6 +155,51 @@ export async function GET(req: NextRequest) {
   );
 }
 
+export async function PATCH(req: NextRequest) {
+  return withToolTrace(
+    { request: req, operation: 'tools.cis-leads.jobs.stop' },
+    async () => {
+      const auth = await authenticateRequest(req.headers.get('authorization'));
+      if ('error' in auth) return auth.error;
+
+      if (!supabaseAdmin) {
+        return jsonError('Supabase admin client is not configured', 500);
+      }
+
+      const body = (await req.json().catch(() => ({}))) as { id?: string; action?: string };
+      const jobId = body.id;
+      if (!jobId) return jsonError('Missing job id', 400);
+      if (body.action !== 'stop') return jsonError('Unknown action', 400);
+
+      const { data: job } = await auth.supabase
+        .from('lead_import_jobs')
+        .select('id,status')
+        .eq('id', jobId)
+        .eq('user_id', auth.user.id)
+        .single<{ id: string; status: string }>();
+
+      if (!job) return jsonError('Job not found', 404);
+      if (job.status !== 'running' && job.status !== 'pending') {
+        return jsonError('Job is not running', 400);
+      }
+
+      const { error } = await supabaseAdmin
+        .from('lead_import_jobs')
+        .update({
+          status: 'failed',
+          error_message: 'Остановлено пользователем',
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('user_id', auth.user.id);
+
+      if (error) return jsonError(error.message, 500);
+
+      return NextResponse.json({ ok: true });
+    },
+  );
+}
+
 export async function DELETE(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.cis-leads.jobs.delete' },

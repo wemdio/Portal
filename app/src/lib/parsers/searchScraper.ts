@@ -100,7 +100,7 @@ function parseProxyList(raw: string): string[] {
 }
 
 function getSearchProxyUrls(): string[] {
-  const listRaw = (process.env.SEARCH_PROXY_URLS ?? '').trim();
+  const listRaw = (process.env.PROXY_URLS ?? '').trim();
   const list = parseProxyList(listRaw);
   if (list.length) return list;
   const singleRaw = (process.env.SEARCH_PROXY_URL?.trim() || process.env.HH_PROXY_URL?.trim()) ?? '';
