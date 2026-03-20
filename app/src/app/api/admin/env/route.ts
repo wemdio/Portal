@@ -12,9 +12,9 @@ export const dynamic = 'force-dynamic';
 async function resolveEnvPath(): Promise<string> {
   const candidates = [
     process.env.ENV_FILE_PATH,
+    path.resolve(process.cwd(), 'host.env'),
     path.resolve(process.cwd(), '..', '.env'),
     path.resolve(process.cwd(), '.env'),
-    '/home/Portal/prod/.env',
   ].filter(Boolean) as string[];
 
   for (const p of candidates) {
@@ -23,7 +23,7 @@ async function resolveEnvPath(): Promise<string> {
       return p;
     } catch { /* try next */ }
   }
-  return candidates[0];
+  throw new Error(`.env not found. Tried: ${candidates.join(', ')}. cwd=${process.cwd()}`);
 }
 
 function jsonError(message: string, status: number) {
