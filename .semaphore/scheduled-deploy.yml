@@ -1,21 +1,17 @@
-# Pipeline для запуска по расписанию (Task в 3:00).
-# Образы уже собраны при пуше в main. Здесь только: проверка SHA → при изменениях pull образов и деплой.
-#
-# В Semaphore: Tasks → New Task → branch: main, pipeline: .semaphore/scheduled-deploy.yml
 version: v1.0
 name: Scheduled Deploy (3 AM) — pull and deploy
-execution_time_limit:
-  hours: 3
 agent:
   machine:
     type: e1-standard-2
     os_image: ubuntu2204
+execution_time_limit:
+  hours: 3
 blocks:
   - name: Deploy if main changed
     dependencies: []
     task:
       secrets:
-        - name: portal-secrets
+        - name: portal_secrets
       prologue:
         commands:
           - checkout

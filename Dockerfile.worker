@@ -32,6 +32,8 @@ RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts work
   --tsconfig=tsconfig.json \
   --conditions=react-server \
   --external:playwright \
+  --external:sqlite3 \
+  --external:gramjs-sqlitesession \
   --log-level=info
 
 # Stage 3: Runtime
