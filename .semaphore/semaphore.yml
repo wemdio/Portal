@@ -1,21 +1,16 @@
-# Логика веток:
-# - push в feature-ветки (не main/test): запускаем тесты;
-# - push в test: ничего не делаем;
-# - push в main: сборка и push Docker-образов (без тестов).
-# Деплой остаётся по расписанию (Task: .semaphore/scheduled-deploy.yml).
 version: v1.0
 name: Auto (push) — branch-aware test/build
-execution_time_limit:
-  hours: 3
 agent:
   machine:
     type: e1-standard-2
     os_image: ubuntu2204
+execution_time_limit:
+  hours: 3
 blocks:
   - name: Run tests
     dependencies: []
     run:
-      when: "branch != 'main' AND branch != 'test'"
+      when: branch != 'main' AND branch != 'test'
     task:
       secrets:
         - name: portal-secrets
@@ -30,20 +25,20 @@ blocks:
           - npm ci --include=optional
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       jobs:
-        - name: Lint, typecheck, build, test, audit
+        - name: 'Lint, typecheck, build, test, audit'
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
             - npm run lint
             - npx tsc --noEmit
-            - export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"
+            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run build
             - npm test -- --watchAll=false
             - npm audit --audit-level=critical
   - name: Push Docker image
     dependencies: []
     run:
-      when: "branch = 'main'"
+      when: branch = 'main'
     task:
       secrets:
         - name: portal-secrets
@@ -62,4 +57,3 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-health-check:prod --platform linux/amd64 -f services/health-check/Dockerfile services/health-check'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-atmos-bot:prod --platform linux/amd64 -f services/atmos-bot/Dockerfile services/atmos-bot'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-transcribe-worker:prod --platform linux/amd64 -f services/transcribe-worker/Dockerfile services/transcribe-worker'
-
