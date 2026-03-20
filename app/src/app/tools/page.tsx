@@ -20,6 +20,7 @@ import {
   Building2,
   Users,
   Bot,
+  BookOpen,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -35,7 +36,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   parsers: Search,
   'email-sequence': Mail,
   'auto-report': FileText,
-   'audio-transcribe': Waves,
+  'audio-transcribe': Waves,
   'tg-transcribe': Video,
   'cis-lead-finder': Building2,
   'li-outreach': Users,
@@ -45,6 +46,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'habr-career': Briefcase,
   'tg-parser': Users,
   'sales-copilot': Bot,
+  'knowledge-base': BookOpen,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {

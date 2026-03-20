@@ -2,7 +2,8 @@ import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SalesCopilotConfig, CopilotDraftMessage } from './types';
-import { generateDraft } from './llm';
+import { generateDraft, classifyDialog } from './llm';
+import { searchChunks } from '../knowledgeBase/contextRetriever';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -45,6 +46,86 @@ async function hasPendingDraft(
   return (count ?? 0) > 0;
 }
 
+const DISMISS_COOLDOWN_DAYS = 30;
+
+async function isDismissedRecently(
+  db: SupabaseClient,
+  configId: string,
+  tgUserId: number,
+): Promise<boolean> {
+  const cutoff = new Date(Date.now() - DISMISS_COOLDOWN_DAYS * 24 * 3600 * 1000).toISOString();
+  const { count } = await db
+    .from('sales_copilot_drafts')
+    .select('id', { count: 'exact', head: true })
+    .eq('config_id', configId)
+    .eq('tg_user_id', tgUserId)
+    .eq('draft_type', 'proactive')
+    .eq('status', 'dismissed')
+    .gte('acted_at', cutoff);
+  return (count ?? 0) > 0;
+}
+
+async function loadCompiledBrief(db: SupabaseClient): Promise<string> {
+  try {
+    const { data } = await db
+      .from('kb_compiled_brief')
+      .select('brief')
+      .eq('id', 'default')
+      .single();
+    return data?.brief?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Fetch 2-3 KB chunks relevant to the current conversation.
+ * Single DB query, no LLM call. Returns ~300-600 tokens.
+ */
+const RU_STOPWORDS = new Set([
+  'это', 'как', 'что', 'для', 'или', 'при', 'так', 'уже', 'все', 'вот',
+  'они', 'мне', 'мой', 'вас', 'ваш', 'его', 'она', 'нас', 'наш', 'они',
+  'тут', 'там', 'был', 'был', 'еще', 'нет', 'да', 'ну', 'бы', 'же',
+  'очень', 'если', 'тоже', 'здравствуйте', 'добрый', 'день', 'привет',
+  'спасибо', 'пожалуйста', 'могу', 'можно', 'нужно', 'хочу',
+]);
+
+async function fetchRelevantDetails(
+  db: SupabaseClient,
+  chatMessages: CopilotDraftMessage[],
+): Promise<string> {
+  try {
+    const keywords = chatMessages
+      .slice(-4)
+      .map(m => m.content)
+      .join(' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3 && !RU_STOPWORDS.has(w.toLowerCase()))
+      .slice(0, 8)
+      .join(' ');
+
+    if (!keywords) return '';
+
+    const { chunks } = await searchChunks(db, keywords, { limit: 3 });
+    if (chunks.length === 0) return '';
+
+    return chunks
+      .map(c => `[${c.document_title}]\n${c.content}`)
+      .join('\n\n');
+  } catch {
+    return '';
+  }
+}
+
+function buildKbPrompt(brief: string, details: string): string {
+  const parts: string[] = [];
+  if (brief) parts.push(`## Общие знания о компании\n${brief}`);
+  if (details) parts.push(`## Детали по теме разговора\n${details}`);
+  if (parts.length === 0) return '';
+  return `\n\n[БАЗА ЗНАНИЙ КОМПАНИИ]\n${parts.join('\n\n')}\n[/БАЗА ЗНАНИЙ КОМПАНИИ]`;
+}
+
 async function generateDraftText(
   history: CopilotDraftMessage[],
   systemPrompt: string,
@@ -63,6 +144,7 @@ async function scanReactive(
   config: SalesCopilotConfig,
   db: SupabaseClient,
   log: LogFn,
+  kbBrief: string,
 ) {
   if (!config.reactive_enabled) return;
 
@@ -97,7 +179,9 @@ async function scanReactive(
       if (chatMessages.length === 0) continue;
 
       const lastIncoming = chatMessages.filter(m => m.role === 'user').pop();
-      const draftText = await generateDraftText(chatMessages, config.reactive_system_prompt, config.llm_model);
+      const details = await fetchRelevantDetails(db, chatMessages);
+      const fullPrompt = config.reactive_system_prompt + buildKbPrompt(kbBrief, details);
+      const draftText = await generateDraftText(chatMessages, fullPrompt, config.llm_model);
       if (!draftText) continue;
 
       const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${tgUserId}`;
@@ -142,6 +226,7 @@ async function scanProactive(
   config: SalesCopilotConfig,
   db: SupabaseClient,
   log: LogFn,
+  kbBrief: string,
 ) {
   if (!config.proactive_enabled) return;
 
@@ -166,6 +251,7 @@ async function scanProactive(
     if (silenceDays < config.proactive_silence_days) continue;
 
     if (await hasPendingDraft(db, config.id, tgUserId)) continue;
+    if (await isDismissedRecently(db, config.id, tgUserId)) continue;
 
     try {
       const history = await client.getMessages(user, { limit: config.reactive_history_limit });
@@ -182,11 +268,20 @@ async function scanProactive(
 
       if (chatMessages.length === 0) continue;
 
-      const prompt = config.proactive_system_prompt.replace(/\{silence_days\}/g, String(silenceDays));
-      const draftText = await generateDraftText(chatMessages, prompt, config.llm_model);
-      if (!draftText) continue;
-
       const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${tgUserId}`;
+
+      const classification = await classifyDialog(chatMessages, silenceDays, config.llm_model);
+      if (!classification.shouldReengage) {
+        log('info', `Proactive skip: ${displayName} — AI решил не писать`);
+        await sleep(500);
+        continue;
+      }
+
+      const basePrompt = config.proactive_system_prompt.replace(/\{silence_days\}/g, String(silenceDays));
+      const details = await fetchRelevantDetails(db, chatMessages);
+      const fullPrompt = basePrompt + buildKbPrompt(kbBrief, details);
+      const draftText = await generateDraftText(chatMessages, fullPrompt, config.llm_model);
+      if (!draftText) continue;
 
       await db.from('sales_copilot_drafts').insert({
         config_id: config.id,
@@ -321,8 +416,11 @@ export async function runCopilotLoop(
       }
 
       await expireOldDrafts(db, configId);
-      await scanReactive(client, config as SalesCopilotConfig, db, log);
-      await scanProactive(client, config as SalesCopilotConfig, db, log);
+
+      const kbBrief = await loadCompiledBrief(db);
+
+      await scanReactive(client, config as SalesCopilotConfig, db, log, kbBrief);
+      await scanProactive(client, config as SalesCopilotConfig, db, log, kbBrief);
 
       const interval = (config.scan_interval_seconds ?? 300) * 1000;
       log('info', `Скан завершён. Пауза ${Math.round(interval / 1000)} сек`);
