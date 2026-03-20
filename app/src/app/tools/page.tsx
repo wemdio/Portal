@@ -23,7 +23,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
-import { ALL_TOOL_IDS, TOOLS_CONFIG, type ToolId } from '@/lib/toolsRegistry';
+import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
 import { RdpToolCard } from './RdpToolCard';
 
 const TOOL_ICONS: Record<ToolId, LucideIcon> = {
@@ -43,7 +43,6 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   instantly: Send,
   'tg-outreach': MessageSquareMore,
   'habr-career': Briefcase,
-  'linkedin-bot': Building2,
   'tg-parser': Users,
   'sales-copilot': Bot,
 };
@@ -147,8 +146,11 @@ export default function ToolsPage() {
     };
   }, []);
 
-  const visibleIds = toolIds ?? [];
-  const orderedVisible = ALL_TOOL_IDS.filter((id) => visibleIds.includes(id));
+  const visibleSet = new Set(toolIds ?? []);
+
+  const visibleGroups = TOOL_GROUPS
+    .map((g) => ({ ...g, toolIds: g.toolIds.filter((id) => visibleSet.has(id)) }))
+    .filter((g) => g.toolIds.length > 0);
 
   return (
     <div className="space-y-6 text-left max-w-full">
@@ -173,7 +175,7 @@ export default function ToolsPage() {
             </div>
           ))}
         </div>
-      ) : orderedVisible.length === 0 ? (
+      ) : visibleGroups.length === 0 ? (
         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-10 text-center">
           <p className="text-gray-600">Доступных инструментов пока нет.</p>
           <p className="text-sm text-gray-500 mt-1">
@@ -181,16 +183,27 @@ export default function ToolsPage() {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
-          {orderedVisible.map((toolId) =>
-            toolId === 'rdp' ? (
-              <div key="rdp" className="min-w-0 flex flex-col h-full">
-                <RdpToolCard />
+        <div className="space-y-6">
+          {visibleGroups.map((group) => (
+            <section key={group.label}>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-px flex-1 bg-gray-200" />
+                <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-400 shrink-0">{group.label}</h2>
+                <div className="h-px flex-1 bg-gray-200" />
               </div>
-            ) : (
-              <ToolLinkCard key={toolId} toolId={toolId} />
-            )
-          )}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
+                {group.toolIds.map((toolId) =>
+                  toolId === 'rdp' ? (
+                    <div key="rdp" className="min-w-0 flex flex-col h-full">
+                      <RdpToolCard />
+                    </div>
+                  ) : (
+                    <ToolLinkCard key={toolId} toolId={toolId} />
+                  )
+                )}
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </div>

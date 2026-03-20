@@ -35,7 +35,6 @@ export const ALL_TOOL_IDS = [
   'instantly',
   'tg-outreach',
   'habr-career',
-  'linkedin-bot',
   'tg-parser',
   'cis-lead-finder',
   'li-outreach',
@@ -148,6 +147,8 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'LinkedIn Outreach',
     description: 'LinkedIn-аутрич: кампании, AI-персонализация, скрапинг лидов через Unipile.',
     href: '/tools/li-outreach',
+    badge: 'Новое',
+    badgeVariant: 'emerald',
     accentColor: 'blue',
   },
   rdp: {
@@ -178,13 +179,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/habr-career',
     accentColor: 'blue',
   },
-  'linkedin-bot': {
-    id: 'linkedin-bot',
-    title: 'LinkedIn Companies',
-    description: 'Парсинг компаний по поисковому URL LinkedIn с экспортом в CSV, Excel или Google Sheets.',
-    href: '/tools/linkedin-bot',
-    accentColor: 'blue',
-  },
   'tg-parser': {
     id: 'tg-parser',
     title: 'TG User Parser',
@@ -200,3 +194,27 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     accentColor: 'blue',
   },
 };
+
+export interface ToolGroup {
+  label: string;
+  toolIds: ToolId[];
+}
+
+export const TOOL_GROUPS: ToolGroup[] = [
+  {
+    label: 'Аутрич',
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'sales-copilot', 'ai-caller', 'ai-caller-v2'],
+  },
+  {
+    label: 'Базы и данные',
+    toolIds: ['done-for-you', 'databases', 'database-review'],
+  },
+  {
+    label: 'Парсеры и поиск лидов',
+    toolIds: ['parsers', 'habr-career', 'tg-parser', 'cis-lead-finder'],
+  },
+  {
+    label: 'Утилиты',
+    toolIds: ['auto-report', 'audio-transcribe', 'tg-transcribe', 'rdp'],
+  },
+];

@@ -48,10 +48,10 @@ function parseProxyList(raw: string): string[] {
     .filter(Boolean);
 }
 
-function getProxyConfig(): { source: 'SEARCH_PROXY_URLS' | 'SEARCH_PROXY_URL' | 'HH_PROXY_URL' | 'none'; proxies: string[] } {
-  const listRaw = (process.env.SEARCH_PROXY_URLS ?? '').trim();
+function getProxyConfig(): { source: 'PROXY_URLS' | 'SEARCH_PROXY_URL' | 'HH_PROXY_URL' | 'none'; proxies: string[] } {
+  const listRaw = (process.env.PROXY_URLS ?? '').trim();
   const list = parseProxyList(listRaw);
-  if (list.length) return { source: 'SEARCH_PROXY_URLS', proxies: list };
+  if (list.length) return { source: 'PROXY_URLS', proxies: list };
 
   const singleSearch = (process.env.SEARCH_PROXY_URL ?? '').trim();
   if (singleSearch) return { source: 'SEARCH_PROXY_URL', proxies: [normalizeProxyUrl(singleSearch)] };
