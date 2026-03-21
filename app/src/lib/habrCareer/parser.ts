@@ -67,20 +67,17 @@ let proxyRoundRobin = 0;
 
 /**
  * Берёт прокси по очереди из env:
- * - SEARCH_PROXY_URLS (список)
- * - SEARCH_PROXY_URL (одиночный)
- * - HH_PROXY_URLS (список)
- * - HH_PROXY_URL (одиночный)
+ * - PROXY_URLS (список)
+ * - SEARCH_PROXY_URL / HH_PROXY_URL (одиночные, фолбэк)
  */
 function getProxyFromEnv(): string {
-  const searchList = parseProxyList((process.env.SEARCH_PROXY_URLS ?? '').trim());
-  const hhList = parseProxyList((process.env.HH_PROXY_URLS ?? '').trim());
+  const list = parseProxyList((process.env.PROXY_URLS ?? '').trim());
   const singles = [
     (process.env.SEARCH_PROXY_URL ?? '').trim(),
     (process.env.HH_PROXY_URL ?? '').trim(),
   ].filter(Boolean);
 
-  const proxies = [...searchList, ...hhList, ...singles];
+  const proxies = [...list, ...singles];
   if (!proxies.length) return '';
 
   proxyRoundRobin = (proxyRoundRobin + 1) % Number.MAX_SAFE_INTEGER;

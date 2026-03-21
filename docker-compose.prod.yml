@@ -12,7 +12,7 @@ services:
       - "3000:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    # Allow non-root app user to access Docker socket via host docker group GID.
+      - ./.env:/app/host.env
     group_add:
       - "${DOCKER_GID:-999}"
     environment:
@@ -26,8 +26,7 @@ services:
       - TG_TRANSCRIBE_BOT_TOKEN=${TG_TRANSCRIBE_BOT_TOKEN}
       - TG_LOCAL_API_URL=http://telegram-bot-api:8081
       - HH_PROXY_URL=${HH_PROXY_URL}
-      - HH_PROXY_URLS=${HH_PROXY_URLS}
-      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - PROXY_URLS=${PROXY_URLS}
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
@@ -56,8 +55,7 @@ services:
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - HH_PROXY_URL=${HH_PROXY_URL}
-      - HH_PROXY_URLS=${HH_PROXY_URLS}
-      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - PROXY_URLS=${PROXY_URLS}
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
@@ -79,8 +77,7 @@ services:
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - HH_PROXY_URL=${HH_PROXY_URL}
-      - HH_PROXY_URLS=${HH_PROXY_URLS}
-      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - PROXY_URLS=${PROXY_URLS}
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
@@ -217,8 +214,7 @@ services:
       - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
       - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
       - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-144.31.54.166}
-      - HH_PROXY_URLS=${HH_PROXY_URLS}
-      - SEARCH_PROXY_URLS=${SEARCH_PROXY_URLS}
+      - PROXY_URLS=${PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера

@@ -52,8 +52,7 @@ HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC",
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-HH_PROXY_URLS: list[str] = []
-SEARCH_PROXY_URLS: list[str] = []
+PROXY_URLS: list[str] = []
 
 def _parse_proxy_list(raw: str) -> list[str]:
     raw = raw.strip()
@@ -68,17 +67,9 @@ def _parse_proxy_list(raw: str) -> list[str]:
             pass
     return [u.strip() for u in raw.split(",") if u.strip()]
 
-HH_PROXY_URLS = _parse_proxy_list(os.environ.get("HH_PROXY_URLS", ""))
-SEARCH_PROXY_URLS = _parse_proxy_list(os.environ.get("SEARCH_PROXY_URLS", ""))
+PROXY_URLS = _parse_proxy_list(os.environ.get("PROXY_URLS", ""))
 
-ALL_PROXIES: list[tuple[str, str]] = []
-_proxy_groups: dict[str, list[str]] = {}
-for url in HH_PROXY_URLS:
-    _proxy_groups.setdefault(url, []).append("HH")
-for url in SEARCH_PROXY_URLS:
-    _proxy_groups.setdefault(url, []).append("Search")
-for url, groups in _proxy_groups.items():
-    ALL_PROXIES.append(("+".join(sorted(set(groups))), url))
+ALL_PROXIES: list[tuple[str, str]] = [(f"Proxy{i+1}", url) for i, url in enumerate(PROXY_URLS)]
 
 
 def _require(name: str, val: str | None) -> str:

@@ -1242,7 +1242,7 @@ export default function TasksPage() {
                 )}
               </div>
             ) : (
-              <div className="flex gap-4 overflow-x-auto pb-2">
+              <div className="flex gap-4 overflow-x-auto pb-2" style={{ transform: 'rotateX(180deg)' }}><div className="flex gap-4" style={{ transform: 'rotateX(180deg)' }}>
                 {selectedBoardColumns.map((col) => (
                   <DroppableColumn
                     key={col.id}
@@ -1375,7 +1375,7 @@ export default function TasksPage() {
                     </div>
                   </DroppableColumn>
                 ))}
-              </div>
+              </div></div>
             )}
           </div>
           <DragOverlay>
