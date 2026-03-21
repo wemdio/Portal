@@ -114,22 +114,8 @@ function normalizeExtractedBriefText(text: string): string {
 }
 
 async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
-  if (!globalThis.DOMMatrix) {
-    const { default: DOMMatrix } = await import('@thednp/dommatrix');
-    globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
-  }
-
-  const { PDFParse } = await import('pdf-parse');
-  const { getData } = await import('pdf-parse/worker');
-  PDFParse.setWorker(getData());
-
-  const parser = new PDFParse({ data: buffer });
-  let result: Awaited<ReturnType<typeof parser.getText>>;
-  try {
-    result = await parser.getText();
-  } finally {
-    await parser.destroy().catch(() => undefined);
-  }
+  const pdfParse = (await import('pdf-parse')).default;
+  const result = await pdfParse(buffer);
   return normalizeExtractedBriefText(result.text?.trim() ?? '');
 }
 

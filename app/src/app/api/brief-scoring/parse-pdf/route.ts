@@ -133,29 +133,15 @@ export async function POST(req: NextRequest) {
     }
 
     // --- Extract text ---
-    if (!globalThis.DOMMatrix) {
-      const { default: DOMMatrix } = await import('@thednp/dommatrix');
-      globalThis.DOMMatrix = DOMMatrix as unknown as typeof globalThis.DOMMatrix;
-    }
-
-    const { PDFParse } = await import('pdf-parse');
-    const { getData } = await import('pdf-parse/worker');
-    PDFParse.setWorker(getData());
-
-    const parser = new PDFParse({ data: buffer });
-    let result: Awaited<ReturnType<typeof parser.getText>>;
-    try {
-      result = await parser.getText();
-    } finally {
-      await parser.destroy().catch(() => undefined);
-    }
+    const pdfParse = (await import('pdf-parse')).default;
+    const result = await pdfParse(buffer);
     const text = result.text?.trim() ?? '';
 
     if (!text) {
       return jsonError('Не удалось извлечь текст из PDF. Возможно, файл содержит только изображения.', 400);
     }
 
-    return NextResponse.json({ text, pages: result.total });
+    return NextResponse.json({ text, pages: result.numpages });
   } catch (err) {
     console.error('Brief PDF parse failed', err);
     const message = err instanceof Error ? err.message : 'Ошибка при разборе PDF';
