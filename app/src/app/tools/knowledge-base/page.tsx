@@ -23,6 +23,7 @@ import {
   Sparkles,
   Pencil,
   Save,
+  Briefcase,
 } from 'lucide-react';
 import type { KbCategory, KbDocument } from '@/lib/knowledgeBase/types';
 import { KB_CATEGORIES } from '@/lib/knowledgeBase/types';
@@ -47,21 +48,21 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 
 const CATEGORY_ICONS: Record<KbCategory | 'all', React.ElementType> = {
   all: Layers,
-  chat_export: MessageSquare,
-  transcript: Video,
+  sales_chats: MessageSquare,
+  video_transcripts: Video,
   product_info: ShoppingBag,
-  sales_script: ScrollText,
-  faq: HelpCircle,
+  cases: Briefcase,
+  client_chats: ScrollText,
   other: FileText,
 };
 
 const CATEGORY_LABELS: Record<KbCategory | 'all', string> = {
   all: 'Все',
-  chat_export: 'Переписки',
-  transcript: 'Расшифровки',
+  sales_chats: 'Переписки Сейлз',
+  video_transcripts: 'Расшифровки встреч',
   product_info: 'О продукте',
-  sales_script: 'Скрипты',
-  faq: 'FAQ',
+  cases: 'Кейсы',
+  client_chats: 'Рабочие чаты',
   other: 'Другое',
 };
 
@@ -355,7 +356,7 @@ function DocumentCard({
 function UploadForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
-  const [category, setCategory] = useState<KbCategory>('chat_export');
+  const [category, setCategory] = useState<KbCategory>('sales_chats');
   const [description, setDescription] = useState('');
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState('');
@@ -701,7 +702,6 @@ function BriefPanel() {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
 
@@ -719,25 +719,6 @@ function BriefPanel() {
       finally { setLoading(false); }
     })();
   }, []);
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    try {
-      const data = await apiFetch<{ brief: string; token_count: number }>(
-        '/api/knowledge-base/brief',
-        { method: 'POST' },
-      );
-      setBrief(data.brief);
-      setTokenCount(data.token_count);
-      setUpdatedAt(new Date().toISOString());
-      setEditing(false);
-      setCollapsed(false);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Generation failed');
-    } finally {
-      setGenerating(false);
-    }
-  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -782,35 +763,19 @@ function BriefPanel() {
           )}
           <ChevronDown className={`h-3 w-3 text-amber-400 transition ${collapsed ? '' : 'rotate-180'}`} />
         </button>
-        <div className="flex items-center gap-1.5">
-          {!editing && brief && (
-            <button
-              onClick={() => { setEditText(brief); setEditing(true); setCollapsed(false); }}
-              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-amber-700 transition hover:bg-amber-100"
-            >
-              <Pencil className="h-3 w-3" />
-              Редактировать
-            </button>
-          )}
+        {!editing && brief && (
           <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-1 text-[10px] font-medium text-white transition hover:bg-amber-700 disabled:opacity-50"
+            onClick={() => { setEditText(brief); setEditing(true); setCollapsed(false); }}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-amber-700 transition hover:bg-amber-100"
           >
-            {generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-            {brief ? 'Перегенерировать' : 'Сгенерировать из KB'}
+            <Pencil className="h-3 w-3" />
+            Редактировать
           </button>
-        </div>
+        )}
       </div>
 
       {!collapsed && (
         <div className="mt-2">
-          {!brief && !editing && (
-            <p className="text-xs text-amber-600">
-              Бриф пуст. Добавьте документы в базу знаний и нажмите &laquo;Сгенерировать из KB&raquo; — AI прочитает все документы и составит краткую выжимку (~500-1000 токенов), которая будет передаваться в каждый промпт Sales Copilot.
-            </p>
-          )}
-
           {editing ? (
             <div className="space-y-2">
               <textarea
@@ -845,7 +810,11 @@ function BriefPanel() {
             <div className="max-h-48 overflow-auto rounded-lg bg-white/70 px-2.5 py-2">
               <p className="whitespace-pre-wrap text-xs leading-relaxed text-gray-700">{brief}</p>
             </div>
-          ) : null}
+          ) : (
+            <p className="text-xs text-amber-600">
+              Бриф пока не создан.
+            </p>
+          )}
         </div>
       )}
     </div>
