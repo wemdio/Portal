@@ -5,12 +5,20 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import { useParams } from 'next/navigation';
 import {
-  ChevronLeft, Loader2, Play, Pause, ExternalLink, Save,
-  Mail, Clock, Settings,
+  ChevronLeft, ChevronRight, Loader2, Play, Pause, ExternalLink, Save,
+  Mail, Clock, Settings, Search, Users,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep } from '@/lib/instantly/types';
+import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep, Lead, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
+
+const INTEREST_LABELS: Record<number, { label: string; cls: string }> = {
+  0: { label: 'Не обработан', cls: 'bg-zinc-100 text-zinc-600' },
+  1: { label: 'Заинтересован', cls: 'bg-emerald-50 text-emerald-700' },
+  [-1]: { label: 'Не заинтересован', cls: 'bg-red-50 text-red-700' },
+  [-2]: { label: 'Ответ получен', cls: 'bg-blue-50 text-blue-700' },
+  [-3]: { label: 'Неверный контакт', cls: 'bg-orange-50 text-orange-700' },
+};
 
 function statusBadgeClass(status: number): string {
   switch (status) {
@@ -89,7 +97,13 @@ export default function CampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'overview' | 'steps' | 'settings'>('overview');
+  const [tab, setTab] = useState<'overview' | 'steps' | 'leads' | 'settings'>('overview');
+
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadsHasMore, setLeadsHasMore] = useState(false);
+  const [leadsAfter, setLeadsAfter] = useState<string | undefined>();
+  const [leadsSearch, setLeadsSearch] = useState('');
 
   const [editName, setEditName] = useState('');
   const [editDailyLimit, setEditDailyLimit] = useState('');
@@ -121,9 +135,19 @@ export default function CampaignDetailPage() {
       setAnalytics(matched ?? null);
 
       const stepsArr = Array.isArray(s) ? s : Array.isArray((s as { data?: unknown }).data) ? (s as { data: CampaignStepAnalytics[] }).data : [];
-      const filteredSteps = stepsArr.filter(
-        (item) => !('campaign_id' in item) || (item as Record<string, unknown>).campaign_id === campaignId,
-      );
+      const filteredSteps = stepsArr
+        .filter((item) => {
+          const stepVal = String(item.step ?? '');
+          if (stepVal === '\\N' || stepVal === 'null' || stepVal === '') return false;
+          if ('campaign_id' in item && (item as Record<string, unknown>).campaign_id !== campaignId) return false;
+          return true;
+        })
+        .map((item) => ({
+          ...item,
+          step: Number(item.step) || 0,
+          variant: Number(item.variant) || 0,
+        }))
+        .sort((a, b) => (a.step as number) - (b.step as number) || (a.variant as number) - (b.variant as number));
       setSteps(filteredSteps);
       setAllTags(tags.items ?? []);
 
@@ -149,6 +173,34 @@ export default function CampaignDetailPage() {
       setActionLoading(false);
     }
   }, [campaignId]);
+
+  const loadLeads = useCallback(async (append = false) => {
+    setLeadsLoading(true);
+    try {
+      const data = await instantlyFetch<PaginatedResponse<Lead>>('/leads', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'list',
+          campaign_id: campaignId,
+          search: leadsSearch || undefined,
+          limit: 50,
+          starting_after: append ? leadsAfter : undefined,
+        }),
+      });
+      const items = data.items ?? [];
+      setLeads(append ? (prev) => [...prev, ...items] : items);
+      setLeadsAfter(data.next_starting_after);
+      setLeadsHasMore(!!data.next_starting_after);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки лидов');
+    } finally {
+      setLeadsLoading(false);
+    }
+  }, [campaignId, leadsSearch, leadsAfter]);
+
+  useEffect(() => {
+    if (tab === 'leads' && leads.length === 0 && !leadsLoading) loadLeads();
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = useCallback(async () => {
     if (!campaign) return;
@@ -261,7 +313,7 @@ export default function CampaignDetailPage() {
       </div>
 
       <div className="mb-6 flex items-center gap-1 rounded-lg border border-zinc-200 bg-white p-0.5 w-fit">
-        {(['overview', 'steps', 'settings'] as const).map((t) => (
+        {(['overview', 'steps', 'leads', 'settings'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -269,7 +321,7 @@ export default function CampaignDetailPage() {
               tab === t ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-900'
             }`}
           >
-            {t === 'overview' ? 'Обзор' : t === 'steps' ? 'Шаги' : 'Настройки'}
+            {{ overview: 'Обзор', steps: 'Шаги', leads: 'Лиды', settings: 'Настройки' }[t]}
           </button>
         ))}
       </div>
@@ -434,6 +486,93 @@ export default function CampaignDetailPage() {
                 </tbody>
               </table>
             </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'leads' && (
+        <div className="rounded-xl border border-zinc-200 bg-white">
+          <div className="flex items-center gap-3 border-b border-zinc-100 p-4">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="text"
+                placeholder="Поиск по email..."
+                value={leadsSearch}
+                onChange={(e) => setLeadsSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { setLeadsAfter(undefined); loadLeads(); }
+                }}
+                className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+              />
+            </div>
+            <button
+              onClick={() => { setLeadsAfter(undefined); loadLeads(); }}
+              disabled={leadsLoading}
+              className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+            >
+              {leadsLoading && leads.length === 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Обновить'}
+            </button>
+          </div>
+
+          {leadsLoading && leads.length === 0 ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+            </div>
+          ) : leads.length === 0 ? (
+            <div className="py-16 text-center">
+              <Users className="mx-auto h-8 w-8 text-zinc-300" />
+              <p className="mt-3 text-sm text-zinc-500">Нет лидов в этой кампании</p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Email</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Имя</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Компания</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Статус</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Добавлен</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-50">
+                    {leads.map((l) => {
+                      const interest = INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0];
+                      return (
+                        <tr key={l.id} className="hover:bg-zinc-50">
+                          <td className="px-4 py-3 font-medium text-zinc-800 truncate max-w-[220px]">{l.email}</td>
+                          <td className="px-4 py-3 text-zinc-500">{[l.first_name, l.last_name].filter(Boolean).join(' ') || '—'}</td>
+                          <td className="px-4 py-3 text-zinc-500 truncate max-w-[180px]">{l.company_name || '—'}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${interest.cls}`}>
+                              {interest.label}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-xs text-zinc-400">
+                            {l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
+                <span className="text-xs text-zinc-400">{leads.length} лидов загружено</span>
+                {leadsHasMore && (
+                  <button
+                    onClick={() => loadLeads(true)}
+                    disabled={leadsLoading}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-zinc-600 hover:text-zinc-900 disabled:opacity-50 transition-colors"
+                  >
+                    {leadsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronRight className="h-3 w-3" />}
+                    Загрузить ещё
+                  </button>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}
