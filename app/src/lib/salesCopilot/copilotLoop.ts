@@ -402,21 +402,23 @@ export async function runCopilotLoop(
 
   try {
     while (!shouldStop()) {
-      if (isInSleepPeriod(config.sleep_periods ?? [], config.timezone_offset ?? 3)) {
-        log('info', 'Спящий период — пауза 60 сек');
-        await sleep(60_000);
-        continue;
-      }
-
       const { data: fresh } = await db
         .from('sales_copilot_configs')
-        .select('is_enabled')
+        .select('*')
         .eq('id', configId)
         .single();
 
       if (!fresh?.is_enabled) {
         log('info', 'Copilot выключен — выход');
         break;
+      }
+
+      Object.assign(config, fresh);
+
+      if (isInSleepPeriod(config.sleep_periods ?? [], config.timezone_offset ?? 3)) {
+        log('info', 'Спящий период — пауза 60 сек');
+        await sleep(60_000);
+        continue;
       }
 
       await expireOldDrafts(db, configId);
