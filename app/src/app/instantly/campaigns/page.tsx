@@ -28,24 +28,44 @@ function statusBadgeClass(status: number): string {
   }
 }
 
+type CampaignPage = { items: Campaign[]; next_starting_after?: string };
+const PAGE_SIZE = 100;
+
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [nextAfter, setNextAfter] = useState<string | undefined>();
+  const [hasMore, setHasMore] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (after?: string) => {
+    const isFirst = !after;
+    if (isFirst) setLoading(true); else setLoadingMore(true);
     setError('');
     try {
-      const data = await instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all');
-      setCampaigns(data.items ?? []);
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+      if (after) params.set('starting_after', after);
+      const data = await instantlyFetch<CampaignPage>(`/campaigns?${params}`);
+      const items = data.items ?? [];
+      setCampaigns((prev) => {
+        const merged = isFirst ? items : [...prev, ...items];
+        return merged.sort((a, b) => {
+          const ta = a.timestamp_created ?? '';
+          const tb = b.timestamp_created ?? '';
+          return tb > ta ? 1 : tb < ta ? -1 : 0;
+        });
+      });
+      setNextAfter(data.next_starting_after ?? undefined);
+      setHasMore(!!data.next_starting_after);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, []);
 
@@ -197,8 +217,20 @@ export default function CampaignsPage() {
               </div>
             ))}
           </div>
-          <div className="border-t border-zinc-100 px-5 py-3 text-xs text-zinc-400">
-            {filtered.length} из {campaigns.length} кампаний
+          <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
+            <span className="text-xs text-zinc-400">
+              {filtered.length} из {campaigns.length} кампаний
+            </span>
+            {hasMore && !search && statusFilter === undefined && (
+              <button
+                onClick={() => load(nextAfter)}
+                disabled={loadingMore}
+                className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 transition-colors"
+              >
+                {loadingMore ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                {loadingMore ? 'Загрузка…' : 'Загрузить ещё'}
+              </button>
+            )}
           </div>
         </div>
       )}
