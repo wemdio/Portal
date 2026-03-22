@@ -125,9 +125,29 @@ async function pollOnce(): Promise<boolean> {
   return true;
 }
 
+async function resumeEnabledConfigs() {
+  const { data: configs } = await db
+    .from('sales_copilot_configs')
+    .select('id, user_id')
+    .eq('is_enabled', true);
+
+  if (!configs?.length) return;
+
+  log('info', `Resuming ${configs.length} enabled config(s) after restart`);
+  for (const cfg of configs) {
+    const { error } = await db
+      .from('sales_copilot_jobs')
+      .insert({ config_id: cfg.id, user_id: cfg.user_id, action: 'start' });
+    if (error) {
+      log('error', `Failed to create resume job for ${cfg.id}: ${error.message}`);
+    }
+  }
+}
+
 async function main() {
   log('info', 'Sales Copilot worker starting...');
   await resetStuckJobs();
+  await resumeEnabledConfigs();
 
   await pollLoop({
     log,
