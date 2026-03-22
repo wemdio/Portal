@@ -43,7 +43,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # FFmpeg для инструмента расшифровки аудио/видео (извлечение дорожки и конвертация в mp3)
-RUN apk add --no-cache ffmpeg
+# su-exec для переключения на непривилегированного пользователя в entrypoint
+RUN apk add --no-cache ffmpeg su-exec
 
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs
@@ -57,7 +58,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY app/scripts ./scripts
 COPY supabase/migrations ./supabase/migrations
 
-USER nextjs
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 3000
 
@@ -65,4 +67,5 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV BODY_SIZE_LIMIT=600mb
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["node", "scripts/start.js"]
