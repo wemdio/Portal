@@ -706,6 +706,19 @@ function SettingsTab({
         <Field label="Часовой пояс (UTC+)">
           <input className="w-full border rounded-lg px-3 py-2 text-sm" type="number" value={form.timezone_offset} onChange={e => update({ timezone_offset: +e.target.value })} />
         </Field>
+        <Field label="Период сна (не сканировать)">
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm"
+            placeholder="00:00-08:00, 14:00-15:00"
+            value={(form.sleep_periods ?? []).join(', ')}
+            onChange={e => {
+              const raw = e.target.value;
+              const periods = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+              update({ sleep_periods: periods });
+            }}
+          />
+          <p className="text-xs text-gray-400 mt-1">Через запятую, например: 00:00-08:00. Оставьте пустым для работы 24/7.</p>
+        </Field>
         <div className="flex gap-4">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={form.ignore_bots} onChange={e => update({ ignore_bots: e.target.checked })} /> Игнорировать ботов
