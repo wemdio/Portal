@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  ChevronLeft, ChevronRight, Loader2, Mail, Send, Reply, Search, Inbox,
+  ChevronLeft, ChevronRight, Loader2, Mail, Send, Reply, Search, Inbox, X,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Email, Campaign, PaginatedResponse } from '@/lib/instantly/types';
@@ -98,6 +98,125 @@ function EmailRow({ email, expanded, onToggle }: { email: Email; expanded: boole
   );
 }
 
+function CampaignCombobox({
+  campaigns,
+  value,
+  onChange,
+}: {
+  campaigns: Campaign[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const selectedName = campaigns.find((c) => c.id === value)?.name ?? '';
+
+  const filtered = query
+    ? campaigns.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()))
+    : campaigns;
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        if (!value) setQuery('');
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [value]);
+
+  useEffect(() => {
+    if (open && listRef.current) {
+      const el = listRef.current.children[highlightIdx] as HTMLElement | undefined;
+      el?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightIdx, open]);
+
+  function select(id: string) {
+    onChange(id);
+    setQuery('');
+    setOpen(false);
+    inputRef.current?.blur();
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (!open && e.key !== 'Escape') { setOpen(true); return; }
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightIdx((i) => Math.min(i + 1, filtered.length - 1));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightIdx((i) => Math.max(i - 1, 0));
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (filtered[highlightIdx]) select(filtered[highlightIdx].id);
+        break;
+      case 'Escape':
+        setOpen(false);
+        inputRef.current?.blur();
+        break;
+    }
+  }
+
+  return (
+    <div ref={containerRef} className="relative min-w-[320px]">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+        <input
+          ref={inputRef}
+          type="text"
+          value={open ? query : (query || selectedName)}
+          placeholder="Поиск кампании…"
+          onChange={(e) => { setQuery(e.target.value); setHighlightIdx(0); setOpen(true); }}
+          onFocus={() => { setOpen(true); setQuery(''); setHighlightIdx(0); }}
+          onKeyDown={handleKeyDown}
+          className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-8 text-sm focus:border-zinc-400 focus:outline-none"
+        />
+        {value && !open && (
+          <button
+            onClick={() => { onChange(''); setQuery(''); inputRef.current?.focus(); }}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {open && (
+        <ul
+          ref={listRef}
+          className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg"
+        >
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-zinc-400">Ничего не найдено</li>
+          ) : (
+            filtered.map((c, idx) => (
+              <li
+                key={c.id}
+                onMouseDown={() => select(c.id)}
+                onMouseEnter={() => setHighlightIdx(idx)}
+                className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                  idx === highlightIdx ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-700 hover:bg-zinc-50'
+                } ${c.id === value ? 'font-medium' : ''}`}
+              >
+                {c.name}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function EmailsPage() {
   const [emails, setEmails] = useState<Email[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -158,16 +277,11 @@ export default function EmailsPage() {
       <p className="mb-6 text-sm text-zinc-500">Входящие и исходящие письма по кампаниям</p>
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
-        <select
+        <CampaignCombobox
+          campaigns={campaigns}
           value={campaignId}
-          onChange={(e) => setCampaignId(e.target.value)}
-          className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none min-w-[200px]"
-        >
-          <option value="">Выберите кампанию</option>
-          {campaigns.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
+          onChange={setCampaignId}
+        />
 
         {emails.length > 0 && (
           <div className="flex items-center gap-1 rounded-lg border border-zinc-200 bg-white p-0.5">
