@@ -8,7 +8,6 @@ import {
   ChevronLeft, ChevronRight, Loader2, Play, Pause, ExternalLink, Save,
   Mail, Clock, Settings, Search, Users, Download, Trash2,
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep, Lead, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
@@ -217,31 +216,32 @@ export default function CampaignDetailPage() {
   const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExporting(format);
     try {
-      const data = await instantlyFetch<{ items: { email: string; first_name: string; last_name: string; company_name: string; title: string; phone: string; website: string; interest_status: number; timestamp_created: string }[]; total: number }>(
-        `/leads/export?campaign_id=${campaignId}`,
-      );
-      const rows = data.items.map((l) => ({
-        Email: l.email,
-        'Имя': l.first_name,
-        'Фамилия': l.last_name,
-        'Компания': l.company_name,
-        'Должность': l.title,
-        'Телефон': l.phone,
-        'Сайт': l.website,
-        'Статус': (INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0]).label,
-        'Добавлен': l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '',
-      }));
-      const ws = XLSX.utils.json_to_sheet(rows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+      const { supabase } = await import('@/lib/supabaseClient');
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (!token) throw new Error('Нет авторизации');
+
+      const res = await fetch(`/api/instantly/leads/export?campaign_id=${campaignId}&format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => 'Ошибка');
+        throw new Error(text);
+      }
+      const blob = await res.blob();
       const safeName = (campaign?.name ?? 'leads').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
-      XLSX.writeFile(wb, `${safeName}.${format}`, { bookType: format });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка экспорта');
     } finally {
       setExporting(false);
     }
-  }, [campaignId, campaign?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [campaignId, campaign?.name]);
 
   const handleClearLeads = useCallback(async () => {
     setClearing(true);
