@@ -160,7 +160,7 @@ export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string;
 
 export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
-    params: { id: params.campaign_id } as Record<string, string>,
+    params: { campaign_id: params.campaign_id } as Record<string, string>,
   });
 }
 
@@ -213,6 +213,20 @@ export async function listLeads(body: {
   starting_after?: string;
 }) {
   return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
+}
+
+export async function listAllLeads(campaignId: string, maxItems = 10000): Promise<Lead[]> {
+  const all: Lead[] = [];
+  let after: string | undefined;
+  let pages = 0;
+  do {
+    const page = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after });
+    if (page.items?.length) all.push(...page.items);
+    after = page.next_starting_after || undefined;
+    pages++;
+    if (all.length >= maxItems || pages >= 200) break;
+  } while (after);
+  return all;
 }
 
 export async function getLead(id: string) {
