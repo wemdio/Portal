@@ -70,7 +70,7 @@ export default function CampaignsPage() {
         const all = [...items];
 
         while (after && !cancelled) {
-          const page = await instantlyFetch<PaginatedResponse<Campaign>>(
+          const page: PaginatedResponse<Campaign> = await instantlyFetch(
             `/campaigns?limit=100&starting_after=${after}`,
           );
           if (cancelled) return;

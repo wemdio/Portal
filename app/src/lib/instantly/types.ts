@@ -253,6 +253,7 @@ export interface Lead {
   first_name?: string | null;
   last_name?: string | null;
   company_name?: string | null;
+  title?: string | null;
   phone?: string | null;
   website?: string | null;
   linkedin_url?: string | null;
