@@ -160,7 +160,7 @@ export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string;
 
 export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
-    params: { id: params.campaign_id } as Record<string, string>,
+    params: { campaign_id: params.campaign_id } as Record<string, string>,
   });
 }
 
