@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
   Send, Loader2, Search, Play, Pause, ChevronLeft, ExternalLink,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign } from '@/lib/instantly/types';
+import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
 const STATUS_FILTERS = [
@@ -28,28 +28,70 @@ function statusBadgeClass(status: number): string {
   }
 }
 
+function sortNewest(items: Campaign[]): Campaign[] {
+  return [...items].sort((a, b) => {
+    const ta = a.timestamp_created ?? '';
+    const tb = b.timestamp_created ?? '';
+    return tb > ta ? 1 : tb < ta ? -1 : 0;
+  });
+}
+
+const VISIBLE_STEP = 100;
+
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingRest, setLoadingRest] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_STEP);
+  const abortRef = useRef(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all');
-      setCampaigns(data.items ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки');
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    abortRef.current = false;
+    let cancelled = false;
+
+    (async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const first = await instantlyFetch<PaginatedResponse<Campaign>>('/campaigns?limit=100');
+        if (cancelled) return;
+        const items = first.items ?? [];
+        setCampaigns(sortNewest(items));
+        setLoading(false);
+
+        if (!first.next_starting_after) return;
+
+        setLoadingRest(true);
+        let after: string | undefined = first.next_starting_after;
+        const all = [...items];
+
+        while (after && !cancelled) {
+          const page: PaginatedResponse<Campaign> = await instantlyFetch(
+            `/campaigns?limit=100&starting_after=${after}`,
+          );
+          if (cancelled) return;
+          const pageItems = page.items ?? [];
+          if (pageItems.length === 0) break;
+          all.push(...pageItems);
+          setCampaigns(sortNewest(all));
+          after = page.next_starting_after ?? undefined;
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setLoadingRest(false);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   const filtered = campaigns.filter((c) => {
     if (statusFilter !== undefined && c.status !== statusFilter) return false;
@@ -59,6 +101,9 @@ export default function CampaignsPage() {
     }
     return true;
   });
+
+  const visible = filtered.slice(0, visibleCount);
+  const hasMore = visibleCount < filtered.length;
 
   const handleAction = useCallback(async (id: string, action: 'activate' | 'pause') => {
     setActionLoading(id);
@@ -142,7 +187,7 @@ export default function CampaignsPage() {
       ) : (
         <div className="rounded-xl border border-zinc-200 bg-white">
           <div className="divide-y divide-zinc-100">
-            {filtered.map((c) => (
+            {visible.map((c) => (
               <div key={c.id} className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50 transition-colors">
                 <Link
                   href={`/instantly/campaigns/${c.id}` as Route}
@@ -197,8 +242,24 @@ export default function CampaignsPage() {
               </div>
             ))}
           </div>
-          <div className="border-t border-zinc-100 px-5 py-3 text-xs text-zinc-400">
-            {filtered.length} из {campaigns.length} кампаний
+          <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
+            <span className="text-xs text-zinc-400 inline-flex items-center gap-1.5">
+              {visible.length} из {filtered.length} кампаний
+              {loadingRest && (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span>подгружаем остальные…</span>
+                </>
+              )}
+            </span>
+            {hasMore && (
+              <button
+                onClick={() => setVisibleCount((v) => v + VISIBLE_STEP)}
+                className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+              >
+                Ещё {Math.min(VISIBLE_STEP, filtered.length - visibleCount)}
+              </button>
+            )}
           </div>
         </div>
       )}
