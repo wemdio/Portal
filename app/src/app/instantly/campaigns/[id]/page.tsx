@@ -204,8 +204,15 @@ export default function CampaignDetailPage() {
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [exporting, setExporting] = useState<string | false>(false);
+  const [exportSeconds, setExportSeconds] = useState(0);
   const [clearing, setClearing] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  useEffect(() => {
+    if (!exporting) { setExportSeconds(0); return; }
+    const interval = setInterval(() => setExportSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [exporting]);
 
   const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExporting(format);
@@ -566,6 +573,11 @@ export default function CampaignDetailPage() {
               {leadsLoading && leads.length === 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Обновить'}
             </button>
             <div className="flex items-center gap-1.5 ml-auto">
+              {exporting && (
+                <span className="text-xs text-zinc-400 mr-1">
+                  Экспорт… {exportSeconds}с
+                </span>
+              )}
               <button
                 onClick={() => handleExport('csv')}
                 disabled={!!exporting || leads.length === 0}
