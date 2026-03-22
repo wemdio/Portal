@@ -575,7 +575,7 @@ export default function CampaignDetailPage() {
             <div className="flex items-center gap-1.5 ml-auto">
               {exporting && (
                 <span className="text-xs text-zinc-400 mr-1">
-                  Экспорт… {exportSeconds}с
+                  Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300">(обычно 10с – 1 мин)</span>
                 </span>
               )}
               <button
