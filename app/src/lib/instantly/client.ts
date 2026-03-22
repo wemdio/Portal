@@ -215,6 +215,17 @@ export async function listLeads(body: {
   return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
 }
 
+export async function listAllLeads(campaignId: string): Promise<Lead[]> {
+  const all: Lead[] = [];
+  let after: string | undefined;
+  do {
+    const page = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after });
+    if (page.items?.length) all.push(...page.items);
+    after = page.next_starting_after || undefined;
+  } while (after);
+  return all;
+}
+
 export async function getLead(id: string) {
   return request<Lead>(`/leads/${id}`);
 }

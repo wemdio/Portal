@@ -203,62 +203,38 @@ export default function CampaignDetailPage() {
     if (tab === 'leads' && leads.length === 0 && !leadsLoading) loadLeads();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<string | false>(false);
   const [clearing, setClearing] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  const fetchAllLeads = useCallback(async (): Promise<Lead[]> => {
-    const all: Lead[] = [];
-    let after: string | undefined;
-    do {
-      const data = await instantlyFetch<PaginatedResponse<Lead>>('/leads', {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'list',
-          campaign_id: campaignId,
-          limit: 100,
-          starting_after: after,
-        }),
-      });
-      if (data.items?.length) all.push(...data.items);
-      after = data.next_starting_after || undefined;
-    } while (after);
-    return all;
-  }, [campaignId]);
-
-  const leadsToRows = (items: Lead[]) =>
-    items.map((l) => ({
-      Email: l.email,
-      'Имя': l.first_name ?? '',
-      'Фамилия': l.last_name ?? '',
-      'Компания': l.company_name ?? '',
-      'Должность': l.title ?? '',
-      'Телефон': l.phone ?? '',
-      'Сайт': l.website ?? '',
-      'Статус': (INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0]).label,
-      'Добавлен': l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '',
-    }));
-
   const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
-    setExporting(true);
+    setExporting(format);
     try {
-      const all = await fetchAllLeads();
-      const rows = leadsToRows(all);
+      const data = await instantlyFetch<{ items: { email: string; first_name: string; last_name: string; company_name: string; title: string; phone: string; website: string; interest_status: number; timestamp_created: string }[]; total: number }>(
+        `/leads/export?campaign_id=${campaignId}`,
+      );
+      const rows = data.items.map((l) => ({
+        Email: l.email,
+        'Имя': l.first_name,
+        'Фамилия': l.last_name,
+        'Компания': l.company_name,
+        'Должность': l.title,
+        'Телефон': l.phone,
+        'Сайт': l.website,
+        'Статус': (INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0]).label,
+        'Добавлен': l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '',
+      }));
       const ws = XLSX.utils.json_to_sheet(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Leads');
       const safeName = (campaign?.name ?? 'leads').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
-      if (format === 'csv') {
-        XLSX.writeFile(wb, `${safeName}.csv`, { bookType: 'csv' });
-      } else {
-        XLSX.writeFile(wb, `${safeName}.xlsx`, { bookType: 'xlsx' });
-      }
+      XLSX.writeFile(wb, `${safeName}.${format}`, { bookType: format });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка экспорта');
     } finally {
       setExporting(false);
     }
-  }, [fetchAllLeads, campaign?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [campaignId, campaign?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClearLeads = useCallback(async () => {
     setClearing(true);
@@ -592,18 +568,18 @@ export default function CampaignDetailPage() {
             <div className="flex items-center gap-1.5 ml-auto">
               <button
                 onClick={() => handleExport('csv')}
-                disabled={exporting || leads.length === 0}
+                disabled={!!exporting || leads.length === 0}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
               >
-                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                {exporting === 'csv' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 CSV
               </button>
               <button
                 onClick={() => handleExport('xlsx')}
-                disabled={exporting || leads.length === 0}
+                disabled={!!exporting || leads.length === 0}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
               >
-                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                {exporting === 'xlsx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 XLSX
               </button>
               <button
