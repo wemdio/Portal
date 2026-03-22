@@ -225,4 +225,8 @@ export const TOOL_GROUPS: ToolGroup[] = [
     label: 'Утилиты',
     toolIds: ['auto-report', 'audio-transcribe', 'tg-transcribe', 'rdp'],
   },
+  {
+    label: 'AI и знания',
+    toolIds: ['knowledge-base'],
+  },
 ];
