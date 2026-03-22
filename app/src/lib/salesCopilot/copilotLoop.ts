@@ -4,6 +4,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SalesCopilotConfig, CopilotDraftMessage } from './types';
 import { generateDraft, classifyDialog } from './llm';
 import { searchChunks } from '../knowledgeBase/contextRetriever';
+import { COPILOT_KB_CATEGORIES } from '../knowledgeBase/types';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -107,7 +108,10 @@ async function fetchRelevantDetails(
 
     if (!keywords) return '';
 
-    const { chunks } = await searchChunks(db, keywords, { limit: 3 });
+    const { chunks } = await searchChunks(db, keywords, {
+      categories: COPILOT_KB_CATEGORIES,
+      limit: 3,
+    });
     if (chunks.length === 0) return '';
 
     return chunks

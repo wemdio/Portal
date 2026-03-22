@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { withKbAuth } from '@/lib/knowledgeBase/apiHelper';
 import { searchChunks } from '@/lib/knowledgeBase/contextRetriever';
 import { DEFAULT_REACTIVE_PROMPT } from '@/lib/salesCopilot/types';
+import { COPILOT_KB_CATEGORIES } from '@/lib/knowledgeBase/types';
 
 const SAMPLE_CONVERSATION = [
   { role: 'user', content: 'Добрый день! Увидел вашу услугу, интересно узнать подробнее' },
@@ -47,7 +48,10 @@ export const POST = withKbAuth(async (req, { supabase }) => {
   let detailsText = '';
   let searchResults: unknown[] = [];
   try {
-    const { chunks } = await searchChunks(supabase, keywords.join(' '), { limit: 3 });
+    const { chunks } = await searchChunks(supabase, keywords.join(' '), {
+      categories: COPILOT_KB_CATEGORIES,
+      limit: 3,
+    });
     searchResults = chunks.map(c => ({
       document_title: c.document_title,
       category: c.category,
