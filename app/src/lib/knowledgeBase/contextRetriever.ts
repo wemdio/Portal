@@ -19,17 +19,19 @@ export async function searchChunks(
   query: string,
   options: {
     category?: KbCategory;
+    categories?: KbCategory[];
     limit?: number;
     offset?: number;
   } = {},
 ): Promise<{ chunks: ContextChunk[]; total: number }> {
-  const { category, limit = 20, offset = 0 } = options;
+  const { category, categories, limit = 20, offset = 0 } = options;
   const tsQuery = toTsQuery(query);
   if (!tsQuery) return { chunks: [], total: 0 };
 
   const { data, error } = await db.rpc('kb_search_chunks', {
     search_query: tsQuery,
     filter_category: category ?? null,
+    filter_categories: categories ?? null,
     result_limit: limit,
     result_offset: offset,
   });
