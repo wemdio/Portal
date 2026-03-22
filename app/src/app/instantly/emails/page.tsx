@@ -120,8 +120,6 @@ function CampaignCombobox({
     ? campaigns.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()))
     : campaigns;
 
-  useEffect(() => { setHighlightIdx(0); }, [query]);
-
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -178,8 +176,8 @@ function CampaignCombobox({
           type="text"
           value={open ? query : (query || selectedName)}
           placeholder="Поиск кампании…"
-          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-          onFocus={() => { setOpen(true); setQuery(''); }}
+          onChange={(e) => { setQuery(e.target.value); setHighlightIdx(0); setOpen(true); }}
+          onFocus={() => { setOpen(true); setQuery(''); setHighlightIdx(0); }}
           onKeyDown={handleKeyDown}
           className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-8 text-sm focus:border-zinc-400 focus:outline-none"
         />
