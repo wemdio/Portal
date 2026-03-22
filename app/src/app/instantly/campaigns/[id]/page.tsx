@@ -6,8 +6,9 @@ import type { Route } from 'next';
 import { useParams } from 'next/navigation';
 import {
   ChevronLeft, ChevronRight, Loader2, Play, Pause, ExternalLink, Save,
-  Mail, Clock, Settings, Search, Users,
+  Mail, Clock, Settings, Search, Users, Download, Trash2,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep, Lead, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
@@ -201,6 +202,81 @@ export default function CampaignDetailPage() {
   useEffect(() => {
     if (tab === 'leads' && leads.length === 0 && !leadsLoading) loadLeads();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  const fetchAllLeads = useCallback(async (): Promise<Lead[]> => {
+    const all: Lead[] = [];
+    let after: string | undefined;
+    do {
+      const data = await instantlyFetch<PaginatedResponse<Lead>>('/leads', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'list',
+          campaign_id: campaignId,
+          limit: 100,
+          starting_after: after,
+        }),
+      });
+      if (data.items?.length) all.push(...data.items);
+      after = data.next_starting_after || undefined;
+    } while (after);
+    return all;
+  }, [campaignId]);
+
+  const leadsToRows = (items: Lead[]) =>
+    items.map((l) => ({
+      Email: l.email,
+      'Имя': l.first_name ?? '',
+      'Фамилия': l.last_name ?? '',
+      'Компания': l.company_name ?? '',
+      'Должность': l.title ?? '',
+      'Телефон': l.phone ?? '',
+      'Сайт': l.website ?? '',
+      'Статус': (INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0]).label,
+      'Добавлен': l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '',
+    }));
+
+  const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
+    setExporting(true);
+    try {
+      const all = await fetchAllLeads();
+      const rows = leadsToRows(all);
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+      const safeName = (campaign?.name ?? 'leads').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
+      if (format === 'csv') {
+        XLSX.writeFile(wb, `${safeName}.csv`, { bookType: 'csv' });
+      } else {
+        XLSX.writeFile(wb, `${safeName}.xlsx`, { bookType: 'xlsx' });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка экспорта');
+    } finally {
+      setExporting(false);
+    }
+  }, [fetchAllLeads, campaign?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleClearLeads = useCallback(async () => {
+    setClearing(true);
+    try {
+      await instantlyFetch('/leads', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'delete-by-campaign', campaign_id: campaignId }),
+      });
+      setLeads([]);
+      setLeadsAfter(undefined);
+      setLeadsHasMore(false);
+      setShowClearConfirm(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка очистки');
+    } finally {
+      setClearing(false);
+    }
+  }, [campaignId]);
 
   const handleSave = useCallback(async () => {
     if (!campaign) return;
@@ -492,8 +568,8 @@ export default function CampaignDetailPage() {
 
       {tab === 'leads' && (
         <div className="rounded-xl border border-zinc-200 bg-white">
-          <div className="flex items-center gap-3 border-b border-zinc-100 p-4">
-            <div className="relative flex-1 max-w-sm">
+          <div className="flex items-center gap-3 border-b border-zinc-100 p-4 flex-wrap">
+            <div className="relative flex-1 min-w-[180px] max-w-sm">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
               <input
                 type="text"
@@ -513,7 +589,56 @@ export default function CampaignDetailPage() {
             >
               {leadsLoading && leads.length === 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Обновить'}
             </button>
+            <div className="flex items-center gap-1.5 ml-auto">
+              <button
+                onClick={() => handleExport('csv')}
+                disabled={exporting || leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                CSV
+              </button>
+              <button
+                onClick={() => handleExport('xlsx')}
+                disabled={exporting || leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                XLSX
+              </button>
+              <button
+                onClick={() => setShowClearConfirm(true)}
+                disabled={leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Очистить
+              </button>
+            </div>
           </div>
+
+          {showClearConfirm && (
+            <div className="border-b border-red-100 bg-red-50 px-5 py-4">
+              <p className="text-sm font-medium text-red-800 mb-1">Удалить все лиды из этой кампании?</p>
+              <p className="text-xs text-red-600 mb-3">Это действие необратимо. Все контакты будут удалены из кампании &ldquo;{campaign?.name}&rdquo;.</p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleClearLeads}
+                  disabled={clearing}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  {clearing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                  Да, удалить все лиды
+                </button>
+                <button
+                  onClick={() => setShowClearConfirm(false)}
+                  className="rounded-lg border border-zinc-200 px-4 py-2 text-xs font-medium text-zinc-600 hover:bg-white transition-colors"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          )}
 
           {leadsLoading && leads.length === 0 ? (
             <div className="flex items-center justify-center py-16">
