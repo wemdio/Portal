@@ -28,44 +28,33 @@ function statusBadgeClass(status: number): string {
   }
 }
 
-type CampaignPage = { items: Campaign[]; next_starting_after?: string };
-const PAGE_SIZE = 100;
+const VISIBLE_STEP = 100;
 
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [nextAfter, setNextAfter] = useState<string | undefined>();
-  const [hasMore, setHasMore] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_STEP);
 
-  const load = useCallback(async (after?: string) => {
-    const isFirst = !after;
-    if (isFirst) setLoading(true); else setLoadingMore(true);
+  const load = useCallback(async () => {
+    setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
-      if (after) params.set('starting_after', after);
-      const data = await instantlyFetch<CampaignPage>(`/campaigns?${params}`);
+      const data = await instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all');
       const items = data.items ?? [];
-      setCampaigns((prev) => {
-        const merged = isFirst ? items : [...prev, ...items];
-        return merged.sort((a, b) => {
-          const ta = a.timestamp_created ?? '';
-          const tb = b.timestamp_created ?? '';
-          return tb > ta ? 1 : tb < ta ? -1 : 0;
-        });
+      items.sort((a, b) => {
+        const ta = a.timestamp_created ?? '';
+        const tb = b.timestamp_created ?? '';
+        return tb > ta ? 1 : tb < ta ? -1 : 0;
       });
-      setNextAfter(data.next_starting_after ?? undefined);
-      setHasMore(!!data.next_starting_after);
+      setCampaigns(items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
       setLoading(false);
-      setLoadingMore(false);
     }
   }, []);
 
@@ -79,6 +68,9 @@ export default function CampaignsPage() {
     }
     return true;
   });
+
+  const visible = filtered.slice(0, visibleCount);
+  const hasMore = visibleCount < filtered.length;
 
   const handleAction = useCallback(async (id: string, action: 'activate' | 'pause') => {
     setActionLoading(id);
@@ -162,7 +154,7 @@ export default function CampaignsPage() {
       ) : (
         <div className="rounded-xl border border-zinc-200 bg-white">
           <div className="divide-y divide-zinc-100">
-            {filtered.map((c) => (
+            {visible.map((c) => (
               <div key={c.id} className="flex items-center gap-4 px-5 py-3.5 hover:bg-zinc-50 transition-colors">
                 <Link
                   href={`/instantly/campaigns/${c.id}` as Route}
@@ -219,16 +211,14 @@ export default function CampaignsPage() {
           </div>
           <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
             <span className="text-xs text-zinc-400">
-              {filtered.length} из {campaigns.length} кампаний
+              {visible.length} из {filtered.length} кампаний
             </span>
-            {hasMore && !search && statusFilter === undefined && (
+            {hasMore && (
               <button
-                onClick={() => load(nextAfter)}
-                disabled={loadingMore}
-                className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 transition-colors"
+                onClick={() => setVisibleCount((v) => v + VISIBLE_STEP)}
+                className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
               >
-                {loadingMore ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                {loadingMore ? 'Загрузка…' : 'Загрузить ещё'}
+                Ещё {Math.min(VISIBLE_STEP, filtered.length - visibleCount)}
               </button>
             )}
           </div>
