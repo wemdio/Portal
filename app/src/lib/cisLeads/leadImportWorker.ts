@@ -7,6 +7,7 @@ import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
 import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
+import { runSocialProfileSerperEnrichment } from '@/lib/cisLeads/socialProfileSerperEnrichment';
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
@@ -448,7 +449,8 @@ const ENRICHMENT_STAGES = [
   'yandexMapsEnrichment',
   'phoneEnrichment',
   'whatsappCheck',
-  'socialProfileEnrichment',
+  'socialProfileSerperEnrichment',
+  'socialProfileFallback',
   'contactAggregation',
 ] as const;
 
@@ -536,11 +538,18 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
   } catch (e) { logErr('whatsappCheck', e); stageIdx++; }
 
   try {
-    log('socialProfileEnrichment start');
+    log('socialProfileSerperEnrichment start');
+    const serperSocialResult = await runSocialProfileSerperEnrichment(jobId, userId);
+    log('socialProfileSerperEnrichment', { processed: serperSocialResult.processed, linksFound: serperSocialResult.linksFound });
+    await advanceProgress('socialProfileSerperEnrichment');
+  } catch (e) { logErr('socialProfileSerperEnrichment', e); stageIdx++; }
+
+  try {
+    log('socialProfileFallback start');
     const socialResult = await runSocialProfileEnrichment(jobId, userId);
-    log('socialProfileEnrichment', { processed: socialResult.processed, linksFound: socialResult.linksFound });
-    await advanceProgress('socialProfileEnrichment');
-  } catch (e) { logErr('socialProfileEnrichment', e); stageIdx++; }
+    log('socialProfileFallback', { processed: socialResult.processed, linksFound: socialResult.linksFound });
+    await advanceProgress('socialProfileFallback');
+  } catch (e) { logErr('socialProfileFallback', e); stageIdx++; }
 
   try {
     log('contactAggregation start');

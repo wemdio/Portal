@@ -47,10 +47,15 @@ async function findSocialProfiles(personName: string, companyName: string): Prom
 
 Ищи в: LinkedIn, VK, Telegram (t.me), Facebook, Twitter/X, Instagram, OK.ru.
 
+КРИТИЧНО:
+- Возвращай ТОЛЬКО ссылки на профили, которые ты РЕАЛЬНО НАШЁЛ в интернете.
+- НИКОГДА не выдумывай и не генерируй URL. Если профиль не найден — верни null.
+- Убедись, что профиль принадлежит именно этому человеку из этой компании.
+
 Верни ТОЛЬКО JSON-объект с найденными ссылками:
 {"linkedin": "url или null", "vk": "url или null", "telegram": "url или null", "facebook": "url или null", "twitter": "url или null", "instagram": "url или null", "ok": "url или null"}
 
-Без пояснений. Если профиль не найден — null.`;
+Без пояснений.`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25_000);
