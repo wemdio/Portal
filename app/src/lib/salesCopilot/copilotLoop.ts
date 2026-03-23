@@ -239,7 +239,8 @@ async function scanProactive(
 ) {
   if (!config.proactive_enabled) return;
 
-  const dialogs = await client.getDialogs({ limit: 100 });
+  const dialogs = await client.getDialogs({});
+  log('info', `Proactive: загружено ${dialogs.length} диалогов`);
   let generated = 0;
 
   for (const dialog of dialogs) {
