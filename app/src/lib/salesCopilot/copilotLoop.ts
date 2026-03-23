@@ -471,7 +471,13 @@ export async function runCopilotLoop(
           await hourlySync(client, config as SalesCopilotConfig, db, log);
           lastHourlySync = Date.now();
         } catch (err) {
-          log('warning', `Ошибка периодической синхронизации: ${err instanceof Error ? err.message : String(err)}`);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (errMsg.includes('Constructor ID')) {
+            log('warning', `GramJS TL schema устарела — Telegram вернул неизвестный объект. Нужно обновить пакет 'telegram'. Синхронизация пропущена.`);
+          } else {
+            log('warning', `Ошибка периодической синхронизации: ${errMsg}`);
+          }
+          lastHourlySync = Date.now();
         }
       }
 
