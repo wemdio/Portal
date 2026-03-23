@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "postinstall": "playwright install chromium",
+    "postinstall": "patch-package && playwright install chromium",
     "db:migrate": "node scripts/db/ensureDatabase.js",
     "predev": "node scripts/db/ensureDatabase.js && node scripts/ensureTgBotApi.js",
     "dev": "concurrently \"next dev\" \"cd ../services/yandexmaps && uvicorn server:app --reload --port 8010\" \"npm run dev:workers\"",
@@ -104,6 +104,7 @@
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
     "jsdom": "^28.1.0",
+    "patch-package": "^8.0.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   },

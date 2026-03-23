@@ -414,6 +414,8 @@ export async function runCampaignLoop(
         continue;
       }
 
+      let tlSchemaErrorCount = 0;
+
       for (const { client, account } of clients) {
         if (shouldStop()) break;
 
@@ -456,12 +458,26 @@ export async function runCampaignLoop(
           }
 
         } catch (err) {
-          log('error', `${account.session_name}: ${err instanceof Error ? err.message : String(err)}`);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (errMsg.includes('Constructor ID')) {
+            tlSchemaErrorCount++;
+            if (tlSchemaErrorCount === 1) {
+              log('warning', `GramJS TL schema устарела — Telegram вернул неизвестный объект. Нужно обновить пакет 'telegram'. Ошибка: ${errMsg.slice(0, 150)}`);
+            }
+          } else {
+            log('error', `${account.session_name}: ${errMsg}`);
+          }
         }
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} сек перед следующим аккаунтом`);
         await sleep(accountDelay);
+      }
+
+      if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
+        const tlBackoff = 300_000;
+        log('warning', `Все ${tlSchemaErrorCount} аккаунтов получили TL schema ошибку — пауза ${tlBackoff / 1000} сек. Обновите пакет 'telegram' (npm update telegram)`);
+        await sleep(tlBackoff);
       }
 
       const cycleDelay = 30_000;
