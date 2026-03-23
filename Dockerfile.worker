@@ -9,6 +9,12 @@ COPY app/package.json app/package-lock.json ./
 # Include optional native packages for cross-platform deterministic installs.
 RUN npm ci --include=optional --ignore-scripts
 
+# Rebuild sqlite3 native bindings (skipped by --ignore-scripts above)
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && npm rebuild sqlite3 \
+    && apt-get purge -y python3 make g++ && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Chromium + system dependencies
 RUN npx playwright install chromium --with-deps
 
