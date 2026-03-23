@@ -7,7 +7,6 @@ import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
 import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
-import { runSocialProfileSerperEnrichment } from '@/lib/cisLeads/socialProfileSerperEnrichment';
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
@@ -438,21 +437,21 @@ async function setEnrichmentProgress(jobId: string, progress: number): Promise<v
     .eq('id', jobId);
 }
 
-const ENRICHMENT_STAGES = [
-  'backfillRawInn',
-  'normalizeCompanies',
-  'fallbackLinkCompanies',
-  'serperLprEnrichment',
-  'lprContactSerperEnrichment',
-  'siteDiscoveryEnrichment',
-  'websiteTeamEnrichment',
-  'yandexMapsEnrichment',
-  'phoneEnrichment',
-  'whatsappCheck',
-  'socialProfileSerperEnrichment',
-  'socialProfileFallback',
-  'contactAggregation',
-] as const;
+const TOTAL_PROGRESS_STEPS = 13;
+
+async function isJobCancelled(jobId: string): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const { data } = await supabaseAdmin
+    .from('lead_import_jobs')
+    .select('status')
+    .eq('id', jobId)
+    .single<{ status: string }>();
+  return data?.status === 'failed' || data?.status === 'completed';
+}
+
+class JobCancelledError extends Error {
+  constructor() { super('Job cancelled by user'); this.name = 'JobCancelledError'; }
+}
 
 async function runLeadPostProcessingInternal(jobId: string, userId: string): Promise<void> {
   const log = (step: string, detail?: unknown) =>
@@ -460,103 +459,138 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
   const logErr = (step: string, err: unknown) =>
     console.error(`[cis-leads][${jobId}] ${step} failed:`, err instanceof Error ? err.message : err);
 
-  const totalStages = ENRICHMENT_STAGES.length;
   let stageIdx = 0;
-
-  const advanceProgress = async (stageName: string) => {
-    stageIdx++;
-    const progress = stageIdx / totalStages;
+  const advanceProgress = async (stageName: string, steps = 1) => {
+    stageIdx += steps;
+    const progress = stageIdx / TOTAL_PROGRESS_STEPS;
     log(`${stageName} done — progress ${Math.round(progress * 100)}%`);
     await setEnrichmentProgress(jobId, progress);
   };
 
-  try {
-    log('backfillRawInn start');
-    await backfillRawInn(jobId, userId);
-    await advanceProgress('backfillRawInn');
-  } catch (e) { logErr('backfillRawInn', e); stageIdx++; }
+  const checkCancelled = async () => {
+    if (await isJobCancelled(jobId)) {
+      log('job cancelled — stopping enrichment');
+      throw new JobCancelledError();
+    }
+  };
 
   try {
-    log('normalizeCompaniesForJob start');
-    await normalizeCompaniesForJob(jobId, userId);
-    await advanceProgress('normalizeCompaniesForJob');
-  } catch (e) { logErr('normalizeCompaniesForJob', e); stageIdx++; }
 
-  try {
-    log('fallbackLinkCompanies start');
-    await fallbackLinkCompaniesFromRawLeads(jobId, userId);
-    await advanceProgress('fallbackLinkCompanies');
-  } catch (e) { logErr('fallbackLinkCompanies', e); stageIdx++; }
+  // ── Phase 1: sequential preparation (stages 1-3) ──
+  try { log('backfillRawInn start'); await backfillRawInn(jobId, userId); await advanceProgress('backfillRawInn'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('backfillRawInn', e); stageIdx++; }
 
-  try {
-    log('serperLprEnrichment start');
-    const serperResult = await runSerperLprEnrichment(jobId, userId);
-    log('serperLprEnrichment', { processed: serperResult.processed, contacts: serperResult.contactsFound });
-    await advanceProgress('serperLprEnrichment');
-  } catch (e) { logErr('serperLprEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('lprContactSerperEnrichment start');
-    const personalSerper = await runLprContactSerperEnrichment(jobId, userId);
-    log('lprContactSerperEnrichment', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
-    await advanceProgress('lprContactSerperEnrichment');
-  } catch (e) { logErr('lprContactSerperEnrichment', e); stageIdx++; }
+  try { log('normalizeCompanies start'); await normalizeCompaniesForJob(jobId, userId); await advanceProgress('normalizeCompanies'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('normalizeCompanies', e); stageIdx++; }
 
-  try {
-    log('siteDiscoveryEnrichment start');
-    const siteDiscovery = await runSiteDiscoveryEnrichment(jobId, userId);
-    log('siteDiscoveryEnrichment', { processed: siteDiscovery.processed, sites: siteDiscovery.sitesFound });
-    await advanceProgress('siteDiscoveryEnrichment');
-  } catch (e) { logErr('siteDiscoveryEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('websiteTeamEnrichment start');
-    const siteResult = await runWebsiteTeamEnrichment(jobId, userId);
-    log('websiteTeamEnrichment', { processed: siteResult.processed, contacts: siteResult.contactsFound });
-    await advanceProgress('websiteTeamEnrichment');
-  } catch (e) { logErr('websiteTeamEnrichment', e); stageIdx++; }
+  try { log('fallbackLinkCompanies start'); await fallbackLinkCompaniesFromRawLeads(jobId, userId); await advanceProgress('fallbackLinkCompanies'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('fallbackLinkCompanies', e); stageIdx++; }
 
-  try {
-    log('yandexMapsEnrichment start');
-    const ymResult = await runYandexMapsEnrichment(jobId, userId);
-    log('yandexMapsEnrichment', { processed: ymResult.processed, updated: ymResult.updated });
-    await advanceProgress('yandexMapsEnrichment');
-  } catch (e) { logErr('yandexMapsEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('phoneEnrichment start');
-    const phoneResult = await runPhoneEnrichmentBatch();
-    log('phoneEnrichment', { processed: phoneResult.processed });
-    await advanceProgress('phoneEnrichment');
-  } catch (e) { logErr('phoneEnrichment', e); stageIdx++; }
+  // ── Phase 2: parallel enrichment (stages 4-10) ──
+  log('phase2 start — parallel enrichment');
 
-  try {
-    log('whatsappCheck start');
-    const waResult = await runWhatsAppCheckBatch(jobId, userId);
-    log('whatsappCheck', { processed: waResult.processed, registered: waResult.registered });
-    await advanceProgress('whatsappCheck');
-  } catch (e) { logErr('whatsappCheck', e); stageIdx++; }
+  const phase2Results = await Promise.allSettled([
+    // Group A: LPR discovery → personal contacts (2 stages)
+    (async () => {
+      try {
+        log('serperLprEnrichment start');
+        const r = await runSerperLprEnrichment(jobId, userId);
+        log('serperLprEnrichment', { processed: r.processed, contacts: r.contactsFound });
+      } catch (e) { logErr('serperLprEnrichment', e); }
+      try {
+        log('lprContactSerperEnrichment start');
+        const r = await runLprContactSerperEnrichment(jobId, userId);
+        log('lprContactSerperEnrichment', { processed: r.processed, updated: r.contactsUpdated });
+      } catch (e) { logErr('lprContactSerperEnrichment', e); }
+    })(),
 
+    // Group B: site discovery → website team parsing (2 stages)
+    (async () => {
+      try {
+        log('siteDiscoveryEnrichment start');
+        const r = await runSiteDiscoveryEnrichment(jobId, userId);
+        log('siteDiscoveryEnrichment', { processed: r.processed, sites: r.sitesFound });
+      } catch (e) { logErr('siteDiscoveryEnrichment', e); }
+      try {
+        log('websiteTeamEnrichment start');
+        const r = await runWebsiteTeamEnrichment(jobId, userId);
+        log('websiteTeamEnrichment', { processed: r.processed, contacts: r.contactsFound });
+      } catch (e) { logErr('websiteTeamEnrichment', e); }
+    })(),
+
+    // Group C: Yandex Maps (1 stage)
+    (async () => {
+      try {
+        log('yandexMapsEnrichment start');
+        const r = await runYandexMapsEnrichment(jobId, userId);
+        log('yandexMapsEnrichment', { processed: r.processed, updated: r.updated });
+      } catch (e) { logErr('yandexMapsEnrichment', e); }
+    })(),
+
+    // Group D: phone → whatsapp (2 stages)
+    (async () => {
+      try {
+        log('phoneEnrichment start');
+        const r = await runPhoneEnrichmentBatch();
+        log('phoneEnrichment', { processed: r.processed });
+      } catch (e) { logErr('phoneEnrichment', e); }
+      try {
+        log('whatsappCheck start');
+        const r = await runWhatsAppCheckBatch(jobId, userId);
+        log('whatsappCheck', { processed: r.processed, registered: r.registered });
+      } catch (e) { logErr('whatsappCheck', e); }
+    })(),
+  ]);
+
+  stageIdx += 7;
+  const failedGroups = phase2Results.filter((r) => r.status === 'rejected').length;
+  if (failedGroups > 0) log('phase2', { failedGroups });
+  await setEnrichmentProgress(jobId, stageIdx / TOTAL_PROGRESS_STEPS);
+  log(`phase2 done — progress ${Math.round((stageIdx / TOTAL_PROGRESS_STEPS) * 100)}%`);
+
+  await checkCancelled();
+
+  // ── Phase 3: social profiles (stages 11-12) ──
   try {
     log('socialProfileSerperEnrichment start');
-    const serperSocialResult = await runSocialProfileSerperEnrichment(jobId, userId);
-    log('socialProfileSerperEnrichment', { processed: serperSocialResult.processed, linksFound: serperSocialResult.linksFound });
+    const { runSocialProfileSerperEnrichment } = await import('@/lib/cisLeads/socialProfileSerperEnrichment');
+    const r = await runSocialProfileSerperEnrichment(jobId, userId);
+    log('socialProfileSerperEnrichment', { processed: r.processed, linksFound: r.linksFound });
     await advanceProgress('socialProfileSerperEnrichment');
-  } catch (e) { logErr('socialProfileSerperEnrichment', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('socialProfileSerperEnrichment', e); stageIdx++; }
+
+  await checkCancelled();
 
   try {
     log('socialProfileFallback start');
-    const socialResult = await runSocialProfileEnrichment(jobId, userId);
-    log('socialProfileFallback', { processed: socialResult.processed, linksFound: socialResult.linksFound });
+    const r = await runSocialProfileEnrichment(jobId, userId);
+    log('socialProfileFallback', { processed: r.processed, linksFound: r.linksFound });
     await advanceProgress('socialProfileFallback');
-  } catch (e) { logErr('socialProfileFallback', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('socialProfileFallback', e); stageIdx++; }
 
+  await checkCancelled();
+
+  // ── Phase 4: final aggregation (stage 13) ──
   try {
     log('contactAggregation start');
-    const contactResult = await runContactAggregationBatch();
-    log('contactAggregation', { processed: contactResult.processed });
+    const r = await runContactAggregationBatch();
+    log('contactAggregation', { processed: r.processed });
     await advanceProgress('contactAggregation');
-  } catch (e) { logErr('contactAggregation', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('contactAggregation', e); stageIdx++; }
+
+  } catch (e) {
+    if (e instanceof JobCancelledError) {
+      log('enrichment stopped — job was cancelled');
+      return;
+    }
+    throw e;
+  }
 }
 
 export async function runLeadPostProcessing(jobId: string): Promise<void> {

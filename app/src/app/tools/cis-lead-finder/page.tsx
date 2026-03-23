@@ -147,6 +147,7 @@ export default function CisLeadFinderPage() {
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
 
   const selectedJob = useMemo(() => jobs.find((j) => j.id === selectedJobId) ?? null, [jobs, selectedJobId]);
+  const hasActiveJob = useMemo(() => jobs.some((j) => (j.display_status ?? j.status) === 'running' || (j.display_status ?? j.status) === 'pending'), [jobs]);
   const selectedCompany = useMemo(() => companies.find((c) => c.id === selectedCompanyId) ?? null, [companies, selectedCompanyId]);
   const statusLabel = (status: ImportJob['status']) => {
     if (status === 'pending') return 'В очереди';
@@ -156,6 +157,18 @@ export default function CisLeadFinderPage() {
     return status;
   };
   const getDisplayStatus = (job: ImportJob): ImportJob['status'] => job.display_status ?? job.status;
+
+  const TOTAL_STAGES = 13;
+  const getStageLabel = (progress: number): string => {
+    const pct = progress * 100;
+    if (pct < 8) return 'Поиск ИНН';
+    if (pct < 15) return 'Нормализация компаний';
+    if (pct < 23) return 'Привязка компаний';
+    if (pct < 77) return 'Обогащение (ЛПР, сайты, телефоны)';
+    if (pct < 85) return 'Поиск LinkedIn';
+    if (pct < 92) return 'Поиск соцсетей';
+    return 'Сборка контактов';
+  };
   const selectedJobProgress = useMemo(() => {
     if (!selectedJob) return null;
     const total = Math.max(0, Number(selectedJob.total_rows) || 0);
@@ -319,23 +332,25 @@ export default function CisLeadFinderPage() {
 
   useEffect(() => {
     void refreshJobs();
-    const t = setInterval(() => void refreshJobs(), 4000);
+    const t = setInterval(() => void refreshJobs(), hasActiveJob ? 5000 : 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [hasActiveJob]);
 
   useEffect(() => {
     if (!selectedJobId) return;
     void loadCompanies(selectedJobId, true);
-    const t = setInterval(() => void loadCompanies(selectedJobId), 6000);
+    if (!hasActiveJob) return;
+    const t = setInterval(() => void loadCompanies(selectedJobId), 10000);
     return () => clearInterval(t);
-  }, [selectedJobId]);
+  }, [selectedJobId, hasActiveJob]);
 
   useEffect(() => {
     if (!selectedCompanyId) return;
     void loadContacts(selectedCompanyId);
-    const t = setInterval(() => void loadContacts(selectedCompanyId), 6000);
+    if (!hasActiveJob) return;
+    const t = setInterval(() => void loadContacts(selectedCompanyId), 10000);
     return () => clearInterval(t);
-  }, [selectedCompanyId]);
+  }, [selectedCompanyId, hasActiveJob]);
 
   const roleLabel = (role: string | null): { text: string; color: string } => {
     switch (role) {
@@ -464,65 +479,73 @@ export default function CisLeadFinderPage() {
           </div>
         ) : null}
 
-        <div
-          className={[
-            'rounded-2xl border-2 border-dashed p-5 transition',
-            isDraggingFile ? 'border-emerald-400 bg-emerald-50/60' : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50/70',
-          ].join(' ')}
-          onDragEnter={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDraggingFile(true);
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDraggingFile(true);
-          }}
-          onDragLeave={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDraggingFile(false);
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDraggingFile(false);
-            setFileFromDrop(e.dataTransfer?.files);
-          }}
-        >
-          <div className="flex items-center justify-between gap-4 flex-wrap">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-gray-900">
-                {file ? 'Файл выбран' : 'Файл не выбран'}
-              </div>
-              <div className="text-xs text-gray-600 mt-1 truncate">
-                {file ? `${file.name} • ${(file.size / (1024 * 1024)).toFixed(2)} MB` : 'Нажмите «Выбрать файл» или перетащите его в этот блок.'}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <input
-                id="cis-leads-file"
-                type="file"
-                accept=".csv,.xls,.xlsx"
-                onChange={(e) => setFileFromDrop(e.target.files)}
-                className="sr-only"
-              />
-              <label
-                htmlFor="cis-leads-file"
-                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium hover:bg-gray-50"
-              >
-                Выбрать файл
-              </label>
+        {hasActiveJob ? (
+          <div className="rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50/60 p-5">
+            <div className="text-sm text-gray-500 text-center">
+              Идёт обработка. Дождитесь завершения или остановите текущий импорт.
             </div>
           </div>
-        </div>
+        ) : (
+          <div
+            className={[
+              'rounded-2xl border-2 border-dashed p-5 transition',
+              isDraggingFile ? 'border-emerald-400 bg-emerald-50/60' : 'border-gray-200 bg-gray-50/40 hover:bg-gray-50/70',
+            ].join(' ')}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingFile(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingFile(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingFile(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingFile(false);
+              setFileFromDrop(e.dataTransfer?.files);
+            }}
+          >
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-gray-900">
+                  {file ? 'Файл выбран' : 'Файл не выбран'}
+                </div>
+                <div className="text-xs text-gray-600 mt-1 truncate">
+                  {file ? `${file.name} • ${(file.size / (1024 * 1024)).toFixed(2)} MB` : 'Нажмите «Выбрать файл» или перетащите его в этот блок.'}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  id="cis-leads-file"
+                  type="file"
+                  accept=".csv,.xls,.xlsx"
+                  onChange={(e) => setFileFromDrop(e.target.files)}
+                  className="sr-only"
+                />
+                <label
+                  htmlFor="cis-leads-file"
+                  className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium hover:bg-gray-50 cursor-pointer"
+                >
+                  Выбрать файл
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex gap-3 flex-wrap">
           <button
             onClick={() => void handleUpload()}
-            disabled={!file || uploading}
+            disabled={!file || uploading || hasActiveJob}
             className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
           >
             {uploading ? 'Загрузка…' : 'Загрузить и запустить'}
@@ -583,20 +606,21 @@ export default function CisLeadFinderPage() {
                           <path d="M5.25 3A2.25 2.25 0 003 5.25v9.5A2.25 2.25 0 005.25 17h9.5A2.25 2.25 0 0017 14.75v-9.5A2.25 2.25 0 0014.75 3h-9.5z" />
                         </svg>
                       </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      title="Удалить импорт"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteTarget({ id: j.id, name: j.source_filename });
-                      }}
-                      className="rounded-md p-0.5 text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                        <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
-                      </svg>
-                    </button>
+                    ) : (
+                      <button
+                        type="button"
+                        title="Удалить импорт"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteTarget({ id: j.id, name: j.source_filename });
+                        }}
+                        className="rounded-md p-0.5 text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                          <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                   <div className="font-medium text-gray-900 truncate pr-6">{j.source_filename}</div>
                   <div className="text-xs text-gray-600 flex gap-2 flex-wrap">
@@ -607,22 +631,27 @@ export default function CisLeadFinderPage() {
                     <span>контактов: {j.contacts_found ?? 0}</span>
                   </div>
                   <div className="mt-2">
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 flex-1 rounded-full bg-gray-100 overflow-hidden">
-                        {displayStatus === 'pending' ? (
-                          <div className="h-full w-0" />
-                        ) : isRunning && progressPercent === 0 ? (
-                          <div className="h-full w-1/4 bg-emerald-400/60 animate-pulse rounded-full" />
-                        ) : (
-                          <div
-                            className={`h-full rounded-full transition-[width] duration-500 ${displayStatus === 'completed' ? 'bg-emerald-500' : displayStatus === 'failed' ? 'bg-red-400' : 'bg-emerald-500'}`}
-                            style={{ width: `${progressPercent}%` }}
-                          />
-                        )}
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2 flex-1 rounded-full bg-gray-100 overflow-hidden">
+                          {displayStatus === 'pending' ? (
+                            <div className="h-full w-0" />
+                          ) : isRunning && progressPercent === 0 ? (
+                            <div className="h-full w-1/4 bg-emerald-400/60 animate-pulse rounded-full" />
+                          ) : (
+                            <div
+                              className={`h-full rounded-full transition-[width] duration-500 ${displayStatus === 'completed' ? 'bg-emerald-500' : displayStatus === 'failed' ? 'bg-red-400' : 'bg-emerald-500'}`}
+                              style={{ width: `${progressPercent}%` }}
+                            />
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-500 w-8 text-right shrink-0">
+                          {displayStatus === 'completed' ? '✓' : displayStatus === 'failed' ? '✗' : displayStatus === 'pending' ? '' : `${progressPercent}%`}
+                        </span>
                       </div>
-                      <span className="text-[10px] text-gray-500 w-8 text-right shrink-0">
-                        {displayStatus === 'completed' ? '✓' : displayStatus === 'failed' ? '✗' : displayStatus === 'pending' ? '' : `${progressPercent}%`}
-                      </span>
+                      {isRunning && enrichProg > 0 && enrichProg < 1 ? (
+                        <div className="text-[10px] text-emerald-600 truncate">{getStageLabel(enrichProg)}</div>
+                      ) : null}
                     </div>
                   </div>
                   {j.error_message ? (
@@ -733,9 +762,9 @@ export default function CisLeadFinderPage() {
                   <div className="space-y-2">
                     {orderedContacts.map((p) => {
                       const role = roleLabel(p.role_guess);
-                      const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email;
                       const tgProfileLink = getTgProfileLink(p);
                       const profileLinks = (p.profile_links && typeof p.profile_links === 'object' ? p.profile_links : {}) as Record<string, string>;
+                      const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email || profileLinks.linkedin;
                       const hasProfileLinks = Object.keys(profileLinks).length > 0;
                       return (
                         <div key={p.id} className="rounded-xl border border-gray-200 p-3 space-y-2">
@@ -754,41 +783,27 @@ export default function CisLeadFinderPage() {
                           {hasChannels ? (
                             <div className="flex gap-2 flex-wrap">
                               {p.channel_phone ? (
-                                <>
-                                  <a
-                                    href={`tel:${p.channel_phone}`}
-                                    className="inline-flex items-center gap-1 rounded-lg bg-gray-50 border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 transition-colors"
-                                  >
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-gray-400">
-                                      <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
-                                    </svg>
-                                    {p.channel_phone}
-                                  </a>
-                                  {(() => {
-                                    if (p.wa_registered === false) return null;
-                                    const waNum = phoneToWhatsApp(p.channel_phone);
-                                    if (!waNum) return null;
-                                    const isVerified = p.wa_registered === true;
-                                    return (
-                                      <a
-                                        href={`https://wa.me/${waNum}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs transition-colors ${
-                                          isVerified
-                                            ? 'bg-green-50 border border-green-200 text-green-700 hover:bg-green-100'
-                                            : 'bg-gray-50 border border-gray-200 text-gray-500 hover:bg-gray-100'
-                                        }`}
-                                        title={isVerified ? 'WhatsApp (подтверждён)' : 'WhatsApp (не проверен)'}
-                                      >
-                                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
-                                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                                        </svg>
-                                        WA{!isVerified ? '?' : ''}
-                                      </a>
-                                    );
-                                  })()}
-                                </>
+                                <a
+                                  href={`tel:${p.channel_phone}`}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-gray-50 border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 transition-colors"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-gray-400">
+                                    <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
+                                  </svg>
+                                  {p.channel_phone}
+                                </a>
+                              ) : null}
+                              {profileLinks.linkedin ? (
+                                <a
+                                  href={profileLinks.linkedin}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 rounded-lg bg-blue-50 border border-blue-200 px-2.5 py-1 text-xs text-[#0A66C2] hover:bg-blue-100 transition-colors"
+                                  title="LinkedIn"
+                                >
+                                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                                  LinkedIn
+                                </a>
                               ) : null}
                               {tgProfileLink ? (
                                 <a
@@ -825,34 +840,15 @@ export default function CisLeadFinderPage() {
                                   <div className="text-[11px] text-amber-600 font-medium">Контакты компании (общие):</div>
                                   <div className="flex gap-2 flex-wrap">
                                     {companyPhone ? (
-                                      <>
-                                        <a
-                                          href={`tel:${companyPhone}`}
-                                          className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-100 transition-colors"
-                                        >
-                                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-amber-400">
-                                            <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
-                                          </svg>
-                                          {companyPhone}
-                                        </a>
-                                        {(() => {
-                                          const waNum = phoneToWhatsApp(companyPhone);
-                                          return waNum ? (
-                                            <a
-                                              href={`https://wa.me/${waNum}`}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
-                                              className="inline-flex items-center gap-1 rounded-lg bg-green-50 border border-green-200 px-2.5 py-1 text-xs text-green-700 hover:bg-green-100 transition-colors"
-                                              title="WhatsApp"
-                                            >
-                                              <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
-                                                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                                              </svg>
-                                              WA
-                                            </a>
-                                          ) : null;
-                                        })()}
-                                      </>
+                                      <a
+                                        href={`tel:${companyPhone}`}
+                                        className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-100 transition-colors"
+                                      >
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-amber-400">
+                                          <path fillRule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h1.148a1.5 1.5 0 0 1 1.465 1.175l.716 3.223a1.5 1.5 0 0 1-1.052 1.767l-.933.267c-.41.117-.643.555-.48.95a11.542 11.542 0 0 0 6.254 6.254c.395.163.833-.07.95-.48l.267-.933a1.5 1.5 0 0 1 1.767-1.052l3.223.716A1.5 1.5 0 0 1 18 15.352V16.5a1.5 1.5 0 0 1-1.5 1.5H15c-1.149 0-2.263-.15-3.326-.43A13.022 13.022 0 0 1 2.43 8.326 13.019 13.019 0 0 1 2 5V3.5Z" clipRule="evenodd" />
+                                        </svg>
+                                        {companyPhone}
+                                      </a>
                                     ) : null}
                                     {companyEmail ? (
                                       <a
@@ -916,9 +912,6 @@ export default function CisLeadFinderPage() {
                             </div>
                           ) : null}
 
-                          <div className="text-[11px] text-gray-400">
-                            Источник: {sourceLabel(p.source)}
-                          </div>
                         </div>
                       );
                     })}

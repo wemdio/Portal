@@ -26,17 +26,10 @@ export async function GET(req: NextRequest) {
         .limit(1);
       const pendingJobId = pendingJobs?.[0]?.id;
       if (pendingJobId) {
-        void runLeadImportJob(pendingJobId).catch((error) => {
-          console.error('CIS lead import worker failed:', error);
-        });
+        void runLeadImportJob(pendingJobId).catch(() => {});
       }
-      // Phone enrichment and contact aggregation run independently
-      void runPhoneEnrichmentBatch().catch((error) => {
-        console.error('CIS phone enrichment failed:', error);
-      });
-      void runContactAggregationBatch().catch((error) => {
-        console.error('CIS contact aggregation failed:', error);
-      });
+      void runPhoneEnrichmentBatch().catch(() => {});
+      void runContactAggregationBatch().catch(() => {});
 
       const activeOnly = new URL(req.url).searchParams.get('active') === '1';
       let q = auth.supabase
