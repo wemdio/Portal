@@ -34,6 +34,11 @@ export interface SalesCopilotConfig {
   ignore_bots: boolean;
   ignore_no_username: boolean;
   excluded_chat_ids: number[];
+  excluded_usernames: string[];
+
+  initial_sync_completed: boolean;
+  initial_sync_offset: number;
+  last_full_sync_at: string | null;
 
   created_at: string;
   updated_at: string;
@@ -98,6 +103,30 @@ export interface DraftStats {
   pending_proactive: number;
   sent_today: number;
   dismissed_today: number;
+}
+
+export interface CopilotDialog {
+  id: string;
+  config_id: string;
+  tg_user_id: number;
+  tg_username: string | null;
+  tg_display_name: string;
+  is_bot: boolean;
+  last_message_date: string | null;
+  last_synced_msg_id: number | null;
+  message_count: number;
+  kb_document_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CopilotMessage {
+  id: string;
+  dialog_id: string;
+  tg_message_id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  message_date: string;
 }
 
 export const DEFAULT_REACTIVE_PROMPT = `Ты — помощник менеджера по продажам. Тебе дана переписка менеджера с клиентом в Telegram.

@@ -25,6 +25,7 @@ import {
   Phone,
   ShieldCheck,
   KeyRound,
+  Database,
 } from 'lucide-react';
 import type {
   SalesCopilotConfig,
@@ -617,8 +618,9 @@ function SettingsTab({
     setMsg('');
     try {
       const token = await getToken();
-      const { id, user_id, account_id, created_at, updated_at, session_data, phone, tg_first_name, tg_username, ...body } = form;
+      const { id, user_id, account_id, created_at, updated_at, session_data, phone, tg_first_name, tg_username, initial_sync_completed, initial_sync_offset, last_full_sync_at, ...body } = form;
       void id; void user_id; void account_id; void created_at; void updated_at; void session_data; void phone; void tg_first_name; void tg_username;
+      void initial_sync_completed; void initial_sync_offset; void last_full_sync_at;
       await fetch(`${API}/configs/${config.id}`, {
         method: 'PATCH',
         headers: authHeaders(token),
@@ -696,6 +698,8 @@ function SettingsTab({
         </div>
       </div>
 
+      <SyncStatus config={config} />
+
       <Section title="Общие">
         <Field label="Модель LLM">
           <input className="w-full border rounded-lg px-3 py-2 text-sm" value={form.llm_model} onChange={e => update({ llm_model: e.target.value })} />
@@ -706,6 +710,19 @@ function SettingsTab({
         <Field label="Часовой пояс (UTC+)">
           <input className="w-full border rounded-lg px-3 py-2 text-sm" type="number" value={form.timezone_offset} onChange={e => update({ timezone_offset: +e.target.value })} />
         </Field>
+        <Field label="Период сна (не сканировать)">
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm"
+            placeholder="00:00-08:00, 14:00-15:00"
+            value={(form.sleep_periods ?? []).join(', ')}
+            onChange={e => {
+              const raw = e.target.value;
+              const periods = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+              update({ sleep_periods: periods });
+            }}
+          />
+          <p className="text-xs text-gray-400 mt-1">Через запятую, например: 00:00-08:00. Оставьте пустым для работы 24/7.</p>
+        </Field>
         <div className="flex gap-4">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={form.ignore_bots} onChange={e => update({ ignore_bots: e.target.checked })} /> Игнорировать ботов
@@ -714,6 +731,19 @@ function SettingsTab({
             <input type="checkbox" checked={form.ignore_no_username} onChange={e => update({ ignore_no_username: e.target.checked })} /> Игнорировать без username
           </label>
         </div>
+        <Field label="Игнорировать юзернеймы (коллеги, не клиенты)">
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm"
+            placeholder="username1, username2, username3"
+            value={(form.excluded_usernames ?? []).join(', ')}
+            onChange={e => {
+              const raw = e.target.value;
+              const usernames = raw ? raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) : [];
+              update({ excluded_usernames: usernames });
+            }}
+          />
+          <p className="text-xs text-gray-400 mt-1">Через запятую, без @. Эти диалоги не будут синхронизироваться и обрабатываться.</p>
+        </Field>
       </Section>
 
       <Section title="Реактивный сценарий — ответ на входящие">
@@ -763,6 +793,84 @@ function SettingsTab({
           <Trash2 className="w-4 h-4" /> Удалить
         </button>
       </div>
+    </div>
+  );
+}
+
+function SyncStatus({ config }: { config: SalesCopilotConfig }) {
+  const [dialogCount, setDialogCount] = useState<number | null>(null);
+  const [msgCount, setMsgCount] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { count: dc } = await supabase
+          .from('copilot_dialogs')
+          .select('id', { count: 'exact', head: true })
+          .eq('config_id', config.id);
+        const { count: mc } = await supabase
+          .from('copilot_messages')
+          .select('id', { count: 'exact', head: true })
+          .in('dialog_id', (
+            await supabase
+              .from('copilot_dialogs')
+              .select('id')
+              .eq('config_id', config.id)
+          ).data?.map(d => d.id) ?? []);
+        if (!cancelled) {
+          setDialogCount(dc ?? 0);
+          setMsgCount(mc ?? 0);
+        }
+      } catch { /* ignore */ } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [config.id]);
+
+  const syncDone = config.initial_sync_completed;
+  const lastSync = config.last_full_sync_at;
+
+  return (
+    <div className={`border rounded-xl p-4 ${syncDone ? 'border-emerald-200 bg-emerald-50/30' : 'border-amber-200 bg-amber-50/30'}`}>
+      <div className="flex items-center gap-2 mb-2">
+        <Database className="w-4 h-4" />
+        <h3 className="text-sm font-semibold text-gray-700">Синхронизация диалогов</h3>
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Загрузка...
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <span className="text-gray-500">Статус:</span>{' '}
+            {syncDone ? (
+              <span className="text-emerald-700 font-medium">Синхронизирован</span>
+            ) : (
+              <span className="text-amber-700 font-medium">
+                Синхронизация... ({config.initial_sync_offset} обработано)
+              </span>
+            )}
+          </div>
+          <div>
+            <span className="text-gray-500">Диалогов:</span>{' '}
+            <span className="font-medium">{dialogCount ?? 0}</span>
+          </div>
+          <div>
+            <span className="text-gray-500">Сообщений:</span>{' '}
+            <span className="font-medium">{msgCount?.toLocaleString('ru-RU') ?? 0}</span>
+          </div>
+          <div>
+            <span className="text-gray-500">Посл. синхронизация:</span>{' '}
+            <span className="font-medium">
+              {lastSync ? timeAgo(lastSync) : 'нет'}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

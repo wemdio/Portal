@@ -1,4 +1,4 @@
-export type KbCategory = 'chat_export' | 'transcript' | 'product_info' | 'sales_script' | 'faq' | 'other';
+export type KbCategory = 'sales_chats' | 'video_transcripts' | 'product_info' | 'client_chats' | 'other' | 'cases';
 export type KbSourceType = 'upload' | 'manual' | 'imported';
 export type KbDocStatus = 'processing' | 'ready' | 'error';
 
@@ -30,10 +30,17 @@ export interface KbChunk {
 }
 
 export const KB_CATEGORIES: { value: KbCategory; label: string }[] = [
-  { value: 'chat_export', label: 'Переписки' },
-  { value: 'transcript', label: 'Расшифровки' },
+  { value: 'sales_chats', label: 'Переписки Сейлз менеджеров' },
+  { value: 'video_transcripts', label: 'Расшифровки видео встреч' },
   { value: 'product_info', label: 'О продукте' },
-  { value: 'sales_script', label: 'Скрипты продаж' },
-  { value: 'faq', label: 'FAQ' },
+  { value: 'cases', label: 'Кейсы' },
+  { value: 'client_chats', label: 'Рабочие чаты с клиентами' },
   { value: 'other', label: 'Другое' },
+];
+
+export const COPILOT_KB_CATEGORIES: KbCategory[] = [
+  'sales_chats',
+  'video_transcripts',
+  'product_info',
+  'cases',
 ];

@@ -160,7 +160,7 @@ export async function getCampaignAnalyticsDaily(params?: { campaign_id?: string;
 
 export async function getCampaignAnalyticsSteps(params: { campaign_id: string }) {
   return request<CampaignStepAnalytics[]>('/campaigns/analytics/steps', {
-    params: { id: params.campaign_id } as Record<string, string>,
+    params: { campaign_id: params.campaign_id } as Record<string, string>,
   });
 }
 
@@ -200,8 +200,11 @@ export async function testAccountVitals(body: { emails: string[] }) {
 
 // ─── Leads ────────────────────────────────────────────────────────────────────
 
-export async function createLeads(leads: LeadCreatePayload[], options?: { skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean }) {
-  return request<unknown>('/leads', { method: 'POST', body: { leads, ...options } });
+export async function createLeads(
+  leads: LeadCreatePayload[],
+  options?: { campaign_id?: string; list_id?: string; skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean },
+) {
+  return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } });
 }
 
 export async function listLeads(body: {
@@ -213,6 +216,20 @@ export async function listLeads(body: {
   starting_after?: string;
 }) {
   return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
+}
+
+export async function listAllLeads(campaignId: string, maxItems = 10000): Promise<Lead[]> {
+  const all: Lead[] = [];
+  let after: string | undefined;
+  let pages = 0;
+  do {
+    const page = await listLeads({ campaign_id: campaignId, limit: 100, starting_after: after });
+    if (page.items?.length) all.push(...page.items);
+    after = page.next_starting_after || undefined;
+    pages++;
+    if (all.length >= maxItems || pages >= 200) break;
+  } while (after);
+  return all;
 }
 
 export async function getLead(id: string) {
@@ -235,8 +252,18 @@ export async function getLeadsByEmail(params: { email: string }) {
   return request<Lead[]>('/leads/by-email', { params: params as Record<string, string> });
 }
 
-export async function deleteLeadsByCampaign(campaignId: string) {
-  return request<{ count: number }>('/leads', { method: 'DELETE', body: { campaign_id: campaignId } });
+export async function deleteLeadsByCampaign(campaignId: string): Promise<{ count: number }> {
+  let totalDeleted = 0;
+  const MAX_ROUNDS = 200;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const result = await request<{ count: number }>('/leads', {
+      method: 'DELETE',
+      body: { campaign_id: campaignId, limit: 10000 },
+    });
+    totalDeleted += result.count;
+    if (result.count === 0) break;
+  }
+  return { count: totalDeleted };
 }
 
 // ─── Lead Lists ───────────────────────────────────────────────────────────────

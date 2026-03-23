@@ -5,12 +5,20 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import { useParams } from 'next/navigation';
 import {
-  ChevronLeft, Loader2, Play, Pause, ExternalLink, Save,
-  Mail, Clock, Settings,
+  ChevronLeft, ChevronRight, Loader2, Play, Pause, ExternalLink, Save,
+  Mail, Clock, Settings, Search, Users, Download, Trash2,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep } from '@/lib/instantly/types';
+import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep, Lead, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
+
+const INTEREST_LABELS: Record<number, { label: string; cls: string }> = {
+  0: { label: 'Не обработан', cls: 'bg-zinc-100 text-zinc-600' },
+  1: { label: 'Заинтересован', cls: 'bg-emerald-50 text-emerald-700' },
+  [-1]: { label: 'Не заинтересован', cls: 'bg-red-50 text-red-700' },
+  [-2]: { label: 'Ответ получен', cls: 'bg-blue-50 text-blue-700' },
+  [-3]: { label: 'Неверный контакт', cls: 'bg-orange-50 text-orange-700' },
+};
 
 function statusBadgeClass(status: number): string {
   switch (status) {
@@ -89,10 +97,17 @@ export default function CampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'overview' | 'steps' | 'settings'>('overview');
+  const [tab, setTab] = useState<'overview' | 'steps' | 'leads' | 'settings'>('overview');
+
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadsHasMore, setLeadsHasMore] = useState(false);
+  const [leadsAfter, setLeadsAfter] = useState<string | undefined>();
+  const [leadsSearch, setLeadsSearch] = useState('');
 
   const [editName, setEditName] = useState('');
   const [editDailyLimit, setEditDailyLimit] = useState('');
+  const [editTagIds, setEditTagIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -121,14 +136,25 @@ export default function CampaignDetailPage() {
       setAnalytics(matched ?? null);
 
       const stepsArr = Array.isArray(s) ? s : Array.isArray((s as { data?: unknown }).data) ? (s as { data: CampaignStepAnalytics[] }).data : [];
-      const filteredSteps = stepsArr.filter(
-        (item) => !('campaign_id' in item) || (item as Record<string, unknown>).campaign_id === campaignId,
-      );
+      const filteredSteps = stepsArr
+        .filter((item) => {
+          const stepVal = String(item.step ?? '');
+          if (stepVal === '\\N' || stepVal === 'null' || stepVal === '') return false;
+          if ('campaign_id' in item && (item as Record<string, unknown>).campaign_id !== campaignId) return false;
+          return true;
+        })
+        .map((item) => ({
+          ...item,
+          step: Number(item.step) || 0,
+          variant: Number(item.variant) || 0,
+        }))
+        .sort((a, b) => (a.step as number) - (b.step as number) || (a.variant as number) - (b.variant as number));
       setSteps(filteredSteps);
       setAllTags(tags.items ?? []);
 
       setEditName(c.name);
       setEditDailyLimit(String(c.daily_limit ?? ''));
+      setEditTagIds(c.email_tag_list ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
@@ -150,6 +176,93 @@ export default function CampaignDetailPage() {
     }
   }, [campaignId]);
 
+  const loadLeads = useCallback(async (append = false) => {
+    setLeadsLoading(true);
+    try {
+      const data = await instantlyFetch<PaginatedResponse<Lead>>('/leads', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'list',
+          campaign_id: campaignId,
+          search: leadsSearch || undefined,
+          limit: 50,
+          starting_after: append ? leadsAfter : undefined,
+        }),
+      });
+      const items = data.items ?? [];
+      setLeads(append ? (prev) => [...prev, ...items] : items);
+      setLeadsAfter(data.next_starting_after);
+      setLeadsHasMore(!!data.next_starting_after);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки лидов');
+    } finally {
+      setLeadsLoading(false);
+    }
+  }, [campaignId, leadsSearch, leadsAfter]);
+
+  useEffect(() => {
+    if (tab === 'leads' && leads.length === 0 && !leadsLoading) loadLeads();
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [exporting, setExporting] = useState<string | false>(false);
+  const [exportSeconds, setExportSeconds] = useState(0);
+  const [clearing, setClearing] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  useEffect(() => {
+    if (!exporting) { setExportSeconds(0); return; }
+    const interval = setInterval(() => setExportSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [exporting]);
+
+  const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
+    setExporting(format);
+    try {
+      const { supabase } = await import('@/lib/supabaseClient');
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (!token) throw new Error('Нет авторизации');
+
+      const res = await fetch(`/api/instantly/leads/export?campaign_id=${campaignId}&format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => 'Ошибка');
+        throw new Error(text);
+      }
+      const blob = await res.blob();
+      const safeName = (campaign?.name ?? 'leads').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка экспорта');
+    } finally {
+      setExporting(false);
+    }
+  }, [campaignId, campaign?.name]);
+
+  const handleClearLeads = useCallback(async () => {
+    setClearing(true);
+    try {
+      await instantlyFetch('/leads', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'delete-by-campaign', campaign_id: campaignId }),
+      });
+      setLeads([]);
+      setLeadsAfter(undefined);
+      setLeadsHasMore(false);
+      setShowClearConfirm(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка очистки');
+    } finally {
+      setClearing(false);
+    }
+  }, [campaignId]);
+
   const handleSave = useCallback(async () => {
     if (!campaign) return;
     setSaving(true);
@@ -157,6 +270,8 @@ export default function CampaignDetailPage() {
       const payload: Record<string, unknown> = {};
       if (editName !== campaign.name) payload.name = editName;
       if (editDailyLimit && Number(editDailyLimit) !== campaign.daily_limit) payload.daily_limit = Number(editDailyLimit);
+      const origTags = campaign.email_tag_list ?? [];
+      if (JSON.stringify(editTagIds.sort()) !== JSON.stringify([...origTags].sort())) payload.email_tag_list = editTagIds;
       if (Object.keys(payload).length === 0) { setSaving(false); return; }
       const updated = await instantlyFetch<Campaign>(`/campaigns/${campaignId}`, {
         method: 'PATCH',
@@ -168,7 +283,7 @@ export default function CampaignDetailPage() {
     } finally {
       setSaving(false);
     }
-  }, [campaign, editName, editDailyLimit, campaignId]);
+  }, [campaign, editName, editDailyLimit, editTagIds, campaignId]);
 
   if (loading) {
     return (
@@ -261,7 +376,7 @@ export default function CampaignDetailPage() {
       </div>
 
       <div className="mb-6 flex items-center gap-1 rounded-lg border border-zinc-200 bg-white p-0.5 w-fit">
-        {(['overview', 'steps', 'settings'] as const).map((t) => (
+        {(['overview', 'steps', 'leads', 'settings'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -269,7 +384,7 @@ export default function CampaignDetailPage() {
               tab === t ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-900'
             }`}
           >
-            {t === 'overview' ? 'Обзор' : t === 'steps' ? 'Шаги' : 'Настройки'}
+            {{ overview: 'Обзор', steps: 'Шаги', leads: 'Лиды', settings: 'Настройки' }[t]}
           </button>
         ))}
       </div>
@@ -438,6 +553,147 @@ export default function CampaignDetailPage() {
         </div>
       )}
 
+      {tab === 'leads' && (
+        <div className="rounded-xl border border-zinc-200 bg-white">
+          <div className="flex items-center gap-3 border-b border-zinc-100 p-4 flex-wrap">
+            <div className="relative flex-1 min-w-[180px] max-w-sm">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="text"
+                placeholder="Поиск по email..."
+                value={leadsSearch}
+                onChange={(e) => setLeadsSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { setLeadsAfter(undefined); loadLeads(); }
+                }}
+                className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-9 pr-3 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+              />
+            </div>
+            <button
+              onClick={() => { setLeadsAfter(undefined); loadLeads(); }}
+              disabled={leadsLoading}
+              className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+            >
+              {leadsLoading && leads.length === 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Обновить'}
+            </button>
+            <div className="flex items-center gap-1.5 ml-auto">
+              {exporting && (
+                <span className="text-xs text-zinc-400 mr-1">
+                  Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300">(обычно 10с – 1 мин)</span>
+                </span>
+              )}
+              <button
+                onClick={() => handleExport('csv')}
+                disabled={!!exporting || leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exporting === 'csv' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                CSV
+              </button>
+              <button
+                onClick={() => handleExport('xlsx')}
+                disabled={!!exporting || leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exporting === 'xlsx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                XLSX
+              </button>
+              <button
+                onClick={() => setShowClearConfirm(true)}
+                disabled={leads.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Очистить
+              </button>
+            </div>
+          </div>
+
+          {showClearConfirm && (
+            <div className="border-b border-red-100 bg-red-50 px-5 py-4">
+              <p className="text-sm font-medium text-red-800 mb-1">Удалить все лиды из этой кампании?</p>
+              <p className="text-xs text-red-600 mb-3">Это действие необратимо. Все контакты будут удалены из кампании &ldquo;{campaign?.name}&rdquo;.</p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleClearLeads}
+                  disabled={clearing}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  {clearing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                  Да, удалить все лиды
+                </button>
+                <button
+                  onClick={() => setShowClearConfirm(false)}
+                  className="rounded-lg border border-zinc-200 px-4 py-2 text-xs font-medium text-zinc-600 hover:bg-white transition-colors"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          )}
+
+          {leadsLoading && leads.length === 0 ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+            </div>
+          ) : leads.length === 0 ? (
+            <div className="py-16 text-center">
+              <Users className="mx-auto h-8 w-8 text-zinc-300" />
+              <p className="mt-3 text-sm text-zinc-500">Нет лидов в этой кампании</p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Email</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Имя</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Компания</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Статус</th>
+                      <th className="px-4 py-3 text-xs font-medium text-zinc-500 uppercase">Добавлен</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-50">
+                    {leads.map((l) => {
+                      const interest = INTEREST_LABELS[l.interest_status ?? 0] ?? INTEREST_LABELS[0];
+                      return (
+                        <tr key={l.id} className="hover:bg-zinc-50">
+                          <td className="px-4 py-3 font-medium text-zinc-800 truncate max-w-[220px]">{l.email}</td>
+                          <td className="px-4 py-3 text-zinc-500">{[l.first_name, l.last_name].filter(Boolean).join(' ') || '—'}</td>
+                          <td className="px-4 py-3 text-zinc-500 truncate max-w-[180px]">{l.company_name || '—'}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${interest.cls}`}>
+                              {interest.label}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-xs text-zinc-400">
+                            {l.timestamp_created ? new Date(l.timestamp_created).toLocaleDateString('ru-RU') : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="border-t border-zinc-100 px-5 py-3 flex items-center justify-between">
+                <span className="text-xs text-zinc-400">{leads.length} лидов загружено</span>
+                {leadsHasMore && (
+                  <button
+                    onClick={() => loadLeads(true)}
+                    disabled={leadsLoading}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-zinc-600 hover:text-zinc-900 disabled:opacity-50 transition-colors"
+                  >
+                    {leadsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronRight className="h-3 w-3" />}
+                    Загрузить ещё
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {tab === 'settings' && (
         <div className="rounded-xl border border-zinc-200 bg-white p-6 max-w-lg">
           <h3 className="mb-4 text-sm font-semibold text-zinc-900">Редактировать кампанию</h3>
@@ -459,6 +715,41 @@ export default function CampaignDetailPage() {
                 onChange={(e) => setEditDailyLimit(e.target.value)}
                 className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
               />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-500">Теги аккаунтов отправки</label>
+              {allTags.length === 0 ? (
+                <p className="text-xs text-zinc-400">Нет доступных тегов</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {allTags.map((tag) => {
+                    const selected = editTagIds.includes(tag.id);
+                    return (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        onClick={() =>
+                          setEditTagIds((prev) =>
+                            selected ? prev.filter((id) => id !== tag.id) : [...prev, tag.id],
+                          )
+                        }
+                        className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                          selected
+                            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                            : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300'
+                        }`}
+                      >
+                        {tag.name ?? tag.label ?? tag.id}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {editTagIds.length > 0 && (
+                <p className="mt-1.5 text-xs text-zinc-400">
+                  Выбрано: {editTagIds.length}
+                </p>
+              )}
             </div>
             <button
               onClick={handleSave}

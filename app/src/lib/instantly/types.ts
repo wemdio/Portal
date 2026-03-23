@@ -253,6 +253,7 @@ export interface Lead {
   first_name?: string | null;
   last_name?: string | null;
   company_name?: string | null;
+  title?: string | null;
   phone?: string | null;
   website?: string | null;
   linkedin_url?: string | null;
@@ -375,14 +376,25 @@ export interface Subsequence {
 
 export interface Email {
   id: string;
-  from_address?: string;
-  to_address?: string;
-  subject?: string;
-  body?: string;
   timestamp_created?: string;
-  thread_id?: string;
-  is_read?: boolean;
+  timestamp_email?: string;
+  subject?: string;
+  body?: { html?: string; text?: string } | string;
+  from_address_email?: string;
+  to_address_email_list?: string;
+  eaccount?: string;
+  lead?: string;
   campaign_id?: string;
+  thread_id?: string;
+  /** 1 = sent by us, 2 = reply from lead, 3 = our reply to lead */
+  ue_type?: number;
+  is_unread?: number;
+  is_focused?: number;
+  ai_interest_value?: number;
+  i_status?: number;
+  content_preview?: string;
+  from_address_json?: { address: string; name?: string }[];
+  to_address_json?: { address: string; name?: string }[];
   [key: string]: unknown;
 }
 

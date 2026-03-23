@@ -938,6 +938,8 @@ export function DatabaseSpreadsheet() {
   const [instantlyCampaigns, setInstantlyCampaigns] = useState<Array<{ id: string; name: string; ts?: string }>>([]);
   const [instantlyLeadLists, setInstantlyLeadLists] = useState<Array<{ id: string; name: string }>>([]);
   const [instantlyCampaignSearch, setInstantlyCampaignSearch] = useState('');
+  const [instantlyCreateMode, setInstantlyCreateMode] = useState(false);
+  const [instantlyNewName, setInstantlyNewName] = useState('');
   const [projectsList, setProjectsList] = useState<Array<{ id: string; name: string }>>([]);
   const [reviewPublish, setReviewPublish] = useState<{
     isOpen: boolean;
@@ -7392,6 +7394,8 @@ export function DatabaseSpreadsheet() {
             setInstantlyCampaigns([]);
             setInstantlyLeadLists([]);
             setInstantlyCampaignSearch('');
+            setInstantlyCreateMode(false);
+            setInstantlyNewName('');
             try {
               const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
               const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
@@ -10032,65 +10036,92 @@ export function DatabaseSpreadsheet() {
                     </div>
                   ) : (
                     <>
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-semibold text-gray-700 block">Кампания</label>
-                        <div className="relative">
+                      <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                        <button type="button" onClick={() => { setInstantlyCreateMode(false); setInstantlyNewName(''); }}
+                          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${!instantlyCreateMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                          Выбрать существующую
+                        </button>
+                        <button type="button" onClick={() => { setInstantlyCreateMode(true); setInstantlyPush((s) => ({ ...s, campaignId: '', leadListId: '' })); setInstantlyCampaignSearch(''); }}
+                          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${instantlyCreateMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                          Создать новую
+                        </button>
+                      </div>
+
+                      {instantlyCreateMode ? (
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-semibold text-gray-700 block">Название кампании</label>
                           <input
                             type="text"
-                            placeholder={instantlyPush.campaignId
-                              ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
-                              : 'Поиск кампании…'}
-                            value={instantlyCampaignSearch}
-                            onChange={(e) => {
-                              setInstantlyCampaignSearch(e.target.value);
-                              if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
-                            }}
+                            placeholder="Например: Outreach Q1 2026"
+                            value={instantlyNewName}
+                            onChange={(e) => setInstantlyNewName(e.target.value)}
                             className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
                           />
-                          {instantlyPush.campaignId && !instantlyCampaignSearch && (
-                            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                              <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
-                                {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
-                              </span>
-                            </div>
-                          )}
-                          {instantlyPush.campaignId && (
-                            <button type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }} className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600">
-                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
-                          )}
+                          <p className="text-[11px] text-gray-400">Кампания будет создана с расписанием по умолчанию (Пн–Пт, 9:00–18:00). Настроить можно позже.</p>
                         </div>
-                      </div>
-                      {!instantlyPush.campaignId && (() => {
-                        const q = instantlyCampaignSearch.toLowerCase().trim();
-                        const filtered = q ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q)) : instantlyCampaigns;
-                        return (
-                          <div className="max-h-44 overflow-y-auto rounded-lg border border-gray-200 bg-white">
-                            {filtered.length === 0 ? (
-                              <p className="px-3 py-3 text-sm text-gray-400 text-center">{q ? 'Ничего не найдено' : 'Нет кампаний'}</p>
-                            ) : (
-                              filtered.map((c) => (
-                                <button key={c.id} type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' })); setInstantlyCampaignSearch(''); }}
-                                  className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2">
-                                  <span className="truncate">{c.name}</span>
-                                  {c.ts && <span className="shrink-0 text-[10px] text-gray-400">{new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}</span>}
+                      ) : (
+                        <>
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-semibold text-gray-700 block">Кампания</label>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                placeholder={instantlyPush.campaignId
+                                  ? instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name ?? 'Поиск кампании…'
+                                  : 'Поиск кампании…'}
+                                value={instantlyCampaignSearch}
+                                onChange={(e) => {
+                                  setInstantlyCampaignSearch(e.target.value);
+                                  if (instantlyPush.campaignId) setInstantlyPush((s) => ({ ...s, campaignId: '' }));
+                                }}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
+                              />
+                              {instantlyPush.campaignId && !instantlyCampaignSearch && (
+                                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                                  <span className="text-sm text-gray-900 truncate max-w-[calc(100%-3rem)]">
+                                    {instantlyCampaigns.find((c) => c.id === instantlyPush.campaignId)?.name}
+                                  </span>
+                                </div>
+                              )}
+                              {instantlyPush.campaignId && (
+                                <button type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: '' })); setInstantlyCampaignSearch(''); }} className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600">
+                                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                                 </button>
-                              ))
-                            )}
+                              )}
+                            </div>
                           </div>
-                        );
-                      })()}
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-semibold text-gray-700 block">Или lead-список</label>
-                        <select
-                          value={instantlyPush.leadListId}
-                          onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
-                          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
-                        >
-                          <option value="">— Выберите lead-список —</option>
-                          {instantlyLeadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-                        </select>
-                      </div>
+                          {!instantlyPush.campaignId && (() => {
+                            const q = instantlyCampaignSearch.toLowerCase().trim();
+                            const filtered = q ? instantlyCampaigns.filter((c) => c.name.toLowerCase().includes(q)) : instantlyCampaigns;
+                            return (
+                              <div className="max-h-44 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+                                {filtered.length === 0 ? (
+                                  <p className="px-3 py-3 text-sm text-gray-400 text-center">{q ? 'Ничего не найдено' : 'Нет кампаний'}</p>
+                                ) : (
+                                  filtered.map((c) => (
+                                    <button key={c.id} type="button" onClick={() => { setInstantlyPush((s) => ({ ...s, campaignId: c.id, leadListId: '' })); setInstantlyCampaignSearch(''); }}
+                                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0 flex items-center justify-between gap-2">
+                                      <span className="truncate">{c.name}</span>
+                                      {c.ts && <span className="shrink-0 text-[10px] text-gray-400">{new Date(c.ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })}</span>}
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            );
+                          })()}
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-semibold text-gray-700 block">Или lead-список</label>
+                            <select
+                              value={instantlyPush.leadListId}
+                              onChange={(e) => setInstantlyPush((s) => ({ ...s, leadListId: e.target.value, campaignId: '' }))}
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 bg-gray-50 focus:outline-none focus:border-gray-400 focus:bg-white"
+                            >
+                              <option value="">— Выберите lead-список —</option>
+                              {instantlyLeadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                            </select>
+                          </div>
+                        </>
+                      )}
                     </>
                   )}
                 </>
@@ -10162,11 +10193,48 @@ export function DatabaseSpreadsheet() {
               {!instantlyPush.mappingStep ? (
                 <button
                   type="button"
-                  disabled={instantlyPush.loadingLists || (!instantlyPush.campaignId && !instantlyPush.leadListId)}
-                  onClick={() => setInstantlyPush((s) => ({ ...s, mappingStep: true, result: '' }))}
+                  disabled={
+                    instantlyPush.loadingLists
+                    || instantlyPush.pushing
+                    || (instantlyCreateMode ? !instantlyNewName.trim() : (!instantlyPush.campaignId && !instantlyPush.leadListId))
+                  }
+                  onClick={async () => {
+                    if (instantlyCreateMode && instantlyNewName.trim()) {
+                      setInstantlyPush((s) => ({ ...s, pushing: true, result: '' }));
+                      try {
+                        const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
+                        const res = await fetch('/api/instantly/campaigns', {
+                          method: 'POST',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            name: instantlyNewName.trim(),
+                            campaign_schedule: {
+                              schedules: [{
+                                name: 'Default',
+                                timing: { from: '09:00', to: '18:00' },
+                                days: { 1: true, 2: true, 3: true, 4: true, 5: true },
+                                timezone: 'Europe/Kirov',
+                              }],
+                            },
+                          }),
+                        });
+                        if (!res.ok) {
+                          const e = await res.json().catch(() => ({}));
+                          throw new Error((e as { error?: string }).error || `HTTP ${res.status}`);
+                        }
+                        const campaign = await res.json() as { id: string };
+                        setInstantlyPush((s) => ({ ...s, campaignId: campaign.id, pushing: false, mappingStep: true, result: '' }));
+                        setInstantlyCreateMode(false);
+                      } catch (err) {
+                        setInstantlyPush((s) => ({ ...s, pushing: false, result: `Ошибка создания кампании: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}` }));
+                      }
+                    } else {
+                      setInstantlyPush((s) => ({ ...s, mappingStep: true, result: '' }));
+                    }
+                  }}
                   className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-medium bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
-                  Далее: маппинг колонок →
+                  {instantlyPush.pushing ? '⟳ Создаём кампанию…' : 'Далее: маппинг колонок →'}
                 </button>
               ) : (
                 <button
@@ -10204,8 +10272,6 @@ export function DatabaseSpreadsheet() {
                           const v = String(row[colIdx!] ?? '').trim();
                           if (v) lead[field] = v;
                         }
-                        if (instantlyPush.campaignId) lead.campaign_id = instantlyPush.campaignId;
-                        if (instantlyPush.leadListId) lead.lead_list_id = instantlyPush.leadListId;
                         const cv: Record<string, string> = {};
                         for (const { colIdx, name } of customVarCols) {
                           const v = String(row[colIdx] ?? '').trim();
@@ -10221,10 +10287,13 @@ export function DatabaseSpreadsheet() {
                       let pushed = 0;
                       for (let i = 0; i < leads.length; i += BATCH) {
                         const batch = leads.slice(i, i + BATCH);
+                        const payload: Record<string, unknown> = { leads: batch, skip_if_in_workspace: true };
+                        if (instantlyPush.campaignId) payload.campaign_id = instantlyPush.campaignId;
+                        if (instantlyPush.leadListId) payload.list_id = instantlyPush.leadListId;
                         const res = await fetch('/api/instantly/leads', {
                           method: 'POST',
                           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ leads: batch, skip_if_in_workspace: true }),
+                          body: JSON.stringify(payload),
                         });
                         if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error((e as { error?: string }).error || `HTTP ${res.status}`); }
                         pushed += batch.length;

@@ -39,6 +39,8 @@ export const POST = withAuth(async (req, user) => {
   }
 
   const data = await instantly.createLeads(body.leads, {
+    campaign_id: body.campaign_id,
+    list_id: body.list_id,
     skip_if_in_workspace: body.skip_if_in_workspace,
     skip_if_in_campaign: body.skip_if_in_campaign,
   });

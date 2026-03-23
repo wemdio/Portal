@@ -73,6 +73,7 @@ const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: s
   { label: 'Аккаунты', href: '/instantly/accounts', icon: Mail, desc: 'Email-аккаунты, прогрев, статусы' },
   { label: 'Lead списки', href: '/instantly/lead-lists', icon: ListChecks, desc: 'Списки лидов и импорт баз' },
   { label: 'Лиды', href: '/instantly/leads', icon: Users, desc: 'Просмотр и управление лидами' },
+  { label: 'Письма', href: '/instantly/emails', icon: Mail, desc: 'Входящие и исходящие письма по кампаниям' },
   { label: 'Аналитика', href: '/instantly/analytics', icon: BarChart3, desc: 'Аналитика кампаний и аккаунтов' },
   { label: 'Блок-лист', href: '/instantly/block-list', icon: AlertCircle, desc: 'Заблокированные домены и email' },
   { label: 'Анализатор', href: '/instantly/analyzer', icon: AlertTriangle, desc: 'Неактивные кампании с лидами, занимающими тариф', adminOnly: true },
