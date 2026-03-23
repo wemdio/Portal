@@ -40,6 +40,37 @@ function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolea
   return false;
 }
 
+async function autoDismissStaledrafts(
+  db: SupabaseClient,
+  configId: string,
+  tgUserId: number,
+  dialogId: string | null,
+): Promise<void> {
+  const { data: pending } = await db
+    .from('sales_copilot_drafts')
+    .select('id, created_at')
+    .eq('config_id', configId)
+    .eq('tg_user_id', tgUserId)
+    .eq('status', 'pending');
+  if (!pending?.length || !dialogId) return;
+
+  for (const draft of pending) {
+    const { count } = await db
+      .from('copilot_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('dialog_id', dialogId)
+      .eq('role', 'assistant')
+      .gt('message_date', draft.created_at);
+
+    if ((count ?? 0) > 0) {
+      await db
+        .from('sales_copilot_drafts')
+        .update({ status: 'dismissed', acted_at: new Date().toISOString() })
+        .eq('id', draft.id);
+    }
+  }
+}
+
 async function hasPendingDraft(
   db: SupabaseClient,
   configId: string,
@@ -192,13 +223,14 @@ async function setupReactiveHandler(
     processingUsers.add(tgUserId);
 
     try {
-      if (await hasPendingDraft(db, config.id, tgUserId)) return;
-
       const dbDialog = await ensureDialog(db, config.id, sender);
       await syncDialogMessages(client, db, dbDialog, sender, log, {
         updateKb: true,
         userId: config.user_id,
       });
+
+      await autoDismissStaledrafts(db, config.id, tgUserId, dbDialog.id);
+      if (await hasPendingDraft(db, config.id, tgUserId)) return;
 
       const chatMessages = await loadChatHistory(db, dbDialog.id, config.reactive_history_limit);
       if (chatMessages.length === 0) return;
@@ -294,6 +326,7 @@ async function scanProactive(
     const lastMsgDate = new Date(dialog.last_message_date);
     const silenceDays = Math.floor((Date.now() - lastMsgDate.getTime()) / (24 * 3600 * 1000));
 
+    await autoDismissStaledrafts(db, config.id, tgUserId, dialog.id);
     if (await hasPendingDraft(db, config.id, tgUserId)) continue;
     if (await isDismissedRecently(db, config.id, tgUserId)) continue;
 
