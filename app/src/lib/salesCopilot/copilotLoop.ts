@@ -372,8 +372,8 @@ export async function runCopilotLoop(
     return;
   }
 
-  if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
-    log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан');
+  if (!process.env.OPENROUTER_SALES_COPILOT_API_KEY && !process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
+    log('error', 'OPENROUTER_SALES_COPILOT_API_KEY не задан');
     await db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
     return;
   }
