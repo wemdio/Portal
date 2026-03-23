@@ -152,7 +152,7 @@ async function scanReactive(
 ) {
   if (!config.reactive_enabled) return;
 
-  const dialogs = await client.getDialogs({ limit: 30 });
+  const dialogs = await client.getDialogs({ limit: 200 });
   const unreadDialogs = dialogs.filter(d => d.unreadCount > 0);
   const userDialogs = unreadDialogs.filter(d => d.entity instanceof Api.User);
   log('info', `Reactive: ${dialogs.length} диалогов, ${unreadDialogs.length} непрочитанных, ${userDialogs.length} от пользователей`);
