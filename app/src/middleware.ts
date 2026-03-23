@@ -121,7 +121,6 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/telegram/link') ||
     pathname.startsWith('/review/base/')
 
-  // Protect routes
   if (!user && !isPublicPath) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
@@ -130,29 +129,56 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/', request.url))
   }
 
-  // Protect admin routes - only admin role can access
-  if (user && request.nextUrl.pathname.startsWith('/admin')) {
+  // Fetch role once for all role-based guards below
+  let userRole: string | null = null
+  const needsRoleCheck =
+    user &&
+    (pathname.startsWith('/admin') ||
+     pathname.startsWith('/billing-calendar') ||
+     pathname.startsWith('/client') ||
+     pathname === '/' ||
+     // any internal page a client should not reach
+     (!pathname.startsWith('/login') && !pathname.startsWith('/review/')))
+
+  if (user && needsRoleCheck) {
     const { data: profile } = await supabase
       .from('profiles')
       .select('role')
       .eq('id', user.id)
       .single()
+    userRole = profile?.role ?? null
+  }
 
-    if (!profile || profile.role !== 'admin') {
+  // Client users: redirect to /client from any internal page
+  if (user && userRole === 'client') {
+    const clientAllowed =
+      pathname.startsWith('/client') ||
+      pathname === '/login' ||
+      pathname === '/maintenance' ||
+      pathname.startsWith('/review/base/')
+    if (!clientAllowed) {
+      return NextResponse.redirect(new URL('/client', request.url))
+    }
+  }
+
+  // /client routes: require client role or admin (for preview)
+  if (user && pathname.startsWith('/client')) {
+    if (userRole !== 'client' && userRole !== 'admin') {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
+  // Protect admin routes - only admin role can access
+  if (user && pathname.startsWith('/admin')) {
+    if (userRole !== 'admin') {
       return NextResponse.redirect(new URL('/', request.url))
     }
   }
 
   // Protect billing-calendar routes - only technician, lead, admin, director
-  if (user && request.nextUrl.pathname.startsWith('/billing-calendar')) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single()
-
+  if (user && pathname.startsWith('/billing-calendar')) {
     const allowedRoles = ['technician', 'lead', 'admin', 'director']
-    if (!profile || !allowedRoles.includes(profile.role)) {
+    if (!userRole || !allowedRoles.includes(userRole)) {
       return NextResponse.redirect(new URL('/', request.url))
     }
   }
