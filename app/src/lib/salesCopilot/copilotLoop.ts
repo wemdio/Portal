@@ -186,6 +186,7 @@ async function setupReactiveHandler(
 
     const tgUserId = Number(sender.id);
     if (config.excluded_chat_ids?.includes(tgUserId)) return;
+    if (sender.username && config.excluded_usernames?.some(u => u.toLowerCase() === sender.username!.toLowerCase())) return;
 
     if (processingUsers.has(tgUserId)) return;
     processingUsers.add(tgUserId);
@@ -286,6 +287,7 @@ async function scanProactive(
 
     const tgUserId = dialog.tg_user_id;
     if (config.excluded_chat_ids?.includes(tgUserId)) continue;
+    if (dialog.tg_username && config.excluded_usernames?.some(u => u.toLowerCase() === dialog.tg_username!.toLowerCase())) continue;
     if (config.ignore_bots && dialog.is_bot) continue;
     if (config.ignore_no_username && !dialog.tg_username) continue;
 

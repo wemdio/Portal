@@ -76,4 +76,5 @@ CREATE POLICY copilot_messages_select_own ON public.copilot_messages
 ALTER TABLE public.sales_copilot_configs
   ADD COLUMN IF NOT EXISTS initial_sync_completed boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS initial_sync_offset integer NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS last_full_sync_at timestamptz;
+  ADD COLUMN IF NOT EXISTS last_full_sync_at timestamptz,
+  ADD COLUMN IF NOT EXISTS excluded_usernames text[] NOT NULL DEFAULT '{}';

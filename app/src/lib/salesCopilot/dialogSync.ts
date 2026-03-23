@@ -337,6 +337,7 @@ export async function initialSync(
     if (config.ignore_bots && u.bot) return false;
     if (config.ignore_no_username && !u.username) return false;
     if (config.excluded_chat_ids?.includes(Number(u.id))) return false;
+    if (u.username && config.excluded_usernames?.some(ex => ex.toLowerCase() === u.username!.toLowerCase())) return false;
     return true;
   });
 
@@ -432,6 +433,7 @@ export async function hourlySync(
     const user = dialog.entity;
     if (config.ignore_bots && user.bot) continue;
     if (config.excluded_chat_ids?.includes(Number(user.id))) continue;
+    if (user.username && config.excluded_usernames?.some(u => u.toLowerCase() === user.username!.toLowerCase())) continue;
 
     const lastMsgDate = dialog.date ? new Date(dialog.date * 1000) : null;
     if (!lastMsgDate) continue;
