@@ -6847,11 +6847,13 @@ export function DatabaseSpreadsheet() {
   useEffect(() => {
     if (!storageKey) return;
     let isMounted = true;
+    hydratedStateRef.current = '__pending__';
     setIsHydrated(false);
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
+    cancelBackgroundSave();
 
     const applyState = (state: PersistedSpreadsheetState | null) => {
       if (!isMounted) return;
@@ -6942,7 +6944,8 @@ export function DatabaseSpreadsheet() {
   useEffect(() => {
     if (!storageKey || !isHydrated) return;
 
-    if (hydratedStateRef.current !== null) {
+    if (hydratedStateRef.current === '__pending__') return;
+    if (hydratedStateRef.current === '__hydrated__') {
       hydratedStateRef.current = null;
       return;
     }
