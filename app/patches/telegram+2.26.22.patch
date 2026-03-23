@@ -1,0 +1,52 @@
+diff --git a/node_modules/telegram/extensions/BinaryReader.js b/node_modules/telegram/extensions/BinaryReader.js
+index 26a439a..41a597a 100644
+--- a/node_modules/telegram/extensions/BinaryReader.js
++++ b/node_modules/telegram/extensions/BinaryReader.js
+@@ -183,18 +183,26 @@ class BinaryReader {
+                 const temp = [];
+                 const length = this.readInt();
+                 for (let i = 0; i < length; i++) {
+-                    temp.push(this.tgReadObject());
++                    try {
++                        const obj = this.tgReadObject();
++                        if (obj !== undefined) temp.push(obj);
++                    } catch (_e) {
++                        break;
++                    }
+                 }
+                 return temp;
+             }
+             clazz = core_1.coreObjects.get(constructorId);
+             if (clazz === undefined) {
+-                // If there was still no luck, give up
+-                this.seek(-4); // Go back
+-                const pos = this.tellPosition();
+-                const error = new errors_1.TypeNotFoundError(constructorId, this.read());
+-                this.setPosition(pos);
+-                throw error;
++                // Unknown constructor — skip remaining bytes instead of crashing
++                if (!BinaryReader._unknownWarnedIds) BinaryReader._unknownWarnedIds = new Set();
++                if (!BinaryReader._unknownWarnedIds.has(constructorId)) {
++                    BinaryReader._unknownWarnedIds.add(constructorId);
++                    console.warn(`[gramjs-patch] Unknown TL constructor ${constructorId} (0x${constructorId.toString(16)}), skipping. Update 'telegram' package when a new version is available.`);
++                }
++                this.seek(-4);
++                this.read();
++                return undefined;
+             }
+         }
+         return clazz.fromReader(this);
+@@ -210,7 +218,12 @@ class BinaryReader {
+         const count = this.readInt();
+         const temp = [];
+         for (let i = 0; i < count; i++) {
+-            temp.push(this.tgReadObject());
++            try {
++                const obj = this.tgReadObject();
++                if (obj !== undefined) temp.push(obj);
++            } catch (_e) {
++                break;
++            }
+         }
+         return temp;
+     }

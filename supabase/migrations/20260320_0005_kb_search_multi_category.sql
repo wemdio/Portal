@@ -1,6 +1,10 @@
 -- Add filter_categories (text[]) parameter to kb_search_chunks
 -- so the copilot can restrict search to relevant categories only.
 
+-- Drop all existing overloads so CREATE OR REPLACE can change the return type
+drop function if exists public.kb_search_chunks(text, text, integer, integer);
+drop function if exists public.kb_search_chunks(text, text, text[], integer, integer);
+
 create or replace function public.kb_search_chunks(
   search_query text,
   filter_category text default null,

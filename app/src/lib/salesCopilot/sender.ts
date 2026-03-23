@@ -75,7 +75,12 @@ export async function sendMessageViaAccount(
   let client: InstanceType<typeof TelegramClient> | null = null;
   try {
     client = await createClient(source);
-    await client.getDialogs({ limit: 50 });
+    try {
+      await client.getDialogs({ limit: 50 });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      if (!msg.includes('Constructor ID')) throw e;
+    }
     const entity = await client.getEntity(tgUserId);
     await client.sendMessage(entity, { message: text });
 
