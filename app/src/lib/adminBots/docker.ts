@@ -26,8 +26,28 @@ export function isDockerAvailable(): boolean {
 }
 
 export function getDockerUnavailableReason(): string | null {
+  if (dockerUnavailableReason !== null) return dockerUnavailableReason;
   getDocker();
   return dockerUnavailableReason;
+}
+
+/**
+ * Actually hit the Docker daemon (ping) to verify the socket is accessible.
+ * Replaces the sync isDockerAvailable() which can't detect EACCES upfront.
+ */
+export async function probeDockerConnection(): Promise<{ available: boolean; error?: string }> {
+  const docker = getDocker();
+  if (!docker) return { available: false, error: dockerUnavailableReason ?? 'Docker init failed' };
+  try {
+    await docker.ping();
+    dockerUnavailableReason = null;
+    return { available: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    dockerUnavailableReason = msg;
+    dockerInstance = null;
+    return { available: false, error: msg };
+  }
 }
 
 export type ContainerState = 'running' | 'exited' | 'paused' | 'unknown';

@@ -4,7 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { BOTS, getContainerBots } from '@/lib/adminBots/config';
 import {
   listContainersByNames,
-  isDockerAvailable,
+  probeDockerConnection,
   getDockerUnavailableReason,
   type ContainerInfo,
 } from '@/lib/adminBots/docker';
@@ -51,7 +51,7 @@ export async function GET(_req: NextRequest) {
   const auth = await requireAdmin(_req);
   if ('error' in auth) return auth.error;
 
-  const dockerInitiallyAvailable = isDockerAvailable();
+  const probe = await probeDockerConnection();
   let dockerError: string | undefined;
 
   const knownContainerNames = getContainerBots()
@@ -60,15 +60,17 @@ export async function GET(_req: NextRequest) {
 
   let containerInfos: ContainerInfo[] = [];
 
-  if (dockerInitiallyAvailable) {
+  if (probe.available) {
     if (knownContainerNames.length > 0) {
       const result = await listContainersByNames(knownContainerNames);
       containerInfos = result.containers;
       if (result.error) dockerError = result.error;
     }
+  } else {
+    dockerError = probe.error;
   }
 
-  const dockerAvailable = dockerError ? false : isDockerAvailable();
+  const dockerAvailable = !dockerError && probe.available;
 
   const byContainerName = new Map(containerInfos.map((c) => [c.name, c]));
   const items: BotListItem[] = [];
