@@ -153,19 +153,24 @@ async function scanReactive(
   if (!config.reactive_enabled) return;
 
   const dialogs = await client.getDialogs({ limit: 30 });
+  const unreadDialogs = dialogs.filter(d => d.unreadCount > 0);
+  const userDialogs = unreadDialogs.filter(d => d.entity instanceof Api.User);
+  log('info', `Reactive: ${dialogs.length} диалогов, ${unreadDialogs.length} непрочитанных, ${userDialogs.length} от пользователей`);
 
   for (const dialog of dialogs) {
     if (dialog.unreadCount === 0) continue;
     if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
     const user = dialog.entity;
-    if (config.ignore_bots && user.bot) continue;
-    if (config.ignore_no_username && !user.username) continue;
+    const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${user.id}`;
+
+    if (config.ignore_bots && user.bot) { log('info', `Skip ${displayName}: бот`); continue; }
+    if (config.ignore_no_username && !user.username) { log('info', `Skip ${displayName}: нет username`); continue; }
 
     const tgUserId = Number(user.id);
-    if (config.excluded_chat_ids?.includes(tgUserId)) continue;
+    if (config.excluded_chat_ids?.includes(tgUserId)) { log('info', `Skip ${displayName}: excluded`); continue; }
 
-    if (await hasPendingDraft(db, config.id, tgUserId)) continue;
+    if (await hasPendingDraft(db, config.id, tgUserId)) { log('info', `Skip ${displayName}: pending draft`); continue; }
 
     try {
       const history = await client.getMessages(user, { limit: config.reactive_history_limit });
