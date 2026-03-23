@@ -6,7 +6,7 @@ create table if not exists public.sales_copilot_configs (
   account_id uuid not null references public.tg_pool_accounts(id) on delete cascade,
 
   is_enabled boolean not null default false,
-  llm_model text not null default 'google/gemini-2.5-flash',
+  llm_model text not null default 'anthropic/claude-3.5-haiku',
 
   reactive_enabled boolean not null default true,
   reactive_system_prompt text not null default '',
