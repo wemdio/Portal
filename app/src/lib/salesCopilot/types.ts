@@ -34,6 +34,7 @@ export interface SalesCopilotConfig {
   ignore_bots: boolean;
   ignore_no_username: boolean;
   excluded_chat_ids: number[];
+  excluded_usernames: string[];
 
   initial_sync_completed: boolean;
   initial_sync_offset: number;

@@ -107,6 +107,7 @@ export default function CampaignDetailPage() {
 
   const [editName, setEditName] = useState('');
   const [editDailyLimit, setEditDailyLimit] = useState('');
+  const [editTagIds, setEditTagIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -153,6 +154,7 @@ export default function CampaignDetailPage() {
 
       setEditName(c.name);
       setEditDailyLimit(String(c.daily_limit ?? ''));
+      setEditTagIds(c.email_tag_list ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
@@ -268,6 +270,8 @@ export default function CampaignDetailPage() {
       const payload: Record<string, unknown> = {};
       if (editName !== campaign.name) payload.name = editName;
       if (editDailyLimit && Number(editDailyLimit) !== campaign.daily_limit) payload.daily_limit = Number(editDailyLimit);
+      const origTags = campaign.email_tag_list ?? [];
+      if (JSON.stringify(editTagIds.sort()) !== JSON.stringify([...origTags].sort())) payload.email_tag_list = editTagIds;
       if (Object.keys(payload).length === 0) { setSaving(false); return; }
       const updated = await instantlyFetch<Campaign>(`/campaigns/${campaignId}`, {
         method: 'PATCH',
@@ -279,7 +283,7 @@ export default function CampaignDetailPage() {
     } finally {
       setSaving(false);
     }
-  }, [campaign, editName, editDailyLimit, campaignId]);
+  }, [campaign, editName, editDailyLimit, editTagIds, campaignId]);
 
   if (loading) {
     return (
@@ -711,6 +715,41 @@ export default function CampaignDetailPage() {
                 onChange={(e) => setEditDailyLimit(e.target.value)}
                 className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
               />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-500">Теги аккаунтов отправки</label>
+              {allTags.length === 0 ? (
+                <p className="text-xs text-zinc-400">Нет доступных тегов</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {allTags.map((tag) => {
+                    const selected = editTagIds.includes(tag.id);
+                    return (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        onClick={() =>
+                          setEditTagIds((prev) =>
+                            selected ? prev.filter((id) => id !== tag.id) : [...prev, tag.id],
+                          )
+                        }
+                        className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                          selected
+                            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                            : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300'
+                        }`}
+                      >
+                        {tag.name ?? tag.label ?? tag.id}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {editTagIds.length > 0 && (
+                <p className="mt-1.5 text-xs text-zinc-400">
+                  Выбрано: {editTagIds.length}
+                </p>
+              )}
             </div>
             <button
               onClick={handleSave}

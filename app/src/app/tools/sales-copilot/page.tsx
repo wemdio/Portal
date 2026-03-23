@@ -731,6 +731,19 @@ function SettingsTab({
             <input type="checkbox" checked={form.ignore_no_username} onChange={e => update({ ignore_no_username: e.target.checked })} /> Игнорировать без username
           </label>
         </div>
+        <Field label="Игнорировать юзернеймы (коллеги, не клиенты)">
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm"
+            placeholder="username1, username2, username3"
+            value={(form.excluded_usernames ?? []).join(', ')}
+            onChange={e => {
+              const raw = e.target.value;
+              const usernames = raw ? raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) : [];
+              update({ excluded_usernames: usernames });
+            }}
+          />
+          <p className="text-xs text-gray-400 mt-1">Через запятую, без @. Эти диалоги не будут синхронизироваться и обрабатываться.</p>
+        </Field>
       </Section>
 
       <Section title="Реактивный сценарий — ответ на входящие">

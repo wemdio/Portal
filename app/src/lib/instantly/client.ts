@@ -252,8 +252,18 @@ export async function getLeadsByEmail(params: { email: string }) {
   return request<Lead[]>('/leads/by-email', { params: params as Record<string, string> });
 }
 
-export async function deleteLeadsByCampaign(campaignId: string) {
-  return request<{ count: number }>('/leads', { method: 'DELETE', body: { campaign_id: campaignId } });
+export async function deleteLeadsByCampaign(campaignId: string): Promise<{ count: number }> {
+  let totalDeleted = 0;
+  const MAX_ROUNDS = 200;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const result = await request<{ count: number }>('/leads', {
+      method: 'DELETE',
+      body: { campaign_id: campaignId, limit: 10000 },
+    });
+    totalDeleted += result.count;
+    if (result.count === 0) break;
+  }
+  return { count: totalDeleted };
 }
 
 // ─── Lead Lists ───────────────────────────────────────────────────────────────
