@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Bot,
@@ -520,7 +520,45 @@ function DraftCard({
         )}
       </div>
 
-      {draft.last_incoming_text && (
+      {draft.chat_history.length > 0 && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1.5 text-sm text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+        >
+          <ScrollText className="w-4 h-4" />
+          {expanded ? 'Скрыть диалог' : 'Показать диалог'}
+          <span className="text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded-full">{draft.chat_history.length}</span>
+          {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </button>
+      )}
+
+      {expanded && draft.chat_history.length > 0 && (
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+          <div className="bg-gray-50 px-3 py-2 border-b border-gray-200">
+            <span className="text-xs font-medium text-gray-500">
+              Полная история диалога ({draft.chat_history.length} сообщений)
+            </span>
+          </div>
+          <div className="p-3 space-y-2 max-h-96 overflow-y-auto">
+            {draft.chat_history.map((msg, i) => (
+              <div key={i} className={`text-sm p-2.5 rounded-lg ${
+                msg.role === 'assistant'
+                  ? 'bg-indigo-50 text-indigo-900 ml-8 border border-indigo-100'
+                  : 'bg-white text-gray-800 mr-8 border border-gray-100 shadow-sm'
+              }`}>
+                <span className={`text-xs font-semibold block mb-1 ${
+                  msg.role === 'assistant' ? 'text-indigo-500' : 'text-gray-400'
+                }`}>
+                  {msg.role === 'assistant' ? 'Менеджер' : displayName}
+                </span>
+                <span className="whitespace-pre-wrap">{msg.content}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!expanded && draft.last_incoming_text && (
         <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-600">
           <span className="text-xs text-gray-400 block mb-1">Последнее от клиента:</span>
           {draft.last_incoming_text}
@@ -538,19 +576,6 @@ function DraftCard({
         <div className="bg-indigo-50 rounded-lg p-3 text-sm text-indigo-900">
           <span className="text-xs text-indigo-400 block mb-1">Черновик:</span>
           {draft.draft_text}
-        </div>
-      )}
-
-      {expanded && draft.chat_history.length > 0 && (
-        <div className="bg-gray-50 rounded-lg p-3 space-y-2 max-h-60 overflow-y-auto">
-          <span className="text-xs text-gray-400 block mb-1">История диалога:</span>
-          {draft.chat_history.map((msg, i) => (
-            <div key={i} className={`text-xs p-2 rounded ${
-              msg.role === 'assistant' ? 'bg-indigo-100 text-indigo-800 ml-4' : 'bg-white text-gray-700 mr-4'
-            }`}>
-              <span className="font-medium">{msg.role === 'assistant' ? 'Менеджер' : 'Клиент'}:</span> {msg.content}
-            </div>
-          ))}
         </div>
       )}
 
@@ -582,13 +607,6 @@ function DraftCard({
         >
           <X className="w-3.5 h-3.5" /> Пропустить
         </button>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="ml-auto flex items-center gap-1 px-2 py-1.5 text-xs text-gray-400 hover:text-gray-600"
-        >
-          {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          {expanded ? 'Скрыть историю' : 'Показать историю'}
-        </button>
       </div>
     </div>
   );
@@ -613,6 +631,8 @@ function SettingsTab({
 
   const update = (patch: Partial<typeof form>) => setForm(prev => ({ ...prev, ...patch }));
 
+  useEffect(() => { setForm({ ...config }); }, [config]);
+
   const handleSave = async () => {
     setSaving(true);
     setMsg('');
@@ -621,11 +641,15 @@ function SettingsTab({
       const { id, user_id, account_id, created_at, updated_at, session_data, phone, tg_first_name, tg_username, initial_sync_completed, initial_sync_offset, last_full_sync_at, ...body } = form;
       void id; void user_id; void account_id; void created_at; void updated_at; void session_data; void phone; void tg_first_name; void tg_username;
       void initial_sync_completed; void initial_sync_offset; void last_full_sync_at;
-      await fetch(`${API}/configs/${config.id}`, {
+      const res = await fetch(`${API}/configs/${config.id}`, {
         method: 'PATCH',
         headers: authHeaders(token),
         body: JSON.stringify(body),
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Ошибка ${res.status}`);
+      }
       setMsg('Сохранено');
       onUpdated();
     } catch (err) {
@@ -732,16 +756,7 @@ function SettingsTab({
           </label>
         </div>
         <Field label="Игнорировать юзернеймы (коллеги, не клиенты)">
-          <input
-            className="w-full border rounded-lg px-3 py-2 text-sm"
-            placeholder="username1, username2, username3"
-            value={(form.excluded_usernames ?? []).join(', ')}
-            onChange={e => {
-              const raw = e.target.value;
-              const usernames = raw ? raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) : [];
-              update({ excluded_usernames: usernames });
-            }}
-          />
+          <ExcludedUsernamesInput value={form.excluded_usernames ?? []} onChange={v => update({ excluded_usernames: v })} />
           <p className="text-xs text-gray-400 mt-1">Через запятую, без @. Эти диалоги не будут синхронизироваться и обрабатываться.</p>
         </Field>
       </Section>
@@ -806,22 +821,11 @@ function SyncStatus({ config }: { config: SalesCopilotConfig }) {
     let cancelled = false;
     (async () => {
       try {
-        const { count: dc } = await supabase
-          .from('copilot_dialogs')
-          .select('id', { count: 'exact', head: true })
-          .eq('config_id', config.id);
-        const { count: mc } = await supabase
-          .from('copilot_messages')
-          .select('id', { count: 'exact', head: true })
-          .in('dialog_id', (
-            await supabase
-              .from('copilot_dialogs')
-              .select('id')
-              .eq('config_id', config.id)
-          ).data?.map(d => d.id) ?? []);
+        const { data } = await supabase.rpc('copilot_dialog_stats', { p_config_id: config.id });
+        const row = data?.[0];
         if (!cancelled) {
-          setDialogCount(dc ?? 0);
-          setMsgCount(mc ?? 0);
+          setDialogCount(row?.dialog_count ?? 0);
+          setMsgCount(row?.message_count ?? 0);
         }
       } catch { /* ignore */ } finally {
         if (!cancelled) setLoading(false);
@@ -872,6 +876,28 @@ function SyncStatus({ config }: { config: SalesCopilotConfig }) {
         </div>
       )}
     </div>
+  );
+}
+
+function ExcludedUsernamesInput({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const [raw, setRaw] = useState(value.join(', '));
+  const prevValue = useRef(value);
+  if (prevValue.current !== value && value.join(', ') !== raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean).join(', ')) {
+    setRaw(value.join(', '));
+    prevValue.current = value;
+  }
+  return (
+    <input
+      className="w-full border rounded-lg px-3 py-2 text-sm"
+      placeholder="username1, username2, username3"
+      value={raw}
+      onChange={e => setRaw(e.target.value)}
+      onBlur={() => {
+        const usernames = raw ? raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) : [];
+        onChange(usernames);
+        setRaw(usernames.join(', '));
+      }}
+    />
   );
 }
 
