@@ -200,8 +200,11 @@ export async function testAccountVitals(body: { emails: string[] }) {
 
 // ─── Leads ────────────────────────────────────────────────────────────────────
 
-export async function createLeads(leads: LeadCreatePayload[], options?: { skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean }) {
-  return request<unknown>('/leads', { method: 'POST', body: { leads, ...options } });
+export async function createLeads(
+  leads: LeadCreatePayload[],
+  options?: { campaign_id?: string; list_id?: string; skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean },
+) {
+  return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } });
 }
 
 export async function listLeads(body: {

@@ -10272,8 +10272,6 @@ export function DatabaseSpreadsheet() {
                           const v = String(row[colIdx!] ?? '').trim();
                           if (v) lead[field] = v;
                         }
-                        if (instantlyPush.campaignId) lead.campaign_id = instantlyPush.campaignId;
-                        if (instantlyPush.leadListId) lead.lead_list_id = instantlyPush.leadListId;
                         const cv: Record<string, string> = {};
                         for (const { colIdx, name } of customVarCols) {
                           const v = String(row[colIdx] ?? '').trim();
@@ -10289,10 +10287,13 @@ export function DatabaseSpreadsheet() {
                       let pushed = 0;
                       for (let i = 0; i < leads.length; i += BATCH) {
                         const batch = leads.slice(i, i + BATCH);
+                        const payload: Record<string, unknown> = { leads: batch, skip_if_in_workspace: true };
+                        if (instantlyPush.campaignId) payload.campaign_id = instantlyPush.campaignId;
+                        if (instantlyPush.leadListId) payload.list_id = instantlyPush.leadListId;
                         const res = await fetch('/api/instantly/leads', {
                           method: 'POST',
                           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ leads: batch, skip_if_in_workspace: true }),
+                          body: JSON.stringify(payload),
                         });
                         if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error((e as { error?: string }).error || `HTTP ${res.status}`); }
                         pushed += batch.length;
