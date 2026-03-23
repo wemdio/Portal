@@ -2,8 +2,9 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 
-# Copy package files
+# Copy package files and patches
 COPY app/package.json app/package-lock.json ./
+COPY app/patches ./patches
 
 # Install dependencies and force musl lightningcss binary for Alpine.
 # package-lock currently contains only gnu flavor, which breaks Next/Turbopack on musl.

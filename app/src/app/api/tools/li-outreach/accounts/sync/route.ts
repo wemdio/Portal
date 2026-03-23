@@ -30,13 +30,22 @@ export async function POST(req: NextRequest) {
         const unipileId = String(acc.id ?? '');
         if (!unipileId) continue;
 
+        const sources = Array.isArray(acc.sources) ? (acc.sources as Array<Record<string, unknown>>) : [];
+        const sourceStatus = String(sources[0]?.status ?? '');
+        const isActive = sourceStatus === 'OK';
+
+        const connParams = (acc.connection_params as Record<string, unknown>) ?? {};
+        const im = (connParams.im as Record<string, unknown>) ?? {};
+        const publicId = String(im.publicIdentifier ?? '');
+        const profileUrl = publicId ? `https://www.linkedin.com/in/${publicId}` : null;
+
         await auth.supabase.from('li_accounts').upsert(
           {
             user_id: auth.user.id,
             unipile_account_id: unipileId,
             name: String(acc.name ?? ''),
-            is_active: String(acc.status ?? '') === 'CONNECTED',
-            profile_url: String((acc as Record<string, unknown>).profile_url ?? '') || null,
+            is_active: isActive,
+            profile_url: profileUrl,
             headline: String((acc as Record<string, unknown>).headline ?? '') || null,
             last_synced_at: new Date().toISOString(),
           },
