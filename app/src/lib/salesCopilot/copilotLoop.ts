@@ -5,6 +5,13 @@ import type { SalesCopilotConfig, CopilotDraftMessage } from './types';
 import { generateDraft, classifyDialog } from './llm';
 import { searchChunks } from '../knowledgeBase/contextRetriever';
 import { COPILOT_KB_CATEGORIES } from '../knowledgeBase/types';
+import {
+  initialSync,
+  hourlySync,
+  ensureDialog,
+  syncDialogMessages,
+  loadChatHistory,
+} from './dialogSync';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -143,62 +150,69 @@ async function writeLog(db: SupabaseClient, configId: string, level: string, mes
   await db.from('sales_copilot_logs').insert({ config_id: configId, level, message }).then(() => {});
 }
 
-async function scanReactive(
+/**
+ * Register a real-time NewMessage event handler for reactive draft generation.
+ * Fires instantly when a private message arrives — no polling needed.
+ * Returns a cleanup function to remove the handler.
+ */
+async function setupReactiveHandler(
   client: TelegramClient,
   config: SalesCopilotConfig,
   db: SupabaseClient,
   log: LogFn,
-  kbBrief: string,
-) {
-  if (!config.reactive_enabled) return;
+): Promise<() => void> {
+  const { NewMessage } = await import('telegram/events');
 
-  const dialogs = await client.getDialogs({ limit: 200 });
-  const unreadDialogs = dialogs.filter(d => d.unreadCount > 0);
-  const userDialogs = unreadDialogs.filter(d => d.entity instanceof Api.User);
-  log('info', `Reactive: ${dialogs.length} диалогов, ${unreadDialogs.length} непрочитанных, ${userDialogs.length} от пользователей`);
+  const processingUsers = new Set<number>();
 
-  for (const dialog of dialogs) {
-    if (dialog.unreadCount === 0) continue;
-    if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
+  const handler = async (event: { message: Api.Message }) => {
+    const message = event.message;
+    if (!message.isPrivate) return;
 
-    const user = dialog.entity;
-    const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${user.id}`;
+    if (!config.reactive_enabled) return;
+    if (isInSleepPeriod(config.sleep_periods ?? [], config.timezone_offset ?? 3)) return;
 
-    if (config.ignore_bots && user.bot) { log('info', `Skip ${displayName}: бот`); continue; }
-    if (config.ignore_no_username && !user.username) { log('info', `Skip ${displayName}: нет username`); continue; }
+    let sender: Api.User;
+    try {
+      const s = await message.getSender();
+      if (!s || !(s instanceof Api.User)) return;
+      sender = s;
+    } catch { return; }
 
-    const tgUserId = Number(user.id);
-    if (config.excluded_chat_ids?.includes(tgUserId)) { log('info', `Skip ${displayName}: excluded`); continue; }
+    const displayName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || `ID:${sender.id}`;
 
-    if (await hasPendingDraft(db, config.id, tgUserId)) { log('info', `Skip ${displayName}: pending draft`); continue; }
+    if (config.ignore_bots && sender.bot) return;
+    if (config.ignore_no_username && !sender.username) return;
+
+    const tgUserId = Number(sender.id);
+    if (config.excluded_chat_ids?.includes(tgUserId)) return;
+
+    if (processingUsers.has(tgUserId)) return;
+    processingUsers.add(tgUserId);
 
     try {
-      const history = await client.getMessages(user, { limit: config.reactive_history_limit });
+      if (await hasPendingDraft(db, config.id, tgUserId)) return;
 
-      const chatMessages: CopilotDraftMessage[] = [];
-      for (const msg of history.reverse()) {
-        if (!msg.message) continue;
-        chatMessages.push({
-          role: msg.out ? 'assistant' : 'user',
-          content: msg.message,
-          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
-        });
-      }
+      const dbDialog = await ensureDialog(db, config.id, sender);
+      await syncDialogMessages(client, db, dbDialog, sender, log, {
+        updateKb: true,
+        userId: config.user_id,
+      });
 
-      if (chatMessages.length === 0) continue;
+      const chatMessages = await loadChatHistory(db, dbDialog.id, config.reactive_history_limit);
+      if (chatMessages.length === 0) return;
 
       const lastIncoming = chatMessages.filter(m => m.role === 'user').pop();
+      const kbBrief = await loadCompiledBrief(db);
       const details = await fetchRelevantDetails(db, chatMessages);
       const fullPrompt = config.reactive_system_prompt + buildKbPrompt(kbBrief, details);
       const draftText = await generateDraftText(chatMessages, fullPrompt, config.llm_model);
-      if (!draftText) continue;
-
-      const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${tgUserId}`;
+      if (!draftText) return;
 
       await db.from('sales_copilot_drafts').insert({
         config_id: config.id,
         tg_user_id: tgUserId,
-        tg_username: user.username ?? null,
+        tg_username: sender.username ?? null,
         tg_display_name: displayName,
         draft_text: draftText,
         draft_type: 'reactive',
@@ -210,75 +224,82 @@ async function scanReactive(
 
       if (config.reactive_set_tg_draft) {
         try {
-          await client.invoke(new Api.messages.SaveDraft({ peer: user, message: draftText }));
+          await client.invoke(new Api.messages.SaveDraft({ peer: sender, message: draftText }));
         } catch (err) {
           log('warning', `Не удалось поставить draft в TG для ${displayName}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
-      log('info', `Reactive draft: ${displayName} (${draftText.length} симв.)`);
+      log('info', `Reactive draft (realtime): ${displayName} (${draftText.length} симв.)`);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('FloodWaitError') || errMsg.includes('PeerFloodError')) {
-        log('warning', `FloodWait — пропуск реактивного скана`);
-        break;
-      }
-      log('error', `Reactive ошибка для ${tgUserId}: ${errMsg}`);
+      log('error', `Reactive event ошибка для ${displayName}: ${errMsg}`);
+    } finally {
+      processingUsers.delete(tgUserId);
     }
+  };
 
-    await sleep(2000);
-  }
+  client.addEventHandler(handler, new NewMessage({ incoming: true }));
+  log('info', 'Reactive: подписка на входящие сообщения (real-time)');
+
+  return () => {
+    client.removeEventHandler(handler, new NewMessage({ incoming: true }));
+  };
 }
 
 async function scanProactive(
-  client: TelegramClient,
+  _client: TelegramClient,
   config: SalesCopilotConfig,
   db: SupabaseClient,
   log: LogFn,
   kbBrief: string,
 ) {
   if (!config.proactive_enabled) return;
+  if (!config.initial_sync_completed) {
+    log('info', 'Proactive: ожидание завершения первичной синхронизации');
+    return;
+  }
 
-  const dialogs = await client.getDialogs({});
-  log('info', `Proactive: загружено ${dialogs.length} диалогов`);
+  const silenceCutoff = new Date(
+    Date.now() - config.proactive_silence_days * 24 * 3600 * 1000,
+  ).toISOString();
+
+  const { data: candidates } = await db
+    .from('copilot_dialogs')
+    .select('*')
+    .eq('config_id', config.id)
+    .not('last_message_date', 'is', null)
+    .lt('last_message_date', silenceCutoff)
+    .order('last_message_date', { ascending: true })
+    .limit(config.proactive_max_drafts_per_scan * 3);
+
+  if (!candidates?.length) {
+    log('info', 'Proactive: нет молчащих диалогов');
+    return;
+  }
+
+  log('info', `Proactive: ${candidates.length} кандидатов из БД`);
   let generated = 0;
 
-  for (const dialog of dialogs) {
+  for (const dialog of candidates) {
     if (generated >= config.proactive_max_drafts_per_scan) break;
-    if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
-    const user = dialog.entity;
-    if (config.ignore_bots && user.bot) continue;
-    if (config.ignore_no_username && !user.username) continue;
-
-    const tgUserId = Number(user.id);
+    const tgUserId = dialog.tg_user_id;
     if (config.excluded_chat_ids?.includes(tgUserId)) continue;
+    if (config.ignore_bots && dialog.is_bot) continue;
+    if (config.ignore_no_username && !dialog.tg_username) continue;
 
-    const lastMsgDate = dialog.date ? new Date(dialog.date * 1000) : null;
-    if (!lastMsgDate) continue;
-
+    const lastMsgDate = new Date(dialog.last_message_date);
     const silenceDays = Math.floor((Date.now() - lastMsgDate.getTime()) / (24 * 3600 * 1000));
-    if (silenceDays < config.proactive_silence_days) continue;
 
     if (await hasPendingDraft(db, config.id, tgUserId)) continue;
     if (await isDismissedRecently(db, config.id, tgUserId)) continue;
 
     try {
-      const history = await client.getMessages(user, { limit: config.reactive_history_limit });
-
-      const chatMessages: CopilotDraftMessage[] = [];
-      for (const msg of history.reverse()) {
-        if (!msg.message) continue;
-        chatMessages.push({
-          role: msg.out ? 'assistant' : 'user',
-          content: msg.message,
-          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
-        });
-      }
-
+      const chatMessages = await loadChatHistory(db, dialog.id, config.reactive_history_limit);
       if (chatMessages.length === 0) continue;
 
-      const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || `ID:${tgUserId}`;
+      const displayName = dialog.tg_display_name;
 
       const classification = await classifyDialog(chatMessages, silenceDays, config.llm_model);
       if (!classification.shouldReengage) {
@@ -296,7 +317,7 @@ async function scanProactive(
       await db.from('sales_copilot_drafts').insert({
         config_id: config.id,
         tg_user_id: tgUserId,
-        tg_username: user.username ?? null,
+        tg_username: dialog.tg_username ?? null,
         tg_display_name: displayName,
         draft_text: draftText,
         draft_type: 'proactive',
@@ -310,14 +331,10 @@ async function scanProactive(
       generated++;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('FloodWaitError') || errMsg.includes('PeerFloodError')) {
-        log('warning', `FloodWait — пропуск проактивного скана`);
-        break;
-      }
       log('error', `Proactive ошибка для ${tgUserId}: ${errMsg}`);
     }
 
-    await sleep(2000);
+    await sleep(500);
   }
 }
 
@@ -406,7 +423,26 @@ export async function runCopilotLoop(
     return;
   }
 
+  let removeReactiveHandler: (() => void) | null = null;
+
   try {
+    // Run initial sync if not yet completed
+    if (!config.initial_sync_completed) {
+      log('info', 'Первичная синхронизация не завершена — запуск...');
+      await initialSync(client, config as SalesCopilotConfig, db, log, shouldStop);
+      Object.assign(config, { initial_sync_completed: true });
+    }
+
+    // Real-time reactive: subscribe to incoming messages instead of polling
+    removeReactiveHandler = await setupReactiveHandler(
+      client, config as SalesCopilotConfig, db, log,
+    );
+
+    const HOURLY_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+    let lastHourlySync = config.last_full_sync_at
+      ? new Date(config.last_full_sync_at).getTime()
+      : 0;
+
     while (!shouldStop()) {
       const { data: fresh } = await db
         .from('sales_copilot_configs')
@@ -427,11 +463,19 @@ export async function runCopilotLoop(
         continue;
       }
 
+      // Hourly sync: lightweight getDialogs to catch messages sent outside copilot
+      if (Date.now() - lastHourlySync >= HOURLY_SYNC_INTERVAL_MS) {
+        try {
+          await hourlySync(client, config as SalesCopilotConfig, db, log);
+          lastHourlySync = Date.now();
+        } catch (err) {
+          log('warning', `Ошибка периодической синхронизации: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       await expireOldDrafts(db, configId);
 
       const kbBrief = await loadCompiledBrief(db);
-
-      await scanReactive(client, config as SalesCopilotConfig, db, log, kbBrief);
       await scanProactive(client, config as SalesCopilotConfig, db, log, kbBrief);
 
       const interval = (config.scan_interval_seconds ?? 300) * 1000;
@@ -439,6 +483,7 @@ export async function runCopilotLoop(
       await sleep(interval);
     }
   } finally {
+    if (removeReactiveHandler) removeReactiveHandler();
     try { await client.disconnect(); } catch { /* ignore */ }
     log('info', 'Copilot остановлен');
   }
