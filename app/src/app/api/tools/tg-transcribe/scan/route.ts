@@ -95,18 +95,18 @@ export async function GET(req: NextRequest) {
         const user = await getUser(req);
         if (!user) return jsonError('Необходима авторизация', 401);
 
-        // Clean up stale jobs
-        await markStaleJobs();
+        // Clean up stale jobs (throttled internally, won't hit DB on every poll)
+        void markStaleJobs();
 
         // Return any active job first
         const { data: active } = await admin
           .from('tg_scan_jobs')
-          .select('*')
+          .select('id,tg_chat_id,topic_id,video_count,status,scanned,videos_found,completed,errors,videos,error_message,created_at,updated_at,finished_at')
           .eq('user_id', user.id)
           .in('status', ['pending', 'running'])
           .order('created_at', { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         if (active) {
           return NextResponse.json({ job: active });
@@ -116,13 +116,13 @@ export async function GET(req: NextRequest) {
         const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         const { data: recent } = await admin
           .from('tg_scan_jobs')
-          .select('*')
+          .select('id,tg_chat_id,topic_id,video_count,status,scanned,videos_found,completed,errors,videos,error_message,created_at,updated_at,finished_at')
           .eq('user_id', user.id)
           .in('status', ['completed', 'failed', 'stopped'])
           .gte('finished_at', fiveMinAgo)
           .order('finished_at', { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         return NextResponse.json({ job: recent ?? null });
     },

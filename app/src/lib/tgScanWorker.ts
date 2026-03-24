@@ -362,9 +362,17 @@ export async function runTgScanJob(jobId: string): Promise<void> {
 /**
  * Mark stale running jobs as failed (e.g. after server restart).
  * Call from GET /scan to clean up before returning active job.
+ * Throttled to run at most once per 60 seconds to avoid hammering the DB on every poll.
  */
+let _lastMarkStaleTs = 0;
+const MARK_STALE_THROTTLE_MS = 60_000;
+
 export async function markStaleJobs(): Promise<void> {
-  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const now = Date.now();
+  if (now - _lastMarkStaleTs < MARK_STALE_THROTTLE_MS) return;
+  _lastMarkStaleTs = now;
+
+  const tenMinAgo = new Date(now - 10 * 60 * 1000).toISOString();
   await admin
     .from('tg_scan_jobs')
     .update({

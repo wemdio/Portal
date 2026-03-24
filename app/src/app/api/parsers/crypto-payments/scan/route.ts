@@ -5,9 +5,10 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 
 export const dynamic = 'force-dynamic';
 
-const REQUEST_TIMEOUT_MS = 12000;
-const MAX_PAGES_PER_SITE = 15;
-const MAX_HTML_BYTES = 1_500_000;
+const REQUEST_TIMEOUT_MS = 8000;
+const SITE_TIMEOUT_MS = 60_000;
+const MAX_HTML_BYTES = 1_200_000;
+const KEY_PATHS = ['/', '/payment', '/payments', '/checkout', '/pay', '/pricing', '/buy'];
 
 type ProviderSignature = {
   name: string;
@@ -354,42 +355,19 @@ function detectProviders(html: string): string[] {
   return Array.from(found);
 }
 
-function collectInternalLinks(html: string, baseUrl: string, host: string): string[] {
-  const $ = load(html);
-  const links = new Set<string>();
-  $('a[href]').each((_, el) => {
-    const href = ($(el).attr('href') || '').trim();
-    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return;
-    try {
-      const url = new URL(href, baseUrl);
-      if (url.hostname !== host) return;
-      url.hash = '';
-      if (/\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|rar|7z|mp4|mp3|avi|doc|docx|xls|xlsx|ppt|pptx)$/i.test(url.pathname)) return;
-      links.add(url.toString().replace(/\/+$/, ''));
-    } catch {
-      // skip
-    }
-  });
-  return Array.from(links);
-}
-
 async function detectCryptoOnSite(websiteRaw: string): Promise<{ providers: string[] }> {
   const homeUrl = normalizeUrl(websiteRaw);
   if (!homeUrl) return { providers: [] };
 
   const root = new URL(homeUrl);
-  root.pathname = '/';
-  root.search = '';
-  root.hash = '';
-
-  const queue: string[] = [root.toString().replace(/\/+$/, '')];
-  const visited = new Set<string>();
   const allProviders = new Set<string>();
 
-  while (queue.length > 0 && visited.size < MAX_PAGES_PER_SITE) {
-    const pageUrl = queue.shift();
-    if (!pageUrl || visited.has(pageUrl)) continue;
-    visited.add(pageUrl);
+  for (const pathname of KEY_PATHS) {
+    const url = new URL(root.toString());
+    url.pathname = pathname;
+    url.search = '';
+    url.hash = '';
+    const pageUrl = url.toString().replace(/\/+$/, '');
 
     const response = await fetchHtml(pageUrl);
     if (!response.ok) continue;
@@ -398,13 +376,6 @@ async function detectCryptoOnSite(websiteRaw: string): Promise<{ providers: stri
     for (const p of providers) allProviders.add(p);
 
     if (allProviders.size > 0) break;
-
-    const discovered = collectInternalLinks(response.html, response.finalUrl, root.hostname);
-    for (const link of discovered) {
-      if (!visited.has(link) && queue.length + visited.size < MAX_PAGES_PER_SITE) {
-        queue.push(link);
-      }
-    }
   }
 
   return { providers: Array.from(allProviders) };
@@ -437,24 +408,26 @@ export async function POST(req: NextRequest) {
     .filter((item) => item.website);
 
   if (items.length === 0) return jsonError('No items to scan', 400);
-  if (items.length > 100) return jsonError('Too many items per request (max 100)', 400);
+  if (items.length > 50) return jsonError('Too many items per request (max 50)', 400);
 
-  const matches: Array<{
-    companyName: string;
-    website: string;
-    paymentSystem: string;
-  }> = [];
+  const withTimeout = (item: ScanItem) =>
+    Promise.race([
+      detectCryptoOnSite(item.website).then((detection) => {
+        if (detection.providers.length === 0) return null;
+        return {
+          companyName: item.companyName,
+          website: normalizeUrl(item.website) ?? item.website,
+          paymentSystem: detection.providers.join(', '),
+        };
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), SITE_TIMEOUT_MS)),
+    ]);
 
-  for (const item of items) {
-    const detection = await detectCryptoOnSite(item.website);
-    if (detection.providers.length > 0) {
-      matches.push({
-        companyName: item.companyName,
-        website: normalizeUrl(item.website) ?? item.website,
-        paymentSystem: detection.providers.join(', '),
-      });
-    }
-  }
+  const results = await Promise.allSettled(items.map(withTimeout));
+
+  const matches = results
+    .map((r) => (r.status === 'fulfilled' ? r.value : null))
+    .filter((v): v is NonNullable<typeof v> => v !== null);
 
   return NextResponse.json({ matches, checked: items.length });
 }
