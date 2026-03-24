@@ -17,6 +17,19 @@ export async function requireAuth(req: NextRequest) {
   return user;
 }
 
+/**
+ * Fetch the caller's role from profiles. Returns null on any failure.
+ */
+async function fetchUserRole(userId: string, token: string): Promise<string | null> {
+  const supabase = createAuthedSupabaseClient(token);
+  const { data } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', userId)
+    .single();
+  return data?.role ?? null;
+}
+
 export function handleInstantlyError(err: unknown) {
   if (err instanceof InstantlyApiError) {
     return jsonError(err.message, err.status >= 400 && err.status < 600 ? err.status : 502);
@@ -26,14 +39,24 @@ export function handleInstantlyError(err: unknown) {
 }
 
 /**
- * Wraps an API handler with auth check and error handling.
+ * Wraps an API handler with auth check, internal-role guard, and error handling.
+ * Client users are rejected — they must use /api/client/* endpoints.
  */
 export function withAuth(
   handler: (req: NextRequest, user: { id: string; email?: string }, params?: Record<string, string>) => Promise<NextResponse>,
 ) {
   return async (req: NextRequest, context?: { params: Promise<Record<string, string>> }) => {
-    const user = await requireAuth(req);
+    const token = getBearerToken(req.headers.get('authorization'));
+    if (!token) return jsonError('Необходима авторизация', 401);
+
+    const supabase = createAuthedSupabaseClient(token);
+    const { data: { user } } = await supabase.auth.getUser();
     if (!user) return jsonError('Необходима авторизация', 401);
+
+    const role = await fetchUserRole(user.id, token);
+    if (role === 'client') {
+      return jsonError('Доступ запрещён. Используйте клиентский кабинет.', 403);
+    }
 
     try {
       const params = context?.params ? await context.params : undefined;

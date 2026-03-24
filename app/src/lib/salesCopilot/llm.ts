@@ -13,8 +13,8 @@ export interface GenerateResult {
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
 function getApiKey(): string {
-  const key = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
-  if (!key) throw new Error('OPENROUTER_TG_OUTREACH_API_KEY не задан');
+  const key = process.env.OPENROUTER_SALES_COPILOT_API_KEY || process.env.OPENROUTER_TG_OUTREACH_API_KEY;
+  if (!key) throw new Error('OPENROUTER_SALES_COPILOT_API_KEY не задан');
   return key;
 }
 

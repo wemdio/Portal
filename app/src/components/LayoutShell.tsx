@@ -70,7 +70,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
       ? 'flex flex-col h-screen overflow-hidden'
       : 'flex flex-col min-h-screen overflow-x-hidden';
 
-  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage;
+  const isClientPortal = pathname.startsWith('/client');
+  const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal;
 
   return (
     <div

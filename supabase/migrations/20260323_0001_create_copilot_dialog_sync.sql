@@ -78,3 +78,17 @@ ALTER TABLE public.sales_copilot_configs
   ADD COLUMN IF NOT EXISTS initial_sync_offset integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS last_full_sync_at timestamptz,
   ADD COLUMN IF NOT EXISTS excluded_usernames text[] NOT NULL DEFAULT '{}';
+
+-- RPC for efficient dialog stats (avoids fetching all rows client-side)
+CREATE OR REPLACE FUNCTION public.copilot_dialog_stats(p_config_id uuid)
+RETURNS TABLE(dialog_count bigint, message_count bigint)
+LANGUAGE sql STABLE SECURITY DEFINER
+AS $$
+  SELECT
+    count(*)::bigint AS dialog_count,
+    coalesce(sum(d.message_count), 0)::bigint AS message_count
+  FROM public.copilot_dialogs d
+    JOIN public.sales_copilot_configs c ON c.id = d.config_id
+  WHERE d.config_id = p_config_id
+    AND c.user_id = auth.uid();
+$$;

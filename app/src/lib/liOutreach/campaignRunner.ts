@@ -177,8 +177,6 @@ async function processStep(
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
 ): Promise<void> {
-  const now = new Date().toISOString();
-
   switch (step.type) {
     case 'invite':
       await processInviteStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log);
@@ -270,7 +268,6 @@ async function processWaitStep(
     // Already waiting — check if time has passed
     if (new Date(cl.next_action_at) <= now) {
       // Wait complete → advance
-      const totalSteps = 999; // unknown here, caller handles bounds
       await db
         .from('li_campaign_leads')
         .update({ current_step: stepIdx + 1, status: 'in_progress', next_action_at: null, updated_at: now.toISOString() })

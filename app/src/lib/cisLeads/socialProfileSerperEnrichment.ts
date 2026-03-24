@@ -12,7 +12,7 @@ import { resolveChannelCandidate } from '@/lib/cisLeads/channelResolver';
 const SOCIAL_LIMIT = 40;
 const VERIFY_TIMEOUT_MS = 6_000;
 const SERPER_API_URL = 'https://google.serper.dev/search';
-const LINKEDIN_AUTO_ACCEPT_SCORE = 70;
+const _LINKEDIN_AUTO_ACCEPT_SCORE = 70;
 const LINKEDIN_REVIEW_SCORE = 50;
 const LINKEDIN_MAX_ITEMS_PER_QUERY = 5;
 const LINKEDIN_MAX_QUERIES = 8;
@@ -108,7 +108,7 @@ export function extractCompanyAliases(companyName: string): string[] {
   return extractAliasesFromLayer(companyName);
 }
 
-const TRANSLIT_MAP: Record<string, string> = {
+const _TRANSLIT_MAP: Record<string, string> = {
   'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
   'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
   'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',

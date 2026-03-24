@@ -9,9 +9,12 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   sales: 'Продажник',
   marketer: 'Маркетолог',
   lead: 'Лид',
+  client: 'Клиент',
 };
 
-export const ALL_ROLES: UserRole[] = ['technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead'];
+export const ALL_ROLES: UserRole[] = ['technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead', 'client'];
+
+export const INTERNAL_ROLES: UserRole[] = ['technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead'];
 
 const ROLES_CAN_CREATE_PROJECTS: UserRole[] = ['admin', 'manager', 'technician', 'director', 'lead'];
 const ROLES_CAN_EDIT_PROJECTS: UserRole[] = ['admin', 'manager', 'technician', 'director', 'sales', 'marketer', 'lead'];
@@ -54,6 +57,15 @@ export function isTechnician(role: UserRole | null): boolean {
 
 export function isLead(role: UserRole | null): boolean {
   return role === 'lead' || role === 'director' || role === 'admin';
+}
+
+export function isClient(role: UserRole | null): boolean {
+  return role === 'client';
+}
+
+export function isInternalRole(role: UserRole | null): boolean {
+  if (!role) return false;
+  return INTERNAL_ROLES.includes(role);
 }
 
 export async function getUserRole(userId: string): Promise<UserRole | null> {
