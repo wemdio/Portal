@@ -237,7 +237,7 @@ export function CryptoPaymentParserView() {
       const token = session?.access_token;
       if (!token) throw new Error('Требуется авторизация');
 
-      const chunks = chunkArray(prepared, 1);
+      const chunks = chunkArray(prepared, 10);
       const found: MatchRow[] = [];
       let checked = 0;
 
