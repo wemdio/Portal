@@ -3,7 +3,7 @@ import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SalesCopilotConfig, CopilotDraftMessage } from './types';
 import { generateDraft, classifyDialog } from './llm';
-import { searchChunks } from '../knowledgeBase/contextRetriever';
+import { hybridSearchChunks } from '../knowledgeBase/contextRetriever';
 import { COPILOT_KB_CATEGORIES } from '../knowledgeBase/types';
 import {
   initialSync,
@@ -134,19 +134,19 @@ async function fetchRelevantDetails(
   chatMessages: CopilotDraftMessage[],
 ): Promise<string> {
   try {
-    const keywords = chatMessages
+    const recentText = chatMessages
       .slice(-4)
       .map(m => m.content)
       .join(' ')
       .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .split(/\s+/)
       .filter(w => w.length >= 3 && !RU_STOPWORDS.has(w.toLowerCase()))
-      .slice(0, 8)
+      .slice(0, 12)
       .join(' ');
 
-    if (!keywords) return '';
+    if (!recentText) return '';
 
-    const { chunks } = await searchChunks(db, keywords, {
+    const { chunks } = await hybridSearchChunks(db, recentText, {
       categories: COPILOT_KB_CATEGORIES,
       limit: 5,
     });
