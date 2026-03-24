@@ -202,6 +202,7 @@ export default function TeamPage() {
     profiles.forEach((profile) => {
       const name = normalizeAssigneeName(getAssigneeDisplayName(profile));
       if (!name) return;
+      if (profile.role === 'client') return;
 
       if (profile.role && LEAD_ROLES.has(profile.role)) {
         managerMap.set(name, {

@@ -3,6 +3,7 @@ import type { TelegramClient } from 'telegram';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SalesCopilotConfig, CopilotDialog, CopilotDraftMessage } from './types';
 import { chunkDialogue } from '../knowledgeBase/chunker';
+import { embedChunksBatch } from '../knowledgeBase/embeddings';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -240,7 +241,11 @@ async function upsertDialogToKb(
       token_count: c.tokenCount,
       metadata: c.metadata,
     }));
-    await db.from('kb_chunks').insert(rows);
+    const { data: inserted } = await db.from('kb_chunks').insert(rows).select('id, content');
+
+    if (inserted?.length) {
+      embedChunksBatch(db, inserted).catch(() => {});
+    }
   }
 
   return docId;
