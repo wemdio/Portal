@@ -1060,13 +1060,15 @@ export function DatabaseSpreadsheet() {
           return;
         }
 
-        void supabase
-          .from('database_spreadsheet_states')
-          .upsert({
-            user_id: queued.userId,
-            state: queued.payload,
-            updated_at: new Date().toISOString(),
-          })
+        void Promise.resolve(
+          supabase
+            .from('database_spreadsheet_states')
+            .upsert({
+              user_id: queued.userId,
+              state: queued.payload,
+              updated_at: new Date().toISOString(),
+            }),
+        )
           .then(({ error }) => {
             if (error) {
               void logError('spreadsheet.state.remote_save.failed', error);
@@ -1075,7 +1077,7 @@ export function DatabaseSpreadsheet() {
             }
             onDone(true);
           })
-          .catch((error) => {
+          .catch((error: unknown) => {
             void logError('spreadsheet.state.remote_save.failed', error);
             onDone(false);
           });
