@@ -129,6 +129,54 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/', request.url))
   }
 
+  let userRole: string | null = null
+  const needsRoleCheck =
+    session &&
+    (pathname.startsWith('/admin') ||
+     pathname.startsWith('/billing-calendar') ||
+     pathname.startsWith('/client') ||
+     pathname === '/' ||
+     (!pathname.startsWith('/login') && !pathname.startsWith('/review/')))
+
+  if (session && needsRoleCheck) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', session.user.id)
+      .single()
+    userRole = profile?.role ?? null
+  }
+
+  if (session && userRole === 'client') {
+    const clientAllowed =
+      pathname.startsWith('/client') ||
+      pathname === '/login' ||
+      pathname === '/maintenance' ||
+      pathname.startsWith('/review/base/')
+    if (!clientAllowed) {
+      return NextResponse.redirect(new URL('/client', request.url))
+    }
+  }
+
+  if (session && pathname.startsWith('/client')) {
+    if (userRole !== 'client' && userRole !== 'admin') {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
+  if (session && pathname.startsWith('/admin')) {
+    if (userRole !== 'admin') {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
+  if (session && pathname.startsWith('/billing-calendar')) {
+    const allowedRoles = ['technician', 'lead', 'admin', 'director']
+    if (!userRole || !allowedRoles.includes(userRole)) {
+      return NextResponse.redirect(new URL('/', request.url))
+    }
+  }
+
   return response
 }
 

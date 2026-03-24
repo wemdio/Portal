@@ -11,7 +11,7 @@ export * from './email-sequence';
 export * from './reglament';
 export * from './lpr';
 
-export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead';
+export type UserRole = 'technician' | 'manager' | 'director' | 'admin' | 'sales' | 'marketer' | 'lead' | 'client';
 
 export interface UserProfile {
   id: string;

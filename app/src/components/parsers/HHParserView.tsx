@@ -453,6 +453,7 @@ export function HHParserView() {
     if (activeJob.status === 'failed' && activeJob.error_message) {
       setError({ message: activeJob.error_message });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeJob?.id, activeJob?.status, loadResults, resultsLimit, resultsPage]);
 
   const totalPages = Math.max(1, Math.ceil(resultsCount / resultsLimit));

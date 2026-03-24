@@ -49,7 +49,7 @@ export default function LiOutreachPage() {
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [campaigns, setCampaigns] = useState<LiCampaign[]>([]);
   const [tasks, setTasks] = useState<LiTask[]>([]);
-  const [settings, setSettings] = useState<LiSettings | null>(null);
+  const [_settings, setSettings] = useState<LiSettings | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [campaignLogs, setCampaignLogs] = useState<LiCampaignLog[]>([]);
   const [syncing, setSyncing] = useState(false);
@@ -96,15 +96,18 @@ export default function LiOutreachPage() {
     void loadCampaigns();
     void loadLeadLists();
     void loadSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (tab === 'leads') void loadLeads();
     if (tab === 'scraper') void loadTasks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   useEffect(() => {
     if (selectedCampaignId) void loadCampaignLogs(selectedCampaignId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCampaignId]);
 
   // ---- Actions --------------------------------------------------------------

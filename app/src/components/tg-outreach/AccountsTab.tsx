@@ -349,6 +349,7 @@ function AccountRow({
       <td className="px-4 py-3">
         <div className="flex items-center justify-center gap-2">
           {account.avatar_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={account.avatar_url}
               alt=""

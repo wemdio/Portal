@@ -25,7 +25,7 @@ export default function AtmosAnalyticsPage() {
   const [selectedChatId, setSelectedChatId] = useState<number | ''>('');
   const [from, setFrom] = useState<string>('');
   const [to, setTo] = useState<string>('');
-  const [loadingChats, setLoadingChats] = useState(false);
+  const [_loadingChats, setLoadingChats] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messages, setMessages] = useState<AtmosMessage[]>([]);
   const [error, setError] = useState<string | null>(null);

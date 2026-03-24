@@ -71,7 +71,7 @@ async function getToken(): Promise<string | null> {
   return session?.access_token ?? null;
 }
 
-function phoneToWhatsApp(phone: string): string | null {
+function _phoneToWhatsApp(phone: string): string | null {
   const digits = phone.replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('8')) return `7${digits.slice(1)}`;
   if (digits.length === 11 && digits.startsWith('7')) return digits;
@@ -179,7 +179,7 @@ export default function CisLeadFinderPage() {
   };
   const getDisplayStatus = (job: ImportJob): ImportJob['status'] => job.display_status ?? job.status;
 
-  const TOTAL_STAGES = 13;
+  const _TOTAL_STAGES = 13;
   const getStageLabel = (progress: number): string => {
     const pct = progress * 100;
     if (pct < 8) return 'Поиск ИНН';
@@ -480,7 +480,7 @@ export default function CisLeadFinderPage() {
     }
   };
 
-  const sourceLabel = (src: string): string => {
+  const _sourceLabel = (src: string): string => {
     if (src === 'dadata_management') return 'ЕГРЮЛ';
     if (src === 'dadata_founder') return 'Учредитель';
     if (src === 'serper_search') return 'Google';

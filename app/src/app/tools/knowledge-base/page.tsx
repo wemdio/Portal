@@ -10,7 +10,6 @@ import {
   Video,
   ShoppingBag,
   ScrollText,
-  HelpCircle,
   Layers,
   Search,
   Trash2,

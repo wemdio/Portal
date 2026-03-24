@@ -80,6 +80,9 @@ export default function UsersPage() {
   const [toolVisibility, setToolVisibility] = useState<Record<string, boolean>>({});
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
+  const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
+  const [clientCampaignInput, setClientCampaignInput] = useState('');
+
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
   const [sortBy, setSortBy] = useState<SortColumn>('name');
@@ -221,10 +224,19 @@ export default function UsersPage() {
     setActionModalLoadingUserId(user.id);
     setError('');
     try {
-      const res = await apiFetch<{ visibility: Record<string, boolean> }>(
-        `/api/admin/users/${user.id}/tools`
-      );
-      setToolVisibility(res.visibility ?? {});
+      const [toolsRes, accessRes] = await Promise.all([
+        apiFetch<{ visibility: Record<string, boolean> }>(
+          `/api/admin/users/${user.id}/tools`
+        ),
+        user.role === 'client'
+          ? apiFetch<{ rows: Array<{ resource_type: string; resource_id: string }> }>(
+              `/api/admin/users/${user.id}/client-access`
+            )
+          : Promise.resolve({ rows: [] as Array<{ resource_type: string; resource_id: string }> }),
+      ]);
+      setToolVisibility(toolsRes.visibility ?? {});
+      const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
+      setClientCampaigns(campaigns);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -233,6 +245,7 @@ export default function UsersPage() {
       setTimeout(() => setModalFlyIn(true), 20);
     } catch {
       setToolVisibility({});
+      setClientCampaigns([]);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -359,6 +372,13 @@ export default function UsersPage() {
         method: 'POST',
         body: JSON.stringify({ visibility: toolVisibility }),
       });
+
+      if (modalRole === 'client') {
+        await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/client-access`, {
+          method: 'PUT',
+          body: JSON.stringify({ campaigns: clientCampaigns }),
+        });
+      }
 
       setSaveSuccessMessage('Изменения сохранены');
     } catch (err: unknown) {
@@ -852,6 +872,56 @@ export default function UsersPage() {
                     </ul>
                   </div>
                 </div>
+
+                {modalRole === 'client' && (
+                  <div className="space-y-4 pt-2 border-t border-gray-200">
+                    <h4 className="text-sm font-medium text-gray-900">Доступ клиента к Instantly</h4>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Кампании (Campaign IDs)</label>
+                      <div className="flex gap-2 mb-2">
+                        <input
+                          type="text"
+                          value={clientCampaignInput}
+                          onChange={(e) => setClientCampaignInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              const v = clientCampaignInput.trim();
+                              if (v && !clientCampaigns.includes(v)) {
+                                setClientCampaigns((prev) => [...prev, v]);
+                              }
+                              setClientCampaignInput('');
+                            }
+                          }}
+                          placeholder="Вставьте Campaign ID и Enter"
+                          className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                      {clientCampaigns.length > 0 && (
+                        <ul className="space-y-1">
+                          {clientCampaigns.map((id) => (
+                            <li key={id} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-1.5 text-sm">
+                              <span className="truncate text-gray-700 font-mono text-xs">{id}</span>
+                              <button
+                                type="button"
+                                onClick={() => setClientCampaigns((prev) => prev.filter((c) => c !== id))}
+                                className="ml-2 text-red-500 hover:text-red-700 text-xs shrink-0"
+                              >
+                                ✕
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {clientCampaigns.length === 0 && (
+                        <p className="text-xs text-gray-400">Нет назначенных кампаний</p>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-gray-400">Lead-списки определяются автоматически из назначенных кампаний</p>
+                  </div>
+                )}
               </div>
               <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end">
                 <button
