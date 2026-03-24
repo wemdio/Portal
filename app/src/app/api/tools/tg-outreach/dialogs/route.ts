@@ -16,6 +16,8 @@ export async function GET(req: NextRequest) {
       if (!campaignId) return jsonError('campaign_id обязателен', 400);
 
       const status = url.searchParams.get('status');
+      const canSendParam = url.searchParams.get('can_send');
+      const isBotParam = url.searchParams.get('tg_is_bot');
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
 
@@ -28,6 +30,12 @@ export async function GET(req: NextRequest) {
 
       if (status) {
         query = query.eq('status', status);
+      }
+      if (canSendParam === 'true' || canSendParam === 'false') {
+        query = query.eq('can_send', canSendParam === 'true');
+      }
+      if (isBotParam === 'true' || isBotParam === 'false') {
+        query = query.eq('tg_is_bot', isBotParam === 'true');
       }
 
       const { data, error, count } = await query;

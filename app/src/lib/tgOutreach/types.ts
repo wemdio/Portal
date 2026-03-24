@@ -91,6 +91,7 @@ export interface FollowUpSettings {
 export interface TelegramSettings {
   forward_limit: number;
   reply_only_if_previously_wrote: boolean;
+  auto_allow_new_dialogs: boolean;
   history_limit: number;
   pre_read_delay_range: [number, number];
   read_reply_delay_range: [number, number];
@@ -100,6 +101,7 @@ export interface TelegramSettings {
   timezone_offset: number;
   ignore_bot_usernames: boolean;
   ignore_no_username: boolean;
+  blocked_usernames: string[];
   account_cooldown_hours: number;
   follow_up: FollowUpSettings;
 }
@@ -152,6 +154,8 @@ export interface OutreachDialog {
   account_id: string;
   tg_user_id: number;
   tg_username: string | null;
+  tg_is_bot?: boolean;
+  can_send?: boolean;
   messages: DialogMessage[];
   status: DialogStatus;
   last_message_at: string | null;
@@ -209,6 +213,7 @@ export const DEFAULT_FOLLOW_UP: FollowUpSettings = {
 export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   forward_limit: 5,
   reply_only_if_previously_wrote: true,
+  auto_allow_new_dialogs: true,
   history_limit: 20,
   pre_read_delay_range: [5, 10],
   read_reply_delay_range: [5, 10],
@@ -218,6 +223,7 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   timezone_offset: 3,
   ignore_bot_usernames: true,
   ignore_no_username: true,
+  blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 5,
   follow_up: DEFAULT_FOLLOW_UP,
 };
