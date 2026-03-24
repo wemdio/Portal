@@ -34,7 +34,7 @@ export default function ClientBasesPage() {
     <div className="mx-auto max-w-5xl">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-zinc-900">Базы</h1>
-        <p className="mt-1 text-sm text-zinc-500">Lead-списки, назначенные вашему аккаунту</p>
+        <p className="mt-1 text-sm text-zinc-500">Lead-списки из ваших кампаний</p>
       </div>
 
       <div className="mb-5">
@@ -61,7 +61,7 @@ export default function ClientBasesPage() {
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">
           <Database className="mx-auto h-8 w-8 text-zinc-300" />
-          <p className="mt-3 text-sm text-zinc-500">{search ? 'Ничего не найдено' : 'Нет назначенных списков'}</p>
+          <p className="mt-3 text-sm text-zinc-500">{search ? 'Ничего не найдено' : 'В кампаниях нет загруженных списков'}</p>
         </div>
       ) : (
         <div className="rounded-xl border border-zinc-200 bg-white divide-y divide-zinc-100">

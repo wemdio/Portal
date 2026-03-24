@@ -57,7 +57,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
 type SetAccessBody = {
   campaigns?: string[];
-  lead_lists?: string[];
 };
 
 export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -77,11 +76,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
 
   const campaigns = Array.isArray(body.campaigns) ? body.campaigns.filter((s): s is string => typeof s === 'string' && s.trim().length > 0) : [];
-  const leadLists = Array.isArray(body.lead_lists) ? body.lead_lists.filter((s): s is string => typeof s === 'string' && s.trim().length > 0) : [];
 
-  // Replace all assignments in a transaction-like fashion:
-  // 1. delete existing rows for this client
-  // 2. insert the new set
   const { error: delErr } = await supabaseAdmin
     .from('client_instantly_access')
     .delete()
@@ -92,20 +87,12 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     return jsonError('Failed to update client access', 500);
   }
 
-  const newRows = [
-    ...campaigns.map((id) => ({
-      client_user_id: targetUserId,
-      resource_type: 'campaign' as const,
-      resource_id: id.trim(),
-      created_by: user.id,
-    })),
-    ...leadLists.map((id) => ({
-      client_user_id: targetUserId,
-      resource_type: 'lead_list' as const,
-      resource_id: id.trim(),
-      created_by: user.id,
-    })),
-  ];
+  const newRows = campaigns.map((id) => ({
+    client_user_id: targetUserId,
+    resource_type: 'campaign' as const,
+    resource_id: id.trim(),
+    created_by: user.id,
+  }));
 
   if (newRows.length > 0) {
     const { error: insErr } = await supabaseAdmin
@@ -121,9 +108,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   await logAudit(
     'admin.client-access.put.success',
     'Client access updated',
-    { campaigns: campaigns.length, leadLists: leadLists.length },
+    { campaigns: campaigns.length },
     logMeta,
   );
 
-  return NextResponse.json({ ok: true, campaigns: campaigns.length, lead_lists: leadLists.length });
+  return NextResponse.json({ ok: true, campaigns: campaigns.length });
 }

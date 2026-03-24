@@ -78,9 +78,7 @@ export default function UsersPage() {
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
-  const [clientLeadLists, setClientLeadLists] = useState<string[]>([]);
   const [clientCampaignInput, setClientCampaignInput] = useState('');
-  const [clientLeadListInput, setClientLeadListInput] = useState('');
 
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
@@ -235,9 +233,7 @@ export default function UsersPage() {
       ]);
       setToolVisibility(toolsRes.visibility ?? {});
       const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
-      const lists = accessRes.rows.filter((r) => r.resource_type === 'lead_list').map((r) => r.resource_id);
       setClientCampaigns(campaigns);
-      setClientLeadLists(lists);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -247,7 +243,6 @@ export default function UsersPage() {
     } catch {
       setToolVisibility({});
       setClientCampaigns([]);
-      setClientLeadLists([]);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -378,10 +373,7 @@ export default function UsersPage() {
       if (modalRole === 'client') {
         await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/client-access`, {
           method: 'PUT',
-          body: JSON.stringify({
-            campaigns: clientCampaigns,
-            lead_lists: clientLeadLists,
-          }),
+          body: JSON.stringify({ campaigns: clientCampaigns }),
         });
       }
 
@@ -924,47 +916,7 @@ export default function UsersPage() {
                       )}
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Lead-списки (Lead List IDs)</label>
-                      <div className="flex gap-2 mb-2">
-                        <input
-                          type="text"
-                          value={clientLeadListInput}
-                          onChange={(e) => setClientLeadListInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              const v = clientLeadListInput.trim();
-                              if (v && !clientLeadLists.includes(v)) {
-                                setClientLeadLists((prev) => [...prev, v]);
-                              }
-                              setClientLeadListInput('');
-                            }
-                          }}
-                          placeholder="Вставьте Lead List ID и Enter"
-                          className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
-                      {clientLeadLists.length > 0 && (
-                        <ul className="space-y-1">
-                          {clientLeadLists.map((id) => (
-                            <li key={id} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-1.5 text-sm">
-                              <span className="truncate text-gray-700 font-mono text-xs">{id}</span>
-                              <button
-                                type="button"
-                                onClick={() => setClientLeadLists((prev) => prev.filter((l) => l !== id))}
-                                className="ml-2 text-red-500 hover:text-red-700 text-xs shrink-0"
-                              >
-                                ✕
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {clientLeadLists.length === 0 && (
-                        <p className="text-xs text-gray-400">Нет назначенных списков</p>
-                      )}
-                    </div>
+                    <p className="text-xs text-gray-400">Lead-списки определяются автоматически из назначенных кампаний</p>
                   </div>
                 )}
               </div>
