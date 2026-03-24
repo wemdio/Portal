@@ -14,8 +14,27 @@ type ServerLogPayload = {
   ip?: string | null;
 };
 
+const LOG_WRITE_BACKOFF_MS = 15_000;
+let logWritesPausedUntil = 0;
+let lastLogWriteErrorAt = 0;
+
+function canAttemptLogWrite(): boolean {
+  return Date.now() >= logWritesPausedUntil;
+}
+
+function markLogWriteFailure(error: unknown): void {
+  const now = Date.now();
+  logWritesPausedUntil = now + LOG_WRITE_BACKOFF_MS;
+  // Avoid flooding stderr while DB/API is degraded.
+  if (now - lastLogWriteErrorAt > LOG_WRITE_BACKOFF_MS) {
+    lastLogWriteErrorAt = now;
+    console.error('Failed to write application log:', error);
+  }
+}
+
 async function writeLog(payload: ServerLogPayload) {
   if (!payload.event || !payload.message) return;
+  if (!canAttemptLogWrite()) return;
 
   try {
     if (!supabaseAdmin) {
@@ -38,10 +57,12 @@ async function writeLog(payload: ServerLogPayload) {
       });
 
     if (error) {
-      console.error('Failed to write application log:', error);
+      markLogWriteFailure(error);
+      return;
     }
+    logWritesPausedUntil = 0;
   } catch (error) {
-    console.error('Failed to write application log:', error);
+    markLogWriteFailure(error);
   }
 }
 

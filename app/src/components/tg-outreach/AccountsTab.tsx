@@ -349,7 +349,14 @@ function AccountRow({
       <td className="px-4 py-3">
         <div className="flex items-center justify-center gap-2">
           {account.avatar_url ? (
-            <img src={account.avatar_url} alt="" className="h-7 w-7 rounded-full object-cover" />
+            <img
+              src={account.avatar_url}
+              alt=""
+              className="h-7 w-7 rounded-full object-cover"
+              loading="lazy"
+              decoding="async"
+              fetchPriority="low"
+            />
           ) : (
             <div className="h-7 w-7 rounded-full bg-zinc-200 flex items-center justify-center text-xs font-medium text-zinc-500">
               {(account.first_name?.[0] ?? '?').toUpperCase()}

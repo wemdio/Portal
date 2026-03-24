@@ -1321,6 +1321,7 @@ export async function fetchVacancies(
       options?.logMeta,
     );
     const employerCache = new Map<string, { siteUrl?: string; industries?: string[]; description?: string }>();
+    const failedEmployerIds: string[] = [];
     let processed = 0;
     await mapWithConcurrency(
       employerIds,
@@ -1332,6 +1333,7 @@ export async function fetchVacancies(
           employerCache.set(employerId, info);
         } catch {
           employerCache.set(employerId, {});
+          failedEmployerIds.push(employerId);
         } finally {
           processed += 1;
           reportProgress(
@@ -1355,6 +1357,38 @@ export async function fetchVacancies(
         return null;
       },
     );
+
+    if (failedEmployerIds.length > 0) {
+      // Retry failed employers with softer pace to recover from transient 429/5xx.
+      let retried = 0;
+      for (const employerId of failedEmployerIds) {
+        await checkCancelled();
+        try {
+          const info = await fetchEmployerDetails(employerId);
+          employerCache.set(employerId, info);
+        } catch {
+          // Keep empty cache entry from first pass.
+        } finally {
+          retried += 1;
+          if (retried % 25 === 0 || retried === failedEmployerIds.length) {
+            void logInfo(
+              'parser.hh.employers.fetch.retry.progress',
+              'HH employers retry progress',
+              {
+                jobId: options?.jobId,
+                searchText: options?.searchText ?? normalized.text,
+                retried,
+                totalRetry: failedEmployerIds.length,
+              },
+              options?.logMeta,
+            );
+          }
+          if (retried < failedEmployerIds.length) {
+            await sleep(120);
+          }
+        }
+      }
+    }
 
     for (const vacancy of all) {
       if (!vacancy.employer_id) continue;

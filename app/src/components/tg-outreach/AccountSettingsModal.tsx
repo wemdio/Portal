@@ -288,7 +288,14 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
                 </label>
 
                 {avatarUrl && (
-                  <img src={avatarUrl} alt="" className="mt-2 h-14 w-14 rounded-lg object-cover" />
+                  <img
+                    src={avatarUrl}
+                    alt=""
+                    className="mt-2 h-14 w-14 rounded-lg object-cover"
+                    loading="lazy"
+                    decoding="async"
+                    fetchPriority="low"
+                  />
                 )}
               </div>
 

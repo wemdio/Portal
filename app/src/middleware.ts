@@ -113,7 +113,7 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  const { data: { session } } = await supabase.auth.getSession()
   const isPublicPath =
     pathname === '/maintenance' ||
     pathname === '/login' ||
@@ -121,36 +121,33 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/telegram/link') ||
     pathname.startsWith('/review/base/')
 
-  if (!user && !isPublicPath) {
+  if (!session && !isPublicPath) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  if (user && pathname === '/login') {
+  if (session && pathname === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
   }
 
-  // Fetch role once for all role-based guards below
   let userRole: string | null = null
   const needsRoleCheck =
-    user &&
+    session &&
     (pathname.startsWith('/admin') ||
      pathname.startsWith('/billing-calendar') ||
      pathname.startsWith('/client') ||
      pathname === '/' ||
-     // any internal page a client should not reach
      (!pathname.startsWith('/login') && !pathname.startsWith('/review/')))
 
-  if (user && needsRoleCheck) {
+  if (session && needsRoleCheck) {
     const { data: profile } = await supabase
       .from('profiles')
       .select('role')
-      .eq('id', user.id)
+      .eq('id', session.user.id)
       .single()
     userRole = profile?.role ?? null
   }
 
-  // Client users: redirect to /client from any internal page
-  if (user && userRole === 'client') {
+  if (session && userRole === 'client') {
     const clientAllowed =
       pathname.startsWith('/client') ||
       pathname === '/login' ||
@@ -161,22 +158,19 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // /client routes: require client role or admin (for preview)
-  if (user && pathname.startsWith('/client')) {
+  if (session && pathname.startsWith('/client')) {
     if (userRole !== 'client' && userRole !== 'admin') {
       return NextResponse.redirect(new URL('/', request.url))
     }
   }
 
-  // Protect admin routes - only admin role can access
-  if (user && pathname.startsWith('/admin')) {
+  if (session && pathname.startsWith('/admin')) {
     if (userRole !== 'admin') {
       return NextResponse.redirect(new URL('/', request.url))
     }
   }
 
-  // Protect billing-calendar routes - only technician, lead, admin, director
-  if (user && pathname.startsWith('/billing-calendar')) {
+  if (session && pathname.startsWith('/billing-calendar')) {
     const allowedRoles = ['technician', 'lead', 'admin', 'director']
     if (!userRole || !allowedRoles.includes(userRole)) {
       return NextResponse.redirect(new URL('/', request.url))
