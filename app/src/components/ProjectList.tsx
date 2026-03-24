@@ -365,7 +365,6 @@ export function ProjectList() {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

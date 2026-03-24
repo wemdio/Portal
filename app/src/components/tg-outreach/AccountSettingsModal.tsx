@@ -288,6 +288,7 @@ export function AccountSettingsModal({ account, allTags, onClose, onSaved }: Pro
                 </label>
 
                 {avatarUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={avatarUrl}
                     alt=""
