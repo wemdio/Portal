@@ -49,11 +49,9 @@ export async function GET(req: NextRequest) {
         resource_id: id,
         created_by: userId,
       }));
-      supabaseAdmin
+      void supabaseAdmin
         .from('client_instantly_access')
-        .upsert(rows, { onConflict: 'client_user_id,resource_type,resource_id', ignoreDuplicates: true })
-        .then(() => {})
-        .catch(() => {});
+        .upsert(rows, { onConflict: 'client_user_id,resource_type,resource_id', ignoreDuplicates: true });
     }
 
     const allListIds = new Set([...storedListIds, ...liveListIds]);

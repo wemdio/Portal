@@ -86,15 +86,15 @@ export default function ClientCampaignDetailPage() {
 
   if (!campaign) return null;
 
-  const sentCount = analytics?.emails_sent_count ?? 0;
-  const openCount = analytics?.open_count ?? 0;
-  const replyCount = analytics?.reply_count ?? 0;
-  const contactedCount = analytics?.new_leads_contacted_count ?? 0;
-  const bouncedCount = analytics?.bounced_count ?? 0;
+  const sentCount = Number(analytics?.emails_sent_count ?? 0);
+  const openCount = Number(analytics?.open_count ?? 0);
+  const replyCount = Number(analytics?.reply_count ?? 0);
+  const contactedCount = Number(analytics?.new_leads_contacted_count ?? 0);
+  const bouncedCount = Number(analytics?.bounced_count ?? 0);
   const openRate = sentCount > 0 ? ((openCount / sentCount) * 100).toFixed(1) : '0';
   const replyRate = contactedCount > 0 ? ((replyCount / contactedCount) * 100).toFixed(1) : '0';
 
-  const sequences: SequenceStep[] = campaign.sequences ?? [];
+  const sequences: SequenceStep[] = (campaign.sequences ?? []).flatMap((s) => s.steps ?? []);
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -126,7 +126,7 @@ export default function ClientCampaignDetailPage() {
             <MetricCard label="Открытия" value={openCount} sub={`${openRate}%`} />
             <MetricCard label="Ответы" value={replyCount} sub={`${replyRate}%`} />
             <MetricCard label="Контактов" value={contactedCount} />
-            <MetricCard label="Лидов" value={analytics?.leads_count ?? 0} />
+            <MetricCard label="Лидов" value={Number(analytics?.leads_count ?? 0)} />
             <MetricCard label="Bounce" value={bouncedCount} />
           </div>
 

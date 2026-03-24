@@ -50,13 +50,13 @@ export default function ClientCampaignsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const totals = analytics.reduce(
+  const totals = analytics.reduce<{ sent: number; opened: number; replied: number; contacted: number; leads: number }>(
     (acc, a) => ({
-      sent: acc.sent + (a.emails_sent_count ?? 0),
-      opened: acc.opened + (a.open_count ?? 0),
-      replied: acc.replied + (a.reply_count ?? 0),
-      contacted: acc.contacted + (a.new_leads_contacted_count ?? 0),
-      leads: acc.leads + (a.leads_count ?? 0),
+      sent: acc.sent + Number(a.emails_sent_count ?? 0),
+      opened: acc.opened + Number(a.open_count ?? 0),
+      replied: acc.replied + Number(a.reply_count ?? 0),
+      contacted: acc.contacted + Number(a.new_leads_contacted_count ?? 0),
+      leads: acc.leads + Number(a.leads_count ?? 0),
     }),
     { sent: 0, opened: 0, replied: 0, contacted: 0, leads: 0 },
   );
