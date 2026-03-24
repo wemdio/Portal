@@ -555,10 +555,23 @@ export function AdminTracesPanel({
   const [statusFilter, setStatusFilter] = useState<'all' | SpanRow['status']>('all');
   const [search, setSearch] = useState('');
   const mountedRef = useRef(true);
+  const inFlightRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchTraces = useCallback(async () => {
+    if (inFlightRef.current) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+
+    inFlightRef.current = true;
+    pendingRefreshRef.current = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      setLoading(true);
+      if (traces.length === 0) setLoading(true);
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) {
         setError('Не авторизован');
@@ -571,6 +584,7 @@ export function AdminTracesPanel({
 
       const res = await fetch(`/api/traces?${params}`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -584,13 +598,21 @@ export function AdminTracesPanel({
         setError('');
       }
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return;
       if (mountedRef.current) {
         setError(err instanceof Error ? err.message : 'Не удалось загрузить трассировки');
       }
     } finally {
+      inFlightRef.current = false;
       if (mountedRef.current) setLoading(false);
+      if (mountedRef.current && pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        queueMicrotask(() => {
+          void fetchTraces();
+        });
+      }
     }
-  }, [jobId, statusFilter]);
+  }, [jobId, statusFilter, traces.length]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -613,11 +635,11 @@ export function AdminTracesPanel({
       .subscribe();
 
     // Also poll periodically (Google-like realtime can be flaky in some environments)
-    // Use jittered interval (5-7s) to avoid thundering herd.
+    // Use jittered interval (10-15s) and rely on in-flight dedupe.
     let pollTimer: ReturnType<typeof setTimeout>;
     const scheduleNextPoll = () => {
       clearTimeout(pollTimer);
-      const delayMs = 5000 + Math.round(Math.random() * 2000);
+      const delayMs = 10000 + Math.round(Math.random() * 5000);
       pollTimer = setTimeout(() => {
         if (!mountedRef.current) return;
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
@@ -634,6 +656,7 @@ export function AdminTracesPanel({
 
     return () => {
       mountedRef.current = false;
+      abortRef.current?.abort();
       clearTimeout(realtimeRefreshTimer);
       clearTimeout(pollTimer);
       void supabase.removeChannel(channel);

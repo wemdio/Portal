@@ -37,6 +37,9 @@ function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string
           src={avatarUrl}
           alt=""
           className="h-full w-full object-cover"
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
           onError={() => setFailedUrls((prev) => new Set(prev).add(avatarUrl))}
         />
       ) : (

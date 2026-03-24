@@ -43,16 +43,39 @@ PORTAL_URL = os.environ.get("HEALTH_PORTAL_URL", "https://polza-portal.ru")
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
-HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "300"))
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
 SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "144.31.54.166")
 HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
 HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
+HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "120"))
+HEARTBEAT_INTERVAL_SEC = max(60, int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "1800")))
+DEADMAN_GRACE_SEC = max(120, int(os.environ.get("HEALTH_DEADMAN_GRACE_SEC", str(HEALTH_INTERVAL_SEC * 3))))
+HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
+    "HEALTH_CRITICAL_ENDPOINTS",
+    "/,/tools,/api/user/tools",
+)
+SUPABASE_REST_URL = os.environ.get("SUPABASE_REST_URL")
+if not SUPABASE_REST_URL:
+    _supabase_base = (
+        os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+        or os.environ.get("SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+    SUPABASE_REST_URL = f"{_supabase_base}/rest/v1/" if _supabase_base else ""
+SUPABASE_REST_API_KEY = (
+    os.environ.get("SUPABASE_HEALTH_API_KEY")
+    or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
+    or ""
+)
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
 PROXY_URLS: list[str] = []
+
+LAST_HEALTH_CHECK_TS = 0.0
+HEARTBEAT_STARTED = False
 
 def _parse_proxy_list(raw: str) -> list[str]:
     raw = raw.strip()
@@ -68,6 +91,7 @@ def _parse_proxy_list(raw: str) -> list[str]:
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 PROXY_URLS = _parse_proxy_list(os.environ.get("PROXY_URLS", ""))
+CRITICAL_ENDPOINTS = _parse_proxy_list(HEALTH_CRITICAL_ENDPOINTS_RAW)
 
 ALL_PROXIES: list[tuple[str, str]] = [(f"Proxy{i+1}", url) for i, url in enumerate(PROXY_URLS)]
 
@@ -283,6 +307,47 @@ async def check_site() -> tuple[bool, str]:
         return False, str(e)[:120]
 
 
+async def check_critical_endpoint(path_or_url: str) -> tuple[bool, str, str]:
+    raw = (path_or_url or "").strip()
+    if not raw:
+        return True, "skip", "empty endpoint"
+    if raw.startswith("http://") or raw.startswith("https://"):
+        target = raw
+    else:
+        target = f"{PORTAL_URL.rstrip('/')}/{raw.lstrip('/')}"
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+            r = await c.get(target)
+            if r.status_code >= 500:
+                return False, target, f"HTTP {r.status_code}"
+            return True, target, f"OK ({r.status_code})"
+    except httpx.TimeoutException:
+        return False, target, "timeout"
+    except Exception as e:
+        return False, target, _normalize_network_error(e)
+
+
+async def check_postgrest() -> tuple[bool, str]:
+    """Check that PostgREST entrypoint is reachable (not 5xx/timeout)."""
+    if not SUPABASE_REST_URL:
+        return True, "not configured (skip)"
+    headers = {}
+    if SUPABASE_REST_API_KEY:
+        headers["apikey"] = SUPABASE_REST_API_KEY
+        headers["Authorization"] = f"Bearer {SUPABASE_REST_API_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+            r = await c.get(SUPABASE_REST_URL, headers=headers)
+            if r.status_code >= 500:
+                return False, f"HTTP {r.status_code}"
+            return True, f"OK ({r.status_code})"
+    except httpx.TimeoutException:
+        return False, "timeout"
+    except Exception as e:
+        return False, _normalize_network_error(e)
+
+
 async def check_db() -> tuple[bool, str, int | None, int | None]:
     """Returns (ok, message, current_connections, max_connections)."""
     if not DATABASE_URL:
@@ -398,11 +463,33 @@ async def check_server() -> tuple[bool, str]:
 
 async def run_health_check():
     """Check all services. Alert immediately on any failure."""
+    global LAST_HEALTH_CHECK_TS
+    LAST_HEALTH_CHECK_TS = asyncio.get_running_loop().time()
     problems: list[str] = []
 
     site_ok, site_msg = await check_site()
     if not site_ok:
         problems.append(f"🔴 <b>Сайт</b> {PORTAL_URL}: {site_msg}")
+
+    if CRITICAL_ENDPOINTS:
+        endpoint_results = await asyncio.gather(
+            *(check_critical_endpoint(ep) for ep in CRITICAL_ENDPOINTS),
+            return_exceptions=True,
+        )
+        endpoint_failures: list[str] = []
+        for outcome in endpoint_results:
+            if isinstance(outcome, Exception):
+                endpoint_failures.append(f"  ✖ internal check error: {_normalize_network_error(outcome)}")
+                continue
+            ok, endpoint, msg = outcome
+            if not ok:
+                endpoint_failures.append(f"  ✖ {endpoint}: {msg}")
+        if endpoint_failures:
+            problems.append("🔴 <b>Критичные endpoint'ы</b>:\n" + "\n".join(endpoint_failures))
+
+    postgrest_ok, postgrest_msg = await check_postgrest()
+    if not postgrest_ok:
+        problems.append(f"🔴 <b>PostgREST</b> {SUPABASE_REST_URL}: {postgrest_msg}")
 
     db_ok, db_msg, db_cur, db_max = await check_db()
     if not db_ok:
@@ -439,6 +526,30 @@ async def run_health_check():
         print(f"[health] ALERT sent: {len(problems)} problem(s)")
     else:
         print(f"[health] OK at {_now_msk()}")
+
+
+async def send_heartbeat():
+    """Periodic heartbeat that confirms bot is alive."""
+    global HEARTBEAT_STARTED
+    if not HEARTBEAT_STARTED:
+        HEARTBEAT_STARTED = True
+        await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
+        return
+    await send_telegram(f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})")
+
+
+async def run_deadman_check():
+    """Alert when health checks stop running on schedule."""
+    if LAST_HEALTH_CHECK_TS <= 0:
+        return
+    now = asyncio.get_running_loop().time()
+    lag = now - LAST_HEALTH_CHECK_TS
+    if lag > DEADMAN_GRACE_SEC:
+        await send_telegram(
+            f"🚨 <b>DEADMAN</b>: health-check не запускался {int(lag)}с (grace={DEADMAN_GRACE_SEC}с)",
+            force=True,
+        )
+        print(f"[health] DEADMAN alert sent: lag={int(lag)}s")
 
 
 # ── Daily report (21:00 MSK) ────────────────────────────────────────────────
@@ -586,6 +697,16 @@ async def main():
         seconds=HEALTH_INTERVAL_SEC,
         id="health",
     )
+    scheduler.add_job(
+        run_deadman_check, "interval",
+        seconds=max(60, HEALTH_INTERVAL_SEC),
+        id="deadman",
+    )
+    scheduler.add_job(
+        send_heartbeat, "interval",
+        seconds=HEARTBEAT_INTERVAL_SEC,
+        id="heartbeat",
+    )
 
     # Daily report at 21:00 MSK (18:00 UTC)
     scheduler.add_job(
@@ -596,6 +717,7 @@ async def main():
 
     # Run first health check now
     await run_health_check()
+    await send_heartbeat()
 
     scheduler.start()
 

@@ -42,6 +42,24 @@ export interface CreateSpanOptions {
   level?: SpanLevel;
 }
 
+const TRACE_WRITE_BACKOFF_MS = 15_000;
+let traceWritesPausedUntil = 0;
+let lastTraceWriteErrorAt = 0;
+
+function canAttemptTraceWrite(): boolean {
+  return Date.now() >= traceWritesPausedUntil;
+}
+
+function markTraceWriteFailure(error: unknown): void {
+  const now = Date.now();
+  traceWritesPausedUntil = now + TRACE_WRITE_BACKOFF_MS;
+  // Avoid error spam when Supabase/PostgREST is down.
+  if (now - lastTraceWriteErrorAt > TRACE_WRITE_BACKOFF_MS) {
+    lastTraceWriteErrorAt = now;
+    console.error('[tracer] Failed to write span:', error);
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Low-level DB operations                                                   */
 /* -------------------------------------------------------------------------- */
@@ -51,6 +69,7 @@ async function insertSpan(opts: CreateSpanOptions): Promise<string | null> {
     console.error('[tracer] supabaseAdmin not configured');
     return null;
   }
+  if (!canAttemptTraceWrite()) return null;
 
   const row = buildTraceSpanInsertPayload({
     traceId: opts.traceId,
@@ -72,9 +91,10 @@ async function insertSpan(opts: CreateSpanOptions): Promise<string | null> {
     .single();
 
   if (error) {
-    console.error('[tracer] Failed to insert span:', error);
+    markTraceWriteFailure(error);
     return null;
   }
+  traceWritesPausedUntil = 0;
 
   return data?.id ?? null;
 }
@@ -91,6 +111,7 @@ async function updateSpan(
   },
 ): Promise<void> {
   if (!supabaseAdmin) return;
+  if (!canAttemptTraceWrite()) return;
 
   const { error } = await supabaseAdmin
     .from('trace_spans')
@@ -98,8 +119,10 @@ async function updateSpan(
     .eq('id', spanId);
 
   if (error) {
-    console.error('[tracer] Failed to update span:', error);
+    markTraceWriteFailure(error);
+    return;
   }
+  traceWritesPausedUntil = 0;
 }
 
 /* -------------------------------------------------------------------------- */
