@@ -148,7 +148,7 @@ async function fetchRelevantDetails(
 
     const { chunks } = await searchChunks(db, keywords, {
       categories: COPILOT_KB_CATEGORIES,
-      limit: 3,
+      limit: 5,
     });
     if (chunks.length === 0) return '';
 
