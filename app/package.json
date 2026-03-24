@@ -23,6 +23,7 @@
     "test:coverage": "jest --coverage",
     "bench:parsers": "node --env-file ../.env scripts/bench/parsersBench.js",
     "linkedin-probe": "node --env-file=../.env scripts/linkedinProbe.js",
+    "crypto-payment-probe": "node scripts/cryptoPaymentProbe.js",
     "docker:rdp": "docker compose -f ../docker-compose.rdp.yml up --build",
     "docker:rdp:down": "docker compose -f ../docker-compose.rdp.yml down"
   },

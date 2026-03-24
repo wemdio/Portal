@@ -86,6 +86,9 @@ function AssigneeAvatar({
         src={avatarUrl}
         alt=""
         className="w-5 h-5 rounded-full object-cover flex-shrink-0"
+        loading="lazy"
+        decoding="async"
+        fetchPriority="low"
         onError={() => setFailedUrls((prev) => new Set(prev).add(avatarUrl))}
       />
     );

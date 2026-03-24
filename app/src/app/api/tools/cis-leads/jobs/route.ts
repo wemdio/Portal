@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
-import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
+import { requestLeadImportStop, runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -169,6 +169,8 @@ export async function PATCH(req: NextRequest) {
       if (job.status !== 'running' && job.status !== 'pending') {
         return jsonError('Job is not running', 400);
       }
+
+      requestLeadImportStop(jobId);
 
       const { error } = await supabaseAdmin
         .from('lead_import_jobs')
