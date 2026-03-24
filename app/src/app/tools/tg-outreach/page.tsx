@@ -150,6 +150,10 @@ function SettingsTab({ campaign, onSave }: {
             Отвечать только если ранее писали
           </label>
           <label className="flex items-center gap-2 text-xs text-gray-700">
+            <input type="checkbox" checked={telegram.auto_allow_new_dialogs} onChange={e => setTG('auto_allow_new_dialogs', e.target.checked)} className="rounded border-gray-300" />
+            Новым диалогам разрешать отправку автоматически
+          </label>
+          <label className="flex items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.ignore_bot_usernames} onChange={e => setTG('ignore_bot_usernames', e.target.checked)} className="rounded border-gray-300" />
             Игнорировать ботов
           </label>
@@ -158,6 +162,12 @@ function SettingsTab({ campaign, onSave }: {
             Игнорировать без имени пользователя
           </label>
         </div>
+        <Field
+          label="Чёрный список username (через запятую)"
+          value={telegram.blocked_usernames.join(', ')}
+          onChange={v => setTG('blocked_usernames', v.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean))}
+          placeholder="SpamBot, another_bot"
+        />
       </section>
 
       {/* Follow-up */}
@@ -265,6 +275,8 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const [filterStatus, setFilterStatus] = useState('');
+  const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
@@ -275,21 +287,25 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
     const token = await getToken();
     const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
     if (filterStatus) params.set('status', filterStatus);
+    if (filterCanSend === 'enabled') params.set('can_send', 'true');
+    if (filterCanSend === 'disabled') params.set('can_send', 'false');
+    if (filterAudience === 'bots') params.set('tg_is_bot', 'true');
+    if (filterAudience === 'users') params.set('tg_is_bot', 'false');
     const res = await fetch(`${API_BASE}/dialogs?${params}`, { headers: authHeaders(token) });
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, filterStatus]);
+  }, [campaignId, offset, filterStatus, filterCanSend, filterAudience]);
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); }); }, [fetchDialogs]);
 
-  const updateStatus = async (id: string, status: string) => {
+  const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
     const token = await getToken();
     await fetch(`${API_BASE}/dialogs/${id}`, {
       method: 'PUT', headers: authHeaders(token),
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(patch),
     });
     void fetchDialogs();
   };
@@ -331,12 +347,34 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-gray-500">Статус:</span>
           {['', 'none', 'lead', 'not_lead', 'later'].map(s => (
             <button key={s} type="button" onClick={() => { setFilterStatus(s); setOffset(0); }}
               className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterStatus === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
               {s ? DIALOG_STATUS_LABELS[s]?.label : 'Все'}
+            </button>
+          ))}
+          <span className="ml-2 text-xs text-gray-500">Отправка:</span>
+          {[
+            { id: 'all', label: 'Все' },
+            { id: 'enabled', label: 'Разрешено' },
+            { id: 'disabled', label: 'Запрещено' },
+          ].map(s => (
+            <button key={s.id} type="button" onClick={() => { setFilterCanSend(s.id as typeof filterCanSend); setOffset(0); }}
+              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterCanSend === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              {s.label}
+            </button>
+          ))}
+          <span className="ml-2 text-xs text-gray-500">Тип:</span>
+          {[
+            { id: 'all', label: 'Все' },
+            { id: 'users', label: 'Люди' },
+            { id: 'bots', label: 'Боты' },
+          ].map(s => (
+            <button key={s.id} type="button" onClick={() => { setFilterAudience(s.id as typeof filterAudience); setOffset(0); }}
+              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterAudience === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
+              {s.label}
             </button>
           ))}
         </div>
@@ -367,6 +405,14 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}</span>
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
+                      {d.tg_is_bot ? (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">Бот</span>
+                      ) : (
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600">Пользователь</span>
+                      )}
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${d.can_send === false ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        {d.can_send === false ? 'Не писать' : 'Можно писать'}
+                      </span>
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
                     </div>
                     <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
@@ -378,11 +424,20 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-gray-500">Статус:</span>
                       {['none', 'lead', 'not_lead', 'later'].map(s => (
-                        <button key={s} type="button" onClick={() => void updateStatus(d.id, s)}
+                        <button key={s} type="button" onClick={() => void updateDialog(d.id, { status: s })}
                           className={`rounded-full px-3 py-1 text-[10px] font-medium transition border cursor-pointer ${d.status === s ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-gray-200 text-gray-600 hover:border-indigo-200 hover:bg-indigo-50'}`}>
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
+                      <label className="ml-2 inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-[10px] font-medium text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={d.can_send !== false}
+                          onChange={e => void updateDialog(d.id, { can_send: e.target.checked })}
+                          className="rounded border-gray-300"
+                        />
+                        Разрешить отправку
+                      </label>
                       <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
                     <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
@@ -395,7 +450,7 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
                     <div className="flex gap-2">
                       <input value={sendText} onChange={e => setSendText(e.target.value)} placeholder="Написать сообщение..."
                         className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400" onKeyDown={e => { if (e.key === 'Enter') void sendMessage(d.id); }} />
-                      <button type="button" onClick={() => void sendMessage(d.id)} disabled={sending}
+                      <button type="button" onClick={() => void sendMessage(d.id)} disabled={sending || d.can_send === false}
                         className="rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
                         <Send className="h-3.5 w-3.5" />
                       </button>

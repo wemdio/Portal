@@ -7,7 +7,6 @@ import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { runSerperLprEnrichment } from '@/lib/cisLeads/serperLprEnrichment';
 import { runLprContactSerperEnrichment } from '@/lib/cisLeads/lprContactSerperEnrichment';
-import { runSocialProfileSerperEnrichment } from '@/lib/cisLeads/socialProfileSerperEnrichment';
 import { runSocialProfileEnrichment } from '@/lib/cisLeads/socialProfileEnrichment';
 import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
@@ -18,6 +17,7 @@ import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportR
 
 const BUCKET = 'cis-lead-imports';
 const SUPABASE_BATCH_SIZE = 500;
+const RAW_LEADS_PAGE_SIZE = 1000;
 
 type LeadImportJobRow = {
   id: string;
@@ -187,67 +187,94 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
 
   const db = supabaseAdmin;
 
-  // Keep this bounded; the job can be resumed by re-running normalization later.
-  const { data: leads, error } = await db
-    .from('raw_leads')
-    .select('id, raw_inn, raw_company_name, raw_city, raw_region')
-    .eq('import_job_id', jobId)
-    .is('company_id', null)
-    .limit(5000);
-
-  if (error) throw new Error(error.message);
-  const rows = (leads ?? []) as Array<{
-    id: string;
-    raw_inn: string | null;
-    raw_company_name: string | null;
-    raw_city: string | null;
-    raw_region: string | null;
-  }>;
-
   const now = new Date().toISOString();
   let normalized = 0;
   let contactsCreated = 0;
+  let totalRows = 0;
 
-  console.log(`[cis-leads][${jobId}] normalizeCompanies: ${rows.length} leads to process`);
+  while (true) {
+    const { data: leads, error } = await db
+      .from('raw_leads')
+      .select('id, raw_inn, raw_company_name, raw_city, raw_region')
+      .eq('import_job_id', jobId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
 
-  await mapWithConcurrency(rows, 6, async (lead) => {
-    const inn = normalizeInn(lead.raw_inn);
-    const name = (lead.raw_company_name ?? '').trim();
-    const city = (lead.raw_city ?? '').trim();
+    const rows = (leads ?? []) as Array<{
+      id: string;
+      raw_inn: string | null;
+      raw_company_name: string | null;
+      raw_city: string | null;
+      raw_region: string | null;
+    }>;
+    if (rows.length === 0) break;
+    totalRows += rows.length;
+    console.log(`[cis-leads][${jobId}] normalizeCompanies: processing chunk of ${rows.length}`);
 
-    let suggestion = null as Awaited<ReturnType<typeof findByInn>>;
-    try {
-      if (inn) suggestion = await findByInn(inn);
-      else if (name) suggestion = await suggestByName(name, city || undefined);
-    } catch {
-      suggestion = null;
-    }
-    if (!suggestion) return;
+    await mapWithConcurrency(rows, 6, async (lead) => {
+      const inn = normalizeInn(lead.raw_inn);
+      const name = (lead.raw_company_name ?? '').trim();
+      const city = (lead.raw_city ?? '').trim();
 
-    const sData = suggestion.data ?? {};
-    const outInn = normalizeInn(String(sData.inn ?? inn ?? '')) ?? inn;
-    const outOgrn = String(sData.ogrn ?? '').trim() || null;
-    const outName =
-      String(sData.name?.full_with_opf ?? '').trim() ||
-      String(suggestion.value ?? '').trim() ||
-      name;
-    if (!outName) return;
-    const outShort = String(sData.name?.short_with_opf ?? '').trim() || null;
-    const outRegion = String(sData.address?.data?.region ?? lead.raw_region ?? '').trim() || null;
-    const outCity = String(sData.address?.data?.city ?? lead.raw_city ?? '').trim() || null;
+      let suggestion = null as Awaited<ReturnType<typeof findByInn>>;
+      try {
+        if (inn) suggestion = await findByInn(inn);
+        else if (name) suggestion = await suggestByName(name, city || undefined);
+      } catch {
+        suggestion = null;
+      }
+      if (!suggestion) return;
 
-    const dadataPhones = (sData.phones as Array<{ value?: string }> | undefined) ?? [];
-    const dadataEmails = (sData.emails as Array<{ value?: string }> | undefined) ?? [];
-    const outPhone = dadataPhones[0]?.value?.trim() || null;
-    const outEmail = dadataEmails[0]?.value?.trim()?.toLowerCase() || null;
+      const sData = suggestion.data ?? {};
+      const outInn = normalizeInn(String(sData.inn ?? inn ?? '')) ?? inn;
+      const outOgrn = String(sData.ogrn ?? '').trim() || null;
+      const outName =
+        String(sData.name?.full_with_opf ?? '').trim() ||
+        String(suggestion.value ?? '').trim() ||
+        name;
+      if (!outName) return;
+      const outShort = String(sData.name?.short_with_opf ?? '').trim() || null;
+      const outRegion = String(sData.address?.data?.region ?? lead.raw_region ?? '').trim() || null;
+      const outCity = String(sData.address?.data?.city ?? lead.raw_city ?? '').trim() || null;
 
-    let companyId: string | null = null;
-    if (outInn) {
-      const { data: company, error: upsertErr } = await db
-        .from('companies')
-        .upsert(
-          {
-            inn: outInn,
+      const dadataPhones = (sData.phones as Array<{ value?: string }> | undefined) ?? [];
+      const dadataEmails = (sData.emails as Array<{ value?: string }> | undefined) ?? [];
+      const outPhone = dadataPhones[0]?.value?.trim() || null;
+      const outEmail = dadataEmails[0]?.value?.trim()?.toLowerCase() || null;
+
+      let companyId: string | null = null;
+      if (outInn) {
+        const { data: company, error: upsertErr } = await db
+          .from('companies')
+          .upsert(
+            {
+              inn: outInn,
+              ogrn: outOgrn,
+              name: outName,
+              short_name: outShort,
+              brand_name: null,
+              region: outRegion,
+              city: outCity,
+              okved_main: null,
+              employees_range: null,
+              site: null,
+              phone: outPhone,
+              email: outEmail,
+              source: 'dadata',
+              source_confidence: 1.0,
+              updated_at: now,
+            },
+            { onConflict: 'inn' },
+          )
+          .select('id')
+          .single<{ id: string }>();
+        if (!upsertErr && company) companyId = company.id;
+      } else {
+        const { data: company, error: insErr } = await db
+          .from('companies')
+          .insert({
+            inn: null,
             ogrn: outOgrn,
             name: outName,
             short_name: outShort,
@@ -260,173 +287,153 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
             phone: outPhone,
             email: outEmail,
             source: 'dadata',
-            source_confidence: 1.0,
+            source_confidence: 0.7,
             updated_at: now,
-          },
-          { onConflict: 'inn' },
-        )
-        .select('id')
-        .single<{ id: string }>();
-      if (!upsertErr && company) companyId = company.id;
-    } else {
-      const { data: company, error: insErr } = await db
-        .from('companies')
-        .insert({
-          inn: null,
-          ogrn: outOgrn,
-          name: outName,
-          short_name: outShort,
-          brand_name: null,
-          region: outRegion,
-          city: outCity,
-          okved_main: null,
-          employees_range: null,
-          site: null,
-          phone: outPhone,
-          email: outEmail,
-          source: 'dadata',
-          source_confidence: 0.7,
-          updated_at: now,
-        })
-        .select('id')
-        .single<{ id: string }>();
-      if (!insErr && company) companyId = company.id;
-    }
+          })
+          .select('id')
+          .single<{ id: string }>();
+        if (!insErr && company) companyId = company.id;
+      }
 
-    if (!companyId) return;
-    normalized++;
+      if (!companyId) return;
+      normalized++;
 
-    const count = await upsertAllDadataLprContacts({
-      userId,
-      companyId,
-      management: sData.management ?? undefined,
-      managers: (sData.managers as DadataManager[] | undefined) ?? undefined,
-      founders: (sData.founders as DadataFounder[] | undefined) ?? undefined,
+      const count = await upsertAllDadataLprContacts({
+        userId,
+        companyId,
+        management: sData.management ?? undefined,
+        managers: (sData.managers as DadataManager[] | undefined) ?? undefined,
+        founders: (sData.founders as DadataFounder[] | undefined) ?? undefined,
+      });
+      contactsCreated += count;
+
+      await db
+        .from('raw_leads')
+        .update({ company_id: companyId })
+        .eq('id', lead.id)
+        .eq('user_id', userId);
     });
-    contactsCreated += count;
+  }
 
-    await db
-      .from('raw_leads')
-      .update({ company_id: companyId })
-      .eq('id', lead.id)
-      .eq('user_id', userId);
-  });
-
-  console.log(`[cis-leads][${jobId}] normalizeCompanies: done, ${normalized} companies, ${contactsCreated} contacts`);
+  console.log(`[cis-leads][${jobId}] normalizeCompanies: done, scanned ${totalRows} leads, ${normalized} companies, ${contactsCreated} contacts`);
 }
 
 async function fallbackLinkCompaniesFromRawLeads(jobId: string, userId: string): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
-  const { data: leads, error } = await db
-    .from('raw_leads')
-    .select('id, raw_inn, raw_company_name, raw_city, raw_region, raw_site')
-    .eq('import_job_id', jobId)
-    .is('company_id', null)
-    .limit(5000);
-  if (error) throw new Error(error.message);
-
-  const rows = (leads ?? []) as Array<{
-    id: string;
-    raw_inn: string | null;
-    raw_company_name: string | null;
-    raw_city: string | null;
-    raw_region: string | null;
-    raw_site: string | null;
-  }>;
-  if (rows.length === 0) return;
-
   const now = new Date().toISOString();
-  for (const lead of rows) {
-    const inn = normalizeInn(lead.raw_inn);
-    const name = (lead.raw_company_name ?? '').trim();
-    const region = (lead.raw_region ?? '').trim() || null;
-    const city = (lead.raw_city ?? '').trim() || null;
-    const site = (lead.raw_site ?? '').trim() || null;
+  while (true) {
+    const { data: leads, error } = await db
+      .from('raw_leads')
+      .select('id, raw_inn, raw_company_name, raw_city, raw_region, raw_site')
+      .eq('import_job_id', jobId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
 
-    let companyId: string | null = null;
+    const rows = (leads ?? []) as Array<{
+      id: string;
+      raw_inn: string | null;
+      raw_company_name: string | null;
+      raw_city: string | null;
+      raw_region: string | null;
+      raw_site: string | null;
+    }>;
+    if (rows.length === 0) break;
 
-    if (inn) {
-      const { data: company, error: upsertErr } = await db
-        .from('companies')
-        .upsert(
-          {
-            inn,
-            name: name || `Компания ${inn}`,
-            short_name: name || null,
-            region,
-            city,
-            site,
-            source: 'import_raw',
-            source_confidence: 0.6,
-            updated_at: now,
-          },
-          { onConflict: 'inn' },
-        )
-        .select('id')
-        .single<{ id: string }>();
-      if (!upsertErr && company) companyId = company.id;
-    } else if (name) {
-      let existingQuery = db
-        .from('companies')
-        .select('id')
-        .eq('name', name);
-      existingQuery = region ? existingQuery.eq('region', region) : existingQuery.is('region', null);
-      const { data: existing } = await existingQuery
-        .limit(1)
-        .maybeSingle<{ id: string }>();
-      if (existing?.id) {
-        companyId = existing.id;
-      } else {
-        const { data: inserted } = await db
+    for (const lead of rows) {
+      const inn = normalizeInn(lead.raw_inn);
+      const name = (lead.raw_company_name ?? '').trim();
+      const region = (lead.raw_region ?? '').trim() || null;
+      const city = (lead.raw_city ?? '').trim() || null;
+      const site = (lead.raw_site ?? '').trim() || null;
+
+      let companyId: string | null = null;
+
+      if (inn) {
+        const { data: company, error: upsertErr } = await db
           .from('companies')
-          .insert({
-            inn: null,
-            name,
-            short_name: name,
-            region,
-            city,
-            site,
-            source: 'import_raw',
-            source_confidence: 0.5,
-            updated_at: now,
-          })
+          .upsert(
+            {
+              inn,
+              name: name || `Компания ${inn}`,
+              short_name: name || null,
+              region,
+              city,
+              site,
+              source: 'import_raw',
+              source_confidence: 0.6,
+              updated_at: now,
+            },
+            { onConflict: 'inn' },
+          )
           .select('id')
           .single<{ id: string }>();
-        companyId = inserted?.id ?? null;
+        if (!upsertErr && company) companyId = company.id;
+      } else if (name) {
+        let existingQuery = db
+          .from('companies')
+          .select('id')
+          .eq('name', name);
+        existingQuery = region ? existingQuery.eq('region', region) : existingQuery.is('region', null);
+        const { data: existing } = await existingQuery
+          .limit(1)
+          .maybeSingle<{ id: string }>();
+        if (existing?.id) {
+          companyId = existing.id;
+        } else {
+          const { data: inserted } = await db
+            .from('companies')
+            .insert({
+              inn: null,
+              name,
+              short_name: name,
+              region,
+              city,
+              site,
+              source: 'import_raw',
+              source_confidence: 0.5,
+              updated_at: now,
+            })
+            .select('id')
+            .single<{ id: string }>();
+          companyId = inserted?.id ?? null;
+        }
       }
+
+      if (!companyId) continue;
+
+      await db
+        .from('raw_leads')
+        .update({ company_id: companyId })
+        .eq('id', lead.id)
+        .eq('user_id', userId);
     }
-
-    if (!companyId) continue;
-
-    await db
-      .from('raw_leads')
-      .update({ company_id: companyId })
-      .eq('id', lead.id)
-      .eq('user_id', userId);
   }
 }
 
 async function backfillRawInn(jobId: string, userId: string): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
-  const { data: leads } = await db
-    .from('raw_leads')
-    .select('id,raw_inn,raw_payload')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .is('company_id', null)
-    .limit(5000);
-  if (!leads?.length) return;
+  while (true) {
+    const { data: leads } = await db
+      .from('raw_leads')
+      .select('id,raw_inn,raw_payload')
+      .eq('import_job_id', jobId)
+      .eq('user_id', userId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (!leads?.length) break;
 
-  for (const lead of leads as Array<{ id: string; raw_inn: string | null; raw_payload: Record<string, unknown> | null }>) {
-    if (lead.raw_inn) continue;
-    const payload = lead.raw_payload;
-    if (!payload || typeof payload !== 'object') continue;
-    const inn = extractInnFromRow(payload);
-    if (!inn) continue;
-    await db.from('raw_leads').update({ raw_inn: inn }).eq('id', lead.id).eq('user_id', userId);
+    for (const lead of leads as Array<{ id: string; raw_inn: string | null; raw_payload: Record<string, unknown> | null }>) {
+      if (lead.raw_inn) continue;
+      const payload = lead.raw_payload;
+      if (!payload || typeof payload !== 'object') continue;
+      const inn = extractInnFromRow(payload);
+      if (!inn) continue;
+      await db.from('raw_leads').update({ raw_inn: inn }).eq('id', lead.id).eq('user_id', userId);
+    }
   }
 }
 
@@ -438,21 +445,21 @@ async function setEnrichmentProgress(jobId: string, progress: number): Promise<v
     .eq('id', jobId);
 }
 
-const ENRICHMENT_STAGES = [
-  'backfillRawInn',
-  'normalizeCompanies',
-  'fallbackLinkCompanies',
-  'serperLprEnrichment',
-  'lprContactSerperEnrichment',
-  'siteDiscoveryEnrichment',
-  'websiteTeamEnrichment',
-  'yandexMapsEnrichment',
-  'phoneEnrichment',
-  'whatsappCheck',
-  'socialProfileSerperEnrichment',
-  'socialProfileFallback',
-  'contactAggregation',
-] as const;
+const TOTAL_PROGRESS_STEPS = 13;
+
+async function isJobCancelled(jobId: string): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const { data } = await supabaseAdmin
+    .from('lead_import_jobs')
+    .select('status')
+    .eq('id', jobId)
+    .single<{ status: string }>();
+  return data?.status === 'failed' || data?.status === 'completed';
+}
+
+class JobCancelledError extends Error {
+  constructor() { super('Job cancelled by user'); this.name = 'JobCancelledError'; }
+}
 
 async function runLeadPostProcessingInternal(jobId: string, userId: string): Promise<void> {
   const log = (step: string, detail?: unknown) =>
@@ -460,103 +467,138 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
   const logErr = (step: string, err: unknown) =>
     console.error(`[cis-leads][${jobId}] ${step} failed:`, err instanceof Error ? err.message : err);
 
-  const totalStages = ENRICHMENT_STAGES.length;
   let stageIdx = 0;
-
-  const advanceProgress = async (stageName: string) => {
-    stageIdx++;
-    const progress = stageIdx / totalStages;
+  const advanceProgress = async (stageName: string, steps = 1) => {
+    stageIdx += steps;
+    const progress = stageIdx / TOTAL_PROGRESS_STEPS;
     log(`${stageName} done — progress ${Math.round(progress * 100)}%`);
     await setEnrichmentProgress(jobId, progress);
   };
 
-  try {
-    log('backfillRawInn start');
-    await backfillRawInn(jobId, userId);
-    await advanceProgress('backfillRawInn');
-  } catch (e) { logErr('backfillRawInn', e); stageIdx++; }
+  const checkCancelled = async () => {
+    if (await isJobCancelled(jobId)) {
+      log('job cancelled — stopping enrichment');
+      throw new JobCancelledError();
+    }
+  };
 
   try {
-    log('normalizeCompaniesForJob start');
-    await normalizeCompaniesForJob(jobId, userId);
-    await advanceProgress('normalizeCompaniesForJob');
-  } catch (e) { logErr('normalizeCompaniesForJob', e); stageIdx++; }
 
-  try {
-    log('fallbackLinkCompanies start');
-    await fallbackLinkCompaniesFromRawLeads(jobId, userId);
-    await advanceProgress('fallbackLinkCompanies');
-  } catch (e) { logErr('fallbackLinkCompanies', e); stageIdx++; }
+  // ── Phase 1: sequential preparation (stages 1-3) ──
+  try { log('backfillRawInn start'); await backfillRawInn(jobId, userId); await advanceProgress('backfillRawInn'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('backfillRawInn', e); stageIdx++; }
 
-  try {
-    log('serperLprEnrichment start');
-    const serperResult = await runSerperLprEnrichment(jobId, userId);
-    log('serperLprEnrichment', { processed: serperResult.processed, contacts: serperResult.contactsFound });
-    await advanceProgress('serperLprEnrichment');
-  } catch (e) { logErr('serperLprEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('lprContactSerperEnrichment start');
-    const personalSerper = await runLprContactSerperEnrichment(jobId, userId);
-    log('lprContactSerperEnrichment', { processed: personalSerper.processed, updated: personalSerper.contactsUpdated });
-    await advanceProgress('lprContactSerperEnrichment');
-  } catch (e) { logErr('lprContactSerperEnrichment', e); stageIdx++; }
+  try { log('normalizeCompanies start'); await normalizeCompaniesForJob(jobId, userId); await advanceProgress('normalizeCompanies'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('normalizeCompanies', e); stageIdx++; }
 
-  try {
-    log('siteDiscoveryEnrichment start');
-    const siteDiscovery = await runSiteDiscoveryEnrichment(jobId, userId);
-    log('siteDiscoveryEnrichment', { processed: siteDiscovery.processed, sites: siteDiscovery.sitesFound });
-    await advanceProgress('siteDiscoveryEnrichment');
-  } catch (e) { logErr('siteDiscoveryEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('websiteTeamEnrichment start');
-    const siteResult = await runWebsiteTeamEnrichment(jobId, userId);
-    log('websiteTeamEnrichment', { processed: siteResult.processed, contacts: siteResult.contactsFound });
-    await advanceProgress('websiteTeamEnrichment');
-  } catch (e) { logErr('websiteTeamEnrichment', e); stageIdx++; }
+  try { log('fallbackLinkCompanies start'); await fallbackLinkCompaniesFromRawLeads(jobId, userId); await advanceProgress('fallbackLinkCompanies'); }
+  catch (e) { if (e instanceof JobCancelledError) throw e; logErr('fallbackLinkCompanies', e); stageIdx++; }
 
-  try {
-    log('yandexMapsEnrichment start');
-    const ymResult = await runYandexMapsEnrichment(jobId, userId);
-    log('yandexMapsEnrichment', { processed: ymResult.processed, updated: ymResult.updated });
-    await advanceProgress('yandexMapsEnrichment');
-  } catch (e) { logErr('yandexMapsEnrichment', e); stageIdx++; }
+  await checkCancelled();
 
-  try {
-    log('phoneEnrichment start');
-    const phoneResult = await runPhoneEnrichmentBatch();
-    log('phoneEnrichment', { processed: phoneResult.processed });
-    await advanceProgress('phoneEnrichment');
-  } catch (e) { logErr('phoneEnrichment', e); stageIdx++; }
+  // ── Phase 2: parallel enrichment (stages 4-10) ──
+  log('phase2 start — parallel enrichment');
 
-  try {
-    log('whatsappCheck start');
-    const waResult = await runWhatsAppCheckBatch(jobId, userId);
-    log('whatsappCheck', { processed: waResult.processed, registered: waResult.registered });
-    await advanceProgress('whatsappCheck');
-  } catch (e) { logErr('whatsappCheck', e); stageIdx++; }
+  const phase2Results = await Promise.allSettled([
+    // Group A: LPR discovery → personal contacts (2 stages)
+    (async () => {
+      try {
+        log('serperLprEnrichment start');
+        const r = await runSerperLprEnrichment(jobId, userId);
+        log('serperLprEnrichment', { processed: r.processed, contacts: r.contactsFound });
+      } catch (e) { logErr('serperLprEnrichment', e); }
+      try {
+        log('lprContactSerperEnrichment start');
+        const r = await runLprContactSerperEnrichment(jobId, userId);
+        log('lprContactSerperEnrichment', { processed: r.processed, updated: r.contactsUpdated });
+      } catch (e) { logErr('lprContactSerperEnrichment', e); }
+    })(),
 
+    // Group B: site discovery → website team parsing (2 stages)
+    (async () => {
+      try {
+        log('siteDiscoveryEnrichment start');
+        const r = await runSiteDiscoveryEnrichment(jobId, userId);
+        log('siteDiscoveryEnrichment', { processed: r.processed, sites: r.sitesFound });
+      } catch (e) { logErr('siteDiscoveryEnrichment', e); }
+      try {
+        log('websiteTeamEnrichment start');
+        const r = await runWebsiteTeamEnrichment(jobId, userId);
+        log('websiteTeamEnrichment', { processed: r.processed, contacts: r.contactsFound });
+      } catch (e) { logErr('websiteTeamEnrichment', e); }
+    })(),
+
+    // Group C: Yandex Maps (1 stage)
+    (async () => {
+      try {
+        log('yandexMapsEnrichment start');
+        const r = await runYandexMapsEnrichment(jobId, userId);
+        log('yandexMapsEnrichment', { processed: r.processed, updated: r.updated });
+      } catch (e) { logErr('yandexMapsEnrichment', e); }
+    })(),
+
+    // Group D: phone → whatsapp (2 stages)
+    (async () => {
+      try {
+        log('phoneEnrichment start');
+        const r = await runPhoneEnrichmentBatch();
+        log('phoneEnrichment', { processed: r.processed });
+      } catch (e) { logErr('phoneEnrichment', e); }
+      try {
+        log('whatsappCheck start');
+        const r = await runWhatsAppCheckBatch(jobId, userId);
+        log('whatsappCheck', { processed: r.processed, registered: r.registered });
+      } catch (e) { logErr('whatsappCheck', e); }
+    })(),
+  ]);
+
+  stageIdx += 7;
+  const failedGroups = phase2Results.filter((r) => r.status === 'rejected').length;
+  if (failedGroups > 0) log('phase2', { failedGroups });
+  await setEnrichmentProgress(jobId, stageIdx / TOTAL_PROGRESS_STEPS);
+  log(`phase2 done — progress ${Math.round((stageIdx / TOTAL_PROGRESS_STEPS) * 100)}%`);
+
+  await checkCancelled();
+
+  // ── Phase 3: social profiles (stages 11-12) ──
   try {
     log('socialProfileSerperEnrichment start');
-    const serperSocialResult = await runSocialProfileSerperEnrichment(jobId, userId);
-    log('socialProfileSerperEnrichment', { processed: serperSocialResult.processed, linksFound: serperSocialResult.linksFound });
+    const { runSocialProfileSerperEnrichment } = await import('@/lib/cisLeads/socialProfileSerperEnrichment');
+    const r = await runSocialProfileSerperEnrichment(jobId, userId);
+    log('socialProfileSerperEnrichment', { processed: r.processed, linksFound: r.linksFound });
     await advanceProgress('socialProfileSerperEnrichment');
-  } catch (e) { logErr('socialProfileSerperEnrichment', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('socialProfileSerperEnrichment', e); stageIdx++; }
+
+  await checkCancelled();
 
   try {
     log('socialProfileFallback start');
-    const socialResult = await runSocialProfileEnrichment(jobId, userId);
-    log('socialProfileFallback', { processed: socialResult.processed, linksFound: socialResult.linksFound });
+    const r = await runSocialProfileEnrichment(jobId, userId);
+    log('socialProfileFallback', { processed: r.processed, linksFound: r.linksFound });
     await advanceProgress('socialProfileFallback');
-  } catch (e) { logErr('socialProfileFallback', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('socialProfileFallback', e); stageIdx++; }
 
+  await checkCancelled();
+
+  // ── Phase 4: final aggregation (stage 13) ──
   try {
     log('contactAggregation start');
-    const contactResult = await runContactAggregationBatch();
-    log('contactAggregation', { processed: contactResult.processed });
+    const r = await runContactAggregationBatch();
+    log('contactAggregation', { processed: r.processed });
     await advanceProgress('contactAggregation');
-  } catch (e) { logErr('contactAggregation', e); stageIdx++; }
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('contactAggregation', e); stageIdx++; }
+
+  } catch (e) {
+    if (e instanceof JobCancelledError) {
+      log('enrichment stopped — job was cancelled');
+      return;
+    }
+    throw e;
+  }
 }
 
 export async function runLeadPostProcessing(jobId: string): Promise<void> {

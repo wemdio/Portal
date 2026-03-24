@@ -86,10 +86,11 @@ async function upsertDialog(
   tgUsername: string | null,
   messages: DialogMessage[],
   status?: string,
+  opts?: { canSend?: boolean; tgIsBot?: boolean },
 ) {
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
-    .select('id, messages, status')
+    .select('id, messages, status, can_send, tg_is_bot')
     .eq('campaign_id', campaignId)
     .eq('account_id', accountId)
     .eq('tg_user_id', tgUserId)
@@ -98,11 +99,18 @@ async function upsertDialog(
   const now = new Date().toISOString();
 
   if (existing) {
-    await db.from('tg_outreach_dialogs').update({
+    const updatePayload: Record<string, unknown> = {
       messages,
       tg_username: tgUsername,
       last_message_at: now,
+      tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
+    };
+    if (typeof opts?.canSend === 'boolean') {
+      updatePayload.can_send = opts.canSend;
+    }
+    await db.from('tg_outreach_dialogs').update({
+      ...updatePayload,
     }).eq('id', existing.id);
   } else {
     await db.from('tg_outreach_dialogs').insert({
@@ -112,9 +120,65 @@ async function upsertDialog(
       tg_username: tgUsername,
       messages,
       status: status ?? 'none',
+      tg_is_bot: opts?.tgIsBot ?? false,
+      can_send: opts?.canSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: now,
     });
   }
+}
+
+async function canSendToDialog(
+  db: SupabaseClient,
+  campaignId: string,
+  accountId: string,
+  tgUserId: number,
+): Promise<boolean> {
+  const { data } = await db
+    .from('tg_outreach_dialogs')
+    .select('can_send')
+    .eq('campaign_id', campaignId)
+    .eq('account_id', accountId)
+    .eq('tg_user_id', tgUserId)
+    .maybeSingle();
+  return data?.can_send !== false;
+}
+
+async function ensureDialogMeta(
+  db: SupabaseClient,
+  campaignId: string,
+  accountId: string,
+  tgUserId: number,
+  tgUsername: string | null,
+  tgIsBot: boolean,
+  autoAllowNewDialogs: boolean,
+) {
+  const { data: existing } = await db
+    .from('tg_outreach_dialogs')
+    .select('id')
+    .eq('campaign_id', campaignId)
+    .eq('account_id', accountId)
+    .eq('tg_user_id', tgUserId)
+    .maybeSingle();
+
+  if (existing?.id) {
+    await db.from('tg_outreach_dialogs').update({
+      tg_username: tgUsername,
+      tg_is_bot: tgIsBot,
+    }).eq('id', existing.id);
+    return;
+  }
+
+  await db.from('tg_outreach_dialogs').insert({
+    campaign_id: campaignId,
+    account_id: accountId,
+    tg_user_id: tgUserId,
+    tg_username: tgUsername,
+    tg_is_bot: tgIsBot,
+    can_send: autoAllowNewDialogs && !tgIsBot,
+    messages: [],
+    status: 'none',
+    last_message_at: new Date().toISOString(),
+  });
 }
 
 async function writeLog(
@@ -183,9 +247,26 @@ async function handleChat(
 
   const tgUserId = Number(entity.id);
   const tgUsername = entity.username ?? null;
+  const tgIsBot = Boolean(entity.bot);
   const displayName = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
 
-  if (tg.ignore_bot_usernames && entity.bot) {
+  await ensureDialogMeta(
+    db,
+    campaign.id,
+    account.id,
+    tgUserId,
+    tgUsername,
+    tgIsBot,
+    Boolean(tg.auto_allow_new_dialogs),
+  );
+
+  const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
+  if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) {
+    log('info', `${displayName}: в чёрном списке username`);
+    return { replied: false, triggerType: null };
+  }
+
+  if (tg.ignore_bot_usernames && tgIsBot) {
     return { replied: false, triggerType: null };
   }
   if (tg.ignore_no_username && !tgUsername) {
@@ -215,6 +296,12 @@ async function handleChat(
   }
 
   if (chatMessages.length === 0) {
+    return { replied: false, triggerType: null };
+  }
+
+  if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
+    log('info', `${displayName}: отправка отключена вручную`);
+    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
     return { replied: false, triggerType: null };
   }
 
@@ -269,9 +356,9 @@ async function handleChat(
     }
 
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
-    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead');
+    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot });
   } else {
-    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages);
+    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
   }
 
   return { replied: true, triggerType };
@@ -290,6 +377,7 @@ async function handleFollowUp(
   const followUpPrompt = tg.follow_up?.prompt || DEFAULT_FOLLOW_UP.prompt;
   const delayHours = tg.follow_up?.delay_hours ?? 0;
   const delayMinutes = tg.follow_up?.delay_minutes ?? 0;
+  const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
   const totalDelayMs = (delayHours * 3600 + delayMinutes * 60) * 1000;
   if (!tg.follow_up?.enabled || totalDelayMs <= 0 || !followUpPrompt) return;
 
@@ -301,6 +389,7 @@ async function handleFollowUp(
     .eq('campaign_id', campaign.id)
     .eq('account_id', account.id)
     .eq('status', 'none')
+    .eq('can_send', true)
     .lt('last_message_at', cutoff)
     .limit(10);
 
@@ -308,7 +397,11 @@ async function handleFollowUp(
 
   for (const dialog of dialogs) {
     const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+    const isBot = Boolean(dialog.tg_is_bot);
     if (await isProcessed(db, campaign.id, tgUserId)) continue;
+    if (isBot && tg.ignore_bot_usernames) continue;
+    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
 
     const messages = dialog.messages as DialogMessage[];
     if (messages.length === 0) continue;
@@ -332,8 +425,8 @@ async function handleFollowUp(
       await client.sendMessage(entity, { message: reply });
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
-      await upsertDialog(db, campaign.id, account.id, tgUserId, dialog.tg_username as string | null, messages);
-      log('info', `Follow-up: ${dialog.tg_username ? `@${dialog.tg_username}` : `ID:${tgUserId}`}`);
+      await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
+      log('info', `Follow-up: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
     } catch (err) {
       log('warning', `Follow-up ошибка ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
     }

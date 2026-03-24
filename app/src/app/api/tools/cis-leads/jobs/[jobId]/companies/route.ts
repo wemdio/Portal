@@ -52,6 +52,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       const { jobId } = await ctx.params;
       const page = Math.max(1, Number(new URL(req.url).searchParams.get('page') ?? '1') || 1);
       const pageSize = Math.max(10, Math.min(500, Number(new URL(req.url).searchParams.get('page_size') ?? '200') || 200));
+      const onlyWithProfiles = new URL(req.url).searchParams.get('only_with_profiles') === '1';
 
       const { data: job, error: jobErr } = await auth.supabase
         .from('lead_import_jobs')
@@ -69,9 +70,28 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
         .limit(10000);
       if (leadsErr) return jsonError(leadsErr.message, 500);
 
-      const allCompanyIds = Array.from(
+      let allCompanyIds = Array.from(
         new Set((leadRows ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean)),
       );
+
+      if (onlyWithProfiles && allCompanyIds.length > 0) {
+        const companyIdsWithLinkedIn = new Set<string>();
+        for (let i = 0; i < allCompanyIds.length; i += BATCH_SIZE) {
+          const batchIds = allCompanyIds.slice(i, i + BATCH_SIZE);
+          const { data: contactsBatch } = await supabaseAdmin
+            .from('company_contacts')
+            .select('company_id,profile_links')
+            .eq('user_id', auth.user.id)
+            .in('company_id', batchIds);
+          for (const c of (contactsBatch ?? []) as Array<{ company_id: string; profile_links: Record<string, string> | null }>) {
+            const pl = c?.profile_links;
+            const linkedin = pl && typeof pl === 'object' ? String(pl.linkedin ?? '').trim() : '';
+            if (linkedin) companyIdsWithLinkedIn.add(String(c.company_id ?? ''));
+          }
+        }
+        allCompanyIds = allCompanyIds.filter((id) => companyIdsWithLinkedIn.has(id));
+      }
+
       const totalCompanies = allCompanyIds.length;
       if (totalCompanies === 0) return NextResponse.json({ companies: [], page, page_size: pageSize, total: 0 });
 
