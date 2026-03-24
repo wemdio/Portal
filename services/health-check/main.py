@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from collections import deque
 from urllib.parse import urlparse
 
 try:
@@ -76,6 +77,35 @@ PROXY_URLS: list[str] = []
 
 LAST_HEALTH_CHECK_TS = 0.0
 HEARTBEAT_STARTED = False
+
+# ── Metrics buffer for heartbeat charts ──────────────────────────────────────
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+# (monotonic_ts, active_connections, cumulative_txn_count)
+_METRICS: deque[tuple[float, int, int]] = deque(maxlen=60)
+
+
+def _spark(values: list[int | float]) -> str:
+    if not values or len(values) < 2:
+        return ""
+    mn, mx = min(values), max(values)
+    if mn == mx:
+        return "▄" * len(values)
+    rng = mx - mn
+    return "".join(
+        SPARK_CHARS[min(7, int((v - mn) / rng * 7))]
+        for v in values
+    )
+
+
+def _fmt_bytes(b: int | float) -> str:
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if abs(b) < 1024:
+            return f"{b:.2f} {u}" if u not in ("B", "KB") else f"{int(b)} {u}"
+        b = b / 1024
+    return f"{b:.2f} PB"
+
 
 def _parse_proxy_list(raw: str) -> list[str]:
     raw = raw.strip()
@@ -527,6 +557,109 @@ async def run_health_check():
     else:
         print(f"[health] OK at {_now_msk()}")
 
+    await _collect_metrics()
+
+
+async def _collect_metrics() -> None:
+    """Record DB connection count and cumulative txn count for sparkline charts."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            cur = await conn.fetchval(
+                "SELECT count(*)::int FROM pg_stat_activity "
+                "WHERE datname = current_database()"
+            )
+            txn = await conn.fetchval(
+                "SELECT (xact_commit + xact_rollback)::bigint "
+                "FROM pg_stat_database WHERE datname = current_database()"
+            )
+            _METRICS.append((asyncio.get_running_loop().time(), cur or 0, txn or 0))
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[health] metrics collect error: {e}")
+
+
+async def _heartbeat_body() -> str:
+    """Build rich heartbeat message with DB stats, sparkline charts and disk usage."""
+    parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
+
+    if not DATABASE_URL:
+        return parts[0]
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            rows = await conn.fetch(
+                "SELECT state, count(*)::int AS n FROM pg_stat_activity "
+                "WHERE datname = current_database() GROUP BY state"
+            )
+            max_c = int(await conn.fetchval("SHOW max_connections") or 0)
+
+            total = sum(r["n"] for r in rows)
+            active = sum(r["n"] for r in rows if r["state"] == "active")
+            idle = sum(r["n"] for r in rows if r["state"] == "idle")
+            idle_txn = sum(
+                r["n"] for r in rows
+                if r["state"] and "idle in transaction" in r["state"]
+            )
+
+            line = f"🔌 <b>Подключения</b>: {total}"
+            if max_c:
+                line += f" / {max_c}"
+            bits = []
+            if active:
+                bits.append(f"active {active}")
+            if idle:
+                bits.append(f"idle {idle}")
+            if idle_txn:
+                bits.append(f"idle_txn {idle_txn}")
+            if bits:
+                line += f"  ({', '.join(bits)})"
+            parts.append(line)
+
+            db_bytes = await conn.fetchval(
+                "SELECT pg_database_size(current_database())"
+            )
+            if db_bytes is not None:
+                parts.append(f"💾 <b>Размер БД</b>: {_fmt_bytes(db_bytes)}")
+        finally:
+            await conn.close()
+    except Exception as e:
+        parts.append(f"⚠️ {str(e)[:80]}")
+
+    if len(_METRICS) >= 2:
+        pts = list(_METRICS)
+        rates: list[int] = []
+        conns: list[int] = []
+        for i in range(1, len(pts)):
+            delta = pts[i][2] - pts[i - 1][2]
+            rates.append(max(0, delta))
+            conns.append(pts[i][1])
+
+        span_min = int((pts[-1][0] - pts[0][0]) / 60)
+        total_txn = sum(rates)
+        fmt_txn = f"{total_txn:,}".replace(",", " ")
+
+        parts.append("")
+        parts.append(f"📊 <b>Транзакции</b> ({span_min} мин): {fmt_txn}")
+        spark_r = _spark(rates)
+        if spark_r:
+            parts.append(f"<code>{spark_r}</code>")
+
+        if conns:
+            mn_c, mx_c = min(conns), max(conns)
+            parts.append(
+                f"📈 <b>Подключения</b> ({span_min} мин): {mn_c}–{mx_c}"
+            )
+            spark_c = _spark(conns)
+            if spark_c:
+                parts.append(f"<code>{spark_c}</code>")
+
+    return "\n".join(parts)
+
 
 async def send_heartbeat():
     """Periodic heartbeat that confirms bot is alive."""
@@ -535,7 +668,8 @@ async def send_heartbeat():
         HEARTBEAT_STARTED = True
         await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
         return
-    await send_telegram(f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})")
+    text = await _heartbeat_body()
+    await send_telegram(text)
 
 
 async def run_deadman_check():
