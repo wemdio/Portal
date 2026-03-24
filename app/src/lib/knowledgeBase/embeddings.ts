@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-const EMBEDDING_MODEL = 'text-embedding-3-small';
+const EMBEDDING_MODEL = 'openai/text-embedding-3-small';
 const EMBEDDING_DIMENSIONS = 1536;
 const EMBEDDING_API_URL = 'https://router.requesty.ai/v1/embeddings';
 const BATCH_SIZE = 100;
