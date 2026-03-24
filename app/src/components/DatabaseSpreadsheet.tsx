@@ -1085,7 +1085,7 @@ export function DatabaseSpreadsheet() {
 
       pump();
     },
-    [logError],
+    [],
   );
 
   const [personalization, setPersonalization] = useState<PersonalizationState>({

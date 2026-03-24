@@ -6,7 +6,7 @@ import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import type { ParsedUser, ParseOptions, ParseSource, OnlineStatus, TgParserAccount } from './types';
 
-function getEnvCredentials(): { apiId: number; apiHash: string; proxyUrl: string } {
+function _getEnvCredentials(): { apiId: number; apiHash: string; proxyUrl: string } {
   return {
     apiId: Number(process.env.TGPARS_API_ID || process.env.TELEGRAM_API_ID || '0'),
     apiHash: process.env.TGPARS_API_HASH || process.env.TELEGRAM_API_HASH || '',
@@ -188,7 +188,6 @@ async function parseChatMessages(
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
 
-  let count = 0;
   for await (const msg of client.iterMessages(entity, { limit: opts.message_limit })) {
     if (!msg?.senderId || !msg.message) continue;
     const sender = await msg.getSender();
@@ -202,7 +201,6 @@ async function parseChatMessages(
     } else {
       usersMap.set(Number(u.id), { user: u, messages: [text] });
     }
-    count++;
   }
 
   const results: ParsedUser[] = [];
@@ -246,11 +244,8 @@ async function parsePostComments(client: TelegramClient, link: string, opts: Par
   if (!ch || ch.className !== 'Channel' || !ch.broadcast) return []; // only broadcast channels have comments
   const title = ch.title ?? ch.username ?? String(ch.id);
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
-  let postCount = 0;
-
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
     if (!post?.replies?.comments) continue;
-    postCount++;
     try {
       for await (const reply of client.iterMessages(entity, { replyTo: post.id, limit: 100 })) {
         if (!reply?.senderId || !reply.message) continue;

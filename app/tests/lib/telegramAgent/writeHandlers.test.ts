@@ -14,7 +14,7 @@ import {
   updateProjectFields,
   createProject,
   createTask,
-  updateTaskStatus,
+  updateTaskStatus as _updateTaskStatus,
   updateTaskFields,
   updateReviewStatus,
   launchHhParser,

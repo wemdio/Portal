@@ -50,7 +50,7 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
   const data = (payload.data ?? payload) as Record<string, unknown>;
   const chatId = String(data.chat_id ?? '');
   const text = String(data.text ?? data.message ?? '');
-  const senderId = String(
+  const _senderId = String(
     (data.sender as Record<string, unknown>)?.attendee_provider_id ?? data.sender_id ?? '',
   );
   const accountId = String(data.account_id ?? '');

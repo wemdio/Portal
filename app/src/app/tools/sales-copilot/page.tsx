@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Bot,
@@ -881,10 +881,10 @@ function SyncStatus({ config }: { config: SalesCopilotConfig }) {
 
 function ExcludedUsernamesInput({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
   const [raw, setRaw] = useState(value.join(', '));
-  const prevValue = useRef(value);
-  if (prevValue.current !== value && value.join(', ') !== raw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean).join(', ')) {
+  const [prevValue, setPrevValue] = useState(value);
+  if (prevValue !== value) {
+    setPrevValue(value);
     setRaw(value.join(', '));
-    prevValue.current = value;
   }
   return (
     <input

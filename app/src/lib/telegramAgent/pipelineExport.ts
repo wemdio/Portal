@@ -100,7 +100,7 @@ async function exportHhPipeline(
   parserJobId: string,
   enrichJobId?: string | null,
   validateJobId?: string | null,
-  pipelineName?: string,
+  _pipelineName?: string,
 ): Promise<ExportResult | string> {
   const sb = ensureAdmin();
 
