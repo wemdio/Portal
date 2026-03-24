@@ -14,6 +14,39 @@ const TG_FILE_SIZE_LIMIT_CLOUD = 20 * 1024 * 1024;
 let localApiAvailable: boolean | null = null;
 let localApiCheckedAt = 0;
 const LOCAL_API_RECHECK_MS = 30_000;
+const TG_TRANSCRIPT_WRITE_BACKOFF_MS = 15_000;
+let tgTranscriptWritesPausedUntil = 0;
+let lastTgTranscriptWriteErrorAt = 0;
+
+function canAttemptTranscriptWrite(): boolean {
+  return Date.now() >= tgTranscriptWritesPausedUntil;
+}
+
+function markTranscriptWriteFailure(error: unknown): void {
+  const now = Date.now();
+  tgTranscriptWritesPausedUntil = now + TG_TRANSCRIPT_WRITE_BACKOFF_MS;
+  if (now - lastTgTranscriptWriteErrorAt > TG_TRANSCRIPT_WRITE_BACKOFF_MS) {
+    lastTgTranscriptWriteErrorAt = now;
+    console.error('[tg-transcribe] Failed to write tg_video_transcripts:', error);
+  }
+}
+
+async function safeInsertTranscript(row: Record<string, unknown>): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  if (!canAttemptTranscriptWrite()) return false;
+  try {
+    const { error } = await supabaseAdmin.from('tg_video_transcripts').insert(row);
+    if (error) {
+      markTranscriptWriteFailure(error);
+      return false;
+    }
+    tgTranscriptWritesPausedUntil = 0;
+    return true;
+  } catch (error) {
+    markTranscriptWriteFailure(error);
+    return false;
+  }
+}
 
 async function checkLocalApi(): Promise<boolean> {
   if (!TG_LOCAL_API_URL) return false;
@@ -258,7 +291,7 @@ export async function processVideoMessage(
   if (isLargeFile && !canUseMtproto && !isLocalApi()) {
     const sizeMb = ((videoInfo.fileSize ?? 0) / (1024 * 1024)).toFixed(1);
     const errorText = `Файл слишком большой (${sizeMb} МБ). Лимит Bot API — 20 МБ. Настройте TELEGRAM_API_ID/TELEGRAM_API_HASH или TG_LOCAL_API_URL.`;
-    await supabaseAdmin.from('tg_video_transcripts').insert({
+    await safeInsertTranscript({
       tg_chat_id: msg.chat.id,
       tg_message_id: msg.message_id,
       tg_sender_id: senderId,
@@ -321,7 +354,7 @@ export async function processVideoMessage(
   onProgress?.({ phase: 'transcribing' });
   const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename });
 
-  await supabaseAdmin.from('tg_video_transcripts').insert({
+  await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
     tg_sender_id: senderId,
@@ -387,7 +420,7 @@ export async function saveErrorRecord(
   if (!supabaseAdmin) return;
 
   const errorText = err instanceof Error ? err.message : 'Неизвестная ошибка';
-  await supabaseAdmin.from('tg_video_transcripts').insert({
+  await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,
     tg_sender_id: getSenderId(msg),

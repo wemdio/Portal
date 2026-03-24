@@ -44,7 +44,7 @@ export function TopNav() {
           Portal
         </Link>
 
-        <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none">
+        <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
           {visibleItems.map((item) => {
             const aliases = navActiveAliases[item.href] ?? [];
             const isActive = item.href === '/'

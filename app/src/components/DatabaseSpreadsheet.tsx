@@ -378,9 +378,10 @@ const DEFAULT_ROWS = 20;
 const DEFAULT_COLS = 10;
 const STORAGE_KEY_PREFIX = 'portal:database-spreadsheet';
 const STORAGE_VERSION = 1;
-const STORAGE_SAVE_DELAY = 700;
+const STORAGE_SAVE_DELAY = 2500;
 const STORAGE_SAVE_DELAY_LARGE = 10_000;
 const LARGE_DATASET_ROW_THRESHOLD = 10_000;
+const REMOTE_SAVE_BACKOFF_MS = 15_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
 const BRIEF_SCORING_STORAGE_KEY_PREFIX = 'portal:brief-scoring';
@@ -917,6 +918,13 @@ export function DatabaseSpreadsheet() {
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const accessTokenRef = useRef<string | null>(null);
   const hydratedStateRef = useRef<string | null>(null);
+  const remoteSaveInFlightRef = useRef(false);
+  const remoteSaveQueuedRef = useRef<{
+    userId: string;
+    payload: PersistedSpreadsheetState;
+    isLargeDataset: boolean;
+  } | null>(null);
+  const remoteSaveBackoffUntilRef = useRef(0);
 
   const [reviewSubmit, setReviewSubmit] = useState<{
     isOpen: boolean;
@@ -1007,6 +1015,76 @@ export function DatabaseSpreadsheet() {
       }
     }
   };
+
+  const queueRemoteStateSave = useCallback(
+    (userIdSnapshot: string, payload: PersistedSpreadsheetState, isLargeDataset: boolean) => {
+      remoteSaveQueuedRef.current = { userId: userIdSnapshot, payload, isLargeDataset };
+
+      const pump = () => {
+        const queued = remoteSaveQueuedRef.current;
+        if (!queued) return;
+        if (remoteSaveInFlightRef.current) return;
+
+        const waitMs = remoteSaveBackoffUntilRef.current - Date.now();
+        if (waitMs > 0) {
+          window.setTimeout(pump, waitMs);
+          return;
+        }
+
+        remoteSaveQueuedRef.current = null;
+        remoteSaveInFlightRef.current = true;
+
+        const onDone = (ok: boolean) => {
+          remoteSaveInFlightRef.current = false;
+          if (!ok) {
+            remoteSaveBackoffUntilRef.current = Date.now() + REMOTE_SAVE_BACKOFF_MS;
+          } else {
+            remoteSaveBackoffUntilRef.current = 0;
+          }
+
+          if (remoteSaveQueuedRef.current) {
+            window.setTimeout(pump, ok ? 0 : REMOTE_SAVE_BACKOFF_MS);
+          }
+        };
+
+        if (queued.isLargeDataset) {
+          if (!accessTokenRef.current) {
+            onDone(false);
+            return;
+          }
+          void backgroundSave(
+            { user_id: queued.userId, state: queued.payload, updated_at: new Date().toISOString() },
+            accessTokenRef.current,
+            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+          ).then((ok) => onDone(Boolean(ok)));
+          return;
+        }
+
+        void supabase
+          .from('database_spreadsheet_states')
+          .upsert({
+            user_id: queued.userId,
+            state: queued.payload,
+            updated_at: new Date().toISOString(),
+          })
+          .then(({ error }) => {
+            if (error) {
+              void logError('spreadsheet.state.remote_save.failed', error);
+              onDone(false);
+              return;
+            }
+            onDone(true);
+          })
+          .catch((error) => {
+            void logError('spreadsheet.state.remote_save.failed', error);
+            onDone(false);
+          });
+      };
+
+      pump();
+    },
+    [logError],
+  );
 
   const [personalization, setPersonalization] = useState<PersonalizationState>({
     isOpen: false,
@@ -6974,28 +7052,7 @@ export function DatabaseSpreadsheet() {
 
     saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
-      if (isLargeDataset) {
-        if (accessTokenRef.current) {
-          void backgroundSave(
-            { user_id: userIdSnapshot, state: payload, updated_at: new Date().toISOString() },
-            accessTokenRef.current,
-            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
-          );
-        }
-        return;
-      }
-      void supabase
-        .from('database_spreadsheet_states')
-        .upsert({
-          user_id: userIdSnapshot,
-          state: payload,
-          updated_at: new Date().toISOString(),
-        })
-        .then(({ error }) => {
-          if (error) {
-          void logError('spreadsheet.state.remote_save.failed', error);
-          }
-        });
+      queueRemoteStateSave(userIdSnapshot, payload, isLargeDataset);
     }, delay);
     return () => {
       if (saveTimeoutRef.current) {
@@ -7004,7 +7061,7 @@ export function DatabaseSpreadsheet() {
       }
       cancelBackgroundSave();
     };
-  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId]);
+  }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave]);
 
   useEffect(() => {
     const handleBeforeUnload = () => {

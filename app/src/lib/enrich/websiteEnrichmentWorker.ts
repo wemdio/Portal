@@ -41,10 +41,13 @@ const FETCH_HARD_TIMEOUT_MS = Number(
 const STALE_PROCESSING_MINUTES = Number(process.env.WEBSITE_ENRICHMENT_STALE_MINUTES ?? '3');
 const MAX_ATTEMPTS = Number(process.env.WEBSITE_ENRICHMENT_MAX_ATTEMPTS ?? '3');
 const SUPABASE_QUERY_TIMEOUT_MS = Number(process.env.WEBSITE_ENRICHMENT_DB_TIMEOUT_MS ?? '30000');
+const EMAIL_CACHE_WRITE_BACKOFF_MS = Number(process.env.WEBSITE_ENRICHMENT_EMAIL_CACHE_BACKOFF_MS ?? '15000');
 
 const cacheSuccessTtlMs = CACHE_SUCCESS_DAYS * 24 * 60 * 60 * 1000;
 const cacheErrorTtlMs = CACHE_ERROR_HOURS * 60 * 60 * 1000;
 const staleProcessingMs = STALE_PROCESSING_MINUTES * 60 * 1000;
+let emailCacheWritesPausedUntil = 0;
+let lastEmailCacheWriteErrorAt = 0;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -226,6 +229,7 @@ async function setEmailCache(
   payload: { emails?: string; error?: string; sourceUrl?: string; pagesScanned?: number },
 ) {
   if (!supabaseAdmin) return;
+  if (Date.now() < emailCacheWritesPausedUntil) return;
   const now = new Date();
   const hasEmails = payload.emails && payload.emails.length > 0;
   const expiresAt = hasEmails
@@ -250,8 +254,14 @@ async function setEmailCache(
         ),
       'Таймаут записи email-кэша',
     );
+    emailCacheWritesPausedUntil = 0;
   } catch {
-    // Cache write should not break item processing.
+    // Cache write should not break item processing and must not flood PostgREST on degradation.
+    emailCacheWritesPausedUntil = Date.now() + EMAIL_CACHE_WRITE_BACKOFF_MS;
+    if (Date.now() - lastEmailCacheWriteErrorAt > EMAIL_CACHE_WRITE_BACKOFF_MS) {
+      lastEmailCacheWriteErrorAt = Date.now();
+      await logError('website.enrichment.worker.email_cache_write_failed', new Error('email cache write failed'));
+    }
   }
 }
 

@@ -781,6 +781,9 @@ export default function CisLeadFinderPage() {
                       {isRunning && enrichProg > 0 && enrichProg < 1 ? (
                         <div className="text-[10px] text-emerald-600 truncate">{getStageLabel(enrichProg)}</div>
                       ) : null}
+                      {isRunning && progressPercent === 0 ? (
+                        <div className="text-[10px] text-amber-600 truncate">Подготовка данных, это может занять несколько минут…</div>
+                      ) : null}
                     </div>
                   </div>
                   {j.error_message ? (

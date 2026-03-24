@@ -113,7 +113,7 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  const { data: { session } } = await supabase.auth.getSession()
   const isPublicPath =
     pathname === '/maintenance' ||
     pathname === '/login' ||
@@ -121,40 +121,12 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith('/api/telegram/link') ||
     pathname.startsWith('/review/base/')
 
-  // Protect routes
-  if (!user && !isPublicPath) {
+  if (!session && !isPublicPath) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  if (user && pathname === '/login') {
+  if (session && pathname === '/login') {
     return NextResponse.redirect(new URL('/', request.url))
-  }
-
-  // Protect admin routes - only admin role can access
-  if (user && request.nextUrl.pathname.startsWith('/admin')) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single()
-
-    if (!profile || profile.role !== 'admin') {
-      return NextResponse.redirect(new URL('/', request.url))
-    }
-  }
-
-  // Protect billing-calendar routes - only technician, lead, admin, director
-  if (user && request.nextUrl.pathname.startsWith('/billing-calendar')) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single()
-
-    const allowedRoles = ['technician', 'lead', 'admin', 'director']
-    if (!profile || !allowedRoles.includes(profile.role)) {
-      return NextResponse.redirect(new URL('/', request.url))
-    }
   }
 
   return response
