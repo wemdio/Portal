@@ -17,6 +17,7 @@ import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportR
 
 const BUCKET = 'cis-lead-imports';
 const SUPABASE_BATCH_SIZE = 500;
+const RAW_LEADS_PAGE_SIZE = 1000;
 
 type LeadImportJobRow = {
   id: string;
@@ -186,67 +187,94 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
 
   const db = supabaseAdmin;
 
-  // Keep this bounded; the job can be resumed by re-running normalization later.
-  const { data: leads, error } = await db
-    .from('raw_leads')
-    .select('id, raw_inn, raw_company_name, raw_city, raw_region')
-    .eq('import_job_id', jobId)
-    .is('company_id', null)
-    .limit(5000);
-
-  if (error) throw new Error(error.message);
-  const rows = (leads ?? []) as Array<{
-    id: string;
-    raw_inn: string | null;
-    raw_company_name: string | null;
-    raw_city: string | null;
-    raw_region: string | null;
-  }>;
-
   const now = new Date().toISOString();
   let normalized = 0;
   let contactsCreated = 0;
+  let totalRows = 0;
 
-  console.log(`[cis-leads][${jobId}] normalizeCompanies: ${rows.length} leads to process`);
+  while (true) {
+    const { data: leads, error } = await db
+      .from('raw_leads')
+      .select('id, raw_inn, raw_company_name, raw_city, raw_region')
+      .eq('import_job_id', jobId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
 
-  await mapWithConcurrency(rows, 6, async (lead) => {
-    const inn = normalizeInn(lead.raw_inn);
-    const name = (lead.raw_company_name ?? '').trim();
-    const city = (lead.raw_city ?? '').trim();
+    const rows = (leads ?? []) as Array<{
+      id: string;
+      raw_inn: string | null;
+      raw_company_name: string | null;
+      raw_city: string | null;
+      raw_region: string | null;
+    }>;
+    if (rows.length === 0) break;
+    totalRows += rows.length;
+    console.log(`[cis-leads][${jobId}] normalizeCompanies: processing chunk of ${rows.length}`);
 
-    let suggestion = null as Awaited<ReturnType<typeof findByInn>>;
-    try {
-      if (inn) suggestion = await findByInn(inn);
-      else if (name) suggestion = await suggestByName(name, city || undefined);
-    } catch {
-      suggestion = null;
-    }
-    if (!suggestion) return;
+    await mapWithConcurrency(rows, 6, async (lead) => {
+      const inn = normalizeInn(lead.raw_inn);
+      const name = (lead.raw_company_name ?? '').trim();
+      const city = (lead.raw_city ?? '').trim();
 
-    const sData = suggestion.data ?? {};
-    const outInn = normalizeInn(String(sData.inn ?? inn ?? '')) ?? inn;
-    const outOgrn = String(sData.ogrn ?? '').trim() || null;
-    const outName =
-      String(sData.name?.full_with_opf ?? '').trim() ||
-      String(suggestion.value ?? '').trim() ||
-      name;
-    if (!outName) return;
-    const outShort = String(sData.name?.short_with_opf ?? '').trim() || null;
-    const outRegion = String(sData.address?.data?.region ?? lead.raw_region ?? '').trim() || null;
-    const outCity = String(sData.address?.data?.city ?? lead.raw_city ?? '').trim() || null;
+      let suggestion = null as Awaited<ReturnType<typeof findByInn>>;
+      try {
+        if (inn) suggestion = await findByInn(inn);
+        else if (name) suggestion = await suggestByName(name, city || undefined);
+      } catch {
+        suggestion = null;
+      }
+      if (!suggestion) return;
 
-    const dadataPhones = (sData.phones as Array<{ value?: string }> | undefined) ?? [];
-    const dadataEmails = (sData.emails as Array<{ value?: string }> | undefined) ?? [];
-    const outPhone = dadataPhones[0]?.value?.trim() || null;
-    const outEmail = dadataEmails[0]?.value?.trim()?.toLowerCase() || null;
+      const sData = suggestion.data ?? {};
+      const outInn = normalizeInn(String(sData.inn ?? inn ?? '')) ?? inn;
+      const outOgrn = String(sData.ogrn ?? '').trim() || null;
+      const outName =
+        String(sData.name?.full_with_opf ?? '').trim() ||
+        String(suggestion.value ?? '').trim() ||
+        name;
+      if (!outName) return;
+      const outShort = String(sData.name?.short_with_opf ?? '').trim() || null;
+      const outRegion = String(sData.address?.data?.region ?? lead.raw_region ?? '').trim() || null;
+      const outCity = String(sData.address?.data?.city ?? lead.raw_city ?? '').trim() || null;
 
-    let companyId: string | null = null;
-    if (outInn) {
-      const { data: company, error: upsertErr } = await db
-        .from('companies')
-        .upsert(
-          {
-            inn: outInn,
+      const dadataPhones = (sData.phones as Array<{ value?: string }> | undefined) ?? [];
+      const dadataEmails = (sData.emails as Array<{ value?: string }> | undefined) ?? [];
+      const outPhone = dadataPhones[0]?.value?.trim() || null;
+      const outEmail = dadataEmails[0]?.value?.trim()?.toLowerCase() || null;
+
+      let companyId: string | null = null;
+      if (outInn) {
+        const { data: company, error: upsertErr } = await db
+          .from('companies')
+          .upsert(
+            {
+              inn: outInn,
+              ogrn: outOgrn,
+              name: outName,
+              short_name: outShort,
+              brand_name: null,
+              region: outRegion,
+              city: outCity,
+              okved_main: null,
+              employees_range: null,
+              site: null,
+              phone: outPhone,
+              email: outEmail,
+              source: 'dadata',
+              source_confidence: 1.0,
+              updated_at: now,
+            },
+            { onConflict: 'inn' },
+          )
+          .select('id')
+          .single<{ id: string }>();
+        if (!upsertErr && company) companyId = company.id;
+      } else {
+        const { data: company, error: insErr } = await db
+          .from('companies')
+          .insert({
+            inn: null,
             ogrn: outOgrn,
             name: outName,
             short_name: outShort,
@@ -259,173 +287,153 @@ async function normalizeCompaniesForJob(jobId: string, userId: string): Promise<
             phone: outPhone,
             email: outEmail,
             source: 'dadata',
-            source_confidence: 1.0,
+            source_confidence: 0.7,
             updated_at: now,
-          },
-          { onConflict: 'inn' },
-        )
-        .select('id')
-        .single<{ id: string }>();
-      if (!upsertErr && company) companyId = company.id;
-    } else {
-      const { data: company, error: insErr } = await db
-        .from('companies')
-        .insert({
-          inn: null,
-          ogrn: outOgrn,
-          name: outName,
-          short_name: outShort,
-          brand_name: null,
-          region: outRegion,
-          city: outCity,
-          okved_main: null,
-          employees_range: null,
-          site: null,
-          phone: outPhone,
-          email: outEmail,
-          source: 'dadata',
-          source_confidence: 0.7,
-          updated_at: now,
-        })
-        .select('id')
-        .single<{ id: string }>();
-      if (!insErr && company) companyId = company.id;
-    }
+          })
+          .select('id')
+          .single<{ id: string }>();
+        if (!insErr && company) companyId = company.id;
+      }
 
-    if (!companyId) return;
-    normalized++;
+      if (!companyId) return;
+      normalized++;
 
-    const count = await upsertAllDadataLprContacts({
-      userId,
-      companyId,
-      management: sData.management ?? undefined,
-      managers: (sData.managers as DadataManager[] | undefined) ?? undefined,
-      founders: (sData.founders as DadataFounder[] | undefined) ?? undefined,
+      const count = await upsertAllDadataLprContacts({
+        userId,
+        companyId,
+        management: sData.management ?? undefined,
+        managers: (sData.managers as DadataManager[] | undefined) ?? undefined,
+        founders: (sData.founders as DadataFounder[] | undefined) ?? undefined,
+      });
+      contactsCreated += count;
+
+      await db
+        .from('raw_leads')
+        .update({ company_id: companyId })
+        .eq('id', lead.id)
+        .eq('user_id', userId);
     });
-    contactsCreated += count;
+  }
 
-    await db
-      .from('raw_leads')
-      .update({ company_id: companyId })
-      .eq('id', lead.id)
-      .eq('user_id', userId);
-  });
-
-  console.log(`[cis-leads][${jobId}] normalizeCompanies: done, ${normalized} companies, ${contactsCreated} contacts`);
+  console.log(`[cis-leads][${jobId}] normalizeCompanies: done, scanned ${totalRows} leads, ${normalized} companies, ${contactsCreated} contacts`);
 }
 
 async function fallbackLinkCompaniesFromRawLeads(jobId: string, userId: string): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
-  const { data: leads, error } = await db
-    .from('raw_leads')
-    .select('id, raw_inn, raw_company_name, raw_city, raw_region, raw_site')
-    .eq('import_job_id', jobId)
-    .is('company_id', null)
-    .limit(5000);
-  if (error) throw new Error(error.message);
-
-  const rows = (leads ?? []) as Array<{
-    id: string;
-    raw_inn: string | null;
-    raw_company_name: string | null;
-    raw_city: string | null;
-    raw_region: string | null;
-    raw_site: string | null;
-  }>;
-  if (rows.length === 0) return;
-
   const now = new Date().toISOString();
-  for (const lead of rows) {
-    const inn = normalizeInn(lead.raw_inn);
-    const name = (lead.raw_company_name ?? '').trim();
-    const region = (lead.raw_region ?? '').trim() || null;
-    const city = (lead.raw_city ?? '').trim() || null;
-    const site = (lead.raw_site ?? '').trim() || null;
+  while (true) {
+    const { data: leads, error } = await db
+      .from('raw_leads')
+      .select('id, raw_inn, raw_company_name, raw_city, raw_region, raw_site')
+      .eq('import_job_id', jobId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
 
-    let companyId: string | null = null;
+    const rows = (leads ?? []) as Array<{
+      id: string;
+      raw_inn: string | null;
+      raw_company_name: string | null;
+      raw_city: string | null;
+      raw_region: string | null;
+      raw_site: string | null;
+    }>;
+    if (rows.length === 0) break;
 
-    if (inn) {
-      const { data: company, error: upsertErr } = await db
-        .from('companies')
-        .upsert(
-          {
-            inn,
-            name: name || `Компания ${inn}`,
-            short_name: name || null,
-            region,
-            city,
-            site,
-            source: 'import_raw',
-            source_confidence: 0.6,
-            updated_at: now,
-          },
-          { onConflict: 'inn' },
-        )
-        .select('id')
-        .single<{ id: string }>();
-      if (!upsertErr && company) companyId = company.id;
-    } else if (name) {
-      let existingQuery = db
-        .from('companies')
-        .select('id')
-        .eq('name', name);
-      existingQuery = region ? existingQuery.eq('region', region) : existingQuery.is('region', null);
-      const { data: existing } = await existingQuery
-        .limit(1)
-        .maybeSingle<{ id: string }>();
-      if (existing?.id) {
-        companyId = existing.id;
-      } else {
-        const { data: inserted } = await db
+    for (const lead of rows) {
+      const inn = normalizeInn(lead.raw_inn);
+      const name = (lead.raw_company_name ?? '').trim();
+      const region = (lead.raw_region ?? '').trim() || null;
+      const city = (lead.raw_city ?? '').trim() || null;
+      const site = (lead.raw_site ?? '').trim() || null;
+
+      let companyId: string | null = null;
+
+      if (inn) {
+        const { data: company, error: upsertErr } = await db
           .from('companies')
-          .insert({
-            inn: null,
-            name,
-            short_name: name,
-            region,
-            city,
-            site,
-            source: 'import_raw',
-            source_confidence: 0.5,
-            updated_at: now,
-          })
+          .upsert(
+            {
+              inn,
+              name: name || `Компания ${inn}`,
+              short_name: name || null,
+              region,
+              city,
+              site,
+              source: 'import_raw',
+              source_confidence: 0.6,
+              updated_at: now,
+            },
+            { onConflict: 'inn' },
+          )
           .select('id')
           .single<{ id: string }>();
-        companyId = inserted?.id ?? null;
+        if (!upsertErr && company) companyId = company.id;
+      } else if (name) {
+        let existingQuery = db
+          .from('companies')
+          .select('id')
+          .eq('name', name);
+        existingQuery = region ? existingQuery.eq('region', region) : existingQuery.is('region', null);
+        const { data: existing } = await existingQuery
+          .limit(1)
+          .maybeSingle<{ id: string }>();
+        if (existing?.id) {
+          companyId = existing.id;
+        } else {
+          const { data: inserted } = await db
+            .from('companies')
+            .insert({
+              inn: null,
+              name,
+              short_name: name,
+              region,
+              city,
+              site,
+              source: 'import_raw',
+              source_confidence: 0.5,
+              updated_at: now,
+            })
+            .select('id')
+            .single<{ id: string }>();
+          companyId = inserted?.id ?? null;
+        }
       }
+
+      if (!companyId) continue;
+
+      await db
+        .from('raw_leads')
+        .update({ company_id: companyId })
+        .eq('id', lead.id)
+        .eq('user_id', userId);
     }
-
-    if (!companyId) continue;
-
-    await db
-      .from('raw_leads')
-      .update({ company_id: companyId })
-      .eq('id', lead.id)
-      .eq('user_id', userId);
   }
 }
 
 async function backfillRawInn(jobId: string, userId: string): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
-  const { data: leads } = await db
-    .from('raw_leads')
-    .select('id,raw_inn,raw_payload')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .is('company_id', null)
-    .limit(5000);
-  if (!leads?.length) return;
+  while (true) {
+    const { data: leads } = await db
+      .from('raw_leads')
+      .select('id,raw_inn,raw_payload')
+      .eq('import_job_id', jobId)
+      .eq('user_id', userId)
+      .is('company_id', null)
+      .range(0, RAW_LEADS_PAGE_SIZE - 1);
+    if (!leads?.length) break;
 
-  for (const lead of leads as Array<{ id: string; raw_inn: string | null; raw_payload: Record<string, unknown> | null }>) {
-    if (lead.raw_inn) continue;
-    const payload = lead.raw_payload;
-    if (!payload || typeof payload !== 'object') continue;
-    const inn = extractInnFromRow(payload);
-    if (!inn) continue;
-    await db.from('raw_leads').update({ raw_inn: inn }).eq('id', lead.id).eq('user_id', userId);
+    for (const lead of leads as Array<{ id: string; raw_inn: string | null; raw_payload: Record<string, unknown> | null }>) {
+      if (lead.raw_inn) continue;
+      const payload = lead.raw_payload;
+      if (!payload || typeof payload !== 'object') continue;
+      const inn = extractInnFromRow(payload);
+      if (!inn) continue;
+      await db.from('raw_leads').update({ raw_inn: inn }).eq('id', lead.id).eq('user_id', userId);
+    }
   }
 }
 

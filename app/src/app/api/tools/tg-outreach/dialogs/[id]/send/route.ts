@@ -34,6 +34,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           .single();
       
         if (dErr || !dialog) return jsonError('Диалог не найден', 404);
+        if (dialog.can_send === false) return jsonError('Отправка для этого диалога отключена', 400);
       
         const newMsg: DialogMessage = {
           role: 'assistant',
