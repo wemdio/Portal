@@ -1,5 +1,7 @@
 'use client'
 
+import Link from 'next/link'
+
 export default function AdminError({
   error,
   reset,
@@ -25,12 +27,12 @@ export default function AdminError({
           >
             Попробовать снова
           </button>
-          <a
+          <Link
             href="/"
             className="rounded-lg border border-zinc-200 px-5 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
           >
             На главную
-          </a>
+          </Link>
         </div>
       </div>
     </div>

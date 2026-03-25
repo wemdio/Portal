@@ -1,5 +1,7 @@
 'use client'
 
+import Link from 'next/link'
+
 export default function ToolsError({
   error,
   reset,
@@ -25,12 +27,12 @@ export default function ToolsError({
           >
             Попробовать снова
           </button>
-          <a
+          <Link
             href="/tools"
             className="rounded-lg border border-zinc-200 px-5 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
           >
             К инструментам
-          </a>
+          </Link>
         </div>
       </div>
     </div>

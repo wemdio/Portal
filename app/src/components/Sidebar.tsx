@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { supabase } from '@/lib/supabaseClient';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
