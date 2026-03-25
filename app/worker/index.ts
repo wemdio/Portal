@@ -20,7 +20,7 @@ import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-const HH_DRAIN_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
 let shuttingDown = false;
@@ -263,7 +263,16 @@ async function claimEmailValidationJob(): Promise<string | null> {
     .maybeSingle();
 
   if (!pending) return null;
-  return pending.id as string;
+
+  const { data: claimed } = await db
+    .from('email_validation_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id as string ?? null;
 }
 
 async function claimLeadImportJob(): Promise<string | null> {

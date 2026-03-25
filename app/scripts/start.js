@@ -3,7 +3,11 @@ const { spawn } = require('child_process');
 const { ensureDatabase } = require('./db/ensureDatabase');
 
 async function main() {
-  await ensureDatabase();
+  try {
+    await ensureDatabase();
+  } catch (err) {
+    console.error('[start] DB migration failed — starting server anyway:', err?.message ?? err);
+  }
 
   const child = spawn('node', ['server.js'], { stdio: 'inherit' });
   child.on('exit', (code, signal) => {

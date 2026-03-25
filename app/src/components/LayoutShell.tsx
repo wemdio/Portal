@@ -7,6 +7,7 @@ import { Sidebar } from './Sidebar';
 import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
+import { UserProvider } from '@/lib/UserProvider';
 
 const MD_BREAKPOINT = 768;
 
@@ -78,6 +79,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
+    <UserProvider>
     <div
       className={shellClassName}
       style={{
@@ -123,5 +125,6 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
     </div>
+    </UserProvider>
   );
 }
