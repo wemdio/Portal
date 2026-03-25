@@ -763,7 +763,7 @@ async def _fetch_heartbeat_db_data() -> dict:
 
                 if stats_table:
                     data["slow_queries"] = await conn.fetch(
-                        f"SELECT left(query, 120) AS q, "
+                        f"SELECT query AS q, "
                         f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
                         f"calls::bigint AS calls "
                         f"FROM {stats_table} "
@@ -771,7 +771,7 @@ async def _fetch_heartbeat_db_data() -> dict:
                         f"ORDER BY max_exec_time DESC LIMIT 5"
                     )
                     data["popular_queries"] = await conn.fetch(
-                        f"SELECT left(query, 120) AS q, "
+                        f"SELECT query AS q, "
                         f"calls::bigint AS calls, "
                         f"round(mean_exec_time::numeric, 2) AS avg_ms "
                         f"FROM {stats_table} "
@@ -997,10 +997,10 @@ async def _ping_proxies(count: int = 3) -> str:
     return "\n".join(lines)
 
 
-def _sanitize_query(q: str | None, limit: int = 70) -> str:
-    """Truncate and HTML-escape a SQL snippet for Telegram."""
-    text = (q or "").strip().replace("\n", " ")
-    text = text.replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
+def _sanitize_query(q: str | None, limit: int = 300) -> str:
+    """Clean and HTML-escape a SQL snippet for Telegram."""
+    text = " ".join((q or "").split())
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(text) > limit:
         text = text[: limit - 3] + "..."
     return text

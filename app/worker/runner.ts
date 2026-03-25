@@ -34,6 +34,9 @@ switch (kind) {
   case 'salescopilot':
     run('./salesCopilot');
     break;
+  case 'aicaller':
+    run('./aiCaller');
+    break;
   case 'all':
   default:
     run('./index');
