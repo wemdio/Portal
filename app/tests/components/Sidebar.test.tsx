@@ -14,26 +14,19 @@ jest.mock('next/link', () => {
   };
 });
 
-jest.mock('@/lib/supabaseClient', () => {
-  const mockSelect = jest.fn().mockReturnThis();
-  const mockEq = jest.fn().mockReturnThis();
-  const mockSingle = jest.fn().mockResolvedValue({ data: { role: 'technician' } });
-  const subscription = { unsubscribe: jest.fn() };
-
-  return {
-    supabase: {
-      auth: {
-        getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
-        onAuthStateChange: jest.fn().mockReturnValue({ data: { subscription } }),
-      },
-      from: jest.fn(() => ({
-        select: mockSelect,
-        eq: mockEq,
-        single: mockSingle,
-      })),
-    },
-  };
-});
+jest.mock('@/lib/UserProvider', () => ({
+  useUser: () => ({
+    userRole: 'technician',
+    userEmail: 'test@example.com',
+    userFullName: 'Test User',
+    userAvatarUrl: null,
+    navTabVisibility: {},
+    visibleTools: null,
+    badges: {},
+    handleAvatarError: jest.fn(),
+    handleSignOut: jest.fn(),
+  }),
+}));
 
 describe('Sidebar Component', () => {
   it('should render navigation items', () => {
