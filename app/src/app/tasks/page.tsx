@@ -20,6 +20,7 @@ import { Project, Task, TaskBoard, TaskBoardColumn, TaskStatus, UserRole } from 
 import { logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { isLead as checkIsLead } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
@@ -159,8 +160,7 @@ export default function TasksPage() {
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const [editingResultValue, setEditingResultValue] = useState('');
 
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
-  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  const { userRole: currentUserRole, userFullName: currentUserName } = useUser();
   const [allProfiles, setAllProfiles] = useState<ProfileOption[]>([]);
 
   const [showAddForm, setShowAddForm] = useState(false);
@@ -223,18 +223,6 @@ export default function TasksPage() {
   async function loadData() {
     try {
       setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user?.id) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role, full_name')
-          .eq('id', session.user.id)
-          .single();
-        if (profile) {
-          setCurrentUserRole(profile.role as UserRole);
-          setCurrentUserName(profile.full_name as string);
-        }
-      }
 
       const [projRes, taskRes, boardsRes, columnsRes, profilesRes] = await Promise.all([
         supabase.from('projects').select('*'),

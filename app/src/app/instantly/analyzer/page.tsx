@@ -8,8 +8,8 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import { getCurrentUserRole } from '@/lib/roles';
 import { isAdmin } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
@@ -66,7 +66,8 @@ type SortDir = 'asc' | 'desc';
 const ANALYZABLE_SET = new Set<number>(ANALYZABLE_STATUSES as unknown as number[]);
 
 export default function CompletedCampaignAnalyzer() {
-  const [authorized, setAuthorized] = useState<boolean | null>(null);
+  const { userRole } = useUser();
+  const authorized = userRole === null ? null : isAdmin(userRole);
   const [rows, setRows] = useState<CampaignRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -83,12 +84,6 @@ export default function CompletedCampaignAnalyzer() {
 
   const [clearing, setClearing] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState<{ id: string; name: string; count: number } | null>(null);
-
-  useEffect(() => {
-    getCurrentUserRole().then((role) => {
-      setAuthorized(isAdmin(role));
-    });
-  }, []);
 
   const toggleStatus = (status: number) => {
     setStatusFilters((prev) => {

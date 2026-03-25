@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole } from '@/types';
 import { isTechnician, isLead } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 
 /* ═══════════════════════════════════════════
    TYPES
@@ -153,11 +154,10 @@ function getNextMonthDate(dateStr: string): string {
    ═══════════════════════════════════════════ */
 
 export default function BillingCalendarPage() {
+  const { userId, userRole } = useUser();
   const [subscriptions, setSubscriptions] = useState<EmailSubscription[]>([]);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [loading, setLoading] = useState(true);
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
-  const [userId, setUserId] = useState<string | null>(null);
 
   // Calendar state
   const now = new Date();
@@ -206,25 +206,7 @@ export default function BillingCalendarPage() {
     notes: '',
   });
 
-  /* ─── Auth & Data Fetching ─── */
-
-  useEffect(() => {
-    async function init() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user) return;
-
-      setUserId(session.user.id);
-
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', session.user.id)
-        .single();
-
-      if (profile) setUserRole(profile.role as UserRole);
-    }
-    init();
-  }, []);
+  /* ─── Data Fetching ─── */
 
   // Table existence state
   const [tableExists, setTableExists] = useState(true);

@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
-import { UserProfile, UserRole } from '@/types';
-import { getCurrentUserRole, canCreateProjects, ROLE_LABELS } from '@/lib/roles';
+import { UserProfile } from '@/types';
+import { canCreateProjects, ROLE_LABELS } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions } from '@/lib/projectAssignees';
 
@@ -40,22 +41,14 @@ function monthsBetween(startStr: string, endStr: string): number {
 
 export default function NewProjectPage() {
   const router = useRouter();
+  const { userRole } = useUser();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
-  const [checkingAccess, setCheckingAccess] = useState(true);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   
   useEffect(() => {
-    void checkAccess();
     void fetchAssigneeUsers();
   }, []);
-
-  async function checkAccess() {
-    const role = await getCurrentUserRole();
-    setUserRole(role);
-    setCheckingAccess(false);
-  }
 
   async function fetchAssigneeUsers() {
     try {
@@ -205,7 +198,7 @@ export default function NewProjectPage() {
     }
   };
 
-  if (checkingAccess) {
+  if (userRole === null) {
     return (
       <div className="flex h-64 items-center justify-center">
         <div className="text-gray-500">Загрузка...</div>
