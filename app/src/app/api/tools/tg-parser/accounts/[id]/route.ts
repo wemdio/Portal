@@ -32,7 +32,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
           return jsonError('Invalid JSON body', 400);
         }
       
-        const allowed = ['name', 'is_active', 'proxy_url', 'phone', 'session_data'] as const;
+        const allowed = ['name', 'is_active', 'proxy_url', 'phone', 'session_data', 'daily_limit'] as const;
         const updates: Record<string, unknown> = {};
         for (const key of allowed) {
           if (body[key] !== undefined) updates[key] = body[key];
@@ -47,7 +47,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
           .update(updates)
           .eq('id', id)
           .eq('user_id', user.id)
-          .select('id, name, api_id, api_hash, phone, proxy_url, session_data, is_active, created_at')
+          .select('id, name, api_id, api_hash, phone, proxy_url, session_data, is_active, daily_limit, created_at')
           .single();
       
         if (error) return jsonError(error.message, 500);
