@@ -1006,77 +1006,6 @@ def _sanitize_query(q: str | None, limit: int = 70) -> str:
     return text
 
 
-async def _fetch_performance_stats() -> str | None:
-    """Fetch DB performance: slow queries, active users, popular queries."""
-    if not DATABASE_URL:
-        return None
-
-    sections: list[str] = []
-    try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
-        try:
-            stats_table: str | None = None
-            for candidate in ("pg_stat_statements", "extensions.pg_stat_statements"):
-                try:
-                    await conn.fetchval(f"SELECT 1 FROM {candidate} LIMIT 1")
-                    stats_table = candidate
-                    break
-                except Exception:
-                    continue
-
-            if stats_table:
-                slow = await conn.fetch(
-                    f"SELECT left(query, 120) AS q, "
-                    f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
-                    f"calls::bigint AS calls "
-                    f"FROM {stats_table} "
-                    f"WHERE queryid IS NOT NULL "
-                    f"ORDER BY max_exec_time DESC LIMIT 5"
-                )
-                if slow:
-                    lines = ["🐌 <b>Долгие запросы</b> (max время):"]
-                    for i, r in enumerate(slow, 1):
-                        q = _sanitize_query(r["q"])
-                        calls_fmt = f"{r['calls']:,}".replace(",", " ")
-                        lines.append(f"  {i}. <code>{q}</code>")
-                        lines.append(f"     max {r['max_s']}s · {calls_fmt} вызовов")
-                    sections.append("\n".join(lines))
-
-                popular = await conn.fetch(
-                    f"SELECT left(query, 120) AS q, "
-                    f"calls::bigint AS calls, "
-                    f"round(mean_exec_time::numeric, 2) AS avg_ms "
-                    f"FROM {stats_table} "
-                    f"WHERE queryid IS NOT NULL "
-                    f"ORDER BY calls DESC LIMIT 5"
-                )
-                if popular:
-                    lines = ["🔥 <b>Популярные запросы</b> (вызовы):"]
-                    for i, r in enumerate(popular, 1):
-                        q = _sanitize_query(r["q"])
-                        calls_fmt = f"{r['calls']:,}".replace(",", " ")
-                        lines.append(f"  {i}. <code>{q}</code>")
-                        lines.append(f"     {calls_fmt} вызовов · avg {r['avg_ms']}ms")
-                    sections.append("\n".join(lines))
-
-            users = await conn.fetch(
-                "SELECT usename, count(*)::int AS n "
-                "FROM pg_stat_activity WHERE datname = current_database() "
-                "GROUP BY usename ORDER BY n DESC LIMIT 5"
-            )
-            if users:
-                lines = ["👥 <b>Пользователи БД</b> (подключения):"]
-                for r in users:
-                    lines.append(f"  • {r['usename']}: {r['n']}")
-                sections.append("\n".join(lines))
-        finally:
-            await conn.close()
-    except Exception as e:
-        return f"⚠️ Ошибка: {str(e)[:80]}"
-
-    return "\n\n".join(sections) if sections else None
-
-
 async def send_heartbeat():
     """Periodic heartbeat: chart + caption + performance stats."""
     global HEARTBEAT_STARTED
@@ -1085,24 +1014,25 @@ async def send_heartbeat():
         await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
         return
 
+    db_data = await _fetch_heartbeat_db_data()
     ping_text = await _ping_site()
 
     chart = _render_heartbeat_chart()
     if chart:
-        caption = await _heartbeat_body(include_sparklines=False)
+        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
         caption += f"\n\n{ping_text}"
         ok = await send_telegram_photo(chart, caption=caption)
         if not ok:
-            text = await _heartbeat_body(include_sparklines=True)
+            text = _format_heartbeat_caption(db_data, include_sparklines=True)
             text += f"\n\n{ping_text}"
             await send_telegram(text)
     else:
-        text = await _heartbeat_body(include_sparklines=True)
+        text = _format_heartbeat_caption(db_data, include_sparklines=True)
         text += f"\n\n{ping_text}"
         await send_telegram(text)
 
     extra_parts: list[str] = []
-    perf = await _fetch_performance_stats()
+    perf = _format_performance_stats(db_data)
     if perf:
         extra_parts.append(perf)
     proxy_text = await _ping_proxies()
