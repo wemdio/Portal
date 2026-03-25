@@ -8,7 +8,8 @@ import {
   Loader2, AlertCircle, Activity, ListChecks, AlertTriangle,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import { getCurrentUserRole, isAdmin } from '@/lib/roles';
+import { isAdmin } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
 
@@ -85,11 +86,8 @@ export default function InstantlyDashboard() {
   const [error, setError] = useState('');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentCampaigns, setRecentCampaigns] = useState<Campaign[]>([]);
-  const [userIsAdmin, setUserIsAdmin] = useState(false);
-
-  useEffect(() => {
-    getCurrentUserRole().then((role) => setUserIsAdmin(isAdmin(role)));
-  }, []);
+  const { userRole } = useUser();
+  const userIsAdmin = isAdmin(userRole);
 
   const load = useCallback(async () => {
     setLoading(true);

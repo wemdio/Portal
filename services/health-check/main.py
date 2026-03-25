@@ -785,6 +785,8 @@ async def _fetch_heartbeat_db_data() -> dict:
                     "GROUP BY usename ORDER BY n DESC LIMIT 5"
                 )
 
+                data["active_jobs"] = await _fetch_active_jobs(conn)
+
                 data["ok"] = True
                 return data
             finally:
@@ -875,6 +877,69 @@ def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> st
                 parts.append(f"<code>{spark_c}</code>")
 
     return "\n".join(parts)
+
+
+_JOB_TABLES: list[tuple[str, str, list[str]]] = [
+    ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
+    ("ai_campaigns",            "AI Кампании",       ["running"]),
+    ("parser_jobs",             "HH Парсер",         ["pending", "running"]),
+    ("search_parser_jobs",      "Поисковый парсер",  ["pending", "running"]),
+    ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
+    ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
+    ("email_validation_jobs",   "Email валидация",   ["pending", "running"]),
+    ("website_enrichment_jobs", "Обогащение",        ["pending", "running"]),
+    ("brief_scoring_jobs",      "Скоринг брифов",    ["pending", "running"]),
+    ("yandex_maps_jobs",        "Яндекс Карты",      ["pending", "running"]),
+    ("lead_import_jobs",        "Импорт лидов",      ["pending", "running"]),
+    ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
+    ("tg_scan_jobs",            "TG Сканер",         ["pending", "running"]),
+    ("lpr_jobs",                "LPR Discovery",     ["pending", "running"]),
+    ("dfyb_jobs",               "DFYB",              ["planning", "parsing", "processing"]),
+]
+
+
+async def _fetch_active_jobs(conn) -> list[dict]:
+    """Query all job tables for active task counts (safe — skips missing tables)."""
+    results: list[dict] = []
+    for table, label, statuses in _JOB_TABLES:
+        try:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(statuses)))
+            rows = await conn.fetch(
+                f"SELECT status, count(*)::int AS n "
+                f"FROM public.{table} "
+                f"WHERE status IN ({placeholders}) "
+                f"GROUP BY status",
+                *statuses,
+            )
+            if rows:
+                total = sum(r["n"] for r in rows)
+                breakdown = {r["status"]: r["n"] for r in rows}
+                results.append({"label": label, "total": total, "breakdown": breakdown})
+        except Exception:
+            pass
+    return results
+
+
+def _format_active_jobs(data: dict) -> str | None:
+    """Format active worker jobs from pre-fetched data."""
+    jobs = data.get("active_jobs")
+    if not jobs:
+        return None
+
+    active = [j for j in jobs if j["total"] > 0]
+    if not active:
+        return None
+
+    total_all = sum(j["total"] for j in active)
+    lines = [f"⚙️ <b>Активные задачи</b> ({total_all}):"]
+    for j in sorted(active, key=lambda x: x["total"], reverse=True):
+        parts = []
+        for status, count in sorted(j["breakdown"].items(), key=lambda x: -x[1]):
+            parts.append(f"{count} {status}")
+        detail = ", ".join(parts)
+        lines.append(f"  • {j['label']}: {detail}")
+
+    return "\n".join(lines)
 
 
 def _format_performance_stats(data: dict) -> str | None:
@@ -1032,6 +1097,9 @@ async def send_heartbeat():
         await send_telegram(text)
 
     extra_parts: list[str] = []
+    jobs_text = _format_active_jobs(db_data)
+    if jobs_text:
+        extra_parts.append(jobs_text)
     perf = _format_performance_stats(db_data)
     if perf:
         extra_parts.append(perf)

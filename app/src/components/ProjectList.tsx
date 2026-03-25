@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import { Project, ProjectNote, ProjectStatus, Task, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
-import { getCurrentUserRole, canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
+import { canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
@@ -308,6 +309,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
 
 export function ProjectList() {
   const isTma = useIsTma();
+  const { userRole } = useUser();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -347,7 +349,6 @@ export function ProjectList() {
 
   useEffect(() => {
     void fetchProjects();
-    void checkPermissions();
     void fetchAssigneeOptions();
     void fetchAllTasks();
     void fetchAllNotes();
@@ -389,12 +390,11 @@ export function ProjectList() {
     return () => window.removeEventListener('scroll', close, true);
   }, [notePopoverId]);
 
-  async function checkPermissions() {
-    const role = await getCurrentUserRole();
-    setCanCreate(canCreateProjects(role));
-    setCanEdit(canEditProjects(role));
-    setCanDelete(canDeleteProjects(role));
-  }
+  useEffect(() => {
+    setCanCreate(canCreateProjects(userRole));
+    setCanEdit(canEditProjects(userRole));
+    setCanDelete(canDeleteProjects(userRole));
+  }, [userRole]);
 
   async function fetchProjects() {
     try {
