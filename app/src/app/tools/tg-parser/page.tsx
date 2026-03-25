@@ -19,7 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
-import ExcelJS from 'exceljs';
+
 import type { ParsedUser } from '@/lib/tgParser/types';
 
 const COLUMNS: (keyof ParsedUser)[] = [
@@ -346,6 +346,7 @@ export default function TgParserPage() {
     if (users.length === 0) return;
     setExporting(true);
     try {
+      const ExcelJS = (await import('exceljs')).default;
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('TG Parser');
       ws.columns = COLUMNS.map((col) => ({ header: col, key: col, width: 20 }));

@@ -27,7 +27,16 @@ async function claimJob(): Promise<string | null> {
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
-  return pending?.id ?? null;
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('email_validation_jobs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  return claimed?.id ?? null;
 }
 
 async function pollOnce(): Promise<boolean> {

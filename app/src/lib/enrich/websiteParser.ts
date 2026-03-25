@@ -87,6 +87,19 @@ async function getPlaywrightBrowser(): Promise<Browser | null> {
   }
 }
 
+async function closePlaywrightBrowser(): Promise<void> {
+  if (!playwrightBrowserPromise) return;
+  try {
+    const browser = await playwrightBrowserPromise;
+    playwrightBrowserPromise = null;
+    await browser.close();
+  } catch { /* ignore */ }
+}
+
+for (const signal of ['exit', 'SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => { void closePlaywrightBrowser(); });
+}
+
 async function fetchHtmlWithPlaywright(
   url: string,
   options?: { timeout?: number; signal?: AbortSignal },

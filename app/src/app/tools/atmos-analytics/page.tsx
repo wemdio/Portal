@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { Download, Loader2, MessageCircle, Users, FileSpreadsheet } from 'lucide-react';
-import ExcelJS from 'exceljs';
+
 
 type AtmosChat = {
   chat_id: number;
@@ -133,6 +133,7 @@ export default function AtmosAnalyticsPage() {
   async function exportExcel() {
     if (!messages.length) return;
 
+    const ExcelJS = (await import('exceljs')).default;
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Messages');
 

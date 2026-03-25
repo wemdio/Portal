@@ -2,8 +2,8 @@
 
 import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
 import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import ExcelJS from 'exceljs';
+import type * as XLSXTypes from 'xlsx';
+import type ExcelJSTypes from 'exceljs';
 import { supabase } from '@/lib/supabaseClient';
 
 const ROW_HEIGHT = 44;
@@ -197,7 +197,7 @@ const thinGrayBorder = {
 };
 
 function setCellStyle(
-  cell: ExcelJS.Cell,
+  cell: ExcelJSTypes.Cell,
   opts: { fill?: string; fontBold?: boolean; fontColor?: string; border?: boolean }
 ) {
   if (opts.fill) {
@@ -861,12 +861,13 @@ function getColumnWidths(rows: (string | number)[][]): { wch: number }[] {
   return widths.map((w) => ({ wch: Math.max(w + 2, 12) }));
 }
 
-function setSheetColumnWidths(ws: XLSX.WorkSheet, rows: (string | number)[][]) {
+function setSheetColumnWidths(ws: XLSXTypes.WorkSheet, rows: (string | number)[][]) {
   const cols = getColumnWidths(rows);
   if (cols.length) ws['!cols'] = cols;
 }
 
-function downloadExcel(tableText: string, summaryRows: (string | number)[][], filename: string) {
+async function downloadExcel(tableText: string, summaryRows: (string | number)[][], filename: string) {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
   const fullReportRows = tableTextToRows(tableText);
   const wsReport = XLSX.utils.aoa_to_sheet(fullReportRows);
@@ -893,6 +894,7 @@ async function downloadExcelFormatted(
   periodText: string,
   filename: string
 ) {
+  const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Отчёт', { views: [{ rightToLeft: false }] });
 

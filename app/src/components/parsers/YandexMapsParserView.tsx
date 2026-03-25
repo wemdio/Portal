@@ -7,7 +7,7 @@ import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm'
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
 import { Download, RefreshCw, FileSpreadsheet, Database } from 'lucide-react';
-import * as XLSX from 'xlsx';
+
 import { saveAs } from 'file-saver';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
@@ -294,8 +294,9 @@ export function YandexMapsParserView() {
     a.click();
   }, [activeJobId, results]);
 
-  const handleExportExcel = useCallback(() => {
+  const handleExportExcel = useCallback(async () => {
     if (!activeJobId || results.length === 0) return;
+    const XLSX = await import('xlsx');
 
     const data = results.map((r) => ({
       'Название': r.name || '',
