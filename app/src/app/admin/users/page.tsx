@@ -10,6 +10,7 @@ import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { Check, ChevronDown, ChevronUp, MoreVertical } from 'lucide-react';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
+import { CampaignStatusLabels } from '@/lib/instantly/types';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -81,7 +82,9 @@ export default function UsersPage() {
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
-  const [clientCampaignInput, setClientCampaignInput] = useState('');
+  const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
+  const [allCampaignsLoading, setAllCampaignsLoading] = useState(false);
+  const [campaignSearch, setCampaignSearch] = useState('');
 
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
@@ -220,15 +223,36 @@ export default function UsersPage() {
     return () => clearTimeout(t);
   }, [saveSuccessMessage]);
 
+  const fetchAllCampaigns = useCallback(async () => {
+    if (allCampaigns.length > 0) return;
+    setAllCampaignsLoading(true);
+    try {
+      const res = await apiFetch<{ items: { id: string; name: string; status: number }[] }>(
+        '/api/instantly/campaigns?limit=all'
+      );
+      setAllCampaigns(res.items ?? []);
+    } catch {
+      setAllCampaigns([]);
+    } finally {
+      setAllCampaignsLoading(false);
+    }
+  }, [apiFetch, allCampaigns.length]);
+
+  useEffect(() => {
+    if (modalRole === 'client') void fetchAllCampaigns();
+  }, [modalRole, fetchAllCampaigns]);
+
   async function openActionModal(user: UserProfile, origin: { x: number; y: number }) {
     setActionModalLoadingUserId(user.id);
     setError('');
+    setCampaignSearch('');
     try {
+      const isClient = user.role === 'client';
       const [toolsRes, accessRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
         ),
-        user.role === 'client'
+        isClient
           ? apiFetch<{ rows: Array<{ resource_type: string; resource_id: string }> }>(
               `/api/admin/users/${user.id}/client-access`
             )
@@ -243,6 +267,7 @@ export default function UsersPage() {
       setModalFlyIn(false);
       setActionModalLoadingUserId(null);
       setTimeout(() => setModalFlyIn(true), 20);
+      if (isClient) void fetchAllCampaigns();
     } catch {
       setToolVisibility({});
       setClientCampaigns([]);
@@ -400,15 +425,7 @@ export default function UsersPage() {
     setDeleting(true);
     setError('');
     try {
-      // Delete from profiles table
-      const { error } = await supabase
-        .from('profiles')
-        .delete()
-        .eq('id', userId);
-
-      if (error) throw error;
-
-      // Remove from local state
+      await apiFetch<{ ok: true }>(`/api/admin/users/${userId}`, { method: 'DELETE' });
       setUsers(users.filter(u => u.id !== userId));
       setDeletingUserId(null);
       void logAudit('admin.users.delete.success', 'User deleted', { targetUserId: userId });
@@ -874,51 +891,65 @@ export default function UsersPage() {
                 </div>
 
                 {modalRole === 'client' && (
-                  <div className="space-y-4 pt-2 border-t border-gray-200">
-                    <h4 className="text-sm font-medium text-gray-900">Доступ клиента к Instantly</h4>
-
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Кампании (Campaign IDs)</label>
-                      <div className="flex gap-2 mb-2">
-                        <input
-                          type="text"
-                          value={clientCampaignInput}
-                          onChange={(e) => setClientCampaignInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              const v = clientCampaignInput.trim();
-                              if (v && !clientCampaigns.includes(v)) {
-                                setClientCampaigns((prev) => [...prev, v]);
-                              }
-                              setClientCampaignInput('');
-                            }
-                          }}
-                          placeholder="Вставьте Campaign ID и Enter"
-                          className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-                        />
-                      </div>
+                  <div className="space-y-3 pt-2 border-t border-gray-200">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-medium text-gray-900">Кампании клиента</h4>
                       {clientCampaigns.length > 0 && (
-                        <ul className="space-y-1">
-                          {clientCampaigns.map((id) => (
-                            <li key={id} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-1.5 text-sm">
-                              <span className="truncate text-gray-700 font-mono text-xs">{id}</span>
-                              <button
-                                type="button"
-                                onClick={() => setClientCampaigns((prev) => prev.filter((c) => c !== id))}
-                                className="ml-2 text-red-500 hover:text-red-700 text-xs shrink-0"
-                              >
-                                ✕
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {clientCampaigns.length === 0 && (
-                        <p className="text-xs text-gray-400">Нет назначенных кампаний</p>
+                        <span className="text-xs text-blue-600 font-medium">{clientCampaigns.length} выбрано</span>
                       )}
                     </div>
-
+                    <input
+                      type="text"
+                      value={campaignSearch}
+                      onChange={(e) => setCampaignSearch(e.target.value)}
+                      placeholder="Поиск кампании..."
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                    />
+                    <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                      {allCampaignsLoading ? (
+                        <div className="px-3 py-4 text-center text-xs text-gray-400">Загрузка кампаний...</div>
+                      ) : (() => {
+                        const q = campaignSearch.toLowerCase();
+                        const selected = allCampaigns.filter((c) => clientCampaigns.includes(c.id));
+                        const unselected = allCampaigns.filter((c) => !clientCampaigns.includes(c.id));
+                        const sorted = [...selected, ...unselected];
+                        const filtered = q ? sorted.filter((c) => c.name.toLowerCase().includes(q)) : sorted;
+                        if (filtered.length === 0) {
+                          return <div className="px-3 py-4 text-center text-xs text-gray-400">Кампании не найдены</div>;
+                        }
+                        return filtered.map((c) => {
+                          const checked = clientCampaigns.includes(c.id);
+                          return (
+                            <label
+                              key={c.id}
+                              className={`flex items-start gap-2.5 px-3 py-2 cursor-pointer hover:bg-gray-50 transition-colors ${checked ? 'bg-blue-50/50' : ''}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  setClientCampaigns((prev) =>
+                                    checked ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                                  );
+                                }}
+                                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <p className="text-sm text-gray-800 leading-snug truncate">{c.name}</p>
+                                <span className={`inline-block mt-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
+                                  c.status === 1 ? 'bg-green-100 text-green-700' :
+                                  c.status === 2 ? 'bg-yellow-100 text-yellow-700' :
+                                  c.status === 3 ? 'bg-gray-100 text-gray-600' :
+                                  'bg-gray-100 text-gray-500'
+                                }`}>
+                                  {CampaignStatusLabels[c.status] ?? `Статус ${c.status}`}
+                                </span>
+                              </div>
+                            </label>
+                          );
+                        });
+                      })()}
+                    </div>
                     <p className="text-xs text-gray-400">Lead-списки определяются автоматически из назначенных кампаний</p>
                   </div>
                 )}

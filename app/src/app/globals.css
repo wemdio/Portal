@@ -1168,3 +1168,188 @@ input[type=number]::-webkit-outer-spin-button {
   flex-shrink: 0;
   background-color: #e0e7ff; /* indigo-100 */
 }
+
+/* ===== CLIENT PORTAL — Neumorphic Design System ===== */
+body:has(.client-portal) {
+  background: #E4DDD4 !important;
+}
+
+.client-portal {
+  --cp-bg: #E4DDD4;
+  --cp-shadow-d: rgba(180, 173, 164, 0.45);
+  --cp-shadow-l: rgba(255, 248, 237, 0.5);
+  --cp-accent: #4A6FA5;
+  --cp-accent-h: #3D5A87;
+  --cp-text: #3A3530;
+  --cp-text-m: #8A8078;
+  --cp-text-l: #B0A89E;
+  --cp-danger: #B85450;
+  background: var(--cp-bg);
+  color: var(--cp-text);
+  min-height: 100vh;
+}
+
+.client-portal .neu-card {
+  background: var(--cp-bg);
+  box-shadow: 6px 6px 14px var(--cp-shadow-d), -6px -6px 14px var(--cp-shadow-l);
+  border-radius: 20px;
+}
+
+.client-portal .neu-sm {
+  background: var(--cp-bg);
+  box-shadow: 4px 4px 10px var(--cp-shadow-d), -4px -4px 10px var(--cp-shadow-l);
+  border-radius: 16px;
+}
+
+.client-portal .neu-inset {
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+}
+
+.client-portal .neu-flat {
+  transition: box-shadow 0.25s ease;
+}
+
+.client-portal .neu-flat:hover {
+  box-shadow: 3px 3px 8px var(--cp-shadow-d), -3px -3px 8px var(--cp-shadow-l);
+}
+
+.client-portal .neu-btn {
+  background: var(--cp-accent);
+  color: #fff;
+  border: none;
+  border-radius: 14px;
+  box-shadow: 3px 3px 8px var(--cp-shadow-d), -2px -2px 6px var(--cp-shadow-l);
+  transition: all 0.2s ease;
+}
+
+.client-portal .neu-btn:hover:not(:disabled) {
+  background: var(--cp-accent-h);
+  box-shadow: 1px 1px 4px var(--cp-shadow-d), -1px -1px 4px var(--cp-shadow-l);
+}
+
+.client-portal .neu-btn:active:not(:disabled) {
+  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.15);
+}
+
+.client-portal .neu-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.client-portal .neu-input {
+  background: var(--cp-bg);
+  border: none;
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+  border-radius: 14px;
+  color: var(--cp-text);
+  outline: none;
+  transition: box-shadow 0.2s ease;
+}
+
+.client-portal .neu-input::placeholder {
+  color: var(--cp-text-l);
+}
+
+.client-portal .neu-input:focus {
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l),
+    0 0 0 2px rgba(74, 111, 165, 0.25);
+}
+
+.client-portal .neu-pill {
+  background: var(--cp-bg);
+  border-radius: 12px;
+  transition: all 0.25s ease;
+}
+
+.client-portal .neu-pill.active {
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+  color: var(--cp-accent);
+}
+
+.client-portal .neu-pill:not(.active):hover {
+  box-shadow: 2px 2px 6px var(--cp-shadow-d), -2px -2px 6px var(--cp-shadow-l);
+}
+
+.client-portal .neu-well {
+  background: var(--cp-bg);
+  box-shadow: inset 2px 2px 4px var(--cp-shadow-d), inset -2px -2px 4px var(--cp-shadow-l);
+  border-radius: 12px;
+}
+
+.client-portal .neu-row {
+  transition: background 0.15s ease;
+}
+
+.client-portal .neu-row:hover {
+  background: rgba(180, 173, 164, 0.1);
+}
+
+.client-portal .neu-divider {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--cp-shadow-d) 50%, transparent 100%);
+}
+
+.client-portal input[type="checkbox"] {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: var(--cp-bg);
+  box-shadow: inset 1px 1px 3px var(--cp-shadow-d), inset -1px -1px 3px var(--cp-shadow-l);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.client-portal input[type="checkbox"]:checked {
+  background: var(--cp-accent);
+  box-shadow: 1px 1px 3px var(--cp-shadow-d), -1px -1px 3px var(--cp-shadow-l);
+}
+
+.client-portal input[type="checkbox"]:checked::after {
+  content: '✓';
+  position: absolute;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.client-portal ::-webkit-scrollbar-thumb {
+  background: rgba(180, 173, 164, 0.5);
+  border-radius: 4px;
+}
+
+.client-portal ::-webkit-scrollbar-thumb:hover {
+  background: rgba(160, 153, 144, 0.7);
+}
+
+.client-portal .neu-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--cp-shadow-d);
+  border-top-color: var(--cp-accent);
+  border-radius: 50%;
+}
+
+.client-portal .no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.client-portal .no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 639px) {
+  .client-portal .neu-card,
+  .client-portal .neu-sm {
+    border-radius: 14px;
+  }
+  .client-portal .neu-pill {
+    border-radius: 10px;
+  }
+}
