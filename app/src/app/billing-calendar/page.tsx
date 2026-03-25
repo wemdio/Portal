@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { UserRole } from '@/types';
 import { isTechnician, isLead } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 
