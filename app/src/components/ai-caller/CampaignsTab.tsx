@@ -78,12 +78,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
-  // Running campaign
-  const [runningCampaignId, setRunningCampaignId] = useState<string | null>(null);
-  const [currentContact, setCurrentContact] = useState<string | null>(null);
-  const [nextCallIn, setNextCallIn] = useState<number | null>(null);
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const campaignsLoaded = useRef<boolean | null>(null);
 
   // Audio playback
@@ -116,21 +110,21 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setLoadingCampaigns(false);
   }, [getToken]);
 
-  // Initial load via ref guard
   if (campaignsLoaded.current == null) {
     campaignsLoaded.current = true;
     fetchCampaigns();
   }
 
-  // Auto-refresh campaign stats while a campaign is running
+  // Auto-refresh campaign stats while any campaign is running (server-driven)
+  const hasRunning = campaigns.some((c) => c.status === 'running');
   useEffect(() => {
-    if (!runningCampaignId) return;
+    if (!hasRunning) return;
     const interval = setInterval(() => {
       fetchCampaigns();
-      // Also refresh expanded contacts if viewing the running campaign
-      if (expandedId === runningCampaignId) {
+      const runningCamp = campaigns.find((c) => c.status === 'running');
+      if (expandedId && runningCamp && expandedId === runningCamp.id) {
         getToken().then((token) =>
-          fetch(`/api/ai-caller/campaigns/${runningCampaignId}`, {
+          fetch(`/api/ai-caller/campaigns/${expandedId}`, {
             headers: { Authorization: `Bearer ${token}` },
           })
             .then((r) => r.json())
@@ -140,7 +134,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [runningCampaignId, expandedId, fetchCampaigns, getToken]);
+  }, [hasRunning, expandedId, campaigns, fetchCampaigns, getToken]);
 
   // Derived defaults
   const effectiveAssistant = formAssistant || (assistants.length ? assistants[0].id : '');
@@ -238,7 +232,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setCreating(false);
   }
 
-  // ── Run Campaign ──
+  // ── Run Campaign (server-driven via worker) ──
 
   async function startCampaign(id: string) {
     const token = await getToken();
@@ -247,8 +241,6 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ status: 'running' }),
     });
-    setRunningCampaignId(id);
-    callNext(id);
     fetchCampaigns();
   }
 
@@ -259,199 +251,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ status: 'paused' }),
     });
-    setRunningCampaignId(null);
-    setCurrentContact(null);
-    setNextCallIn(null);
-    if (pollRef.current) clearTimeout(pollRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
     fetchCampaigns();
-  }
-
-  async function autoAnalyzeCampaign(campaignId: string) {
-    try {
-      const token = await getToken();
-      console.log('[Campaign] Auto-analyzing calls for campaign', campaignId);
-      const res = await fetch('/api/ai-caller/analytics', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ campaignId }),
-      });
-      const result = await res.json();
-      console.log(`[Campaign] Auto-analysis complete: ${result.newlyAnalyzed ?? 0} new analyses`);
-    } catch (err) {
-      console.error('[Campaign] Auto-analysis failed:', err);
-    }
-  }
-
-  const CALL_DELAY_MIN_MS = 5000;
-  const CALL_DELAY_MAX_MS = 15000;
-
-  function randomDelay() {
-    return Math.floor(Math.random() * (CALL_DELAY_MAX_MS - CALL_DELAY_MIN_MS + 1)) + CALL_DELAY_MIN_MS;
-  }
-
-  function scheduleNextCall(campaignId: string) {
-    const delay = randomDelay();
-    const endTime = Date.now() + delay;
-
-    setNextCallIn(Math.ceil(delay / 1000));
-
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    countdownRef.current = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
-      setNextCallIn(remaining);
-      if (remaining <= 0 && countdownRef.current) {
-        clearInterval(countdownRef.current);
-        countdownRef.current = null;
-      }
-    }, 1000);
-
-    pollRef.current = setTimeout(() => {
-      setNextCallIn(null);
-      callNext(campaignId);
-    }, delay);
-  }
-
-  async function callNext(campaignId: string) {
-    let token: string;
-    try {
-      token = await getToken();
-    } catch {
-      console.error('[Campaign] Failed to get auth token, stopping');
-      setRunningCampaignId(null);
-      setCurrentContact(null);
-      return;
-    }
-
-    let data: Record<string, unknown>;
-    try {
-      const res = await fetch(`/api/ai-caller/campaigns/${campaignId}/call-next`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      data = await res.json();
-    } catch (err) {
-      console.error('[Campaign] call-next request failed:', err);
-      setTimeout(() => callNext(campaignId), 5000);
-      return;
-    }
-
-    if (data.done) {
-      setRunningCampaignId(null);
-      setCurrentContact(null);
-      fetchCampaigns();
-      // Auto-analyze all calls for this campaign
-      autoAnalyzeCampaign(campaignId);
-      return;
-    }
-
-    if (data.error) {
-      console.warn('[Campaign] call-next error, skipping:', data.error);
-      setTimeout(() => callNext(campaignId), 2000);
-      return;
-    }
-
-    const contact = data.contact as { id: string; phone: string } | undefined;
-    const callId = data.callId as string | undefined;
-
-    setCurrentContact(contact?.phone || null);
-
-    if (!callId) {
-      console.error('[Campaign] No callId returned, skipping contact');
-      setTimeout(() => callNext(campaignId), 2000);
-      return;
-    }
-
-    // Poll with recursive setTimeout (avoids overlapping async callbacks)
-    const TERMINAL_STATUSES = new Set(['ended', 'failed']);
-    const MAX_POLL_MS = 120_000; // 2 min max per call
-    const POLL_INTERVAL_MS = 3000;
-    const pollStarted = Date.now();
-    let pollErrors = 0;
-    let stopped = false;
-
-    async function completeAndNext() {
-      stopped = true;
-      // Mark contact as completed
-      try {
-        await fetch(`/api/ai-caller/campaigns/${campaignId}/complete-contact`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getToken()}` },
-          body: JSON.stringify({ contactId: contact?.id, callId }),
-        });
-      } catch (err) {
-        console.error('[Campaign] complete-contact failed:', err);
-      }
-
-      setCurrentContact(null);
-      fetchCampaigns();
-
-      // Check if campaign is still running before proceeding
-      try {
-        const campRes = await fetch(`/api/ai-caller/campaigns/${campaignId}`, {
-          headers: { Authorization: `Bearer ${await getToken()}` },
-        });
-        const campData = await campRes.json();
-        if (campData.campaign?.status === 'running') {
-          scheduleNextCall(campaignId);
-        } else {
-          setRunningCampaignId(null);
-        }
-      } catch {
-        scheduleNextCall(campaignId);
-      }
-    }
-
-    async function poll() {
-      if (stopped) return;
-
-      const elapsed = Date.now() - pollStarted;
-
-      // Timeout — skip this contact and move on
-      if (elapsed > MAX_POLL_MS) {
-        console.warn(`[Campaign] Call ${callId} timed out after ${elapsed}ms, moving on`);
-        await completeAndNext();
-        return;
-      }
-
-      let callData: Record<string, unknown>;
-      try {
-        const controller = new AbortController();
-        const fetchTimeout = setTimeout(() => controller.abort(), 10_000);
-        const callRes = await fetch(`/api/ai-caller/calls/${callId}`, {
-          headers: { Authorization: `Bearer ${await getToken()}` },
-          signal: controller.signal,
-        });
-        clearTimeout(fetchTimeout);
-        if (!callRes.ok) throw new Error(`HTTP ${callRes.status}`);
-        callData = await callRes.json();
-        pollErrors = 0;
-      } catch (err) {
-        pollErrors++;
-        console.warn(`[Campaign] Poll error #${pollErrors}:`, err);
-        if (pollErrors >= 5) {
-          console.error('[Campaign] Too many poll errors, skipping contact');
-          await completeAndNext();
-          return;
-        }
-        // Retry after delay
-        pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-        return;
-      }
-
-      const call = callData.call as Record<string, unknown> | undefined;
-      const status = (call?.status as string) ?? '';
-
-      if (TERMINAL_STATUSES.has(status)) {
-        await completeAndNext();
-      } else {
-        // Schedule next poll
-        pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-      }
-    }
-
-    // Start polling
-    pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
   }
 
   async function deleteCampaign(id: string) {
@@ -547,7 +347,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
 
   // ── Telegram recording ──
 
-  if (!tgLoadedRef.current) {
+  useEffect(() => {
+    if (tgLoadedRef.current) return;
     tgLoadedRef.current = true;
     getToken().then((token) =>
       fetch('/api/ai-caller/telegram/chats', {
@@ -557,7 +358,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         .then((data) => setTgChats(data.chats ?? []))
         .catch(() => {})
     );
-  }
+  }, [getToken]);
 
   async function sendRecordingToTelegram(vapiCallId: string, phone: string, chatId: number) {
     setSendingTgRec(vapiCallId);
@@ -608,32 +409,27 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         </button>
       </div>
 
-      {/* Running indicator */}
-      {runningCampaignId && (
-        <div className="rounded-xl bg-green-50 border border-green-200 px-5 py-4 flex items-center gap-3">
+      {/* Running indicator (server-driven) */}
+      {campaigns.filter((c) => c.status === 'running').map((camp) => (
+        <div key={camp.id} className="rounded-xl bg-green-50 border border-green-200 px-5 py-4 flex items-center gap-3">
           <Loader2 className="h-5 w-5 animate-spin text-green-600" />
           <div>
-            <p className="text-sm font-medium text-green-800">Обзвон идёт...</p>
-            {currentContact && (
-              <p className="text-xs text-green-600 mt-0.5">
-                Звоним: {currentContact}
-              </p>
-            )}
-            {!currentContact && nextCallIn !== null && nextCallIn > 0 && (
-              <p className="text-xs text-green-600 mt-0.5">
-                Следующий звонок через {nextCallIn} сек.
-              </p>
-            )}
+            <p className="text-sm font-medium text-green-800">
+              Обзвон идёт: {camp.name}
+            </p>
+            <p className="text-xs text-green-600 mt-0.5">
+              {camp.called_contacts}/{camp.total_contacts} контактов, {camp.successful_contacts} успешных
+            </p>
           </div>
           <button
-            onClick={() => pauseCampaign(runningCampaignId)}
+            onClick={() => pauseCampaign(camp.id)}
             className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-yellow-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-yellow-600"
           >
             <Pause className="h-3.5 w-3.5" />
             Пауза
           </button>
         </div>
-      )}
+      ))}
 
       {/* Create Form */}
       {showCreate && (
@@ -803,8 +599,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
                     {camp.status === 'draft' || camp.status === 'paused' ? (
                       <button
                         onClick={() => startCampaign(camp.id)}
-                        disabled={!!runningCampaignId}
-                        className="p-2 rounded-lg text-green-600 hover:bg-green-50 disabled:opacity-50"
+                        className="p-2 rounded-lg text-green-600 hover:bg-green-50"
                         title="Запустить"
                       >
                         <Play className="h-4 w-4" />

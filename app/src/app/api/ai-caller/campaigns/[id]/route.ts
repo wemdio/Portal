@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { resolveAiCallerProvider } from '@/lib/ai-caller-request-provider';
 
 export const dynamic = 'force-dynamic';
@@ -100,8 +101,18 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+  // Create worker jobs for status transitions (server-side call orchestration)
+  if (supabaseAdmin && (body.status === 'running' || body.status === 'paused')) {
+    const action = body.status === 'running' ? 'start' : 'stop';
+    await supabaseAdmin.from('ai_caller_jobs').insert({
+      campaign_id: id,
+      user_id: user.id,
+      action,
+      status: 'pending',
+    });
+  }
+
   if (body.status === 'completed') {
-    // Best-effort backend auto-analysis when campaign is explicitly completed.
     void triggerAutoAnalysis(req.nextUrl.origin, token, id, provider);
   }
 
