@@ -4,16 +4,15 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useParams } from 'next/navigation';
-import { ChevronLeft, Loader2, Mail, Clock } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, SequenceStep } from '@/lib/instantly/types';
 
 function MetricCard({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
   return (
-    <div className="rounded-lg border border-zinc-100 bg-zinc-50/50 p-4">
-      <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">{label}</p>
-      <p className="mt-1 text-xl font-bold text-zinc-900">{value}</p>
-      {sub && <p className="mt-0.5 text-xs text-zinc-400">{sub}</p>}
+    <div className="neu-sm p-3 sm:p-4">
+      <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{label}</p>
+      <p className="mt-1 sm:mt-1.5 text-lg sm:text-xl font-bold">{value}</p>
+      {sub && <p className="mt-0.5 text-[10px] sm:text-xs" style={{ color: 'var(--cp-text-m)' }}>{sub}</p>}
     </div>
   );
 }
@@ -68,7 +67,7 @@ export default function ClientCampaignDetailPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-32">
-        <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+        <div className="neu-spinner animate-spin" />
       </div>
     );
   }
@@ -76,10 +75,10 @@ export default function ClientCampaignDetailPage() {
   if (error && !campaign) {
     return (
       <div className="mx-auto max-w-4xl">
-        <Link href={'/client' as Route} className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 mb-4">
-          <ChevronLeft className="h-3 w-3" /> Кампании
+        <Link href={'/client' as Route} className="inline-flex items-center gap-1 text-xs font-medium mb-4 transition-colors" style={{ color: 'var(--cp-text-m)' }}>
+          ← Кампании
         </Link>
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>
+        <div className="neu-inset rounded-2xl px-5 py-4 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>{error}</div>
       </div>
     );
   }
@@ -98,21 +97,26 @@ export default function ClientCampaignDetailPage() {
 
   return (
     <div className="mx-auto max-w-4xl">
-      <Link href={'/client' as Route} className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 mb-4 transition-colors">
-        <ChevronLeft className="h-3 w-3" /> Кампании
+      <Link
+        href={'/client' as Route}
+        className="inline-flex items-center gap-1 text-xs font-medium mb-5 transition-colors"
+        style={{ color: 'var(--cp-text-m)' }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--cp-accent)')}
+        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--cp-text-m)')}
+      >
+        ← Кампании
       </Link>
 
-      <h1 className="text-xl font-bold text-zinc-900 mb-1">{campaign.name}</h1>
-      <p className="text-xs text-zinc-400 mb-6">ID: {campaign.id}</p>
+      <h1 className="text-lg sm:text-xl font-extrabold mb-1 break-words">{campaign.name}</h1>
+      <p className="text-[10px] sm:text-xs mb-4 sm:mb-6 truncate" style={{ color: 'var(--cp-text-l)' }}>ID: {campaign.id}</p>
 
-      <div className="flex gap-2 mb-6">
+      <div className="flex gap-2 mb-4 sm:mb-6">
         {(['overview', 'steps'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all ${
-              tab === t ? 'bg-zinc-900 text-white' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
-            }`}
+            className={`neu-pill px-5 py-2 text-xs font-semibold ${tab === t ? 'active' : ''}`}
+            style={tab !== t ? { color: 'var(--cp-text-m)' } : undefined}
           >
             {t === 'overview' ? 'Обзор' : 'Цепочка'}
           </button>
@@ -121,7 +125,7 @@ export default function ClientCampaignDetailPage() {
 
       {tab === 'overview' && (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 mb-6">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-4 mb-4 sm:mb-6">
             <MetricCard label="Отправлено" value={sentCount} />
             <MetricCard label="Открытия" value={openCount} sub={`${openRate}%`} />
             <MetricCard label="Ответы" value={replyCount} sub={`${replyRate}%`} />
@@ -131,27 +135,29 @@ export default function ClientCampaignDetailPage() {
           </div>
 
           {steps.length > 0 && (
-            <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
-              <h3 className="px-4 py-3 text-sm font-semibold text-zinc-800 border-b border-zinc-100">Статистика по шагам</h3>
+            <div className="neu-card overflow-hidden">
+              <h3 className="px-3 sm:px-5 py-3 sm:py-4 text-xs sm:text-sm font-bold" style={{ color: 'var(--cp-text-m)' }}>
+                Статистика по шагам
+              </h3>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full text-xs sm:text-sm">
                   <thead>
-                    <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
-                      <th className="px-4 py-2 text-xs font-medium text-zinc-500">Шаг</th>
-                      <th className="px-4 py-2 text-xs font-medium text-zinc-500 text-right">Отправлено</th>
-                      <th className="px-4 py-2 text-xs font-medium text-zinc-500 text-right">Открытия</th>
-                      <th className="px-4 py-2 text-xs font-medium text-zinc-500 text-right">Ответы</th>
+                    <tr style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
+                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-left text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Шаг</th>
+                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Отпр.</th>
+                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Откр.</th>
+                      <th className="px-3 sm:px-5 py-2.5 sm:py-3 text-right text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>Отв.</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-50">
+                  <tbody>
                     {steps.map((s, i) => (
-                      <tr key={i}>
-                        <td className="px-4 py-2 text-zinc-700">
-                          Step {s.step}{s.variant ? ` (var ${String.fromCharCode(65 + Number(s.variant))})` : ''}
+                      <tr key={i} className="neu-row" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
+                        <td className="px-3 sm:px-5 py-2.5 sm:py-3" style={{ color: 'var(--cp-text-m)' }}>
+                          Step {s.step}{s.variant ? ` (${String.fromCharCode(65 + Number(s.variant))})` : ''}
                         </td>
-                        <td className="px-4 py-2 text-right">{s.sent ?? 0}</td>
-                        <td className="px-4 py-2 text-right">{s.unique_opened ?? s.opened ?? 0}</td>
-                        <td className="px-4 py-2 text-right">{s.unique_replies ?? s.replies ?? 0}</td>
+                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.sent ?? 0}</td>
+                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.unique_opened ?? s.opened ?? 0}</td>
+                        <td className="px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-text-m)' }}>{s.unique_replies ?? s.replies ?? 0}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -165,9 +171,8 @@ export default function ClientCampaignDetailPage() {
       {tab === 'steps' && (
         <div className="space-y-4">
           {sequences.length === 0 ? (
-            <div className="rounded-xl border border-zinc-200 bg-white py-12 text-center">
-              <Mail className="mx-auto h-8 w-8 text-zinc-300" />
-              <p className="mt-3 text-sm text-zinc-500">Цепочка не настроена</p>
+            <div className="neu-card py-14 text-center">
+              <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Цепочка не настроена</p>
             </div>
           ) : (
             sequences.map((step, idx) => {
@@ -175,29 +180,32 @@ export default function ClientCampaignDetailPage() {
               const body = stripHtml(step.body ?? step.variants?.[0]?.body);
               const waitDays = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
               return (
-                <div key={idx} className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
-                  <div className="px-4 py-3 border-b border-zinc-100 flex items-center gap-3">
-                    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-xs font-bold text-zinc-600">
+                <div key={idx} className="neu-sm overflow-hidden">
+                  <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center gap-2.5 sm:gap-3">
+                    <div className="neu-well flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center text-[10px] sm:text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
                       {idx + 1}
                     </div>
                     <div className="flex-1 min-w-0">
-                      {subject && <p className="text-sm font-medium text-zinc-800 truncate">{subject}</p>}
+                      {subject && <p className="text-xs sm:text-sm font-semibold truncate">{subject}</p>}
                       {step.variants && step.variants.length > 1 && (
-                        <p className="text-[10px] text-zinc-400">{step.variants.length} варианта</p>
+                        <p className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>{step.variants.length} варианта</p>
                       )}
                     </div>
                     {waitDays != null && waitDays > 0 && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
-                        <Clock className="h-3 w-3" /> {waitDays}д
+                      <span className="text-[10px] sm:text-[11px] font-medium shrink-0" style={{ color: 'var(--cp-text-l)' }}>
+                        {waitDays}д
                       </span>
                     )}
                   </div>
                   {body && (
-                    <div className="px-4 py-3">
-                      <pre className="text-xs text-zinc-600 whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto">
-                        {body}
-                      </pre>
-                    </div>
+                    <>
+                      <hr className="neu-divider mx-3 sm:mx-5" />
+                      <div className="px-3 sm:px-5 py-3 sm:py-4">
+                        <pre className="text-[11px] sm:text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-48 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
+                          {body}
+                        </pre>
+                      </div>
+                    </>
                   )}
                 </div>
               );
