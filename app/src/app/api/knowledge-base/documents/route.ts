@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { withKbAuth } from '@/lib/knowledgeBase/apiHelper';
 import { chunkText, chunkDialogue } from '@/lib/knowledgeBase/chunker';
 import { parseChatCsv } from '@/lib/knowledgeBase/csvParser';
+import { embedChunksBatch } from '@/lib/knowledgeBase/embeddings';
 import type { KbCategory, KbSourceType } from '@/lib/knowledgeBase/types';
 
 export const GET = withKbAuth(async (req, { supabase }) => {
@@ -88,9 +89,12 @@ async function handleManualCreate(
       token_count: c.tokenCount,
       metadata: c.metadata,
     }));
-    const { error: chunkErr } = await supabase.from('kb_chunks').insert(rows);
+    const { data: inserted, error: chunkErr } = await supabase.from('kb_chunks').insert(rows).select('id, content');
     if (chunkErr) {
       console.error('Chunk insert error:', chunkErr);
+    }
+    if (inserted?.length) {
+      embedChunksBatch(supabase, inserted).catch(() => {});
     }
   }
 
@@ -175,8 +179,11 @@ async function handleFileUpload(
       token_count: c.tokenCount,
       metadata: c.metadata,
     }));
-    const { error: chunkErr } = await supabase.from('kb_chunks').insert(rows);
+    const { data: inserted2, error: chunkErr } = await supabase.from('kb_chunks').insert(rows).select('id, content');
     if (chunkErr) console.error('Chunk insert error:', chunkErr);
+    if (inserted2?.length) {
+      embedChunksBatch(supabase, inserted2).catch(() => {});
+    }
   }
 
   return NextResponse.json({

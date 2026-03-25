@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { withKbAuth } from '@/lib/knowledgeBase/apiHelper';
 import { chunkText } from '@/lib/knowledgeBase/chunker';
+import { embedChunksBatch } from '@/lib/knowledgeBase/embeddings';
 
 export const POST = withKbAuth(async (req, { supabase, userId }) => {
   const { source } = (await req.json()) as { source: 'audio_transcripts' | 'tg_video_transcripts' };
@@ -64,7 +65,7 @@ async function importAudioTranscripts(
 
     const chunks = chunkText(t.text);
     if (chunks.length > 0) {
-      await supabase.from('kb_chunks').insert(
+      const { data: ins } = await supabase.from('kb_chunks').insert(
         chunks.map((c, i) => ({
           document_id: doc.id,
           chunk_index: i,
@@ -72,7 +73,8 @@ async function importAudioTranscripts(
           token_count: c.tokenCount,
           metadata: c.metadata,
         })),
-      );
+      ).select('id, content');
+      if (ins?.length) embedChunksBatch(supabase, ins).catch(() => {});
     }
     imported++;
   }
@@ -135,7 +137,7 @@ async function importTgVideoTranscripts(
 
     const chunks = chunkText(t.text);
     if (chunks.length > 0) {
-      await supabase.from('kb_chunks').insert(
+      const { data: ins2 } = await supabase.from('kb_chunks').insert(
         chunks.map((c, i) => ({
           document_id: doc.id,
           chunk_index: i,
@@ -143,7 +145,8 @@ async function importTgVideoTranscripts(
           token_count: c.tokenCount,
           metadata: { ...c.metadata, sender_name: t.sender_name },
         })),
-      );
+      ).select('id, content');
+      if (ins2?.length) embedChunksBatch(supabase, ins2).catch(() => {});
     }
     imported++;
   }

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { KbCategory } from './types';
+import { generateEmbedding } from './embeddings';
 
 export interface ContextChunk {
   chunk_id: string;
@@ -51,6 +52,62 @@ export async function searchChunks(
 }
 
 /**
+ * Hybrid search: FTS + semantic similarity via pgvector.
+ * Falls back to FTS-only if embedding generation fails.
+ */
+export async function hybridSearchChunks(
+  db: SupabaseClient,
+  query: string,
+  options: {
+    categories?: KbCategory[];
+    limit?: number;
+  } = {},
+): Promise<{ chunks: ContextChunk[]; total: number }> {
+  const { categories, limit = 5 } = options;
+  const tsQuery = toTsQuery(query);
+
+  let embedding: number[] | null = null;
+  try {
+    embedding = await generateEmbedding(query);
+  } catch {
+    // Fall back to FTS-only if embedding fails
+  }
+
+  if (!tsQuery && !embedding) return { chunks: [], total: 0 };
+
+  if (!embedding) {
+    return searchChunks(db, query, { categories, limit });
+  }
+
+  const pgVector = `[${embedding.join(',')}]`;
+  const { data, error } = await db.rpc('kb_hybrid_search', {
+    query_text: tsQuery || '',
+    query_embedding: pgVector,
+    filter_categories: categories ?? null,
+    match_limit: limit,
+    fts_weight: 1.0,
+    semantic_weight: 1.0,
+  });
+
+  if (error) {
+    console.error('Hybrid search error, falling back to FTS:', error.message);
+    return searchChunks(db, query, { categories, limit });
+  }
+
+  return {
+    chunks: (data ?? []).map((r: Record<string, unknown>) => ({
+      chunk_id: r.chunk_id as string,
+      document_id: r.document_id as string,
+      document_title: r.document_title as string,
+      category: r.category as KbCategory,
+      content: r.content as string,
+      rank: (r.combined_score as number) ?? (r.rank as number) ?? 0,
+    })),
+    total: (data ?? []).length,
+  };
+}
+
+/**
  * Get relevant context for AI tools.
  * Extracts keywords from the input, searches KB, returns formatted context string.
  */
@@ -83,7 +140,7 @@ export async function getRelevantContext(
 
 /**
  * Convert a user query into a Postgres tsquery string.
- * Splits into words, joins with &, handles Russian + English.
+ * Splits into words, joins with |, handles Russian + English.
  */
 function toTsQuery(query: string): string {
   const words = query
