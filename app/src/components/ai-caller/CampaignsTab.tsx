@@ -110,11 +110,12 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setLoadingCampaigns(false);
   }, [getToken]);
 
-  // Initial load via ref guard
-  if (campaignsLoaded.current == null) {
-    campaignsLoaded.current = true;
-    fetchCampaigns();
-  }
+  useEffect(() => {
+    if (campaignsLoaded.current == null) {
+      campaignsLoaded.current = true;
+      fetchCampaigns();
+    }
+  }, [fetchCampaigns]);
 
   // Auto-refresh campaign stats while any campaign is running (server-driven)
   const hasRunning = campaigns.some((c) => c.status === 'running');
@@ -348,7 +349,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
 
   // ── Telegram recording ──
 
-  if (!tgLoadedRef.current) {
+  useEffect(() => {
+    if (tgLoadedRef.current) return;
     tgLoadedRef.current = true;
     getToken().then((token) =>
       fetch('/api/ai-caller/telegram/chats', {
@@ -358,7 +360,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
         .then((data) => setTgChats(data.chats ?? []))
         .catch(() => {})
     );
-  }
+  }, [getToken]);
 
   async function sendRecordingToTelegram(vapiCallId: string, phone: string, chatId: number) {
     setSendingTgRec(vapiCallId);
