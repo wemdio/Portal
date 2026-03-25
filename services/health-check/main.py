@@ -708,75 +708,143 @@ def _render_heartbeat_chart() -> bytes | None:
     return buf.getvalue()
 
 
-async def _heartbeat_body(include_sparklines: bool = True) -> str:
-    """Build heartbeat caption text. Sparklines omitted when chart image is attached."""
+async def _fetch_heartbeat_db_data() -> dict:
+    """Single DB connection with retry to collect all heartbeat data."""
+    data: dict = {"ok": False, "error": ""}
+    if not DATABASE_URL:
+        return data
+
+    last_err: Exception | None = None
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+            try:
+                rows = await conn.fetch(
+                    "SELECT state, count(*)::int AS n FROM pg_stat_activity "
+                    "WHERE datname = current_database() GROUP BY state"
+                )
+                data["conn_max"] = int(await conn.fetchval("SHOW max_connections") or 0)
+                data["conn_total"] = sum(r["n"] for r in rows)
+                data["conn_active"] = sum(r["n"] for r in rows if r["state"] == "active")
+                data["conn_idle"] = sum(r["n"] for r in rows if r["state"] == "idle")
+                data["conn_idle_txn"] = sum(
+                    r["n"] for r in rows
+                    if r["state"] and "idle in transaction" in r["state"]
+                )
+
+                data["disk_db"] = await conn.fetchval(
+                    "SELECT pg_database_size(current_database())"
+                ) or 0
+                try:
+                    data["disk_wal"] = await conn.fetchval(
+                        "SELECT coalesce(sum(size), 0)::bigint FROM pg_ls_waldir()"
+                    ) or 0
+                except Exception:
+                    data["disk_wal"] = 0
+
+                cur = await conn.fetchval(
+                    "SELECT count(*)::int FROM pg_stat_activity "
+                    "WHERE datname = current_database()"
+                )
+                txn = await conn.fetchval(
+                    "SELECT (xact_commit + xact_rollback)::bigint "
+                    "FROM pg_stat_database WHERE datname = current_database()"
+                )
+                _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
+
+                stats_table: str | None = None
+                for candidate in ("pg_stat_statements", "extensions.pg_stat_statements"):
+                    try:
+                        await conn.fetchval(f"SELECT 1 FROM {candidate} LIMIT 1")
+                        stats_table = candidate
+                        break
+                    except Exception:
+                        continue
+
+                if stats_table:
+                    data["slow_queries"] = await conn.fetch(
+                        f"SELECT left(query, 120) AS q, "
+                        f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
+                        f"calls::bigint AS calls "
+                        f"FROM {stats_table} "
+                        f"WHERE queryid IS NOT NULL "
+                        f"ORDER BY max_exec_time DESC LIMIT 5"
+                    )
+                    data["popular_queries"] = await conn.fetch(
+                        f"SELECT left(query, 120) AS q, "
+                        f"calls::bigint AS calls, "
+                        f"round(mean_exec_time::numeric, 2) AS avg_ms "
+                        f"FROM {stats_table} "
+                        f"WHERE queryid IS NOT NULL "
+                        f"ORDER BY calls DESC LIMIT 5"
+                    )
+
+                data["db_users"] = await conn.fetch(
+                    "SELECT usename, count(*)::int AS n "
+                    "FROM pg_stat_activity WHERE datname = current_database() "
+                    "GROUP BY usename ORDER BY n DESC LIMIT 5"
+                )
+
+                data["ok"] = True
+                return data
+            finally:
+                await conn.close()
+        except Exception as e:
+            last_err = e
+            print(
+                f"[health] heartbeat DB attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: "
+                f"{type(e).__name__}: {e}"
+            )
+            if attempt < HEALTH_RETRY_ATTEMPTS:
+                await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    data["error"] = _normalize_network_error(last_err) if last_err else "unknown"
+    return data
+
+
+def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> str:
+    """Format heartbeat caption from pre-fetched data (pure formatting, no DB)."""
     parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
 
-    if not DATABASE_URL:
-        return parts[0]
+    if not data.get("ok"):
+        err = data.get("error", "")
+        if err:
+            parts.append(f"⚠️ <b>БД недоступна</b>: {err}")
+        return "\n".join(parts)
 
-    try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
-        try:
-            rows = await conn.fetch(
-                "SELECT state, count(*)::int AS n FROM pg_stat_activity "
-                "WHERE datname = current_database() GROUP BY state"
-            )
-            max_c = int(await conn.fetchval("SHOW max_connections") or 0)
+    total = data["conn_total"]
+    max_c = data["conn_max"]
+    line = f"🔌 <b>Подключения</b>: {total}"
+    if max_c:
+        line += f" / {max_c}"
+    bits = []
+    if data["conn_active"]:
+        bits.append(f"active {data['conn_active']}")
+    if data["conn_idle"]:
+        bits.append(f"idle {data['conn_idle']}")
+    if data["conn_idle_txn"]:
+        bits.append(f"idle_txn {data['conn_idle_txn']}")
+    if bits:
+        line += f"  ({', '.join(bits)})"
+    parts.append(line)
 
-            total = sum(r["n"] for r in rows)
-            active = sum(r["n"] for r in rows if r["state"] == "active")
-            idle = sum(r["n"] for r in rows if r["state"] == "idle")
-            idle_txn = sum(
-                r["n"] for r in rows
-                if r["state"] and "idle in transaction" in r["state"]
-            )
+    db_bytes = data["disk_db"]
+    wal_bytes = data["disk_wal"]
+    total_used = db_bytes + wal_bytes
+    disk_limit = DISK_TOTAL_GB * (1024 ** 3)
+    pct = total_used / disk_limit * 100 if disk_limit else 0
+    filled = min(20, int(pct / 100 * 20))
+    bar = "█" * filled + "░" * (20 - filled)
 
-            line = f"🔌 <b>Подключения</b>: {total}"
-            if max_c:
-                line += f" / {max_c}"
-            bits = []
-            if active:
-                bits.append(f"active {active}")
-            if idle:
-                bits.append(f"idle {idle}")
-            if idle_txn:
-                bits.append(f"idle_txn {idle_txn}")
-            if bits:
-                line += f"  ({', '.join(bits)})"
-            parts.append(line)
-
-            db_bytes = await conn.fetchval(
-                "SELECT pg_database_size(current_database())"
-            ) or 0
-
-            wal_bytes = 0
-            try:
-                wal_bytes = await conn.fetchval(
-                    "SELECT coalesce(sum(size), 0)::bigint FROM pg_ls_waldir()"
-                ) or 0
-            except Exception:
-                pass
-
-            total_used = db_bytes + wal_bytes
-            disk_limit = DISK_TOTAL_GB * (1024 ** 3)
-            pct = total_used / disk_limit * 100 if disk_limit else 0
-            filled = min(20, int(pct / 100 * 20))
-            bar = "█" * filled + "░" * (20 - filled)
-
-            parts.append(
-                f"💾 <b>Диск</b>: {_fmt_bytes(total_used)} / "
-                f"{DISK_TOTAL_GB:g} GB ({pct:.0f}%)"
-            )
-            parts.append(f"<code>  {bar}</code>")
-            detail = [f"БД {_fmt_bytes(db_bytes)}"]
-            if wal_bytes:
-                detail.append(f"WAL {_fmt_bytes(wal_bytes)}")
-            parts.append("  " + " · ".join(detail))
-        finally:
-            await conn.close()
-    except Exception as e:
-        parts.append(f"⚠️ {str(e)[:80]}")
+    parts.append(
+        f"💾 <b>Диск</b>: {_fmt_bytes(total_used)} / "
+        f"{DISK_TOTAL_GB:g} GB ({pct:.0f}%)"
+    )
+    parts.append(f"<code>  {bar}</code>")
+    detail = [f"БД {_fmt_bytes(db_bytes)}"]
+    if wal_bytes:
+        detail.append(f"WAL {_fmt_bytes(wal_bytes)}")
+    parts.append("  " + " · ".join(detail))
 
     if include_sparklines and len(_METRICS) >= 2:
         pts = list(_METRICS)
@@ -807,6 +875,43 @@ async def _heartbeat_body(include_sparklines: bool = True) -> str:
                 parts.append(f"<code>{spark_c}</code>")
 
     return "\n".join(parts)
+
+
+def _format_performance_stats(data: dict) -> str | None:
+    """Format performance stats from pre-fetched data (pure formatting, no DB)."""
+    if not data.get("ok"):
+        return None
+
+    sections: list[str] = []
+
+    slow = data.get("slow_queries")
+    if slow:
+        lines = ["🐌 <b>Долгие запросы</b> (max время):"]
+        for i, r in enumerate(slow, 1):
+            q = _sanitize_query(r["q"])
+            calls_fmt = f"{r['calls']:,}".replace(",", " ")
+            lines.append(f"  {i}. <code>{q}</code>")
+            lines.append(f"     max {r['max_s']}s · {calls_fmt} вызовов")
+        sections.append("\n".join(lines))
+
+    popular = data.get("popular_queries")
+    if popular:
+        lines = ["🔥 <b>Популярные запросы</b> (вызовы):"]
+        for i, r in enumerate(popular, 1):
+            q = _sanitize_query(r["q"])
+            calls_fmt = f"{r['calls']:,}".replace(",", " ")
+            lines.append(f"  {i}. <code>{q}</code>")
+            lines.append(f"     {calls_fmt} вызовов · avg {r['avg_ms']}ms")
+        sections.append("\n".join(lines))
+
+    users = data.get("db_users")
+    if users:
+        lines = ["👥 <b>Пользователи БД</b> (подключения):"]
+        for r in users:
+            lines.append(f"  • {r['usename']}: {r['n']}")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections) if sections else None
 
 
 async def _ping_site(count: int = 5) -> str:
@@ -901,77 +1006,6 @@ def _sanitize_query(q: str | None, limit: int = 70) -> str:
     return text
 
 
-async def _fetch_performance_stats() -> str | None:
-    """Fetch DB performance: slow queries, active users, popular queries."""
-    if not DATABASE_URL:
-        return None
-
-    sections: list[str] = []
-    try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
-        try:
-            stats_table: str | None = None
-            for candidate in ("pg_stat_statements", "extensions.pg_stat_statements"):
-                try:
-                    await conn.fetchval(f"SELECT 1 FROM {candidate} LIMIT 1")
-                    stats_table = candidate
-                    break
-                except Exception:
-                    continue
-
-            if stats_table:
-                slow = await conn.fetch(
-                    f"SELECT left(query, 120) AS q, "
-                    f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
-                    f"calls::bigint AS calls "
-                    f"FROM {stats_table} "
-                    f"WHERE queryid IS NOT NULL "
-                    f"ORDER BY max_exec_time DESC LIMIT 5"
-                )
-                if slow:
-                    lines = ["🐌 <b>Долгие запросы</b> (max время):"]
-                    for i, r in enumerate(slow, 1):
-                        q = _sanitize_query(r["q"])
-                        calls_fmt = f"{r['calls']:,}".replace(",", " ")
-                        lines.append(f"  {i}. <code>{q}</code>")
-                        lines.append(f"     max {r['max_s']}s · {calls_fmt} вызовов")
-                    sections.append("\n".join(lines))
-
-                popular = await conn.fetch(
-                    f"SELECT left(query, 120) AS q, "
-                    f"calls::bigint AS calls, "
-                    f"round(mean_exec_time::numeric, 2) AS avg_ms "
-                    f"FROM {stats_table} "
-                    f"WHERE queryid IS NOT NULL "
-                    f"ORDER BY calls DESC LIMIT 5"
-                )
-                if popular:
-                    lines = ["🔥 <b>Популярные запросы</b> (вызовы):"]
-                    for i, r in enumerate(popular, 1):
-                        q = _sanitize_query(r["q"])
-                        calls_fmt = f"{r['calls']:,}".replace(",", " ")
-                        lines.append(f"  {i}. <code>{q}</code>")
-                        lines.append(f"     {calls_fmt} вызовов · avg {r['avg_ms']}ms")
-                    sections.append("\n".join(lines))
-
-            users = await conn.fetch(
-                "SELECT usename, count(*)::int AS n "
-                "FROM pg_stat_activity WHERE datname = current_database() "
-                "GROUP BY usename ORDER BY n DESC LIMIT 5"
-            )
-            if users:
-                lines = ["👥 <b>Пользователи БД</b> (подключения):"]
-                for r in users:
-                    lines.append(f"  • {r['usename']}: {r['n']}")
-                sections.append("\n".join(lines))
-        finally:
-            await conn.close()
-    except Exception as e:
-        return f"⚠️ Ошибка: {str(e)[:80]}"
-
-    return "\n\n".join(sections) if sections else None
-
-
 async def send_heartbeat():
     """Periodic heartbeat: chart + caption + performance stats."""
     global HEARTBEAT_STARTED
@@ -980,24 +1014,25 @@ async def send_heartbeat():
         await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
         return
 
+    db_data = await _fetch_heartbeat_db_data()
     ping_text = await _ping_site()
 
     chart = _render_heartbeat_chart()
     if chart:
-        caption = await _heartbeat_body(include_sparklines=False)
+        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
         caption += f"\n\n{ping_text}"
         ok = await send_telegram_photo(chart, caption=caption)
         if not ok:
-            text = await _heartbeat_body(include_sparklines=True)
+            text = _format_heartbeat_caption(db_data, include_sparklines=True)
             text += f"\n\n{ping_text}"
             await send_telegram(text)
     else:
-        text = await _heartbeat_body(include_sparklines=True)
+        text = _format_heartbeat_caption(db_data, include_sparklines=True)
         text += f"\n\n{ping_text}"
         await send_telegram(text)
 
     extra_parts: list[str] = []
-    perf = await _fetch_performance_stats()
+    perf = _format_performance_stats(db_data)
     if perf:
         extra_parts.append(perf)
     proxy_text = await _ping_proxies()
