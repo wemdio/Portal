@@ -100,8 +100,8 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal worker-aicaller
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
-            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal worker-aicaller
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
             sudo docker image prune --force
             sudo docker volume prune --force
