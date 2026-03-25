@@ -15,6 +15,8 @@ import {
   ChevronUp,
   KeyRound,
   CheckCircle2,
+  Upload,
+  Zap,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 import ExcelJS from 'exceljs';
@@ -57,6 +59,8 @@ type TgAccount = {
   proxy_url: string;
   session_data: string;
   is_active: boolean;
+  daily_limit: number;
+  sent_today: number;
   created_at: string;
 };
 
@@ -88,6 +92,7 @@ export default function TgParserPage() {
   const [addApiHash, setAddApiHash] = useState('');
   const [addPhone, setAddPhone] = useState('');
   const [accountsExpanded, setAccountsExpanded] = useState(true);
+  const [uploading, setUploading] = useState(false);
 
   // Auth wizard state
   type AuthStep = 'form' | 'code_needed' | 'password_needed' | 'done';
@@ -222,6 +227,54 @@ export default function TgParserPage() {
     }
   }, [accountId, loadAccounts]);
 
+  const updateDailyLimit = useCallback(async (id: string, newLimit: number) => {
+    const token = await getAccessToken();
+    if (!token) return;
+    const res = await fetch(`${API_ACCOUNTS}/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ daily_limit: Math.max(0, newLimit) }),
+    });
+    if (res.ok) {
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, daily_limit: Math.max(0, newLimit) } : a)),
+      );
+    } else {
+      const data = (await res.json()) as { error?: string };
+      setError(data?.error ?? 'Ошибка обновления лимита');
+    }
+  }, []);
+
+  const handleFilesUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (!files.length) return;
+
+    setUploading(true);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      if (!token) { setError('Необходима авторизация'); return; }
+      const form = new FormData();
+      files.forEach((file) => form.append('files', file));
+      const res = await fetch(`${API_ACCOUNTS}/bulk-files`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data?.error ?? `Ошибка: ${res.status}`); return; }
+      if (data.warnings?.length) {
+        setError(`Загружено ${data.count} аккаунтов. Предупреждения: ${data.warnings.join('; ')}`);
+      }
+      void loadAccounts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки файлов');
+    } finally {
+      setUploading(false);
+    }
+  }, [loadAccounts]);
+
   // --- Parse ---
   const runParse = useCallback(async () => {
     const linkList = links.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
@@ -332,14 +385,28 @@ export default function TgParserPage() {
             Аккаунты Telegram ({accounts.length})
             {accountsExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </button>
-          <button
-            type="button"
-            onClick={() => { setShowAddAccount((v) => !v); setAccountsExpanded(true); }}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-          >
-            <Plus className="h-4 w-4" />
-            Добавить
-          </button>
+          <div className="flex items-center gap-2">
+            <label className={`inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
+              {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              Загрузить файлы
+              <input
+                type="file"
+                multiple
+                accept=".json,.session"
+                className="hidden"
+                onChange={handleFilesUpload}
+                disabled={uploading}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => { setShowAddAccount((v) => !v); setAccountsExpanded(true); }}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <Plus className="h-4 w-4" />
+              Добавить
+            </button>
+          </div>
         </div>
 
         {accountsExpanded && (
@@ -498,33 +565,77 @@ export default function TgParserPage() {
               </p>
             ) : (
               <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
-                {accounts.map((acc) => (
-                  <div key={acc.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
-                    <span
-                      className={`h-2 w-2 rounded-full shrink-0 ${acc.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}
-                      title={acc.is_active ? 'Активен' : 'Отключен'}
-                    />
-                    <span className="font-medium text-gray-800 truncate flex-1">
-                      {acc.name || `Account ${acc.api_id}`}
-                    </span>
-                    <span className="text-gray-500 text-xs truncate max-w-[120px]">
-                      {acc.phone || `ID: ${acc.api_id}`}
-                    </span>
-                    {acc.session_data ? (
-                      <span className="text-xs text-emerald-600">session ok</span>
-                    ) : (
-                      <span className="text-xs text-amber-600">no session</span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => deleteAccount(acc.id)}
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50"
-                      title="Удалить"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
+                {accounts.map((acc) => {
+                  const pct = acc.daily_limit > 0
+                    ? Math.min(100, Math.round((acc.sent_today / acc.daily_limit) * 100))
+                    : 100;
+                  const limitReached = acc.sent_today >= acc.daily_limit;
+                  const barColor = limitReached
+                    ? 'bg-rose-500'
+                    : pct > 75
+                      ? 'bg-amber-500'
+                      : 'bg-emerald-500';
+
+                  return (
+                    <div key={acc.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${acc.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                        title={acc.is_active ? 'Активен' : 'Отключен'}
+                      />
+                      <span className="font-medium text-gray-800 truncate min-w-0 flex-1">
+                        {acc.name || `Account ${acc.api_id}`}
+                      </span>
+                      <span className="text-gray-500 text-xs truncate max-w-[120px]">
+                        {acc.phone || `ID: ${acc.api_id}`}
+                      </span>
+                      {acc.session_data ? (
+                        <span className="text-xs text-emerald-600">session ok</span>
+                      ) : (
+                        <span className="text-xs text-amber-600">no session</span>
+                      )}
+
+                      {/* Daily capacity */}
+                      <div className="flex items-center gap-2 min-w-[180px]" title="Мощность: отправлено / лимит в день">
+                        <Zap className={`h-3.5 w-3.5 shrink-0 ${limitReached ? 'text-rose-500' : 'text-amber-500'}`} />
+                        <div className="flex items-center gap-1.5 flex-1">
+                          <div className="h-1.5 flex-1 rounded-full bg-gray-200 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all ${barColor}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                          <span className={`text-xs tabular-nums whitespace-nowrap ${limitReached ? 'text-rose-600 font-medium' : 'text-gray-500'}`}>
+                            {acc.sent_today}/{acc.daily_limit}
+                          </span>
+                        </div>
+                        <input
+                          type="number"
+                          min={0}
+                          defaultValue={acc.daily_limit}
+                          key={`${acc.id}-${acc.daily_limit}`}
+                          onBlur={(e) => {
+                            const v = parseInt(e.target.value, 10);
+                            if (!isNaN(v) && v >= 0) void updateDailyLimit(acc.id, v);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                          }}
+                          className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-xs text-center text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                          title="Лимит рассылок в день"
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => deleteAccount(acc.id)}
+                        className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50"
+                        title="Удалить"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -774,7 +885,7 @@ export default function TgParserPage() {
         <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 p-12 text-center">
           <p className="text-gray-500 text-sm">
             Введите ссылки на чаты или каналы (t.me/…), выберите режимы парсинга и нажмите «Запустить парсинг».
-            Парсинг может занять несколько минут. Выберите аккаунт Telegram из списка или используйте серверные env-переменные.
+            Парсинг может занять несколько минут.
           </p>
         </div>
       )}
