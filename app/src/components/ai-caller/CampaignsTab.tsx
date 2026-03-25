@@ -110,12 +110,10 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setLoadingCampaigns(false);
   }, [getToken]);
 
-  useEffect(() => {
-    if (campaignsLoaded.current == null) {
-      campaignsLoaded.current = true;
-      fetchCampaigns();
-    }
-  }, [fetchCampaigns]);
+  if (campaignsLoaded.current == null) {
+    campaignsLoaded.current = true;
+    fetchCampaigns();
+  }
 
   // Auto-refresh campaign stats while any campaign is running (server-driven)
   const hasRunning = campaigns.some((c) => c.status === 'running');
