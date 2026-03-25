@@ -80,7 +80,7 @@ export async function POST(req: NextRequest) {
         session_data: string;
         proxy_url: string;
         is_active: boolean;
-      }>[] = [];
+      }> = [];
       const errors: string[] = [];
 
       for (const [base, item] of byBase) {
