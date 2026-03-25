@@ -73,6 +73,10 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const isClientPortal = pathname.startsWith('/client');
   const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal;
 
+  if (isClientPortal) {
+    return <>{children}</>;
+  }
+
   return (
     <div
       className={shellClassName}

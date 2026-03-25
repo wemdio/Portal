@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { Loader2, FileText, Download } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
 
@@ -95,55 +94,57 @@ export default function ClientReportsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-900">Отчёты</h1>
-        <p className="mt-1 text-sm text-zinc-500">Выберите кампании и сформируйте отчёт</p>
+    <div className="mx-auto max-w-5xl">
+      <div className="mb-6 sm:mb-8">
+        <h1 className="text-xl sm:text-2xl font-extrabold">Отчёты</h1>
+        <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>Выберите кампании и сформируйте отчёт</p>
       </div>
 
       {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+        <div className="neu-inset mb-6 rounded-2xl px-5 py-3.5 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>
+          {error}
+        </div>
       )}
 
       {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+        <div className="flex items-center justify-center py-24">
+          <div className="neu-spinner animate-spin" />
         </div>
       ) : (
         <>
           <div className="mb-4 flex items-center gap-3">
             <button
               onClick={selectAll}
-              className="text-xs text-blue-600 hover:text-blue-800"
+              className="text-xs font-semibold transition-colors"
+              style={{ color: 'var(--cp-accent)' }}
             >
               {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
             </button>
-            <span className="text-xs text-zinc-400">
+            <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
               {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
             </span>
           </div>
 
           {campaigns.length > 0 && (
-            <div className="mb-6 rounded-xl border border-zinc-200 bg-white divide-y divide-zinc-100 max-h-64 overflow-y-auto">
-              {campaigns.map((c) => {
+            <div className="neu-card mb-6 max-h-64 overflow-y-auto">
+              {campaigns.map((c, idx) => {
                 const a = analytics.find((x) => x.campaign_id === c.id);
-                const sent = a?.emails_sent_count ?? 0;
-                const replied = a?.reply_count ?? 0;
+                const sent = Number(a?.emails_sent_count ?? 0);
+                const replied = Number(a?.reply_count ?? 0);
+                const checked = selectedIds.has(c.id);
                 return (
                   <label
                     key={c.id}
-                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${
-                      selectedIds.has(c.id) ? 'bg-blue-50' : 'hover:bg-zinc-50'
-                    }`}
+                    className="neu-row flex items-center gap-2 sm:gap-3 px-3 sm:px-5 py-2.5 sm:py-3 cursor-pointer"
+                    style={idx > 0 ? { borderTop: '1px solid rgba(180,173,164,0.15)' } : undefined}
                   >
                     <input
                       type="checkbox"
-                      checked={selectedIds.has(c.id)}
+                      checked={checked}
                       onChange={() => toggleCampaign(c.id)}
-                      className="rounded border-zinc-300"
                     />
-                    <span className="flex-1 min-w-0 text-sm text-zinc-800 truncate">{c.name}</span>
-                    <span className="text-xs text-zinc-400 shrink-0">
+                    <span className="flex-1 min-w-0 text-xs sm:text-sm font-medium truncate">{c.name}</span>
+                    <span className="text-[10px] sm:text-[11px] shrink-0 hidden sm:inline" style={{ color: 'var(--cp-text-l)' }}>
                       {sent} sent / {replied} replies
                     </span>
                   </label>
@@ -156,80 +157,70 @@ export default function ClientReportsPage() {
             <button
               onClick={handleGenerate}
               disabled={generating}
-              className="inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+              className="neu-btn inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold w-full sm:w-auto justify-center"
             >
-              {generating ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Генерация...
-                </>
-              ) : (
-                <>
-                  <FileText className="h-4 w-4" />
-                  Сформировать отчёт
-                </>
-              )}
+              {generating ? 'Генерация...' : 'Сформировать отчёт'}
             </button>
           </div>
 
           {report && (
-            <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
-              <div className="px-4 py-3 border-b border-zinc-100 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-zinc-800">Результат</h3>
+            <div className="neu-card overflow-hidden">
+              <div className="px-3 sm:px-5 py-3 sm:py-4 flex items-center justify-between">
+                <h3 className="text-xs sm:text-sm font-bold">Результат</h3>
                 <button
                   onClick={handleDownloadCsv}
-                  className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                  className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] sm:text-xs font-semibold"
+                  style={{ color: 'var(--cp-accent)' }}
                 >
-                  <Download className="h-3.5 w-3.5" /> CSV
+                  CSV
                 </button>
               </div>
 
-              <div className="p-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div>
-                  <p className="text-xs text-zinc-500">Кампаний</p>
-                  <p className="text-lg font-bold text-zinc-900">{report.summary.totalCampaigns}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Отправлено</p>
-                  <p className="text-lg font-bold text-zinc-900">{report.summary.totalEmailsSent}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Открытия</p>
-                  <p className="text-lg font-bold text-zinc-900">
-                    {report.summary.totalOpened}
-                    <span className="text-xs font-normal text-zinc-400 ml-1">{report.summary.conversion.openPctAllEmails}</span>
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Ответы</p>
-                  <p className="text-lg font-bold text-zinc-900">
-                    {report.summary.totalReplies}
-                    <span className="text-xs font-normal text-zinc-400 ml-1">{report.summary.conversion.replyPctByLeads}</span>
-                  </p>
-                </div>
+              <hr className="neu-divider mx-3 sm:mx-5" />
+
+              <div className="p-3 sm:p-5 grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4">
+                {[
+                  { label: 'Кампаний', value: report.summary.totalCampaigns },
+                  { label: 'Отправлено', value: report.summary.totalEmailsSent },
+                  { label: 'Открытия', value: report.summary.totalOpened, sub: report.summary.conversion.openPctAllEmails },
+                  { label: 'Ответы', value: report.summary.totalReplies, sub: report.summary.conversion.replyPctByLeads },
+                ].map((m) => (
+                  <div key={m.label} className="neu-sm p-2.5 sm:p-3.5">
+                    <p className="text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{m.label}</p>
+                    <p className="text-base sm:text-lg font-bold mt-1">
+                      {m.value}
+                      {m.sub && <span className="text-[10px] sm:text-xs font-normal ml-1 sm:ml-1.5" style={{ color: 'var(--cp-text-l)' }}>{m.sub}</span>}
+                    </p>
+                  </div>
+                ))}
               </div>
 
               {report.rows && report.rows.length > 0 && (
-                <div className="border-t border-zinc-100 overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="bg-zinc-50 text-left">
-                        {report.rows[0]?.map((cell, i) => (
-                          <th key={i} className="px-3 py-2 font-medium text-zinc-500">{String(cell)}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-50">
-                      {report.rows.slice(1).map((row, ri) => (
-                        <tr key={ri} className="hover:bg-zinc-50">
-                          {row.map((cell, ci) => (
-                            <td key={ci} className="px-3 py-2 text-zinc-700">{String(cell)}</td>
+                <>
+                  <hr className="neu-divider mx-3 sm:mx-5" />
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[10px] sm:text-xs">
+                      <thead>
+                        <tr>
+                          {report.rows[0]?.map((cell, i) => (
+                            <th key={i} className="px-3 sm:px-5 py-2.5 sm:py-3 text-left text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap" style={{ color: 'var(--cp-text-l)' }}>
+                              {String(cell)}
+                            </th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {report.rows.slice(1).map((row, ri) => (
+                          <tr key={ri} className="neu-row" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
+                            {row.map((cell, ci) => (
+                              <td key={ci} className="px-3 sm:px-5 py-2 sm:py-2.5 whitespace-nowrap" style={{ color: 'var(--cp-text-m)' }}>{String(cell)}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           )}
