@@ -8,6 +8,7 @@ import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
 
 interface UserContextValue {
+  userId: string | null;
   userRole: UserRole | null;
   userEmail: string | null;
   userFullName: string | null;
@@ -28,6 +29,7 @@ export function useUser(): UserContextValue {
 }
 
 export function UserProvider({ children }: { children: ReactNode }) {
+  const [userId, setUserId] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userFullName, setUserFullName] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     const applySession = async (session: Session | null) => {
       if (!isMounted) return;
       if (!session) {
+        setUserId(null);
         setUserEmail(null);
         setUserRole(null);
         setUserFullName(null);
@@ -53,6 +56,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      setUserId(session.user.id);
       setUserEmail(session.user.email ?? null);
       const [profile, navRows] = await Promise.all([
         supabase
@@ -84,11 +88,6 @@ export function UserProvider({ children }: { children: ReactNode }) {
       }
       setNavTabVisibility(vis);
     };
-
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      await applySession(session);
-    })();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
       void applySession(session);
@@ -158,6 +157,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<UserContextValue>(() => ({
+    userId,
     userRole,
     userEmail,
     userFullName,
@@ -167,7 +167,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     badges,
     handleAvatarError,
     handleSignOut,
-  }), [userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, handleAvatarError, handleSignOut]);
+  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, handleAvatarError, handleSignOut]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

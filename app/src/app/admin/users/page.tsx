@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
-import { ALL_ROLES, ROLE_LABELS, isAdmin, getCurrentUserRole } from '@/lib/roles';
+import { ALL_ROLES, ROLE_LABELS, isAdmin } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
@@ -52,8 +53,7 @@ function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string
 
 export default function UsersPage() {
   const isTma = useIsTma();
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(null);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const { userId: currentUserId, userRole: currentUserRole } = useUser();
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -109,13 +109,7 @@ export default function UsersPage() {
 
   const checkAccess = useCallback(async () => {
     try {
-      const role = await getCurrentUserRole();
-      setCurrentUserRole(role);
-
-      const { data: { session } } = await supabase.auth.getSession();
-      setCurrentUserId(session?.user?.id ?? null);
-
-      if (!isAdmin(role)) {
+      if (!isAdmin(currentUserRole)) {
         setError('Доступ запрещен. Только администраторы могут управлять пользователями.');
         setLoading(false);
         return;
@@ -128,7 +122,7 @@ export default function UsersPage() {
       setError(getErrorMessage(err));
       setLoading(false);
     }
-  }, [fetchUsers]);
+  }, [currentUserRole, fetchUsers]);
 
   const getAccessToken = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
