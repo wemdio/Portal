@@ -223,10 +223,6 @@ export default function UsersPage() {
     return () => clearTimeout(t);
   }, [saveSuccessMessage]);
 
-  useEffect(() => {
-    if (modalRole === 'client') void fetchAllCampaigns();
-  }, [modalRole, fetchAllCampaigns]);
-
   const fetchAllCampaigns = useCallback(async () => {
     if (allCampaigns.length > 0) return;
     setAllCampaignsLoading(true);
@@ -241,6 +237,10 @@ export default function UsersPage() {
       setAllCampaignsLoading(false);
     }
   }, [apiFetch, allCampaigns.length]);
+
+  useEffect(() => {
+    if (modalRole === 'client') void fetchAllCampaigns();
+  }, [modalRole, fetchAllCampaigns]);
 
   async function openActionModal(user: UserProfile, origin: { x: number; y: number }) {
     setActionModalLoadingUserId(user.id);
