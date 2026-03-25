@@ -97,8 +97,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     return session?.access_token ?? '';
   }, []);
 
-  const fetchCampaigns = useCallback(async () => {
-    setLoadingCampaigns(true);
+  const fetchCampaigns = useCallback(async (silent = false) => {
+    if (!silent) setLoadingCampaigns(true);
     try {
       const token = await getToken();
       const res = await fetch('/api/ai-caller/campaigns', {
@@ -107,7 +107,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       const data = await res.json();
       setCampaigns(data.campaigns ?? []);
     } catch { /* ignore */ }
-    setLoadingCampaigns(false);
+    if (!silent) setLoadingCampaigns(false);
   }, [getToken]);
 
   if (campaignsLoaded.current == null) {
@@ -120,7 +120,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   useEffect(() => {
     if (!hasRunning) return;
     const interval = setInterval(() => {
-      fetchCampaigns();
+      fetchCampaigns(true);
       const runningCamp = campaigns.find((c) => c.status === 'running');
       if (expandedId && runningCamp && expandedId === runningCamp.id) {
         getToken().then((token) =>
@@ -241,7 +241,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ status: 'running' }),
     });
-    fetchCampaigns();
+    fetchCampaigns(true);
   }
 
   async function pauseCampaign(id: string) {
@@ -251,7 +251,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ status: 'paused' }),
     });
-    fetchCampaigns();
+    fetchCampaigns(true);
   }
 
   async function deleteCampaign(id: string) {
@@ -261,7 +261,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
-    fetchCampaigns();
+    fetchCampaigns(true);
   }
 
   async function loadContacts(campaignId: string) {

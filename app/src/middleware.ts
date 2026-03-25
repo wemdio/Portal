@@ -1,6 +1,15 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+const ROLE_COOKIE = 'x-portal-role'
+const ROLE_COOKIE_MAX_AGE = 5 * 60 // 5 minutes
+
+const ROLE_GATED_PREFIXES = ['/admin', '/billing-calendar', '/client'] as const
+
+function needsRoleCheck(pathname: string): boolean {
+  return ROLE_GATED_PREFIXES.some(p => pathname.startsWith(p))
+}
+
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({
     request: {
@@ -113,71 +122,84 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { session } } = await supabase.auth.getSession()
-  const isPublicPath =
-    pathname === '/maintenance' ||
-    pathname === '/login' ||
-    pathname.startsWith('/api/telegram/verify') ||
-    pathname.startsWith('/api/telegram/link') ||
-    pathname.startsWith('/review/base/')
-
-  if (!session && !isPublicPath) {
-    return NextResponse.redirect(new URL('/login', request.url))
-  }
-
-  if (session && pathname === '/login') {
-    return NextResponse.redirect(new URL('/', request.url))
-  }
-
-  let userRole: string | null = null
-  const needsRoleCheck =
-    session &&
-    (pathname.startsWith('/admin') ||
-     pathname.startsWith('/billing-calendar') ||
-     pathname.startsWith('/client') ||
-     pathname === '/' ||
-     (!pathname.startsWith('/login') && !pathname.startsWith('/review/')))
-
-  if (session && needsRoleCheck) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', session.user.id)
-      .single()
-    userRole = profile?.role ?? null
-  }
-
-  if (session && userRole === 'client') {
-    const clientAllowed =
-      pathname.startsWith('/client') ||
-      pathname === '/login' ||
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    const isPublicPath =
       pathname === '/maintenance' ||
+      pathname === '/login' ||
+      pathname.startsWith('/api/telegram/verify') ||
+      pathname.startsWith('/api/telegram/link') ||
       pathname.startsWith('/review/base/')
-    if (!clientAllowed) {
-      return NextResponse.redirect(new URL('/client', request.url))
-    }
-  }
 
-  if (session && pathname.startsWith('/client')) {
-    if (userRole !== 'client' && userRole !== 'admin') {
+    if (!session && !isPublicPath) {
+      return NextResponse.redirect(new URL('/login', request.url))
+    }
+
+    if (session && pathname === '/login') {
       return NextResponse.redirect(new URL('/', request.url))
     }
-  }
 
-  if (session && pathname.startsWith('/admin')) {
-    if (userRole !== 'admin') {
-      return NextResponse.redirect(new URL('/', request.url))
+    let userRole: string | null = null
+
+    if (session && needsRoleCheck(pathname)) {
+      const cachedRole = request.cookies.get(ROLE_COOKIE)?.value ?? null
+      if (cachedRole) {
+        userRole = cachedRole
+      } else {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', session.user.id)
+          .single()
+        userRole = profile?.role ?? null
+        if (userRole) {
+          response.cookies.set({
+            name: ROLE_COOKIE,
+            value: userRole,
+            httpOnly: true,
+            sameSite: 'lax',
+            path: '/',
+            maxAge: ROLE_COOKIE_MAX_AGE,
+          })
+        }
+      }
     }
-  }
 
-  if (session && pathname.startsWith('/billing-calendar')) {
-    const allowedRoles = ['technician', 'lead', 'admin', 'director']
-    if (!userRole || !allowedRoles.includes(userRole)) {
-      return NextResponse.redirect(new URL('/', request.url))
+    if (session && userRole === 'client') {
+      const clientAllowed =
+        pathname.startsWith('/client') ||
+        pathname === '/login' ||
+        pathname === '/maintenance' ||
+        pathname.startsWith('/review/base/')
+      if (!clientAllowed) {
+        return NextResponse.redirect(new URL('/client', request.url))
+      }
     }
-  }
 
-  return response
+    if (session && pathname.startsWith('/client')) {
+      if (userRole !== 'client' && userRole !== 'admin') {
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
+    if (session && pathname.startsWith('/admin')) {
+      if (userRole !== 'admin') {
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
+    if (session && pathname.startsWith('/billing-calendar')) {
+      const allowedRoles = ['technician', 'lead', 'admin', 'director']
+      if (!userRole || !allowedRoles.includes(userRole)) {
+        return NextResponse.redirect(new URL('/', request.url))
+      }
+    }
+
+    return response
+  } catch (err) {
+    console.error('[middleware] Supabase error, degrading gracefully:', err)
+    return response
+  }
 }
 
 export const config = {

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { Play, Loader2, Download, FileSpreadsheet, Database, AlertCircle } from 'lucide-react';
 import { saveAs } from 'file-saver';
-import ExcelJS from 'exceljs';
+
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 type HabrCompany = {
@@ -140,6 +140,7 @@ export default function HabrCareerPage() {
     if (companies.length === 0) return;
     setExporting(true);
     try {
+      const ExcelJS = (await import('exceljs')).default;
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Habr Career');
       ws.columns = COLUMNS.map((col) => ({ header: col, key: col, width: 20 }));

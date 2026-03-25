@@ -5,7 +5,7 @@ import type { ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent } from 'react
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
@@ -2232,6 +2232,7 @@ export function DatabaseSpreadsheet() {
         applyRowsToNewTab(workerRows, file.name);
         finalizeImport('done', file.name);
       } else {
+        const XLSX = await import('xlsx');
         const workbook = XLSX.read(buffer, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         const sheet = workbook.Sheets[sheetName];
@@ -2258,8 +2259,9 @@ export function DatabaseSpreadsheet() {
     downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), filename);
   };
 
-  const handleExportXlsx = () => {
+  const handleExportXlsx = async () => {
     if (!activeTab) return;
+    const XLSX = await import('xlsx');
     const workbook = XLSX.utils.book_new();
     const sheet = XLSX.utils.aoa_to_sheet(activeTab.data);
     XLSX.utils.book_append_sheet(workbook, sheet, activeTab.name || 'Sheet1');

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
-import { useNavData } from '@/lib/useNavData';
+import { useUser } from '@/lib/UserProvider';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 
 const navActiveAliases: Record<string, string[]> = {
@@ -24,7 +24,7 @@ export function TopNav() {
     badges,
     handleAvatarError,
     handleSignOut,
-  } = useNavData();
+  } = useUser();
 
   if (pathname === '/login') return null;
 

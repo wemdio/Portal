@@ -18,7 +18,14 @@ import { openaiGenerate, detectTrigger } from './openaiChat';
 import { truncateMessage } from '@/lib/logger';
 
 const BUCKET_SESSIONS = 'tg-outreach-sessions';
+const SESSION_CACHE_MAX = 100;
 const sessionPathCache = new Map<string, string>();
+
+function sessionCacheEvict(): void {
+  if (sessionPathCache.size <= SESSION_CACHE_MAX) return;
+  const oldest = sessionPathCache.keys().next().value;
+  if (oldest != null) sessionPathCache.delete(oldest);
+}
 
 async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): Promise<string> {
   const cached = sessionPathCache.get(storagePath);
@@ -28,6 +35,7 @@ async function downloadSessionToTemp(db: SupabaseClient, storagePath: string): P
   const localPath = path.join(os.tmpdir(), `tg-session-${storagePath.replace(/\//g, '-')}`);
   fs.writeFileSync(localPath, Buffer.from(await data.arrayBuffer()));
   sessionPathCache.set(storagePath, localPath);
+  sessionCacheEvict();
   return localPath;
 }
 

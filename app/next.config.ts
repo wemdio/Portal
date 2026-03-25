@@ -22,6 +22,11 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: '600mb',
     },
+    optimizePackageImports: [
+      'lucide-react',
+      '@phosphor-icons/react',
+      'date-fns',
+    ],
   },
   outputFileTracingIncludes: {
     '/api/brief-scoring/parse-pdf': [
