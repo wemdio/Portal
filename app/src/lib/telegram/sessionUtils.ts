@@ -54,6 +54,7 @@ export async function sqliteBufferToSessionString(buffer: ArrayBuffer): Promise<
   try {
     fs.writeFileSync(tmpPath, Buffer.from(buffer));
     const session = await readSqliteSession(tmpPath);
+    await session.load();
     return session.save();
   } finally {
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
