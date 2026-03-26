@@ -91,6 +91,7 @@ if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     "lead_import_jobs"
     "tg_outreach_jobs"
     "ai_caller_jobs"
+    "tg_parser_jobs"
   )
 
   for table in "${tracked_tables[@]}"; do

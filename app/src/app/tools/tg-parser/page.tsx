@@ -23,6 +23,8 @@ import {
   TG_PARSER_MAX_CONTACTS_PER_RUN_DEFAULT,
   TG_PARSER_MAX_CONTACTS_PER_RUN_MAX,
 } from '@/lib/tgParser/constants';
+import type { ParseJob, TgParserJobApiRow } from '@/lib/tgParser/mapJobRow';
+import { tgParserApiRowToUi } from '@/lib/tgParser/mapJobRow';
 
 const COLUMNS: (keyof ParsedUser)[] = [
   'ID/Username',
@@ -45,33 +47,6 @@ const COLUMNS: (keyof ParsedUser)[] = [
 
 function cellValue(v: unknown): string {
   return String(v ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
-}
-
-type ParseJobStatus = 'running' | 'done' | 'error';
-
-type ParseJob = {
-  id: string;
-  /** пусто = парсинг через env (без выбранного аккаунта) */
-  accountId: string;
-  accountLabel: string;
-  linkCount: number;
-  linksSummary: string;
-  status: ParseJobStatus;
-  users: ParsedUser[];
-  error?: string;
-  /** Частичный результат: лимит аккаунта, лимит контактов или ошибка Telegram */
-  warning?: string;
-  startedAt: number;
-};
-
-function formatParseStopMessage(stopReason?: string, detail?: string): string {
-  if (stopReason === 'contact_limit') {
-    return 'Остановлено: достигнут лимит «макс. контактов за запуск» для этого аккаунта (настройка в таблице аккаунтов). Экспортируйте CSV или Excel.';
-  }
-  if (stopReason === 'error') {
-    return `Остановлено из-за ошибки; сохранён частичный результат. ${detail ?? ''}`.trim();
-  }
-  return 'Частичный результат — экспортируйте данные, если нужно.';
 }
 
 function jobAccountKey(accountId: string): string {
@@ -153,6 +128,36 @@ export default function TgParserPage() {
   }, []);
 
   useEffect(() => { void loadAccounts(); }, [loadAccounts]);
+
+  const loadParseJobs = useCallback(async () => {
+    const token = await getAccessToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/tools/tg-parser/jobs?limit=50', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const { items } = (await res.json()) as { items: TgParserJobApiRow[] };
+      const rows = items ?? [];
+      setParseJobs(rows.map(tgParserApiRowToUi));
+      runningAccountKeysRef.current.clear();
+      for (const row of rows) {
+        if (row.status === 'pending' || row.status === 'running') {
+          runningAccountKeysRef.current.add(jobAccountKey(row.account_id ?? ''));
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => { void loadParseJobs(); }, [loadParseJobs]);
+
+  useEffect(() => {
+    if (!parseJobs.some((j) => j.status === 'running')) return;
+    const t = setInterval(() => { void loadParseJobs(); }, 3000);
+    return () => clearInterval(t);
+  }, [parseJobs, loadParseJobs]);
 
   const resetAddForm = () => {
     setAddName(''); setAddApiId(''); setAddApiHash('');
@@ -311,7 +316,7 @@ export default function TgParserPage() {
     }
   }, [loadAccounts]);
 
-  // --- Parse (несколько параллельных задач; один аккаунт — не более одной задачи «running») ---
+  // --- Parse: задачи в БД + отдельный worker (переживают перезагрузку страницы и рестарт portal) ---
   const runParse = useCallback(async () => {
     const linkList = links.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     if (linkList.length === 0) {
@@ -320,53 +325,21 @@ export default function TgParserPage() {
     }
 
     const key = jobAccountKey(accountId);
-    const jobId = crypto.randomUUID();
-    const acc = accountId.trim()
-      ? accounts.find((a) => a.id === accountId.trim())
-      : undefined;
-    const accountLabel = acc
-      ? acc.name || acc.phone || `Account ${acc.api_id}`
-      : 'Без аккаунта (переменные окружения)';
-
-    const newJob: ParseJob = {
-      id: jobId,
-      accountId: accountId.trim(),
-      accountLabel,
-      linkCount: linkList.length,
-      linksSummary:
-        linkList.length <= 2
-          ? linkList.join(', ')
-          : `${linkList.slice(0, 2).join(', ')} +${linkList.length - 2}`,
-      status: 'running',
-      users: [],
-      startedAt: Date.now(),
-    };
-
     if (runningAccountKeysRef.current.has(key)) {
       setError(
         'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
       );
       return;
     }
-    runningAccountKeysRef.current.add(key);
-    setParseJobs((prev) => [newJob, ...prev]);
-    setError(null);
 
-    const patchJob = (id: string, patch: Partial<ParseJob>) => {
-      setParseJobs((prev) => {
-        const current = prev.find((j) => j.id === id);
-        if (!current) return prev;
-        if (patch.status === 'done' || patch.status === 'error') {
-          runningAccountKeysRef.current.delete(jobAccountKey(current.accountId));
-        }
-        return prev.map((j) => (j.id === id ? { ...j, ...patch } : j));
-      });
-    };
+    setError(null);
+    runningAccountKeysRef.current.add(key);
 
     try {
       const token = await getAccessToken();
       if (!token) {
-        patchJob(jobId, { status: 'error', error: 'Необходима авторизация' });
+        runningAccountKeysRef.current.delete(key);
+        setError('Необходима авторизация');
         return;
       }
 
@@ -388,34 +361,22 @@ export default function TgParserPage() {
         body: JSON.stringify(body),
       });
 
-      const data = (await res.json()) as {
-        status?: string;
-        users?: ParsedUser[];
-        error?: string;
-        stop_reason?: string;
-      };
+      const data = (await res.json()) as { error?: string; job_id?: string };
+      if (res.status === 409) {
+        runningAccountKeysRef.current.delete(key);
+        setError(data?.error ?? 'Задача уже выполняется');
+        return;
+      }
       if (!res.ok) {
-        patchJob(jobId, { status: 'error', error: data?.error ?? `Ошибка: ${res.status}` });
+        runningAccountKeysRef.current.delete(key);
+        setError(data?.error ?? `Ошибка: ${res.status}`);
         return;
       }
-      if (data.status === 'error') {
-        patchJob(jobId, { status: 'error', error: data.error ?? 'Ошибка парсинга' });
-        return;
-      }
-      if (data.status === 'partial') {
-        patchJob(jobId, {
-          status: 'done',
-          users: data.users ?? [],
-          warning: formatParseStopMessage(data.stop_reason, data.error),
-        });
-        return;
-      }
-      patchJob(jobId, { status: 'done', users: data.users ?? [] });
+
+      await loadParseJobs();
     } catch (e) {
-      patchJob(jobId, {
-        status: 'error',
-        error: e instanceof Error ? e.message : 'Ошибка запроса',
-      });
+      runningAccountKeysRef.current.delete(key);
+      setError(e instanceof Error ? e.message : 'Ошибка запроса');
     }
   }, [
     links,
@@ -427,18 +388,33 @@ export default function TgParserPage() {
     filterOnline,
     filterRecently,
     maxOfflineDays,
-    accounts,
+    loadParseJobs,
   ]);
 
-  const removeParseJob = useCallback((id: string) => {
-    setParseJobs((prev) => {
-      const j = prev.find((x) => x.id === id);
-      if (j?.status === 'running') {
-        runningAccountKeysRef.current.delete(jobAccountKey(j.accountId));
+  const removeParseJob = useCallback(
+    async (id: string) => {
+      const token = await getAccessToken();
+      if (!token) return;
+      const res = await fetch(`/api/tools/tg-parser/jobs/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await res.json()) as { error?: string };
+      if (res.status === 409) {
+        setError(data.error ?? null);
+        return;
       }
-      return prev.filter((x) => x.id !== id);
-    });
-  }, []);
+      if (!res.ok) return;
+      setParseJobs((prev) => {
+        const j = prev.find((x) => x.id === id);
+        if (j?.status === 'running') {
+          runningAccountKeysRef.current.delete(jobAccountKey(j.accountId));
+        }
+        return prev.filter((x) => x.id !== id);
+      });
+    },
+    [],
+  );
 
   const exportJobCsv = useCallback(async (job: ParseJob) => {
     if (job.users.length === 0) return;
@@ -1032,14 +1008,16 @@ export default function TgParserPage() {
                       </button>
                     </>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => removeParseJob(job.id)}
-                    className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
-                    title="Убрать из списка"
-                  >
-                    Скрыть
-                  </button>
+                  {job.status !== 'running' && (
+                    <button
+                      type="button"
+                      onClick={() => void removeParseJob(job.id)}
+                      className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                      title="Удалить запись из истории"
+                    >
+                      Скрыть
+                    </button>
+                  )}
                 </div>
               </div>
               {job.status === 'done' && job.users.length > 0 && (
