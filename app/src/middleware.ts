@@ -2,7 +2,8 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 const ROLE_COOKIE = 'x-portal-role'
-const ROLE_COOKIE_MAX_AGE = 5 * 60 // 5 minutes
+/** Дольше, чтобы реже дергать profiles при каждой RSC-навигации (ускоряет TTFB на защищённых маршрутах). */
+const ROLE_COOKIE_MAX_AGE = 30 * 60 // 30 minutes
 
 const ROLE_GATED_PREFIXES = ['/admin', '/billing-calendar', '/client'] as const
 
