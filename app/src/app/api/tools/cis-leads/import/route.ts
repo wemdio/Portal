@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { buildCisLeadImportObjectName, getFilenameExtension } from '@/lib/cisLeads/cisLeadImportStoragePath';
 import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 
 export const dynamic = 'force-dynamic';
@@ -9,12 +10,6 @@ export const dynamic = 'force-dynamic';
 const BUCKET = 'cis-lead-imports';
 const MAX_FILE_SIZE_BYTES = 60 * 1024 * 1024; // 60 MB
 const SUPPORTED_EXTENSIONS = new Set(['.csv', '.xls', '.xlsx']);
-
-function getExtension(filename: string): string {
-  const idx = filename.lastIndexOf('.');
-  if (idx === -1) return '';
-  return filename.slice(idx).toLowerCase();
-}
 
 export async function POST(req: NextRequest) {
   return withToolTrace(
@@ -38,7 +33,7 @@ export async function POST(req: NextRequest) {
       }
 
       const filename = file.name?.trim() || 'leads';
-      const ext = getExtension(filename);
+      const ext = getFilenameExtension(filename);
       if (!SUPPORTED_EXTENSIONS.has(ext)) {
         return jsonError('Неверный формат файла. Поддерживаются: CSV, XLS, XLSX', 400);
       }
@@ -66,7 +61,7 @@ export async function POST(req: NextRequest) {
 
       if (jobError || !job) return jsonError(jobError?.message ?? 'Failed to create import job', 500);
 
-      const filePath = `${auth.user.id}/${job.id}/${filename}`;
+      const filePath = `${auth.user.id}/${job.id}/${buildCisLeadImportObjectName(filename)}`;
       const uploadRes = await supabaseAdmin.storage
         .from(BUCKET)
         .upload(filePath, arrayBuffer, { contentType: file.type || 'application/octet-stream', upsert: true });
