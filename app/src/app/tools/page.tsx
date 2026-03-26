@@ -26,6 +26,7 @@ import {
 import { supabase } from '@/lib/supabaseClient';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
 import { RdpToolCard } from './RdpToolCard';
+import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 
 const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'done-for-you': Sparkles,
@@ -120,6 +121,8 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
 export default function ToolsPage() {
   const [toolIds, setToolIds] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(true);
+
+  usePortalBlockingLoad(loading);
 
   useEffect(() => {
     let cancelled = false;

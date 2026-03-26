@@ -8,6 +8,7 @@ import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
 import { UserProvider } from '@/lib/UserProvider';
+import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 
 const MD_BREAKPOINT = 768;
 
@@ -80,6 +81,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
 
   return (
     <UserProvider>
+    <PortalLoadingProvider>
     <div
       className={shellClassName}
       style={{
@@ -125,6 +127,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
     </div>
+    </PortalLoadingProvider>
     </UserProvider>
   );
 }
