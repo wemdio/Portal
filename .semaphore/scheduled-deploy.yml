@@ -142,9 +142,9 @@ blocks:
                 esac;
                 sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
                 echo '--- Step 5: restart workers ---';
-                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-sales-copilot worker-tg-parser; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
-                sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach portal-worker-sales-copilot portal-worker-tg-parser 2>/dev/null || true;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-sales-copilot worker-tg-parser;
+                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach portal-worker-aicaller portal-worker-sales-copilot portal-worker-tg-parser 2>/dev/null || true;
+                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser;
                 echo '--- Step 6: disable maintenance mode (normal path) ---';
                 echo '[scheduled] maintenance disabled after successful deploy';
                 disable_maintenance;
