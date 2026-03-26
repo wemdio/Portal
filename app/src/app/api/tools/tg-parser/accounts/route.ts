@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
+import {
+  clampTgParserDailyLimit,
+  TG_PARSER_DAILY_LIMIT_DEFAULT,
+} from '@/lib/tgParser/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,7 +83,10 @@ export async function POST(req: NextRequest) {
         if (!sessionData) return jsonError('session_data обязателен', 400);
       
         const name = (body.name as string)?.trim() || `Account ${apiId}`;
-        const dailyLimit = body.daily_limit != null ? Math.max(0, Number(body.daily_limit) || 30) : 30;
+        const dailyLimit =
+          body.daily_limit != null
+            ? clampTgParserDailyLimit(body.daily_limit)
+            : TG_PARSER_DAILY_LIMIT_DEFAULT;
       
         const { data, error } = await supabase
           .from('tg_parser_accounts')

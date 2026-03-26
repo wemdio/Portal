@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   Play,
@@ -16,11 +16,12 @@ import {
   KeyRound,
   CheckCircle2,
   Upload,
-  Zap,
+  Gauge,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
 import type { ParsedUser } from '@/lib/tgParser/types';
+import { clampTgParserDailyLimit, TG_PARSER_DAILY_LIMIT_MAX } from '@/lib/tgParser/constants';
 
 const COLUMNS: (keyof ParsedUser)[] = [
   'ID/Username',
@@ -43,6 +44,25 @@ const COLUMNS: (keyof ParsedUser)[] = [
 
 function cellValue(v: unknown): string {
   return String(v ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+}
+
+type ParseJobStatus = 'running' | 'done' | 'error';
+
+type ParseJob = {
+  id: string;
+  /** пусто = парсинг через env (без выбранного аккаунта) */
+  accountId: string;
+  accountLabel: string;
+  linkCount: number;
+  linksSummary: string;
+  status: ParseJobStatus;
+  users: ParsedUser[];
+  error?: string;
+  startedAt: number;
+};
+
+function jobAccountKey(accountId: string): string {
+  return accountId.trim() || '__env__';
 }
 
 async function getAccessToken(): Promise<string | null> {
@@ -77,10 +97,10 @@ export default function TgParserPage() {
   const [filterRecently, setFilterRecently] = useState(false);
   const [maxOfflineDays, setMaxOfflineDays] = useState<string>('');
 
-  const [busy, setBusy] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const [parseJobs, setParseJobs] = useState<ParseJob[]>([]);
+  const runningAccountKeysRef = useRef<Set<string>>(new Set());
+  const [exportingJobId, setExportingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [users, setUsers] = useState<ParsedUser[]>([]);
 
   // --- Accounts state ---
   const [accounts, setAccounts] = useState<TgAccount[]>([]);
@@ -230,14 +250,15 @@ export default function TgParserPage() {
   const updateDailyLimit = useCallback(async (id: string, newLimit: number) => {
     const token = await getAccessToken();
     if (!token) return;
+    const clamped = clampTgParserDailyLimit(newLimit);
     const res = await fetch(`${API_ACCOUNTS}/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ daily_limit: Math.max(0, newLimit) }),
+      body: JSON.stringify({ daily_limit: clamped }),
     });
     if (res.ok) {
       setAccounts((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, daily_limit: Math.max(0, newLimit) } : a)),
+        prev.map((a) => (a.id === id ? { ...a, daily_limit: clamped } : a)),
       );
     } else {
       const data = (await res.json()) as { error?: string };
@@ -275,7 +296,7 @@ export default function TgParserPage() {
     }
   }, [loadAccounts]);
 
-  // --- Parse ---
+  // --- Parse (несколько параллельных задач; один аккаунт — не более одной задачи «running») ---
   const runParse = useCallback(async () => {
     const linkList = links.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     if (linkList.length === 0) {
@@ -283,13 +304,56 @@ export default function TgParserPage() {
       return;
     }
 
-    setBusy(true);
+    const key = jobAccountKey(accountId);
+    const jobId = crypto.randomUUID();
+    const acc = accountId.trim()
+      ? accounts.find((a) => a.id === accountId.trim())
+      : undefined;
+    const accountLabel = acc
+      ? acc.name || acc.phone || `Account ${acc.api_id}`
+      : 'Без аккаунта (переменные окружения)';
+
+    const newJob: ParseJob = {
+      id: jobId,
+      accountId: accountId.trim(),
+      accountLabel,
+      linkCount: linkList.length,
+      linksSummary:
+        linkList.length <= 2
+          ? linkList.join(', ')
+          : `${linkList.slice(0, 2).join(', ')} +${linkList.length - 2}`,
+      status: 'running',
+      users: [],
+      startedAt: Date.now(),
+    };
+
+    if (runningAccountKeysRef.current.has(key)) {
+      setError(
+        'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
+      );
+      return;
+    }
+    runningAccountKeysRef.current.add(key);
+    setParseJobs((prev) => [newJob, ...prev]);
     setError(null);
-    setUsers([]);
+
+    const patchJob = (id: string, patch: Partial<ParseJob>) => {
+      setParseJobs((prev) => {
+        const current = prev.find((j) => j.id === id);
+        if (!current) return prev;
+        if (patch.status === 'done' || patch.status === 'error') {
+          runningAccountKeysRef.current.delete(jobAccountKey(current.accountId));
+        }
+        return prev.map((j) => (j.id === id ? { ...j, ...patch } : j));
+      });
+    };
 
     try {
       const token = await getAccessToken();
-      if (!token) { setError('Необходима авторизация'); return; }
+      if (!token) {
+        patchJob(jobId, { status: 'error', error: 'Необходима авторизация' });
+        return;
+      }
 
       const body: Record<string, unknown> = {
         links: linkList,
@@ -310,22 +374,50 @@ export default function TgParserPage() {
       });
 
       const data = (await res.json()) as { status?: string; users?: ParsedUser[]; error?: string };
-      if (!res.ok) { setError(data?.error ?? `Ошибка: ${res.status}`); return; }
-      if (data.status === 'error') { setError(data.error ?? 'Ошибка парсинга'); return; }
-      setUsers(data.users ?? []);
+      if (!res.ok) {
+        patchJob(jobId, { status: 'error', error: data?.error ?? `Ошибка: ${res.status}` });
+        return;
+      }
+      if (data.status === 'error') {
+        patchJob(jobId, { status: 'error', error: data.error ?? 'Ошибка парсинга' });
+        return;
+      }
+      patchJob(jobId, { status: 'done', users: data.users ?? [] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Ошибка запроса');
-    } finally {
-      setBusy(false);
+      patchJob(jobId, {
+        status: 'error',
+        error: e instanceof Error ? e.message : 'Ошибка запроса',
+      });
     }
-  }, [links, accountId, parseMessages, parseMembers, parseComments, messageLimit, filterOnline, filterRecently, maxOfflineDays]);
+  }, [
+    links,
+    accountId,
+    parseMessages,
+    parseMembers,
+    parseComments,
+    messageLimit,
+    filterOnline,
+    filterRecently,
+    maxOfflineDays,
+    accounts,
+  ]);
 
-  const exportCsv = useCallback(async () => {
-    if (users.length === 0) return;
-    setExporting(true);
+  const removeParseJob = useCallback((id: string) => {
+    setParseJobs((prev) => {
+      const j = prev.find((x) => x.id === id);
+      if (j?.status === 'running') {
+        runningAccountKeysRef.current.delete(jobAccountKey(j.accountId));
+      }
+      return prev.filter((x) => x.id !== id);
+    });
+  }, []);
+
+  const exportJobCsv = useCallback(async (job: ParseJob) => {
+    if (job.users.length === 0) return;
+    setExportingJobId(job.id);
     try {
       const header = COLUMNS.join(',');
-      const rows = users.map((u) =>
+      const rows = job.users.map((u) =>
         COLUMNS.map((col) => {
           const v = cellValue(u[col]);
           const needsQuotes = /[",\n\r]/.test(v);
@@ -334,34 +426,36 @@ export default function TgParserPage() {
       );
       const csv = [header, ...rows].join('\n');
       const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-      saveAs(blob, 'tg-parser.csv');
+      const stamp = new Date(job.startedAt).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      saveAs(blob, `tg-parser-${stamp}.csv`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка экспорта');
     } finally {
-      setExporting(false);
+      setExportingJobId(null);
     }
-  }, [users]);
+  }, []);
 
-  const exportExcel = useCallback(async () => {
-    if (users.length === 0) return;
-    setExporting(true);
+  const exportJobExcel = useCallback(async (job: ParseJob) => {
+    if (job.users.length === 0) return;
+    setExportingJobId(job.id);
     try {
       const ExcelJS = (await import('exceljs')).default;
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('TG Parser');
       ws.columns = COLUMNS.map((col) => ({ header: col, key: col, width: 20 }));
-      users.forEach((u) => ws.addRow(u as unknown as Record<string, unknown>));
+      job.users.forEach((u) => ws.addRow(u as unknown as Record<string, unknown>));
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
-      saveAs(blob, 'tg-parser.xlsx');
+      const stamp = new Date(job.startedAt).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      saveAs(blob, `tg-parser-${stamp}.xlsx`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка экспорта');
     } finally {
-      setExporting(false);
+      setExportingJobId(null);
     }
-  }, [users]);
+  }, []);
 
   useEffect(() => { setError(null); }, [links]);
 
@@ -371,6 +465,7 @@ export default function TgParserPage() {
         <h1 className="text-2xl font-bold text-gray-900">TG User Parser</h1>
         <p className="text-sm text-gray-500 mt-1">
           Парсинг пользователей из Telegram: сообщения в чатах, участники, комментарии к постам. Экспорт в CSV или Excel.
+          Можно запускать несколько парсингов параллельно на разных аккаунтах; один и тот же аккаунт не занят двумя задачами одновременно.
         </p>
       </div>
 
@@ -565,7 +660,32 @@ export default function TgParserPage() {
                 Нет аккаунтов. Добавьте Telegram-аккаунт для парсинга.
               </p>
             ) : (
-              <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
+              <div className="space-y-2">
+                <p className="text-xs text-gray-500 leading-snug">
+                  <span className="text-gray-600">Квота</span> — дневной счётчик <span className="whitespace-nowrap">API-операций</span> и
+                  потолок (по умолчанию 500, до {TG_PARSER_DAILY_LIMIT_MAX}). Это <span className="text-gray-700">не</span> ограничение
+                  «сколько сообщений спарсить» в форме ниже — там свои поля.
+                </p>
+                <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="bg-gray-50 border-b border-gray-200">
+                  <div className="grid grid-cols-[0.5rem_minmax(0,1fr)_auto] items-center gap-x-3 px-4 py-2 text-xs font-medium text-gray-500">
+                    <span
+                      className="w-2 shrink-0"
+                      title="Аккаунт включён и доступен для парсинга"
+                    />
+                    <span className="min-w-0 text-left" title="Имя в списке или номер API">
+                      Аккаунт
+                    </span>
+                    <div className="grid grid-cols-[120px_76px_minmax(11rem,max-content)_3.5rem_2.25rem] items-center gap-x-3 [&>span]:text-center">
+                      <span title="Телефон привязки">Телефон</span>
+                      <span title="Сохранённая сессия GramJS — можно парсить">Сессия</span>
+                      <span title="Использовано API-операций за сегодня">Квота</span>
+                      <span title="Максимум API-операций за календарный день">Потолок</span>
+                      <span className="block w-full" aria-hidden />
+                    </div>
+                  </div>
+                </div>
+                <div className="divide-y divide-gray-100">
                 {accounts.map((acc) => {
                   const pct = acc.daily_limit > 0
                     ? Math.min(100, Math.round((acc.sent_today / acc.daily_limit) * 100))
@@ -577,66 +697,93 @@ export default function TgParserPage() {
                       ? 'bg-amber-500'
                       : 'bg-emerald-500';
 
+                  const phoneDisplay = acc.phone || `ID: ${acc.api_id}`;
+
                   return (
-                    <div key={acc.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                    <div
+                      key={acc.id}
+                      className="grid grid-cols-[0.5rem_minmax(0,1fr)_auto] items-center gap-x-3 px-4 py-2.5 text-sm"
+                    >
                       <span
-                        className={`h-2 w-2 rounded-full shrink-0 ${acc.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                        className={`h-2 w-2 rounded-full shrink-0 justify-self-center ${acc.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}
                         title={acc.is_active ? 'Активен' : 'Отключен'}
                       />
-                      <span className="font-medium text-gray-800 truncate min-w-0 flex-1">
+                      <span className="min-w-0 truncate font-medium text-gray-800">
                         {acc.name || `Account ${acc.api_id}`}
                       </span>
-                      <span className="text-gray-500 text-xs truncate max-w-[120px]">
-                        {acc.phone || `ID: ${acc.api_id}`}
-                      </span>
-                      {acc.session_data ? (
-                        <span className="text-xs text-emerald-600">session ok</span>
-                      ) : (
-                        <span className="text-xs text-amber-600">no session</span>
-                      )}
-
-                      {/* Daily capacity */}
-                      <div className="flex items-center gap-2 min-w-[180px]" title="Мощность: отправлено / лимит в день">
-                        <Zap className={`h-3.5 w-3.5 shrink-0 ${limitReached ? 'text-rose-500' : 'text-amber-500'}`} />
-                        <div className="flex items-center gap-1.5 flex-1">
-                          <div className="h-1.5 flex-1 rounded-full bg-gray-200 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all ${barColor}`}
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                          <span className={`text-xs tabular-nums whitespace-nowrap ${limitReached ? 'text-rose-600 font-medium' : 'text-gray-500'}`}>
-                            {acc.sent_today}/{acc.daily_limit}
+                      <div className="grid grid-cols-[120px_76px_minmax(11rem,max-content)_3.5rem_2.25rem] items-center gap-x-3">
+                        <div className="min-w-0 text-center">
+                          <span
+                            className="inline-block max-w-full truncate text-xs text-gray-500"
+                            title={phoneDisplay}
+                          >
+                            {phoneDisplay}
                           </span>
                         </div>
-                        <input
-                          type="number"
-                          min={0}
-                          defaultValue={acc.daily_limit}
-                          key={`${acc.id}-${acc.daily_limit}`}
-                          onBlur={(e) => {
-                            const v = parseInt(e.target.value, 10);
-                            if (!isNaN(v) && v >= 0) void updateDailyLimit(acc.id, v);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                          }}
-                          className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-xs text-center text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                          title="Лимит рассылок в день"
-                        />
-                      </div>
+                        <div className="text-center">
+                          {acc.session_data ? (
+                            <span className="text-xs text-emerald-600">session ok</span>
+                          ) : (
+                            <span className="text-xs text-amber-600">no session</span>
+                          )}
+                        </div>
 
-                      <button
-                        type="button"
-                        onClick={() => deleteAccount(acc.id)}
-                        className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50"
-                        title="Удалить"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                        <div
+                          className="flex min-w-0 items-center justify-center gap-2"
+                          title="API-операции сегодня / дневной потолок (не лимит сообщений в форме ниже)"
+                        >
+                          <Gauge
+                            className={`h-3.5 w-3.5 shrink-0 ${limitReached ? 'text-rose-500' : 'text-gray-400'}`}
+                            aria-hidden
+                          />
+                          <div className="flex items-center gap-1.5">
+                            <div className="h-1.5 w-20 shrink-0 rounded-full bg-gray-200 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all ${barColor}`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className={`text-xs tabular-nums whitespace-nowrap ${limitReached ? 'text-rose-600 font-medium' : 'text-gray-500'}`}>
+                              {acc.sent_today}/{acc.daily_limit}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-center">
+                          <input
+                            type="number"
+                            min={0}
+                            max={TG_PARSER_DAILY_LIMIT_MAX}
+                            defaultValue={acc.daily_limit}
+                            key={`${acc.id}-${acc.daily_limit}`}
+                            onBlur={(e) => {
+                              const v = parseInt(e.target.value, 10);
+                              if (!isNaN(v)) void updateDailyLimit(acc.id, v);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                            }}
+                            className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-xs text-center text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                            title="Максимум операций с аккаунта за календарный день"
+                          />
+                        </div>
+
+                        <div className="flex justify-center">
+                          <button
+                            type="button"
+                            onClick={() => deleteAccount(acc.id)}
+                            className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50"
+                            title="Удалить"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   );
                 })}
+                </div>
+                </div>
               </div>
             )}
           </div>
@@ -646,7 +793,7 @@ export default function TgParserPage() {
       {/* Parse form */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 space-y-4">
         {accounts.length > 0 && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="tg-account" className="text-sm text-gray-600 whitespace-nowrap">
               Аккаунт:
             </label>
@@ -655,16 +802,28 @@ export default function TgParserPage() {
               value={accountId}
               onChange={(e) => setAccountId(e.target.value)}
               className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 min-w-[200px]"
-              disabled={busy}
             >
-              <option value="">Выберите аккаунт</option>
-              {accounts.filter((a) => a.is_active && a.session_data).map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name || `Account ${a.api_id}`}
-                </option>
-              ))}
+              <option
+                value=""
+                disabled={parseJobs.some((j) => j.status === 'running' && !j.accountId)}
+              >
+                Выберите аккаунт
+              </option>
+              {accounts.filter((a) => a.is_active && a.session_data).map((a) => {
+                const accBusy = parseJobs.some(
+                  (j) => j.status === 'running' && j.accountId === a.id,
+                );
+                return (
+                  <option key={a.id} value={a.id} disabled={accBusy}>
+                    {a.name || `Account ${a.api_id}`}
+                    {accBusy ? ' — парсинг…' : ''}
+                  </option>
+                );
+              })}
             </select>
-            <span className="text-xs text-gray-500">выберите аккаунт для парсинга</span>
+            <span className="text-xs text-gray-500">
+              выберите аккаунт и чаты, запустите — затем можно сразу выбрать другой аккаунт и снова запустить
+            </span>
           </div>
         )}
 
@@ -679,7 +838,6 @@ export default function TgParserPage() {
             placeholder={'https://t.me/chatname\nhttps://t.me/channel'}
             rows={4}
             className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            disabled={busy}
           />
         </div>
 
@@ -692,7 +850,6 @@ export default function TgParserPage() {
                 id="parse-messages"
                 checked={parseMessages}
                 onChange={(e) => setParseMessages(e.target.checked)}
-                disabled={busy}
               />
               <label htmlFor="parse-messages" className="text-sm text-gray-700">Сообщения в чатах</label>
             </div>
@@ -702,7 +859,6 @@ export default function TgParserPage() {
                 id="parse-members"
                 checked={parseMembers}
                 onChange={(e) => setParseMembers(e.target.checked)}
-                disabled={busy}
               />
               <label htmlFor="parse-members" className="text-sm text-gray-700">Участники</label>
             </div>
@@ -712,7 +868,6 @@ export default function TgParserPage() {
                 id="parse-comments"
                 checked={parseComments}
                 onChange={(e) => setParseComments(e.target.checked)}
-                disabled={busy}
               />
               <label htmlFor="parse-comments" className="text-sm text-gray-700">Комментарии под постами</label>
             </div>
@@ -733,7 +888,6 @@ export default function TgParserPage() {
               value={messageLimit}
               onChange={(e) => setMessageLimit(Math.min(5000, Math.max(10, Number(e.target.value) || 100)))}
               className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-gray-900"
-              disabled={busy}
             />
           </div>
           <div>
@@ -746,7 +900,6 @@ export default function TgParserPage() {
               value={maxOfflineDays}
               onChange={(e) => setMaxOfflineDays(e.target.value)}
               className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-gray-900"
-              disabled={busy}
             />
           </div>
         </div>
@@ -760,7 +913,6 @@ export default function TgParserPage() {
                 id="filter-online"
                 checked={filterOnline}
                 onChange={(e) => setFilterOnline(e.target.checked)}
-                disabled={busy}
               />
               <label htmlFor="filter-online" className="text-sm text-gray-700">Только онлайн</label>
             </div>
@@ -770,7 +922,6 @@ export default function TgParserPage() {
                 id="filter-recently"
                 checked={filterRecently}
                 onChange={(e) => setFilterRecently(e.target.checked)}
-                disabled={busy}
               />
               <label htmlFor="filter-recently" className="text-sm text-gray-700">Недавно в сети</label>
             </div>
@@ -783,24 +934,23 @@ export default function TgParserPage() {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={runParse}
-          disabled={busy}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {busy ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Парсинг...
-            </>
-          ) : (
-            <>
-              <Play className="h-4 w-4" />
-              Запустить парсинг
-            </>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void runParse()}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
+          >
+            <Play className="h-4 w-4" />
+            Запустить парсинг
+          </button>
+          {parseJobs.some((j) => j.status === 'running') && (
+            <span className="text-xs text-gray-500 inline-flex items-center gap-1.5">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+              Выполняется задач:{' '}
+              {parseJobs.filter((j) => j.status === 'running').length}
+            </span>
           )}
-        </button>
+        </div>
       </div>
 
       {error && (
@@ -810,83 +960,136 @@ export default function TgParserPage() {
         </div>
       )}
 
-      {users.length > 0 && (
-        <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-          <div className="p-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-gray-600">
-              Найдено пользователей: <span className="font-semibold text-gray-900">{users.length}</span>
-            </p>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={exportCsv}
-                disabled={exporting}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                <Download className="h-4 w-4" />
-                CSV
-              </button>
-              <button
-                type="button"
-                onClick={exportExcel}
-                disabled={exporting}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                <FileSpreadsheet className="h-4 w-4" />
-                Excel
-              </button>
-            </div>
-          </div>
-          <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50 sticky top-0">
-                <tr>
-                  {COLUMNS.map((col) => (
-                    <th
-                      key={col}
-                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-                    >
-                      {col}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
-                {users.map((u, i) => (
-                  <tr key={i} className="hover:bg-gray-50">
-                    {COLUMNS.map((col) => {
-                      const val = u[col];
-                      const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
-                      return (
-                        <td key={col} className="px-4 py-3 text-gray-700 max-w-[200px] truncate">
-                          {isLink && typeof val === 'string' && val.startsWith('http') ? (
-                            <a
-                              href={val}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-blue-600 hover:underline truncate block"
+      {parseJobs.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold text-gray-800">Задачи парсинга</h2>
+          {parseJobs.map((job) => (
+            <div
+              key={job.id}
+              className={`rounded-2xl border overflow-hidden ${
+                job.status === 'running'
+                  ? 'border-blue-200 bg-blue-50/30'
+                  : job.status === 'error'
+                    ? 'border-red-200 bg-red-50/30'
+                    : 'border-gray-200 bg-white'
+              }`}
+            >
+              <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    {job.status === 'running' && (
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-600 shrink-0" />
+                    )}
+                    <span className="font-medium text-gray-900">{job.accountLabel}</span>
+                    <span className="text-gray-500">
+                      · {job.linkCount} {job.linkCount === 1 ? 'чат' : 'чатов'}
+                    </span>
+                    <span className="text-gray-400 text-xs truncate max-w-full" title={job.linksSummary}>
+                      ({job.linksSummary})
+                    </span>
+                  </div>
+                  {job.status === 'error' && job.error && (
+                    <p className="text-sm text-red-700">{job.error}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {job.status === 'done' && job.users.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void exportJobCsv(job)}
+                        disabled={exportingJobId === job.id}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        <Download className="h-4 w-4" />
+                        CSV
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void exportJobExcel(job)}
+                        disabled={exportingJobId === job.id}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        <FileSpreadsheet className="h-4 w-4" />
+                        Excel
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeParseJob(job.id)}
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                    title="Убрать из списка"
+                  >
+                    Скрыть
+                  </button>
+                </div>
+              </div>
+              {job.status === 'done' && job.users.length > 0 && (
+                <>
+                  <div className="px-4 py-2 bg-gray-50/80 border-b border-gray-100">
+                    <p className="text-sm text-gray-600">
+                      Найдено пользователей:{' '}
+                      <span className="font-semibold text-gray-900">{job.users.length}</span>
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          {COLUMNS.map((col) => (
+                            <th
+                              key={col}
+                              className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
                             >
-                              {val}
-                            </a>
-                          ) : (
-                            cellValue(val)
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                              {col}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200 bg-white">
+                        {job.users.map((u, i) => (
+                          <tr key={`${job.id}-${i}`} className="hover:bg-gray-50">
+                            {COLUMNS.map((col) => {
+                              const val = u[col];
+                              const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
+                              return (
+                                <td key={col} className="px-4 py-3 text-gray-700 max-w-[200px] truncate">
+                                  {isLink && typeof val === 'string' && val.startsWith('http') ? (
+                                    <a
+                                      href={val}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-blue-600 hover:underline truncate block"
+                                    >
+                                      {val}
+                                    </a>
+                                  ) : (
+                                    cellValue(val)
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              {job.status === 'done' && job.users.length === 0 && (
+                <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
-      {!busy && users.length === 0 && !error && (
+      {parseJobs.length === 0 && !error && (
         <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 p-12 text-center">
           <p className="text-gray-500 text-sm">
             Введите ссылки на чаты или каналы (t.me/…), выберите режимы парсинга и нажмите «Запустить парсинг».
-            Парсинг может занять несколько минут.
+            Парсинг может занять несколько минут. Запущенные задачи отображаются ниже; пока они идут, можно настроить другой аккаунт и запустить ещё одну.
           </p>
         </div>
       )}

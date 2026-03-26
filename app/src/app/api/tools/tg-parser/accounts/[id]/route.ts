@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
+import { clampTgParserDailyLimit } from '@/lib/tgParser/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,7 +36,12 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
         const allowed = ['name', 'is_active', 'proxy_url', 'phone', 'session_data', 'daily_limit'] as const;
         const updates: Record<string, unknown> = {};
         for (const key of allowed) {
-          if (body[key] !== undefined) updates[key] = body[key];
+          if (body[key] === undefined) continue;
+          if (key === 'daily_limit') {
+            updates[key] = clampTgParserDailyLimit(body[key]);
+          } else {
+            updates[key] = body[key];
+          }
         }
       
         if (Object.keys(updates).length === 0) {
