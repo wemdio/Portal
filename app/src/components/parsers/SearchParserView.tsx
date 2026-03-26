@@ -263,6 +263,12 @@ export function SearchParserView() {
   const [queryStatsOpen, setQueryStatsOpen] = useState(false);
   const [queryStatsPage, setQueryStatsPage] = useState(0);
   const latestCreatedAtRef = useRef<string | null>(null);
+  /** Сверяем с текущим выбранным job, чтобы не применять ответ устаревшего loadResults после смены задачи. */
+  const activeJobIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeJobIdRef.current = activeJobId;
+  }, [activeJobId]);
 
   const activeJob = useMemo(() => jobs.find(j => j.id === activeJobId), [jobs, activeJobId]);
   const leads = useMemo(() => {
@@ -425,9 +431,11 @@ export function SearchParserView() {
           if (!after) return;
           const url = `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}&limit=${RESULTS_PAGE_SIZE}`;
           const data = await apiFetch<{ results: SearchResult[] }>(url);
+          if (activeJobIdRef.current !== jobId) return;
           const incoming = data.results ?? [];
           if (incoming.length === 0) return;
           setResults((prev) => {
+            if (activeJobIdRef.current !== jobId) return prev;
             const seen = new Set(prev.map((r) => r.id));
             const merged = [...prev];
             for (const r of incoming) {
@@ -441,16 +449,19 @@ export function SearchParserView() {
         let all: SearchResult[] = [];
         let offset = 0;
         while (true) {
+          if (activeJobIdRef.current !== jobId) return;
           const url = `/api/parsers/search/${jobId}/results?limit=${RESULTS_PAGE_SIZE}&offset=${offset}`;
           const data = await apiFetch<{ results: SearchResult[]; count: number }>(url);
+          if (activeJobIdRef.current !== jobId) return;
           const page = data.results ?? [];
           all = all.concat(page);
           if (page.length < RESULTS_PAGE_SIZE || all.length >= (data.count ?? Infinity)) break;
           offset += RESULTS_PAGE_SIZE;
         }
+        if (activeJobIdRef.current !== jobId) return;
         setResults(all);
       } finally {
-        if (isInitial) setLoadingResults(false);
+        if (isInitial && activeJobIdRef.current === jobId) setLoadingResults(false);
       }
     },
     [apiFetch],
@@ -460,8 +471,10 @@ export function SearchParserView() {
     async (jobId: string) => {
       try {
         const data = await apiFetch<{ stats: SearchQueryStat[] }>(`/api/parsers/search/${jobId}/query-stats`);
+        if (activeJobIdRef.current !== jobId) return;
         setQueryStats(data.stats ?? []);
       } catch {
+        if (activeJobIdRef.current !== jobId) return;
         setQueryStats([]);
       }
     },
@@ -485,6 +498,7 @@ export function SearchParserView() {
       setResults([]);
       setQueryStats([]);
       latestCreatedAtRef.current = null;
+      setLoadingResults(false);
     }
   }, [activeJobId, loadResults, loadQueryStats]);
 
@@ -624,6 +638,11 @@ export function SearchParserView() {
   }, [activeJob, handleStart]);
 
   const totalCompanies = companyLeads.length;
+  /** В БД — всего строк; в таблице — после дедупа по сайту. Показываем max, чтобы не было 0 при загрузке и рассинхрона со свёрнутым списком. */
+  const displayCompanyCount = useMemo(() => {
+    if (!activeJob) return totalCompanies;
+    return Math.max(activeJob.total_results ?? 0, totalCompanies);
+  }, [activeJob, totalCompanies]);
   const activeProgress = activeJob ? getSearchProgress(activeJob) : null;
   const activeUserQuery = activeJob ? getUserSearchQuery(activeJob) : '';
   const activeUserQueryUi = activeUserQuery ? truncateUiText(activeUserQuery, 160) : '';
@@ -753,7 +772,12 @@ export function SearchParserView() {
                           ? `Прогресс: ${jobProgress.progressValue}% — ${jobProgress.stageLabel}`
                           : `Статус: ${jobProgress.stageLabel}`}
                       </span>
-                      <span>Компаний: {job.id === activeJobId ? totalCompanies : (job.total_results ?? 0)}</span>
+                      <span>
+                        Компаний:{' '}
+                        {job.id === activeJobId
+                          ? displayCompanyCount
+                          : (job.total_results ?? 0)}
+                      </span>
                       {job.error_message ? (
                         <span className={`${jobProgress.stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
                           {jobProgress.stoppedByUser ? 'Остановлено' : job.error_message}
@@ -787,7 +811,7 @@ export function SearchParserView() {
                   </div>
                 </div>
                 <p className="text-sm text-gray-500">
-                  {activeJob ? `Компаний: ${totalCompanies}` : `${totalCompanies} компаний`}
+                  {activeJob ? `Компаний: ${displayCompanyCount}` : `${totalCompanies} компаний`}
                 </p>
                 {activeJob ? (
                   <p className="mt-1 text-xs text-gray-500" title={activeUserQuery || undefined}>

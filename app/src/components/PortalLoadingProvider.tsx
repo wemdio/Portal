@@ -58,6 +58,14 @@ function NavigationRouteDetector({
   }, [routeKey, onNavigatingChange]);
 
   useEffect(() => {
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) onNavigatingChange(false);
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
+  }, [onNavigatingChange]);
+
+  useEffect(() => {
     const clearStuckNav = () => {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -99,16 +107,13 @@ function NavigationRouteDetector({
       clearStuckNav();
     };
 
-    const onPopState = () => {
-      onNavigatingChange(true);
-      clearStuckNav();
-    };
+    // Не слушаем popstate: при «Назад»/«Вперёд» Next.js и bfcache часто не совпадают по
+    // таймингу с usePathname(), из‑за чего navigating оставался true бесконечно.
+    // Индикатор нужен для кликов по внутренним ссылкам (медленный RSC).
 
     document.addEventListener('click', onClickCapture, true);
-    window.addEventListener('popstate', onPopState);
     return () => {
       document.removeEventListener('click', onClickCapture, true);
-      window.removeEventListener('popstate', onPopState);
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
