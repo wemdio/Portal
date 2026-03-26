@@ -38,7 +38,7 @@ export function TopNav() {
   });
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
+    <header className="sticky top-0 z-40 w-full shrink-0 border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
       <div className="flex items-center gap-4 px-4 h-11">
         <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
           Portal
