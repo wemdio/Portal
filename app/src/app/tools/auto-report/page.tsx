@@ -1109,6 +1109,11 @@ export default function AutoReportPage() {
   }, []);
 
   const [campaignsList, setCampaignsList] = useState<InstantlyCampaignItem[]>([]);
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsFetched, setCampaignsFetched] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState('');
+
   const loadCampaigns = useCallback(async () => {
     setCampaignsLoading(true);
     setError('');
@@ -1150,10 +1155,6 @@ export default function AutoReportPage() {
   useEffect(() => {
     loadCampaigns();
   }, [loadCampaigns]);
-  const [campaignsLoading, setCampaignsLoading] = useState(false);
-  const [campaignsFetched, setCampaignsFetched] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
   const listContainerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
 
@@ -1389,9 +1390,7 @@ export default function AutoReportPage() {
                   onScroll={() => setScrollTop(listContainerRef.current?.scrollTop ?? 0)}
                   className="max-h-[28rem] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1.5 w-full min-w-0 shadow-inner"
                 >
-                  {filteredCampaigns.length === 0 && searchQuery ? (
-                    <p className="text-sm text-gray-500 py-6 text-center">По запросу «{searchQuery}» ничего не найдено</p>
-                  ) : filteredCampaigns.length > 0 ? (
+                  {filteredCampaigns.length > 0 ? (
                     <div style={{ height: totalHeight, position: 'relative' }}>
                       <ul
                         className="space-y-0.5 absolute left-0 right-0 px-0 list-none"

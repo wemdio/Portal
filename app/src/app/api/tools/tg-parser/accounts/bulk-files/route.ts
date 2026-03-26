@@ -108,13 +108,18 @@ export async function POST(req: NextRequest) {
 
           let sessionData = acc.session_string;
 
-          if (i === 0 && item.session && !sessionData) {
+          if (!sessionData && item.session) {
             try {
               sessionData = await sqliteBufferToSessionString(item.session);
             } catch (err) {
               const msg = err instanceof Error ? err.message : 'Ошибка чтения';
               errors.push(`${base}.session: ${msg}`);
             }
+          }
+
+          if (!sessionData) {
+            errors.push(`${base}.json[${i}]: нет session данных (ни в JSON, ни в .session файле)`);
+            continue;
           }
 
           rows.push({
