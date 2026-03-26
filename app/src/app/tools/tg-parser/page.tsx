@@ -11,17 +11,18 @@ import {
   Plus,
   Trash2,
   User,
-  ChevronDown,
-  ChevronUp,
   KeyRound,
   CheckCircle2,
   Upload,
-  Gauge,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
 import type { ParsedUser } from '@/lib/tgParser/types';
-import { clampTgParserDailyLimit, TG_PARSER_DAILY_LIMIT_MAX } from '@/lib/tgParser/constants';
+import {
+  clampTgParserMaxContactsPerRun,
+  TG_PARSER_MAX_CONTACTS_PER_RUN_DEFAULT,
+  TG_PARSER_MAX_CONTACTS_PER_RUN_MAX,
+} from '@/lib/tgParser/constants';
 
 const COLUMNS: (keyof ParsedUser)[] = [
   'ID/Username',
@@ -58,8 +59,20 @@ type ParseJob = {
   status: ParseJobStatus;
   users: ParsedUser[];
   error?: string;
+  /** Частичный результат: лимит аккаунта, лимит контактов или ошибка Telegram */
+  warning?: string;
   startedAt: number;
 };
+
+function formatParseStopMessage(stopReason?: string, detail?: string): string {
+  if (stopReason === 'contact_limit') {
+    return 'Остановлено: достигнут лимит «макс. контактов за запуск» для этого аккаунта (настройка в таблице аккаунтов). Экспортируйте CSV или Excel.';
+  }
+  if (stopReason === 'error') {
+    return `Остановлено из-за ошибки; сохранён частичный результат. ${detail ?? ''}`.trim();
+  }
+  return 'Частичный результат — экспортируйте данные, если нужно.';
+}
 
 function jobAccountKey(accountId: string): string {
   return accountId.trim() || '__env__';
@@ -79,8 +92,7 @@ type TgAccount = {
   proxy_url: string;
   session_data: string;
   is_active: boolean;
-  daily_limit: number;
-  sent_today: number;
+  max_contacts_per_run?: number;
   created_at: string;
 };
 
@@ -111,7 +123,6 @@ export default function TgParserPage() {
   const [addApiId, setAddApiId] = useState('');
   const [addApiHash, setAddApiHash] = useState('');
   const [addPhone, setAddPhone] = useState('');
-  const [accountsExpanded, setAccountsExpanded] = useState(true);
   const [uploading, setUploading] = useState(false);
 
   // Auth wizard state
@@ -122,8 +133,12 @@ export default function TgParserPage() {
   const [authPassword, setAuthPassword] = useState('');
 
   const loadAccounts = useCallback(async () => {
+    setAccountsLoading(true);
     const token = await getAccessToken();
-    if (!token) { setAccountsLoading(false); return; }
+    if (!token) {
+      setAccountsLoading(false);
+      return;
+    }
     try {
       const res = await fetch(API_ACCOUNTS, {
         headers: { Authorization: `Bearer ${token}` },
@@ -247,18 +262,18 @@ export default function TgParserPage() {
     }
   }, [accountId, loadAccounts]);
 
-  const updateDailyLimit = useCallback(async (id: string, newLimit: number) => {
+  const updateMaxContactsPerRun = useCallback(async (id: string, newLimit: number) => {
     const token = await getAccessToken();
     if (!token) return;
-    const clamped = clampTgParserDailyLimit(newLimit);
+    const clamped = clampTgParserMaxContactsPerRun(newLimit);
     const res = await fetch(`${API_ACCOUNTS}/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ daily_limit: clamped }),
+      body: JSON.stringify({ max_contacts_per_run: clamped }),
     });
     if (res.ok) {
       setAccounts((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, daily_limit: clamped } : a)),
+        prev.map((a) => (a.id === id ? { ...a, max_contacts_per_run: clamped } : a)),
       );
     } else {
       const data = (await res.json()) as { error?: string };
@@ -373,13 +388,26 @@ export default function TgParserPage() {
         body: JSON.stringify(body),
       });
 
-      const data = (await res.json()) as { status?: string; users?: ParsedUser[]; error?: string };
+      const data = (await res.json()) as {
+        status?: string;
+        users?: ParsedUser[];
+        error?: string;
+        stop_reason?: string;
+      };
       if (!res.ok) {
         patchJob(jobId, { status: 'error', error: data?.error ?? `Ошибка: ${res.status}` });
         return;
       }
       if (data.status === 'error') {
         patchJob(jobId, { status: 'error', error: data.error ?? 'Ошибка парсинга' });
+        return;
+      }
+      if (data.status === 'partial') {
+        patchJob(jobId, {
+          status: 'done',
+          users: data.users ?? [],
+          warning: formatParseStopMessage(data.stop_reason, data.error),
+        });
         return;
       }
       patchJob(jobId, { status: 'done', users: data.users ?? [] });
@@ -465,22 +493,16 @@ export default function TgParserPage() {
         <h1 className="text-2xl font-bold text-gray-900">TG User Parser</h1>
         <p className="text-sm text-gray-500 mt-1">
           Парсинг пользователей из Telegram: сообщения в чатах, участники, комментарии к постам. Экспорт в CSV или Excel.
-          Можно запускать несколько парсингов параллельно на разных аккаунтах; один и тот же аккаунт не занят двумя задачами одновременно.
         </p>
       </div>
 
       {/* Accounts section */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6">
         <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => setAccountsExpanded((v) => !v)}
-            className="flex items-center gap-2 text-sm font-semibold text-gray-800"
-          >
-            <User className="h-4 w-4" />
-            Аккаунты Telegram ({accounts.length})
-            {accountsExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-          </button>
+          <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+            <User className="h-4 w-4" aria-hidden />
+            Аккаунты Telegram ({accountsLoading ? '…' : accounts.length})
+          </div>
           <div className="flex items-center gap-2">
             <label className={`inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
               {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
@@ -496,7 +518,7 @@ export default function TgParserPage() {
             </label>
             <button
               type="button"
-              onClick={() => { setShowAddAccount((v) => !v); setAccountsExpanded(true); }}
+              onClick={() => { setShowAddAccount((v) => !v); }}
               className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
             >
               <Plus className="h-4 w-4" />
@@ -505,8 +527,7 @@ export default function TgParserPage() {
           </div>
         </div>
 
-        {accountsExpanded && (
-          <div className="mt-4 space-y-4">
+        <div className="mt-4 space-y-4">
             {showAddAccount && (
               <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-4 space-y-3">
                 {/* Step 1: credentials + phone */}
@@ -654,17 +675,26 @@ export default function TgParserPage() {
             )}
 
             {accountsLoading ? (
-              <p className="text-sm text-gray-500 py-2">Загрузка аккаунтов...</p>
+              <div className="rounded-lg border border-gray-200 bg-gray-50/50 overflow-hidden">
+                <div className="flex flex-col sm:flex-row gap-4 px-6 py-12 items-center justify-center min-h-[140px] text-center sm:text-left">
+                  <Loader2 className="h-10 w-10 animate-spin text-blue-600 shrink-0" aria-hidden />
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">Загрузка аккаунтов…</p>
+                    <p className="text-xs text-gray-500 mt-1 max-w-md">
+                      Получаем список из базы. Если аккаунтов ещё нет, здесь появится подсказка после загрузки.
+                    </p>
+                  </div>
+                </div>
+              </div>
             ) : accounts.length === 0 ? (
               <p className="text-sm text-gray-500 py-2">
-                Нет аккаунтов. Добавьте Telegram-аккаунт для парсинга.
+                Пока нет аккаунтов. Добавьте Telegram-аккаунт — он появится у всех, кто открывает этот инструмент.
               </p>
             ) : (
               <div className="space-y-2">
                 <p className="text-xs text-gray-500 leading-snug">
-                  <span className="text-gray-600">Квота</span> — дневной счётчик <span className="whitespace-nowrap">API-операций</span> и
-                  потолок (по умолчанию 500, до {TG_PARSER_DAILY_LIMIT_MAX}). Это <span className="text-gray-700">не</span> ограничение
-                  «сколько сообщений спарсить» в форме ниже — там свои поля.
+                  <span className="text-gray-600">Макс. за запуск</span> — сколько <span className="whitespace-nowrap">уникальных контактов</span> максимум
+                  соберёт один запуск парсинга с этого аккаунта (по умолчанию 500, до {TG_PARSER_MAX_CONTACTS_PER_RUN_MAX.toLocaleString('ru-RU')}).
                 </p>
                 <div className="rounded-lg border border-gray-200 overflow-hidden">
                 <div className="bg-gray-50 border-b border-gray-200">
@@ -676,27 +706,19 @@ export default function TgParserPage() {
                     <span className="min-w-0 text-left" title="Имя в списке или номер API">
                       Аккаунт
                     </span>
-                    <div className="grid grid-cols-[120px_76px_minmax(11rem,max-content)_3.5rem_2.25rem] items-center gap-x-3 [&>span]:text-center">
+                    <div className="grid grid-cols-[120px_76px_7rem_2.25rem] items-center gap-x-3 [&>span]:text-center">
                       <span title="Телефон привязки">Телефон</span>
                       <span title="Сохранённая сессия GramJS — можно парсить">Сессия</span>
-                      <span title="Использовано API-операций за сегодня">Квота</span>
-                      <span title="Максимум API-операций за календарный день">Потолок</span>
+                      <span title="Максимум уникальных контактов за один запуск парсинга">Макс. за запуск</span>
                       <span className="block w-full" aria-hidden />
                     </div>
                   </div>
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div
+                  className="divide-y divide-gray-100 max-h-[calc(7*3rem)] overflow-y-auto overscroll-contain"
+                  style={{ scrollbarGutter: 'stable' }}
+                >
                 {accounts.map((acc) => {
-                  const pct = acc.daily_limit > 0
-                    ? Math.min(100, Math.round((acc.sent_today / acc.daily_limit) * 100))
-                    : 100;
-                  const limitReached = acc.sent_today >= acc.daily_limit;
-                  const barColor = limitReached
-                    ? 'bg-rose-500'
-                    : pct > 75
-                      ? 'bg-amber-500'
-                      : 'bg-emerald-500';
-
                   const phoneDisplay = acc.phone || `ID: ${acc.api_id}`;
 
                   return (
@@ -711,7 +733,7 @@ export default function TgParserPage() {
                       <span className="min-w-0 truncate font-medium text-gray-800">
                         {acc.name || `Account ${acc.api_id}`}
                       </span>
-                      <div className="grid grid-cols-[120px_76px_minmax(11rem,max-content)_3.5rem_2.25rem] items-center gap-x-3">
+                      <div className="grid grid-cols-[120px_76px_7rem_2.25rem] items-center gap-x-3">
                         <div className="min-w-0 text-center">
                           <span
                             className="inline-block max-w-full truncate text-xs text-gray-500"
@@ -728,43 +750,22 @@ export default function TgParserPage() {
                           )}
                         </div>
 
-                        <div
-                          className="flex min-w-0 items-center justify-center gap-2"
-                          title="API-операции сегодня / дневной потолок (не лимит сообщений в форме ниже)"
-                        >
-                          <Gauge
-                            className={`h-3.5 w-3.5 shrink-0 ${limitReached ? 'text-rose-500' : 'text-gray-400'}`}
-                            aria-hidden
-                          />
-                          <div className="flex items-center gap-1.5">
-                            <div className="h-1.5 w-20 shrink-0 rounded-full bg-gray-200 overflow-hidden">
-                              <div
-                                className={`h-full rounded-full transition-all ${barColor}`}
-                                style={{ width: `${pct}%` }}
-                              />
-                            </div>
-                            <span className={`text-xs tabular-nums whitespace-nowrap ${limitReached ? 'text-rose-600 font-medium' : 'text-gray-500'}`}>
-                              {acc.sent_today}/{acc.daily_limit}
-                            </span>
-                          </div>
-                        </div>
-
                         <div className="flex justify-center">
                           <input
                             type="number"
-                            min={0}
-                            max={TG_PARSER_DAILY_LIMIT_MAX}
-                            defaultValue={acc.daily_limit}
-                            key={`${acc.id}-${acc.daily_limit}`}
+                            min={1}
+                            max={TG_PARSER_MAX_CONTACTS_PER_RUN_MAX}
+                            defaultValue={acc.max_contacts_per_run ?? TG_PARSER_MAX_CONTACTS_PER_RUN_DEFAULT}
+                            key={`${acc.id}-${acc.max_contacts_per_run ?? 0}`}
                             onBlur={(e) => {
                               const v = parseInt(e.target.value, 10);
-                              if (!isNaN(v)) void updateDailyLimit(acc.id, v);
+                              if (!isNaN(v)) void updateMaxContactsPerRun(acc.id, v);
                             }}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                             }}
-                            className="w-14 rounded border border-gray-300 px-1.5 py-0.5 text-xs text-center text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                            title="Максимум операций с аккаунта за календарный день"
+                            className="w-[6.5rem] rounded border border-gray-300 px-1.5 py-0.5 text-xs text-center text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                            title="Максимум уникальных контактов за один запуск парсинга"
                           />
                         </div>
 
@@ -786,8 +787,7 @@ export default function TgParserPage() {
                 </div>
               </div>
             )}
-          </div>
-        )}
+        </div>
       </div>
 
       {/* Parse form */}
@@ -822,7 +822,7 @@ export default function TgParserPage() {
               })}
             </select>
             <span className="text-xs text-gray-500">
-              выберите аккаунт и чаты, запустите — затем можно сразу выбрать другой аккаунт и снова запустить
+              лимит уникальных контактов за один запуск задаётся в таблице аккаунтов («Макс. за запуск»); можно параллельно гонять разные аккаунты
             </span>
           </div>
         )}
@@ -877,9 +877,11 @@ export default function TgParserPage() {
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-6 items-end">
-          <div>
-            <label htmlFor="message-limit" className="block text-sm font-medium text-gray-700 mb-1">Лимит сообщений/участников</label>
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 sm:gap-8 sm:items-start">
+          <div className="min-w-0 max-w-md">
+            <label htmlFor="message-limit" className="block text-sm font-medium text-gray-700 mb-1">
+              Лимит сообщений / участников
+            </label>
             <input
               id="message-limit"
               type="number"
@@ -889,9 +891,15 @@ export default function TgParserPage() {
               onChange={(e) => setMessageLimit(Math.min(5000, Math.max(10, Number(e.target.value) || 100)))}
               className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-gray-900"
             />
+            <p className="text-[11px] text-gray-500 mt-1.5 leading-snug">
+              Ограничивает <span className="text-gray-600">глубину обхода</span> в каждом чате: сколько последних сообщений просмотреть при сборе авторов и сколько участников максимум запросить у Telegram для списка членов.
+              Это не «сколько людей в итоге в таблице» — общий потолок по людям задаётся у аккаунта колонкой «Макс. за запуск».
+            </p>
           </div>
-          <div>
-            <label htmlFor="max-offline" className="block text-sm font-medium text-gray-700 mb-1">Макс. дней оффлайн</label>
+          <div className="min-w-0 max-w-md">
+            <label htmlFor="max-offline" className="block text-sm font-medium text-gray-700 mb-1">
+              Макс. дней оффлайн
+            </label>
             <input
               id="max-offline"
               type="number"
@@ -901,6 +909,10 @@ export default function TgParserPage() {
               onChange={(e) => setMaxOfflineDays(e.target.value)}
               className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-gray-900"
             />
+            <p className="text-[11px] text-gray-500 mt-1.5 leading-snug">
+              Если указано число, в результат попадут только пользователи, у которых «последний раз в сети» не старше N дней (с учётом статусов вроде «недавно», «на неделе»).
+              Пустое поле — не отсекать по давности последнего визита.
+            </p>
           </div>
         </div>
 
@@ -971,7 +983,9 @@ export default function TgParserPage() {
                   ? 'border-blue-200 bg-blue-50/30'
                   : job.status === 'error'
                     ? 'border-red-200 bg-red-50/30'
-                    : 'border-gray-200 bg-white'
+                    : job.warning
+                      ? 'border-amber-200 bg-amber-50/20'
+                      : 'border-gray-200 bg-white'
               }`}
             >
               <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
@@ -990,6 +1004,9 @@ export default function TgParserPage() {
                   </div>
                   {job.status === 'error' && job.error && (
                     <p className="text-sm text-red-700">{job.error}</p>
+                  )}
+                  {job.status === 'done' && job.warning && (
+                    <p className="text-sm text-amber-900/90">{job.warning}</p>
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">

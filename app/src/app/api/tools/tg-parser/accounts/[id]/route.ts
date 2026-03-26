@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
-import { clampTgParserDailyLimit } from '@/lib/tgParser/constants';
+import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -33,12 +33,12 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
           return jsonError('Invalid JSON body', 400);
         }
       
-        const allowed = ['name', 'is_active', 'proxy_url', 'phone', 'session_data', 'daily_limit'] as const;
+        const allowed = ['name', 'is_active', 'proxy_url', 'phone', 'session_data', 'max_contacts_per_run'] as const;
         const updates: Record<string, unknown> = {};
         for (const key of allowed) {
           if (body[key] === undefined) continue;
-          if (key === 'daily_limit') {
-            updates[key] = clampTgParserDailyLimit(body[key]);
+          if (key === 'max_contacts_per_run') {
+            updates[key] = clampTgParserMaxContactsPerRun(body[key]);
           } else {
             updates[key] = body[key];
           }
@@ -52,8 +52,7 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
           .from('tg_parser_accounts')
           .update(updates)
           .eq('id', id)
-          .eq('user_id', user.id)
-          .select('id, name, api_id, api_hash, phone, proxy_url, session_data, is_active, daily_limit, created_at')
+          .select('id, name, api_id, api_hash, phone, proxy_url, session_data, is_active, max_contacts_per_run, created_at')
           .single();
       
         if (error) return jsonError(error.message, 500);
@@ -81,8 +80,7 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
         const { error } = await supabase
           .from('tg_parser_accounts')
           .delete()
-          .eq('id', id)
-          .eq('user_id', user.id);
+          .eq('id', id);
       
         if (error) return jsonError(error.message, 500);
         return new NextResponse(null, { status: 204 });
