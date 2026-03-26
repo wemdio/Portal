@@ -1,4 +1,3 @@
-
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
@@ -21,9 +20,11 @@ export async function GET(
   if (!user) return jsonError('Unauthorized', 401);
 
   const { id } = await params;
-  const after = req.nextUrl.searchParams.get('after')?.trim() || null;
-  
-  // Ensure the job belongs to the current user.
+  const sp = req.nextUrl.searchParams;
+  const after = sp.get('after')?.trim() || null;
+  const limit = Math.min(5000, Math.max(1, Number(sp.get('limit') ?? '1000')));
+  const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
+
   const { data: job, error: jobError } = await supabase
     .from('search_parser_jobs')
     .select('id,user_id')
@@ -32,16 +33,22 @@ export async function GET(
   if (jobError || !job) return jsonError('Not found', 404);
   if (job.user_id !== user.id) return jsonError('Forbidden', 403);
 
-  let query = supabase.from('search_results').select('*').eq('job_id', id);
+  let query = supabase
+    .from('search_results')
+    .select('*', { count: 'exact' })
+    .eq('job_id', id);
+
   if (after) {
-    // incremental mode: return only rows created after the last seen timestamp
     query = query.gt('created_at', after);
   }
-  const { data: results, error } = await query.order('created_at', { ascending: true });
+
+  const { data: results, error, count } = await query
+    .order('created_at', { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (error) {
     return jsonError(error.message, 500);
   }
 
-  return NextResponse.json({ results });
+  return NextResponse.json({ results, count: count ?? 0, limit, offset });
 }

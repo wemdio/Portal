@@ -413,29 +413,42 @@ export function SearchParserView() {
     }
   }, []);
 
+  const RESULTS_PAGE_SIZE = 1000;
+
   const loadResults = useCallback(
     async (jobId: string, mode: 'initial' | 'incremental' = 'initial') => {
       const isInitial = mode === 'initial';
       if (isInitial) setLoadingResults(true);
       try {
-        const after = !isInitial ? latestCreatedAtRef.current : null;
-        const url = after
-          ? `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}`
-          : `/api/parsers/search/${jobId}/results`;
-        const data = await apiFetch<{ results: SearchResult[] }>(url);
-        const incoming = data.results ?? [];
-        if (incoming.length === 0) return;
-        setResults((prev) => {
-          if (isInitial || prev.length === 0) return incoming;
-          const seen = new Set(prev.map((r) => r.id));
-          const merged = [...prev];
-          for (const r of incoming) {
-            if (seen.has(r.id)) continue;
-            seen.add(r.id);
-            merged.push(r);
-          }
-          return merged;
-        });
+        if (!isInitial) {
+          const after = latestCreatedAtRef.current;
+          if (!after) return;
+          const url = `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}&limit=${RESULTS_PAGE_SIZE}`;
+          const data = await apiFetch<{ results: SearchResult[] }>(url);
+          const incoming = data.results ?? [];
+          if (incoming.length === 0) return;
+          setResults((prev) => {
+            const seen = new Set(prev.map((r) => r.id));
+            const merged = [...prev];
+            for (const r of incoming) {
+              if (!seen.has(r.id)) { seen.add(r.id); merged.push(r); }
+            }
+            return merged;
+          });
+          return;
+        }
+
+        let all: SearchResult[] = [];
+        let offset = 0;
+        while (true) {
+          const url = `/api/parsers/search/${jobId}/results?limit=${RESULTS_PAGE_SIZE}&offset=${offset}`;
+          const data = await apiFetch<{ results: SearchResult[]; count: number }>(url);
+          const page = data.results ?? [];
+          all = all.concat(page);
+          if (page.length < RESULTS_PAGE_SIZE || all.length >= (data.count ?? Infinity)) break;
+          offset += RESULTS_PAGE_SIZE;
+        }
+        setResults(all);
       } finally {
         if (isInitial) setLoadingResults(false);
       }
