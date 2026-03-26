@@ -179,11 +179,19 @@ async function userToParsed(
   };
 }
 
+export type ParseStopReason = 'contact_limit' | 'error';
+
+export type ParseResult =
+  | { status: 'ok'; users: ParsedUser[] }
+  | { status: 'partial'; users: ParsedUser[]; stop_reason: ParseStopReason; error?: string }
+  | { status: 'error'; error: string };
+
 async function parseChatMessages(
   client: TelegramClient,
   link: string,
-  opts: ParseOptions
-): Promise<ParsedUser[]> {
+  opts: ParseOptions,
+  mergeUser: (u: ParsedUser) => Promise<boolean>,
+): Promise<void> {
   const entity = await client.getEntity(link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
@@ -203,20 +211,23 @@ async function parseChatMessages(
     }
   }
 
-  const results: ParsedUser[] = [];
-  for (const [_, { user, messages }] of usersMap) {
+  for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
-    results.push(await userToParsed(client, user, link, title, 'chat_messages', messages));
+    const parsed = await userToParsed(client, user, link, title, 'chat_messages', messages);
+    if (!(await mergeUser(parsed))) return;
     await new Promise((r) => setTimeout(r, 100)); // rate limit
   }
-  return results;
 }
 
-async function parseChatMembers(client: TelegramClient, link: string, opts: ParseOptions): Promise<ParsedUser[]> {
+async function parseChatMembers(
+  client: TelegramClient,
+  link: string,
+  opts: ParseOptions,
+  mergeUser: (u: ParsedUser) => Promise<boolean>,
+): Promise<void> {
   const entity = await client.getEntity(link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
-  const results: ParsedUser[] = [];
   let count = 0;
   try {
     for await (const participant of client.iterParticipants(entity, { limit: opts.message_limit })) {
@@ -224,24 +235,28 @@ async function parseChatMembers(client: TelegramClient, link: string, opts: Pars
       if (!u || u.className !== 'User' || u.bot) continue;
       const { status, lastSeen } = getOnlineStatus(u.status);
       if (!filterByOnline(status, lastSeen, opts)) continue;
-      results.push(await userToParsed(client, u, link, title, 'chat_members', []));
+      const parsed = await userToParsed(client, u, link, title, 'chat_members', []);
+      if (!(await mergeUser(parsed))) return;
       count++;
       if (count % 50 === 0) await new Promise((r) => setTimeout(r, 100));
     }
   } catch (e) {
     if (String(e).includes('CHAT_ADMIN_REQUIRED') || String(e).includes('CHANNEL_PRIVATE')) {
-      // skip members if no access
-      return [];
+      return;
     }
     throw e;
   }
-  return results;
 }
 
-async function parsePostComments(client: TelegramClient, link: string, opts: ParseOptions): Promise<ParsedUser[]> {
+async function parsePostComments(
+  client: TelegramClient,
+  link: string,
+  opts: ParseOptions,
+  mergeUser: (u: ParsedUser) => Promise<boolean>,
+): Promise<void> {
   const entity = await client.getEntity(link);
   const ch = entity as Api.Channel;
-  if (!ch || ch.className !== 'Channel' || !ch.broadcast) return []; // only broadcast channels have comments
+  if (!ch || ch.className !== 'Channel' || !ch.broadcast) return;
   const title = ch.title ?? ch.username ?? String(ch.id);
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
   for await (const post of client.iterMessages(entity, { limit: opts.message_limit })) {
@@ -265,17 +280,36 @@ async function parsePostComments(client: TelegramClient, link: string, opts: Par
     }
   }
 
-  const results: ParsedUser[] = [];
-  for (const [_, { user, messages }] of usersMap) {
+  for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
-    results.push(await userToParsed(client, user, link, title, 'post_comments', messages));
+    const parsed = await userToParsed(client, user, link, title, 'post_comments', messages);
+    if (!(await mergeUser(parsed))) return;
     await new Promise((r) => setTimeout(r, 100));
   }
-  return results;
 }
 
-export type ParseResult = { status: 'ok'; users: ParsedUser[] } | { status: 'error'; error: string };
+function buildMergeUser(
+  opts: ParseOptions,
+  allUsers: Map<number, ParsedUser>,
+  stopRef: { reason: ParseStopReason | null },
+): (u: ParsedUser) => Promise<boolean> {
+  return async (u: ParsedUser) => {
+    if (stopRef.reason) return false;
+    const ex = allUsers.get(u.ID);
+    if (ex) {
+      ex.Сообщения = [ex.Сообщения, u.Сообщения].filter(Boolean).join('\n---\n');
+      ex['Количество сообщений'] += u['Количество сообщений'];
+      return true;
+    }
+    if (opts.max_contacts != null && allUsers.size >= opts.max_contacts) {
+      stopRef.reason = 'contact_limit';
+      return false;
+    }
+    allUsers.set(u.ID, u);
+    return true;
+  };
+}
 
 export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   if (!opts.links?.length) return { status: 'error', error: 'links is empty' };
@@ -285,50 +319,46 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
 
   const client = await getClient(opts.account);
   const allUsers = new Map<number, ParsedUser>();
+  const stopRef: { reason: ParseStopReason | null } = { reason: null };
+  const mergeUser = buildMergeUser(opts, allUsers, stopRef);
 
   try {
     for (const link of opts.links) {
+      if (stopRef.reason) break;
       const trimmed = String(link).trim();
       if (!trimmed) continue;
 
       if (opts.parse_chat_messages) {
-        const msgs = await parseChatMessages(client, trimmed, opts);
-        for (const u of msgs) {
-          const ex = allUsers.get(u.ID);
-          if (ex) {
-            ex.Сообщения = [ex.Сообщения, u.Сообщения].filter(Boolean).join('\n---\n');
-            ex['Количество сообщений'] += u['Количество сообщений'];
-          } else {
-            allUsers.set(u.ID, u);
-          }
-        }
+        await parseChatMessages(client, trimmed, opts, mergeUser);
+        if (stopRef.reason) break;
       }
       if (opts.parse_chat_members) {
-        const mems = await parseChatMembers(client, trimmed, opts);
-        for (const u of mems) {
-          if (!allUsers.has(u.ID)) allUsers.set(u.ID, u);
-        }
+        await parseChatMembers(client, trimmed, opts, mergeUser);
+        if (stopRef.reason) break;
       }
       if (opts.parse_post_comments) {
-        const comments = await parsePostComments(client, trimmed, opts);
-        for (const u of comments) {
-          const ex = allUsers.get(u.ID);
-          if (ex) {
-            ex.Сообщения = [ex.Сообщения, u.Сообщения].filter(Boolean).join('\n---\n');
-            ex['Количество сообщений'] += u['Количество сообщений'];
-          } else {
-            allUsers.set(u.ID, u);
-          }
-        }
+        await parsePostComments(client, trimmed, opts, mergeUser);
+        if (stopRef.reason) break;
       }
     }
     await client.disconnect();
   } catch (e) {
     try {
       await client.disconnect();
-    } catch {}
-    return { status: 'error', error: e instanceof Error ? e.message : String(e) };
+    } catch {
+      /* ignore */
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    const users = [...allUsers.values()];
+    if (users.length > 0) {
+      return { status: 'partial', users, stop_reason: 'error', error: msg };
+    }
+    return { status: 'error', error: msg };
   }
 
-  return { status: 'ok', users: [...allUsers.values()] };
+  const users = [...allUsers.values()];
+  if (stopRef.reason) {
+    return { status: 'partial', users, stop_reason: stopRef.reason };
+  }
+  return { status: 'ok', users };
 }

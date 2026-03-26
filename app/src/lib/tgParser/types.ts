@@ -41,4 +41,6 @@ export interface ParseOptions {
   filter_recently: boolean;
   max_offline_days: number | null;
   account?: TgParserAccount;
+  /** Остановиться после N уникальных контактов (с аккаунта: max_contacts_per_run). Без поля — без лимита. */
+  max_contacts?: number | null;
 }
