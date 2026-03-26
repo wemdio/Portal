@@ -5,8 +5,8 @@
 
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
 /** Таймаут одного запроса к Instantly (увеличен для списка кампаний при медленной сети). */
-const INSTANTLY_TIMEOUT_MS = 45_000;
-const INSTANTLY_MAX_RETRIES = 2;
+const INSTANTLY_TIMEOUT_MS = 90_000;
+const INSTANTLY_MAX_RETRIES = 3;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -49,7 +49,7 @@ async function fetchInstantlyJson(
 
       const body = await res.text().catch(() => '');
       if (attempt < INSTANTLY_MAX_RETRIES && isRetryableStatus(res.status)) {
-        await sleep(400 * (attempt + 1));
+        await sleep(1000 * (attempt + 1));
         continue;
       }
 
@@ -62,7 +62,7 @@ async function fetchInstantlyJson(
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message);
       if (attempt < INSTANTLY_MAX_RETRIES && (isTimeout || isNetwork)) {
-        await sleep(400 * (attempt + 1));
+        await sleep(1000 * (attempt + 1));
         continue;
       }
       break;
