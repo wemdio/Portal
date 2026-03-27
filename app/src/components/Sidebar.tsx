@@ -98,6 +98,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
           if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
 
+          const isGuide = item.href === '/guide';
           const aliases = navActiveAliases[item.href] ?? [];
           const isActive = item.href === '/'
             ? pathname === '/'
@@ -112,9 +113,11 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               prefetch={false}
               onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
-                ${isActive
-                  ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
-                  : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
+                ${isGuide
+                  ? (isActive ? 'text-orange-600 font-medium' : 'text-orange-500 hover:text-orange-600')
+                  : (isActive
+                    ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
+                    : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'))
                 }
               `}
             >

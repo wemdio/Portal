@@ -9,7 +9,7 @@ export default function AdminPage() {
 
   const cardClass =
     'bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all group ' +
-    (isTma ? 'p-4' : 'p-6');
+  (isTma ? 'p-5' : 'p-8');
 
   return (
     <div className={`max-w-6xl mx-auto px-4 ${isTma ? 'py-6 text-sm leading-relaxed' : 'py-10'}`}>

@@ -83,6 +83,7 @@ export function TmaHeader() {
       <div className="px-4 pb-3">
         <div className="flex items-center gap-2 overflow-x-auto">
           {items.map((item) => {
+            const isGuide = item.href === '/guide';
             const isActive = item.href === '/'
               ? pathname === '/'
               : pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -91,7 +92,9 @@ export function TmaHeader() {
                 key={item.name}
                 href={item.href as Route}
                 className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition ${
-                  isActive ? 'tma-chip-active' : 'tma-chip'
+                  isGuide
+                    ? (isActive ? 'text-orange-400' : 'text-orange-300')
+                    : (isActive ? 'tma-chip-active' : 'tma-chip')
                 }`}
               >
                 {item.name}

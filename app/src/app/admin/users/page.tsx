@@ -9,7 +9,7 @@ import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { Check, ChevronDown, ChevronUp, MoreVertical } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, MoreVertical, Plus } from 'lucide-react';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
 
@@ -484,15 +484,6 @@ export default function UsersPage() {
           <h1 className={`${isTma ? 'text-xl' : 'text-3xl'} font-bold text-gray-900`}>Управление пользователями</h1>
           <p className="mt-1 text-sm text-gray-500">Создание и управление ролями пользователей</p>
         </div>
-        <button
-          onClick={() => {
-            setSearchQuery(''); // Clear search when opening modal
-            setShowCreateModal(true);
-          }}
-          className={`inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors ${isTma ? 'w-full sm:w-auto' : ''}`}
-        >
-          Добавить пользователя
-        </button>
       </div>
 
       {error && (
@@ -504,17 +495,27 @@ export default function UsersPage() {
         </div>
       )}
 
-      <div className="mb-6">
-        <div className="relative">
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="relative flex-1">
           <input
             type="text"
             placeholder="Поиск по email, имени или роли..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             autoComplete="off"
-            className="w-full pl-4 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="h-8 w-full rounded-lg border border-gray-300 px-4 py-0 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
+        <button
+          onClick={() => {
+            setSearchQuery(''); // Clear search when opening modal
+            setShowCreateModal(true);
+          }}
+          className={`inline-flex h-8 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-5 text-sm font-semibold text-white shadow-sm shadow-blue-600/25 transition-all hover:-translate-y-0.5 hover:from-blue-500 hover:to-indigo-500 hover:shadow-md hover:shadow-blue-600/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 active:translate-y-0 ${isTma ? 'w-full sm:w-auto' : ''}`}
+        >
+          <Plus className="h-4 w-4" />
+          Добавить пользователя
+        </button>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -629,7 +630,7 @@ export default function UsersPage() {
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+            <div className="px-7 py-5 border-b border-gray-200 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">Новый пользователь</h3>
               <button
                 onClick={() => { 
@@ -643,7 +644,7 @@ export default function UsersPage() {
                 ✕
               </button>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="p-7 space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Имя
@@ -652,7 +653,7 @@ export default function UsersPage() {
                   type="text"
                   value={newUser.full_name}
                   onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Иван Иванов"
                 />
               </div>
@@ -664,7 +665,7 @@ export default function UsersPage() {
                   type="email"
                   value={newUser.email}
                   onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="user@example.com"
                   required
                 />
@@ -677,7 +678,7 @@ export default function UsersPage() {
                   type="password"
                   value={newUser.password}
                   onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Минимум 8 символов"
                   required
                 />
@@ -689,7 +690,7 @@ export default function UsersPage() {
                 <select
                   value={newUser.role}
                   onChange={(e) => setNewUser({ ...newUser, role: e.target.value as UserRole })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {ALL_ROLES.map((role) => (
                     <option key={role} value={role}>
@@ -699,21 +700,11 @@ export default function UsersPage() {
                 </select>
               </div>
             </div>
-            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
-              <button
-                onClick={() => { 
-                  setShowCreateModal(false); 
-                  setError(''); 
-                  setSearchQuery(''); 
-                }}
-                className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                Отмена
-              </button>
+            <div className="px-7 py-5 border-t border-gray-200 flex justify-center">
               <button
                 onClick={handleCreateUser}
                 disabled={creating}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center"
+                className="inline-flex min-w-[140px] items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-blue-600/25 transition-all hover:-translate-y-0.5 hover:from-blue-500 hover:to-indigo-500 hover:shadow-md hover:shadow-blue-600/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {creating ? 'Создание...' : 'Создать'}
               </button>
@@ -747,7 +738,7 @@ export default function UsersPage() {
                 transition: 'left 1s cubic-bezier(0.34, 1.56, 0.64, 1), top 1s cubic-bezier(0.34, 1.56, 0.64, 1), transform 1s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 1s ease-out',
               }}
             >
-              <div className="px-6 py-4 border-b border-gray-200 shrink-0 space-y-3">
+              <div className="px-7 py-5 border-b border-gray-200 shrink-0 space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-lg font-semibold text-gray-900">
                     {userForModal.full_name || userForModal.email || 'Пользователь'}
@@ -776,13 +767,13 @@ export default function UsersPage() {
                   </div>
                 )}
               </div>
-              <div className="p-6 overflow-y-auto space-y-6">
+              <div className="p-7 overflow-y-auto space-y-6">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Роль</label>
                   <select
                     value={modalRole ?? ''}
                     onChange={(e) => setModalRole(e.target.value as UserRole)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {ALL_ROLES.map((role) => (
                       <option key={role} value={role}>
@@ -790,35 +781,6 @@ export default function UsersPage() {
                       </option>
                     ))}
                   </select>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActionModalUserId(null);
-                      setModalFlyIn(false);
-                      setError('');
-                      setResettingUserId(actionModalUserId);
-                      setNewPassword('');
-                      setRevealPassword(false);
-                    }}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Сменить пароль
-                  </button>
-                  {actionModalUserId !== currentUserId && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActionModalUserId(null);
-                        setModalFlyIn(false);
-                        setDeletingUserId(actionModalUserId);
-                      }}
-                      className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
-                    >
-                      Удалить пользователя
-                    </button>
-                  )}
                 </div>
                 <div className="space-y-5">
                   <div>
@@ -852,7 +814,7 @@ export default function UsersPage() {
                     </ul>
                   </div>
                   <div>
-                    <h4 className="text-sm font-medium text-gray-900 mb-1">Отображение вкладок в боковой панели</h4>
+                    <h4 className="text-sm font-medium text-gray-900 mb-1">Отображение вкладок в Header-е</h4>
                     <p className="text-xs text-gray-500 mb-3">Управляет дополнительными пунктами навигации для данного пользователя</p>
                     <ul className="space-y-2">
                       {ALL_NAV_TAB_IDS.map((tabId) => (
@@ -897,7 +859,7 @@ export default function UsersPage() {
                       value={campaignSearch}
                       onChange={(e) => setCampaignSearch(e.target.value)}
                       placeholder="Поиск кампании..."
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
                       {allCampaignsLoading ? (
@@ -948,12 +910,41 @@ export default function UsersPage() {
                   </div>
                 )}
               </div>
-              <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end">
+              <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActionModalUserId(null);
+                      setModalFlyIn(false);
+                      setError('');
+                      setResettingUserId(actionModalUserId);
+                      setNewPassword('');
+                      setRevealPassword(false);
+                    }}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Сменить пароль
+                  </button>
+                  {actionModalUserId !== currentUserId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                        setDeletingUserId(actionModalUserId);
+                      }}
+                      className="px-3 py-2 border border-red-200 text-red-700 rounded-lg text-sm hover:bg-red-50"
+                    >
+                      Удалить пользователя
+                    </button>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={handleSaveAllChanges}
                   disabled={saving || !modalRole}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+                  className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium text-sm"
                 >
                   {saving ? 'Сохранение...' : 'Сохранить изменения'}
                 </button>
@@ -1038,7 +1029,7 @@ export default function UsersPage() {
                     type={revealPassword ? 'text' : 'password'}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="Минимум 8 символов"
                     autoComplete="new-password"
                   />
