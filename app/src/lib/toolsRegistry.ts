@@ -148,8 +148,6 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'LinkedIn Outreach',
     description: 'LinkedIn-аутрич: кампании, AI-персонализация, скрапинг лидов через Unipile.',
     href: '/tools/li-outreach',
-    badge: 'Новое',
-    badgeVariant: 'emerald',
     accentColor: 'blue',
   },
   rdp: {
