@@ -10,6 +10,7 @@ export type NavItem = {
 };
 
 export const navItems: NavItem[] = [
+  { name: 'Гайд', href: '/guide' },
   { name: 'Проекты', href: '/' },
   { name: 'Аналитика проектов', href: '/analytics/projects' },
   { name: 'Задачи', href: '/tasks' },

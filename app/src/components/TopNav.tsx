@@ -47,6 +47,7 @@ export function TopNav() {
         <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
           {visibleItems.map((item) => {
             const aliases = navActiveAliases[item.href] ?? [];
+            const isGuide = item.href === '/guide';
             const isActive = item.href === '/'
               ? pathname === '/'
               : pathname === item.href ||
@@ -59,9 +60,9 @@ export function TopNav() {
                 href={item.href as Route}
                 prefetch={false}
                 className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-medium transition-all duration-150 ${
-                  isActive
-                    ? 'bg-zinc-900 text-white shadow-sm'
-                    : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                  isGuide
+                    ? (isActive ? 'text-orange-600' : 'text-orange-500 hover:text-orange-600')
+                    : (isActive ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800')
                 }`}
               >
                 {item.name}
