@@ -134,6 +134,10 @@ export async function pauseCampaign(id: string) {
   return request<Campaign>(`/campaigns/${id}/pause`, { method: 'POST' });
 }
 
+export async function deleteCampaign(id: string): Promise<Campaign | undefined> {
+  return request<Campaign | undefined>(`/campaigns/${id}`, { method: 'DELETE' });
+}
+
 export async function duplicateCampaign(id: string) {
   return request<Campaign>(`/campaigns/${id}/duplicate`, { method: 'POST' });
 }
