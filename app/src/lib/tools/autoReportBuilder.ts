@@ -97,14 +97,13 @@ function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {
 }
 
 /**
- * Список кампаний Instantly (API v2).
- * GET /api/v2/campaigns — ответ: { items: Campaign[], next_starting_after?: string }.
- * Авторизация: Bearer {{api_key}} в заголовке Authorization.
- * Поддержана пагинация (limit=100, starting_after).
+ * Постраничная выборка списка кампаний Instantly (API v2), по 100 штук.
+ * Используется синхронизацией каталога в БД и полным списком в fallback-режиме.
  */
-export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+export async function* iterateInstantlyCampaignPages(
+  apiKey: string,
+): AsyncGenerator<InstantlyCampaignItem[], void, void> {
   const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
-  const all: InstantlyCampaignItem[] = [];
   let startingAfter: string | null = null;
   const seenPageTokens = new Set<string>();
   let pageCount = 0;
@@ -122,12 +121,24 @@ export async function fetchInstantlyCampaignsList(apiKey: string): Promise<Insta
 
     const data = await fetchInstantlyJson(url.toString(), headers, 'Instantly list campaigns');
     const arr = extractCampaignsArray(data);
-    if (arr?.length) all.push(...arr);
+    if (arr?.length) yield arr;
 
     const next = data && typeof data === 'object' && (data as Record<string, unknown>).next_starting_after;
     startingAfter = typeof next === 'string' && next ? next : null;
   } while (startingAfter);
+}
 
+/**
+ * Список кампаний Instantly (API v2).
+ * GET /api/v2/campaigns — ответ: { items: Campaign[], next_starting_after?: string }.
+ * Авторизация: Bearer {{api_key}} в заголовке Authorization.
+ * Поддержана пагинация (limit=100, starting_after).
+ */
+export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+  const all: InstantlyCampaignItem[] = [];
+  for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+    all.push(...page);
+  }
   return all;
 }
 

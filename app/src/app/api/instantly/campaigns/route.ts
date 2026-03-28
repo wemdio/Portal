@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
+import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -40,5 +41,6 @@ export const GET = withAuth(async (req) => {
 export const POST = withAuth(async (req) => {
   const body = await req.json();
   const campaign = await instantly.createCampaign(body);
+  await upsertInstantlyCatalogFromCampaign(campaign);
   return NextResponse.json(campaign, { status: 201 });
 });

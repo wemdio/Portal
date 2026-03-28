@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { Download, Loader2, MessageCircle, Users, FileSpreadsheet } from 'lucide-react';
 
@@ -21,6 +23,8 @@ type AtmosMessage = {
 };
 
 export default function AtmosAnalyticsPage() {
+  const pathname = usePathname();
+  const isAdminRoute = pathname?.startsWith('/admin');
   const [chats, setChats] = useState<AtmosChat[]>([]);
   const [selectedChatId, setSelectedChatId] = useState<number | ''>('');
   const [from, setFrom] = useState<string>('');
@@ -185,6 +189,13 @@ export default function AtmosAnalyticsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
+      {isAdminRoute && (
+        <div>
+          <Link href="/admin" className="text-sm font-medium text-blue-600 hover:text-blue-700">
+            ← Назад в админку
+          </Link>
+        </div>
+      )}
       <header>
         <h1 className="text-2xl font-bold text-gray-900">Atmos-аналитика</h1>
         <p className="mt-1 text-sm text-gray-500">

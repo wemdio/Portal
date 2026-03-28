@@ -18,11 +18,11 @@ export default function MaintenancePage() {
           Technical update
         </p>
         <h1 className="max-w-2xl text-4xl font-semibold leading-tight tracking-tight text-white md:text-5xl">
-          Мы выкатываем обновление портала
+          Обновление портала
         </h1>
         <p className="mt-6 max-w-xl text-base leading-relaxed text-slate-300 md:text-lg">
           Сейчас команда добавляет новые фичи и фиксит баги. Портал скоро снова будет доступен.
-          Спасибо за терпение.
+          Обычно это занимает 2-5 минут. Спасибо за терпение. 
         </p>
         <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
           <Link
@@ -31,9 +31,6 @@ export default function MaintenancePage() {
           >
             Обновить страницу
           </Link>
-          <span className="rounded-xl border border-slate-700 bg-slate-900/60 px-5 py-2 text-sm text-slate-300">
-            Обычно это занимает 2-5 минут
-          </span>
         </div>
       </div>
     </section>
