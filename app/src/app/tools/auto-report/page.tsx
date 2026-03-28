@@ -18,6 +18,13 @@ interface InstantlyCampaignItem {
   timestamp_updated?: string;
 }
 
+interface CampaignsListMeta {
+  source: 'database' | 'instantly_fallback';
+  lastSyncedAt: string | null;
+  stale: boolean;
+  backgroundSync: boolean;
+}
+
 function formatCampaignTimestamp(value: string | null | undefined): string | null {
   const raw = (value ?? '').trim();
   if (!raw) return null;
@@ -1111,26 +1118,35 @@ export default function AutoReportPage() {
   const [campaignsList, setCampaignsList] = useState<InstantlyCampaignItem[]>([]);
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsFetched, setCampaignsFetched] = useState(false);
+  const [catalogSyncPending, setCatalogSyncPending] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
+  const catalogSyncWaitAttemptsRef = useRef(0);
 
-  const loadCampaigns = useCallback(async () => {
-    setCampaignsLoading(true);
+  const loadCampaigns = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
+    if (!silent) {
+      setCampaignsLoading(true);
+    }
     setError('');
     try {
       const token = await getToken();
       if (!token) {
         setError('Нужна авторизация. Войдите в аккаунт.');
-        setCampaignsLoading(false);
+        if (!silent) setCampaignsLoading(false);
         return;
       }
       const res = await fetch('/api/tools/auto-report/campaigns', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = (await res.json().catch(() => ({}))) as { campaigns?: InstantlyCampaignItem[]; error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        campaigns?: InstantlyCampaignItem[];
+        meta?: CampaignsListMeta;
+        error?: string;
+      };
       if (!res.ok) {
         setError(data.error || `Ошибка ${res.status}`);
-        setCampaignsLoading(false);
+        if (!silent) setCampaignsLoading(false);
         return;
       }
       const sorted = [...(data.campaigns ?? [])].sort((a, b) => {
@@ -1145,16 +1161,45 @@ export default function AutoReportPage() {
       setCampaignsList(sorted);
       setSelectedIds(new Set());
       setCampaignsFetched(true);
+
+      const meta = data.meta;
+      const empty = sorted.length === 0;
+      const bg = meta?.backgroundSync === true;
+
+      if (empty && bg) {
+        catalogSyncWaitAttemptsRef.current += 1;
+        if (catalogSyncWaitAttemptsRef.current >= 48) {
+          setError(
+            'Каталог кампаний не подгрузился за ~3 минуты. Проверьте миграцию БД, INSTANTLY_API_KEY и CRON для /api/tools/auto-report/campaigns/sync, затем обновите страницу.',
+          );
+          setCatalogSyncPending(false);
+        } else {
+          setCatalogSyncPending(true);
+        }
+      } else {
+        catalogSyncWaitAttemptsRef.current = 0;
+        setCatalogSyncPending(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки кампаний');
     } finally {
-      setCampaignsLoading(false);
+      if (!silent) {
+        setCampaignsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     loadCampaigns();
   }, [loadCampaigns]);
+
+  useEffect(() => {
+    if (!catalogSyncPending || campaignsList.length > 0) return;
+    const id = window.setInterval(() => {
+      void loadCampaigns({ silent: true });
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [catalogSyncPending, campaignsList.length, loadCampaigns]);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
 
@@ -1335,6 +1380,14 @@ export default function AutoReportPage() {
                   Загрузка кампаний…
                 </span>
               ) : null}
+              {catalogSyncPending && !campaignsLoading && campaignsList.length === 0 ? (
+                <span className="inline-flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Синхронизация каталога с Instantly… Первая загрузка может занять до 3 минут (много
+                  кампаний — дольше). Список появится сам; дальше названия в БД обновляются примерно каждые
+                  10–15 мин.
+                </span>
+              ) : null}
               {campaignsList.length > 0 && (
                 <div className="inline-flex items-center gap-2">
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
@@ -1362,11 +1415,12 @@ export default function AutoReportPage() {
               )}
             </div>
 
-            {campaignsFetched && campaignsList.length === 0 && (
+            {campaignsFetched && campaignsList.length === 0 && !catalogSyncPending && !error ? (
               <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                Кампаний не найдено. Убедитесь, что API-ключ Instantly v2 с правом <code className="bg-amber-100 px-1 rounded">campaigns:read</code> и в workspace есть кампании.
+                Кампаний не найдено. Убедитесь, что API-ключ Instantly v2 с правом{' '}
+                <code className="bg-amber-100 px-1 rounded">campaigns:read</code> и в workspace есть кампании.
               </p>
-            )}
+            ) : null}
 
             {campaignsList.length > 0 && (
               <div className="space-y-2">
