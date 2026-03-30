@@ -125,20 +125,8 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  if (session && pathname === '/login') {
-    return NextResponse.redirect(new URL('/', request.url))
-  }
-
   let userRole: string | null = null
-  const needsRoleCheck =
-    session &&
-    (pathname.startsWith('/admin') ||
-     pathname.startsWith('/billing-calendar') ||
-     pathname.startsWith('/client') ||
-     pathname === '/' ||
-     (!pathname.startsWith('/login') && !pathname.startsWith('/review/')))
-
-  if (session && needsRoleCheck) {
+  if (session && !pathname.startsWith('/review/base/') && pathname !== '/maintenance') {
     const { data: profile } = await supabase
       .from('profiles')
       .select('role')
@@ -147,10 +135,15 @@ export async function middleware(request: NextRequest) {
     userRole = profile?.role ?? null
   }
 
+  if (session && pathname === '/login') {
+    return NextResponse.redirect(
+      new URL(userRole === 'client' ? '/client' : '/', request.url)
+    )
+  }
+
   if (session && userRole === 'client') {
     const clientAllowed =
       pathname.startsWith('/client') ||
-      pathname === '/login' ||
       pathname === '/maintenance' ||
       pathname.startsWith('/review/base/')
     if (!clientAllowed) {
