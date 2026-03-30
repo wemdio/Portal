@@ -17,11 +17,13 @@ Daily report (21:00 MSK):
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from collections import deque
 from urllib.parse import urlparse
 
 try:
@@ -35,7 +37,15 @@ except ImportError:
 import asyncpg
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -72,10 +82,41 @@ SUPABASE_REST_API_KEY = (
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "8"))
+
 PROXY_URLS: list[str] = []
 
 LAST_HEALTH_CHECK_TS = 0.0
 HEARTBEAT_STARTED = False
+
+# ── Metrics buffer for heartbeat charts ──────────────────────────────────────
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+# (monotonic_ts, active_connections, cumulative_txn_count)
+_METRICS: deque[tuple[float, int, int]] = deque(maxlen=60)
+
+
+def _spark(values: list[int | float]) -> str:
+    if not values or len(values) < 2:
+        return ""
+    mn, mx = min(values), max(values)
+    if mn == mx:
+        return "▄" * len(values)
+    rng = mx - mn
+    return "".join(
+        SPARK_CHARS[min(7, int((v - mn) / rng * 7))]
+        for v in values
+    )
+
+
+def _fmt_bytes(b: int | float) -> str:
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if abs(b) < 1024:
+            return f"{b:.2f} {u}" if u not in ("B", "KB") else f"{int(b)} {u}"
+        b = b / 1024
+    return f"{b:.2f} PB"
+
 
 def _parse_proxy_list(raw: str) -> list[str]:
     raw = raw.strip()
@@ -221,6 +262,36 @@ async def send_telegram(text: str, parse_mode: str = "HTML", force: bool = False
             return r.is_success
     except Exception as e:
         print(f"[health] TG send error: {e}")
+        return False
+
+
+async def send_telegram_photo(
+    photo_bytes: bytes,
+    caption: str = "",
+    force: bool = False,
+) -> bool:
+    """Send a photo with caption to the health chat."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    if not force and not await get_send_alerts():
+        return True
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                url,
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                },
+                files={"photo": ("heartbeat.png", photo_bytes, "image/png")},
+            )
+            if not r.is_success:
+                print(f"[health] TG photo error {r.status_code}: {r.text[:200]}")
+            return r.is_success
+    except Exception as e:
+        print(f"[health] TG photo error: {e}")
         return False
 
 
@@ -527,15 +598,515 @@ async def run_health_check():
     else:
         print(f"[health] OK at {_now_msk()}")
 
+    await _collect_metrics()
+
+
+async def _collect_metrics() -> None:
+    """Record DB connection count and cumulative txn count for sparkline charts."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            cur = await conn.fetchval(
+                "SELECT count(*)::int FROM pg_stat_activity "
+                "WHERE datname = current_database()"
+            )
+            txn = await conn.fetchval(
+                "SELECT (xact_commit + xact_rollback)::bigint "
+                "FROM pg_stat_database WHERE datname = current_database()"
+            )
+            _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[health] metrics collect error: {e}")
+
+
+def _render_heartbeat_chart() -> bytes | None:
+    """Render transactions & connections chart as PNG bytes."""
+    if not HAS_MATPLOTLIB or len(_METRICS) < 3:
+        return None
+
+    pts = list(_METRICS)
+    msk = timezone(timedelta(hours=3))
+
+    timestamps: list[datetime] = []
+    rates: list[int] = []
+    conns: list[int] = []
+
+    for i in range(1, len(pts)):
+        ts = datetime.fromtimestamp(pts[i][0], tz=msk)
+        timestamps.append(ts)
+        delta = pts[i][2] - pts[i - 1][2]
+        rates.append(max(0, delta))
+        conns.append(pts[i][1])
+
+    if not rates:
+        return None
+
+    BG = "#1C1C1E"
+    TEXT = "#F5F5F7"
+    SUBTEXT = "#8E8E93"
+    GRID = "#3A3A3C"
+    GREEN = "#3ECF8E"
+    BLUE = "#0A84FF"
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(8, 4.5), facecolor=BG,
+        gridspec_kw={"hspace": 0.55},
+    )
+
+    for ax in (ax1, ax2):
+        ax.set_facecolor(BG)
+        ax.tick_params(colors=SUBTEXT, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
+        ax.grid(axis="y", color=GRID, linewidth=0.5, alpha=0.5)
+        ax.set_axisbelow(True)
+
+    total_txn = sum(rates)
+    fmt_total = f"{total_txn:,}".replace(",", " ")
+    ax1.set_title(
+        f"Транзакции БД — {fmt_total}",
+        color=TEXT, fontsize=12, fontweight="bold", loc="left", pad=10,
+    )
+    x = range(len(rates))
+    ax1.bar(x, rates, color=GREEN, alpha=0.85, width=0.7)
+
+    ax2.set_title(
+        f"Подключения — {conns[-1]}",
+        color=TEXT, fontsize=12, fontweight="bold", loc="left", pad=10,
+    )
+    x2 = range(len(conns))
+    ax2.fill_between(x2, conns, color=BLUE, alpha=0.2)
+    ax2.plot(x2, conns, color=BLUE, linewidth=1.5)
+
+    for ax, n in [(ax1, len(rates)), (ax2, len(conns))]:
+        if n <= 1:
+            continue
+        step = max(1, n // 5)
+        ticks = list(range(0, n, step))
+        if ticks[-1] != n - 1:
+            ticks.append(n - 1)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(
+            [timestamps[i].strftime("%H:%M") for i in ticks],
+            color=SUBTEXT,
+        )
+
+    fig.tight_layout(pad=1.5)
+
+    buf = io.BytesIO()
+    fig.savefig(
+        buf, format="png", dpi=150, bbox_inches="tight",
+        facecolor=fig.get_facecolor(), edgecolor="none",
+    )
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+async def _fetch_heartbeat_db_data() -> dict:
+    """Single DB connection with retry to collect all heartbeat data."""
+    data: dict = {"ok": False, "error": ""}
+    if not DATABASE_URL:
+        return data
+
+    last_err: Exception | None = None
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+            try:
+                rows = await conn.fetch(
+                    "SELECT state, count(*)::int AS n FROM pg_stat_activity "
+                    "WHERE datname = current_database() GROUP BY state"
+                )
+                data["conn_max"] = int(await conn.fetchval("SHOW max_connections") or 0)
+                data["conn_total"] = sum(r["n"] for r in rows)
+                data["conn_active"] = sum(r["n"] for r in rows if r["state"] == "active")
+                data["conn_idle"] = sum(r["n"] for r in rows if r["state"] == "idle")
+                data["conn_idle_txn"] = sum(
+                    r["n"] for r in rows
+                    if r["state"] and "idle in transaction" in r["state"]
+                )
+
+                data["disk_db"] = await conn.fetchval(
+                    "SELECT pg_database_size(current_database())"
+                ) or 0
+                try:
+                    data["disk_wal"] = await conn.fetchval(
+                        "SELECT coalesce(sum(size), 0)::bigint FROM pg_ls_waldir()"
+                    ) or 0
+                except Exception:
+                    data["disk_wal"] = 0
+
+                cur = await conn.fetchval(
+                    "SELECT count(*)::int FROM pg_stat_activity "
+                    "WHERE datname = current_database()"
+                )
+                txn = await conn.fetchval(
+                    "SELECT (xact_commit + xact_rollback)::bigint "
+                    "FROM pg_stat_database WHERE datname = current_database()"
+                )
+                _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
+
+                stats_table: str | None = None
+                for candidate in ("pg_stat_statements", "extensions.pg_stat_statements"):
+                    try:
+                        await conn.fetchval(f"SELECT 1 FROM {candidate} LIMIT 1")
+                        stats_table = candidate
+                        break
+                    except Exception:
+                        continue
+
+                if stats_table:
+                    data["slow_queries"] = await conn.fetch(
+                        f"SELECT query AS q, "
+                        f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
+                        f"calls::bigint AS calls "
+                        f"FROM {stats_table} "
+                        f"WHERE queryid IS NOT NULL "
+                        f"ORDER BY max_exec_time DESC LIMIT 5"
+                    )
+                    data["popular_queries"] = await conn.fetch(
+                        f"SELECT query AS q, "
+                        f"calls::bigint AS calls, "
+                        f"round(mean_exec_time::numeric, 2) AS avg_ms "
+                        f"FROM {stats_table} "
+                        f"WHERE queryid IS NOT NULL "
+                        f"ORDER BY calls DESC LIMIT 5"
+                    )
+
+                data["db_users"] = await conn.fetch(
+                    "SELECT usename, count(*)::int AS n "
+                    "FROM pg_stat_activity WHERE datname = current_database() "
+                    "GROUP BY usename ORDER BY n DESC LIMIT 5"
+                )
+
+                data["active_jobs"] = await _fetch_active_jobs(conn)
+
+                data["ok"] = True
+                return data
+            finally:
+                await conn.close()
+        except Exception as e:
+            last_err = e
+            print(
+                f"[health] heartbeat DB attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: "
+                f"{type(e).__name__}: {e}"
+            )
+            if attempt < HEALTH_RETRY_ATTEMPTS:
+                await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    data["error"] = _normalize_network_error(last_err) if last_err else "unknown"
+    return data
+
+
+def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> str:
+    """Format heartbeat caption from pre-fetched data (pure formatting, no DB)."""
+    parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
+
+    if not data.get("ok"):
+        err = data.get("error", "")
+        if err:
+            parts.append(f"⚠️ <b>БД недоступна</b>: {err}")
+        return "\n".join(parts)
+
+    total = data["conn_total"]
+    max_c = data["conn_max"]
+    line = f"🔌 <b>Подключения</b>: {total}"
+    if max_c:
+        line += f" / {max_c}"
+    bits = []
+    if data["conn_active"]:
+        bits.append(f"active {data['conn_active']}")
+    if data["conn_idle"]:
+        bits.append(f"idle {data['conn_idle']}")
+    if data["conn_idle_txn"]:
+        bits.append(f"idle_txn {data['conn_idle_txn']}")
+    if bits:
+        line += f"  ({', '.join(bits)})"
+    parts.append(line)
+
+    db_bytes = data["disk_db"]
+    wal_bytes = data["disk_wal"]
+    total_used = db_bytes + wal_bytes
+    disk_limit = DISK_TOTAL_GB * (1024 ** 3)
+    pct = total_used / disk_limit * 100 if disk_limit else 0
+    filled = min(20, int(pct / 100 * 20))
+    bar = "█" * filled + "░" * (20 - filled)
+
+    parts.append(
+        f"💾 <b>Диск</b>: {_fmt_bytes(total_used)} / "
+        f"{DISK_TOTAL_GB:g} GB ({pct:.0f}%)"
+    )
+    parts.append(f"<code>  {bar}</code>")
+    detail = [f"БД {_fmt_bytes(db_bytes)}"]
+    if wal_bytes:
+        detail.append(f"WAL {_fmt_bytes(wal_bytes)}")
+    parts.append("  " + " · ".join(detail))
+
+    if include_sparklines and len(_METRICS) >= 2:
+        pts = list(_METRICS)
+        rates: list[int] = []
+        conns: list[int] = []
+        for i in range(1, len(pts)):
+            delta = pts[i][2] - pts[i - 1][2]
+            rates.append(max(0, delta))
+            conns.append(pts[i][1])
+
+        span_min = int((pts[-1][0] - pts[0][0]) / 60)
+        total_txn = sum(rates)
+        fmt_txn = f"{total_txn:,}".replace(",", " ")
+
+        parts.append("")
+        parts.append(f"📊 <b>Транзакции</b> ({span_min} мин): {fmt_txn}")
+        spark_r = _spark(rates)
+        if spark_r:
+            parts.append(f"<code>{spark_r}</code>")
+
+        if conns:
+            mn_c, mx_c = min(conns), max(conns)
+            parts.append(
+                f"📈 <b>Подключения</b> ({span_min} мин): {mn_c}–{mx_c}"
+            )
+            spark_c = _spark(conns)
+            if spark_c:
+                parts.append(f"<code>{spark_c}</code>")
+
+    return "\n".join(parts)
+
+
+_JOB_TABLES: list[tuple[str, str, list[str]]] = [
+    ("ai_caller_jobs",          "AI Звонилка",       ["pending", "running"]),
+    ("ai_campaigns",            "AI Кампании",       ["running"]),
+    ("parser_jobs",             "HH Парсер",         ["pending", "running"]),
+    ("search_parser_jobs",      "Поисковый парсер",  ["pending", "running"]),
+    ("tg_outreach_jobs",        "TG Аутрич",         ["pending", "running"]),
+    ("tg_outreach_campaigns",   "TG Кампании",       ["running"]),
+    ("email_validation_jobs",   "Email валидация",   ["pending", "running"]),
+    ("website_enrichment_jobs", "Обогащение",        ["pending", "running"]),
+    ("brief_scoring_jobs",      "Скоринг брифов",    ["pending", "running"]),
+    ("yandex_maps_jobs",        "Яндекс Карты",      ["pending", "running"]),
+    ("lead_import_jobs",        "Импорт лидов",      ["pending", "running"]),
+    ("sales_copilot_jobs",      "Sales Copilot",     ["pending", "running"]),
+    ("tg_scan_jobs",            "TG Сканер",         ["pending", "running"]),
+    ("lpr_jobs",                "LPR Discovery",     ["pending", "running"]),
+    ("dfyb_jobs",               "DFYB",              ["planning", "parsing", "processing"]),
+]
+
+
+async def _fetch_active_jobs(conn) -> list[dict]:
+    """Query all job tables for active task counts (safe — skips missing tables)."""
+    results: list[dict] = []
+    for table, label, statuses in _JOB_TABLES:
+        try:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(statuses)))
+            rows = await conn.fetch(
+                f"SELECT status, count(*)::int AS n "
+                f"FROM public.{table} "
+                f"WHERE status IN ({placeholders}) "
+                f"GROUP BY status",
+                *statuses,
+            )
+            if rows:
+                total = sum(r["n"] for r in rows)
+                breakdown = {r["status"]: r["n"] for r in rows}
+                results.append({"label": label, "total": total, "breakdown": breakdown})
+        except Exception:
+            pass
+    return results
+
+
+def _format_active_jobs(data: dict) -> str | None:
+    """Format active worker jobs from pre-fetched data."""
+    jobs = data.get("active_jobs")
+    if not jobs:
+        return None
+
+    active = [j for j in jobs if j["total"] > 0]
+    if not active:
+        return None
+
+    total_all = sum(j["total"] for j in active)
+    lines = [f"⚙️ <b>Активные задачи</b> ({total_all}):"]
+    for j in sorted(active, key=lambda x: x["total"], reverse=True):
+        parts = []
+        for status, count in sorted(j["breakdown"].items(), key=lambda x: -x[1]):
+            parts.append(f"{count} {status}")
+        detail = ", ".join(parts)
+        lines.append(f"  • {j['label']}: {detail}")
+
+    return "\n".join(lines)
+
+
+def _format_performance_stats(data: dict) -> str | None:
+    """Format performance stats from pre-fetched data (pure formatting, no DB)."""
+    if not data.get("ok"):
+        return None
+
+    sections: list[str] = []
+
+    slow = data.get("slow_queries")
+    if slow:
+        lines = ["🐌 <b>Долгие запросы</b> (max время):"]
+        for i, r in enumerate(slow, 1):
+            q = _sanitize_query(r["q"])
+            calls_fmt = f"{r['calls']:,}".replace(",", " ")
+            lines.append(f"  {i}. <code>{q}</code>")
+            lines.append(f"     max {r['max_s']}s · {calls_fmt} вызовов")
+        sections.append("\n".join(lines))
+
+    popular = data.get("popular_queries")
+    if popular:
+        lines = ["🔥 <b>Популярные запросы</b> (вызовы):"]
+        for i, r in enumerate(popular, 1):
+            q = _sanitize_query(r["q"])
+            calls_fmt = f"{r['calls']:,}".replace(",", " ")
+            lines.append(f"  {i}. <code>{q}</code>")
+            lines.append(f"     {calls_fmt} вызовов · avg {r['avg_ms']}ms")
+        sections.append("\n".join(lines))
+
+    users = data.get("db_users")
+    if users:
+        lines = ["👥 <b>Пользователи БД</b> (подключения):"]
+        for r in users:
+            lines.append(f"  • {r['usename']}: {r['n']}")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections) if sections else None
+
+
+async def _ping_site(count: int = 5) -> str:
+    """Ping the portal URL several times and return formatted latency results."""
+    results: list[tuple[int, float]] = []
+    try:
+        async with httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT, follow_redirects=False,
+        ) as client:
+            for _ in range(count):
+                try:
+                    r = await client.get(PORTAL_URL)
+                    ms = r.elapsed.total_seconds() * 1000
+                    results.append((r.status_code, ms))
+                except Exception:
+                    results.append((0, 0.0))
+    except Exception:
+        return f"🌐 <b>Пинг</b> {PORTAL_URL}: ошибка"
+
+    ok_count = sum(1 for code, _ in results if 200 <= code < 400)
+    times = [ms for _, ms in results if ms > 0]
+    avg_ms = sum(times) / len(times) if times else 0
+
+    pings = "  ".join(
+        f"{code}·{ms:.0f}ms" if code else "✖"
+        for code, ms in results
+    )
+    return (
+        f"🌐 <b>Пинг</b> ({ok_count}/{count}, avg {avg_ms:.0f}ms):\n"
+        f"<code>  {pings}</code>"
+    )
+
+
+async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
+    """Ping one proxy `count` times, return (ok_count, latencies_ms)."""
+    ok = 0
+    latencies: list[float] = []
+    try:
+        async with httpx.AsyncClient(proxy=url, timeout=HTTP_TIMEOUT) as client:
+            for _ in range(count):
+                try:
+                    r = await client.get("https://httpbin.org/ip")
+                    if r.status_code == 200:
+                        ok += 1
+                        latencies.append(r.elapsed.total_seconds() * 1000)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return ok, latencies
+
+
+async def _ping_proxies(count: int = 3) -> str:
+    """Ping every proxy `count` times concurrently, return formatted summary."""
+    if not ALL_PROXIES:
+        return "🔗 <b>Прокси</b>: не настроены"
+
+    tasks = [_ping_one_proxy(url, count) for _, url in ALL_PROXIES]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    rows: list[tuple[str, str, bool, int, int, float]] = []
+    for (group, url), outcome in zip(ALL_PROXIES, outcomes):
+        if isinstance(outcome, Exception):
+            rows.append((group, _redact(url), False, 0, count, 0.0))
+        else:
+            ok_cnt, lats = outcome
+            avg = sum(lats) / len(lats) if lats else 0.0
+            rows.append((group, _redact(url), ok_cnt > 0, ok_cnt, count, avg))
+
+    alive = sum(1 for _, _, ok, *_ in rows if ok)
+    total = len(rows)
+
+    lines = [f"🔗 <b>Прокси</b>: {alive}/{total} работают"]
+    for group, addr, ok_flag, ok_cnt, cnt, avg in rows:
+        icon = "✅" if ok_flag else "❌"
+        if ok_flag and avg > 0:
+            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}, avg {avg:.0f}ms")
+        elif ok_flag:
+            lines.append(f"  {icon} [{group}] {addr} — {ok_cnt}/{cnt}")
+        else:
+            lines.append(f"  {icon} [{group}] {addr} — не отвечает")
+
+    return "\n".join(lines)
+
+
+def _sanitize_query(q: str | None, limit: int = 300) -> str:
+    """Clean and HTML-escape a SQL snippet for Telegram."""
+    text = " ".join((q or "").split())
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
 
 async def send_heartbeat():
-    """Periodic heartbeat that confirms bot is alive."""
+    """Periodic heartbeat: chart + caption + performance stats."""
     global HEARTBEAT_STARTED
     if not HEARTBEAT_STARTED:
         HEARTBEAT_STARTED = True
         await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
         return
-    await send_telegram(f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})")
+
+    db_data = await _fetch_heartbeat_db_data()
+    ping_text = await _ping_site()
+
+    chart = _render_heartbeat_chart()
+    if chart:
+        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
+        caption += f"\n\n{ping_text}"
+        ok = await send_telegram_photo(chart, caption=caption)
+        if not ok:
+            text = _format_heartbeat_caption(db_data, include_sparklines=True)
+            text += f"\n\n{ping_text}"
+            await send_telegram(text)
+    else:
+        text = _format_heartbeat_caption(db_data, include_sparklines=True)
+        text += f"\n\n{ping_text}"
+        await send_telegram(text)
+
+    extra_parts: list[str] = []
+    jobs_text = _format_active_jobs(db_data)
+    if jobs_text:
+        extra_parts.append(jobs_text)
+    perf = _format_performance_stats(db_data)
+    if perf:
+        extra_parts.append(perf)
+    proxy_text = await _ping_proxies()
+    extra_parts.append(proxy_text)
+    if extra_parts:
+        await send_telegram("\n\n".join(extra_parts))
 
 
 async def run_deadman_check():
@@ -550,134 +1121,6 @@ async def run_deadman_check():
             force=True,
         )
         print(f"[health] DEADMAN alert sent: lag={int(lag)}s")
-
-
-# ── Daily report (21:00 MSK) ────────────────────────────────────────────────
-
-JOB_TABLES = [
-    ("parser_jobs", "HH парсер"),
-    ("search_parser_jobs", "Search парсер"),
-    ("website_enrichment_jobs", "Website enrichment"),
-    ("yandex_maps_jobs", "Яндекс.Карты"),
-    ("brief_scoring_jobs", "Brief scoring"),
-    ("email_validation_jobs", "Email validation"),
-    ("tg_outreach_campaigns", "TG Outreach"),
-]
-
-
-async def _fetch_daily_jobs(conn: asyncpg.Connection) -> str:
-    """Build daily jobs summary text."""
-    lines: list[str] = []
-    total_ok = 0
-    total_fail = 0
-
-    for table, label in JOB_TABLES:
-        try:
-            if table == "tg_outreach_campaigns":
-                completed = await conn.fetchval(
-                    f"SELECT count(*)::int FROM {table} WHERE status = 'stopped' AND updated_at >= CURRENT_DATE"
-                ) or 0
-                failed = await conn.fetchval(
-                    f"SELECT count(*)::int FROM {table} WHERE status = 'error' AND updated_at >= CURRENT_DATE"
-                ) or 0
-            else:
-                completed = await conn.fetchval(
-                    f"SELECT count(*)::int FROM {table} WHERE status = 'completed' AND completed_at >= CURRENT_DATE"
-                ) or 0
-                failed = await conn.fetchval(
-                    f"SELECT count(*)::int FROM {table} WHERE status = 'failed' AND completed_at >= CURRENT_DATE"
-                ) or 0
-
-            total_ok += completed
-            total_fail += failed
-
-            if completed + failed == 0:
-                continue
-
-            status_text = f"✅ {completed}"
-            if failed > 0:
-                status_text += f"  ❌ {failed}"
-            lines.append(f"  • {label}: {status_text}")
-
-            if failed > 0:
-                try:
-                    errors = await conn.fetch(
-                        f"SELECT error_message FROM {table} WHERE status = 'failed' AND completed_at >= CURRENT_DATE AND error_message IS NOT NULL LIMIT 3"
-                    )
-                    for err_row in errors:
-                        msg = (err_row["error_message"] or "")[:100]
-                        if msg:
-                            lines.append(f"      ↳ {msg}")
-                except Exception:
-                    pass
-        except Exception:
-            lines.append(f"  • {label}: ⚠️ не удалось получить данные")
-
-    header = f"<b>Задачи за сегодня</b>: ✅ {total_ok}  ❌ {total_fail}"
-    if lines:
-        return header + "\n" + "\n".join(lines)
-    return header + "\n  Нет задач за сегодня"
-
-
-async def run_daily_report():
-    """21:00 MSK daily report."""
-    sections: list[str] = []
-
-    # ── 1. Jobs ──
-    if DATABASE_URL:
-        try:
-            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
-            try:
-                jobs_text = await _fetch_daily_jobs(conn)
-                sections.append(jobs_text)
-
-                # ── 2. DB connections ──
-                cur = await conn.fetchval(
-                    "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()"
-                )
-                max_raw = await conn.fetchval("SHOW max_connections")
-                max_c = int(max_raw) if max_raw else "?"
-                sections.append(f"<b>БД</b>: ✅ OK ({cur} / {max_c} подключений)")
-            finally:
-                await conn.close()
-        except Exception as e:
-            sections.append(f"<b>БД</b>: ❌ {str(e)[:120]}")
-    else:
-        sections.append("<b>БД</b>: ❌ DATABASE_URL не задан")
-
-    # ── 2. Site & server ──
-    site_ok, site_msg = await check_site()
-    if site_ok:
-        sections.append(f"<b>Сайт</b> {PORTAL_URL}: ✅ {site_msg}")
-    else:
-        sections.append(f"<b>Сайт</b> {PORTAL_URL}: ❌ {site_msg}")
-
-    srv_ok, srv_msg = await check_server()
-    if srv_ok:
-        sections.append(f"<b>Сервер {SERVER_IP}</b>: ✅ {srv_msg}")
-    else:
-        sections.append(f"<b>Сервер {SERVER_IP}</b>: ❌ {srv_msg}")
-
-    # ── 3. Proxies ──
-    proxy_results = await check_all_proxies()
-    alive = sum(1 for *_, ok, _ in proxy_results if ok)
-    total = len(proxy_results)
-
-    if total == 0:
-        sections.append("<b>Прокси</b>: не настроены")
-    else:
-        proxy_lines = [f"<b>Прокси</b>: {alive}/{total} работают"]
-        for group, addr, ok, msg in proxy_results:
-            icon = "✅" if ok else "❌"
-            proxy_lines.append(f"  {icon} [{group}] {addr}" + (f" — {msg}" if not ok else ""))
-        sections.append("\n".join(proxy_lines))
-
-    # ── Build message ──
-    header = f"📊 <b>Дневной отчёт</b>  —  {_now_msk()}\n"
-    text = header + "\n" + "\n\n".join(sections)
-
-    await send_telegram(text)
-    print(f"[health] Daily report sent at {_now_msk()}")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -708,13 +1151,6 @@ async def main():
         id="heartbeat",
     )
 
-    # Daily report at 21:00 MSK (18:00 UTC)
-    scheduler.add_job(
-        run_daily_report,
-        CronTrigger(hour=18, minute=0, timezone="UTC"),
-        id="daily",
-    )
-
     # Run first health check now
     await run_health_check()
     await send_heartbeat()
@@ -727,7 +1163,8 @@ async def main():
     proxy_count = len(ALL_PROXIES)
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
-        f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, daily at 21:00 MSK. "
+        f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, "
+        f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s. "
         "Commands in chat: /mute /вкл /alerts"
     )
 

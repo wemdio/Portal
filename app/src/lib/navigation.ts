@@ -9,7 +9,13 @@ export type NavItem = {
   badgeId?: string;
 };
 
+/** Paths that belong to a nav section but use a different URL prefix (sync with TopNav / Sidebar). */
+export const NAV_PATH_ALIASES: Record<string, string[]> = {
+  '/tools': ['/parsers'],
+};
+
 export const navItems: NavItem[] = [
+  { name: 'Гайд', href: '/guide' },
   { name: 'Проекты', href: '/' },
   { name: 'Аналитика проектов', href: '/analytics/projects' },
   { name: 'Задачи', href: '/tasks' },

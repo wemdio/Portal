@@ -22,6 +22,11 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: '600mb',
     },
+    optimizePackageImports: [
+      'lucide-react',
+      '@phosphor-icons/react',
+      'date-fns',
+    ],
   },
   outputFileTracingIncludes: {
     '/api/brief-scoring/parse-pdf': [
@@ -29,7 +34,7 @@ const nextConfig: NextConfig = {
       './node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs',
     ],
   },
-  serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode'],
+  serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode', 'sqlite3'],
   env: {
     NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,

@@ -62,7 +62,9 @@ export async function generateSearchQueries(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      throw new Error(`AI API error: ${response.status}`);
+      const body = await response.text().catch(() => '');
+      console.error(`AI API ${response.status}: ${body}`);
+      throw new Error(`AI API error: ${response.status} — ${body.slice(0, 200)}`);
     }
 
     const data = await response.json();

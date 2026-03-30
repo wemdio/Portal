@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { normalizeUrl } from '@/lib/enrich/websiteParser';
+import { startToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
@@ -108,12 +109,27 @@ export async function POST(req: NextRequest) {
     return jsonError('Too many sites in one request (max 200)', 400);
   }
 
-  const results: SiteCheckResult[] = await Promise.all(
-    sites.map(async (site) => ({
-      idx: site.idx,
-      ...(await checkSingleSite(String(site.url ?? '').trim())),
-    })),
-  );
+  const trace = await startToolTrace({
+    request: req,
+    operation: 'database.site_availability',
+    userId: user.id,
+    input: { count: sites.length },
+    message: `Проверка доступности ${sites.length} сайтов`,
+  });
 
-  return NextResponse.json({ results });
+  try {
+    const results: SiteCheckResult[] = await Promise.all(
+      sites.map(async (site) => ({
+        idx: site.idx,
+        ...(await checkSingleSite(String(site.url ?? '').trim())),
+      })),
+    );
+
+    const online = results.filter((r) => r.status.startsWith('Онлайн')).length;
+    await trace.end({ count: results.length, online, offline: results.length - online });
+    return NextResponse.json({ results });
+  } catch (err) {
+    await trace.fail(err);
+    throw err;
+  }
 }

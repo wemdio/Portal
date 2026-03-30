@@ -12,6 +12,8 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { validateEmail, type ValidationResult, type DomainInfo } from './validator';
+import { startTrace } from '@/lib/tracer';
+import type { Span } from '@/lib/tracer';
 
 function workerLog(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[email-validation][${level.toUpperCase()}] ${msg}`;
@@ -234,6 +236,7 @@ export async function runEmailValidationJob(jobId: string) {
   }
 
   const db = supabaseAdmin;
+  let trace: Span | null = null;
 
   try {
     workerLog('info', `Starting job ${jobId}`);
@@ -251,6 +254,14 @@ export async function runEmailValidationJob(jobId: string) {
     }
 
     if (['failed', 'cancelled'].includes(job.status)) return;
+
+    trace = await startTrace({
+      name: 'database.email_validation',
+      input: { jobId, total: job.total },
+      message: `Валидация почт (${job.total} адресов)`,
+      userId: job.user_id,
+      jobId,
+    });
 
     let processed = job.processed ?? 0;
     let success = job.success_count ?? 0;
@@ -439,12 +450,14 @@ export async function runEmailValidationJob(jobId: string) {
     await logInfo('email.validation.worker.completed', 'Email validation job completed', {
       jobId, processed: completedCount + failedCount, success: completedCount, errors: failedCount,
     });
+    await trace?.end({ processed: completedCount + failedCount, success: completedCount, errors: failedCount, status: finalStatus });
 
     await cleanupQueue(jobId);
 
   } catch (err) {
     workerLog('error', `Job ${jobId} CRASHED`, err);
     await logError('email.validation.worker.failed', err, { jobId });
+    await trace?.fail(err);
     await db
       .from('email_validation_jobs')
       .update({

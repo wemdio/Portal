@@ -57,14 +57,21 @@ async function request<T>(
   }
 
   const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
-  const init: RequestInit = { method: options.method ?? 'GET', headers };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 90_000);
+  const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(options.body);
   }
 
-  const res = await fetch(url.toString(), init);
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), init);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -125,6 +132,10 @@ export async function activateCampaign(id: string) {
 
 export async function pauseCampaign(id: string) {
   return request<Campaign>(`/campaigns/${id}/pause`, { method: 'POST' });
+}
+
+export async function deleteCampaign(id: string): Promise<Campaign | undefined> {
+  return request<Campaign | undefined>(`/campaigns/${id}`, { method: 'DELETE' });
 }
 
 export async function duplicateCampaign(id: string) {

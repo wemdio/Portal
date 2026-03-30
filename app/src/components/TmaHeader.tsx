@@ -1,65 +1,38 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
-import { getCurrentUserRole, isAdmin } from '@/lib/roles';
-import type { UserRole } from '@/types';
-import { supabase } from '@/lib/supabaseClient';
-import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { isAdmin } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 
 export function TmaHeader() {
   const pathname = usePathname();
   const router = useRouter();
-  const [role, setRole] = useState<UserRole | null>(null);
-  const [userName, setUserName] = useState<string | null>(null);
-  const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
-  const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
+  const {
+    userRole,
+    userEmail,
+    userFullName,
+    userAvatarUrl,
+    handleAvatarError,
+    handleSignOut,
+  } = useUser();
 
-  const handleSignOut = () => {
+  const userName = userFullName || userEmail?.split('@')[0] || null;
+
+  const onSignOut = () => {
     void (async () => {
-      await supabase.auth.signOut();
+      await handleSignOut();
       router.push('/login' as Route);
       router.refresh();
     })();
   };
 
-  useEffect(() => {
-    let mounted = true;
-    void (async () => {
-      const nextRole = await getCurrentUserRole();
-      if (mounted) setRole(nextRole);
-
-      const { data: { session } } = await supabase.auth.getSession();
-      const user = session?.user ?? null;
-      if (!mounted) return;
-      if (!user) {
-        setUserName(null);
-        setUserAvatarUrl(null);
-        return;
-      }
-
-      const fallbackName = (user.email ?? '').split('@')[0] || 'User';
-      const { data } = await supabase
-        .from('profiles')
-        .select('full_name, avatar_url')
-        .eq('id', user.id)
-        .single();
-
-      if (!mounted) return;
-      setUserName((typeof data?.full_name === 'string' && data.full_name.trim()) ? data.full_name : fallbackName);
-      setUserAvatarUrl(normalizePublicAvatarUrl(typeof data?.avatar_url === 'string' ? data.avatar_url : null));
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
   const items = useMemo(() => {
-    return navItems.filter((item) => !item.adminOnly || isAdmin(role));
-  }, [role]);
+    return navItems.filter((item) => !item.adminOnly || isAdmin(userRole));
+  }, [userRole]);
 
   const activeItem = useMemo(() => {
     const exact = items.find((item) => item.href === pathname);
@@ -94,35 +67,7 @@ export function TmaHeader() {
               src={userAvatarUrl}
               alt=""
               className="h-6 w-6 rounded-full object-cover ring-1 ring-black/5"
-              onError={() => {
-                if (avatarTriedSigned) {
-                  setUserAvatarUrl(null);
-                  return;
-                }
-                setAvatarTriedSigned(true);
-                void (async () => {
-                  const { data: { session } } = await supabase.auth.getSession();
-                  const token = session?.access_token;
-                  if (!token) {
-                    setUserAvatarUrl(null);
-                    return;
-                  }
-                  const res = await fetch('/api/profile/avatar/signed', {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${token}` },
-                  });
-                  if (!res.ok) {
-                    setUserAvatarUrl(null);
-                    return;
-                  }
-                  const data = (await res.json()) as { readUrl?: unknown };
-                  if (typeof data.readUrl === 'string' && data.readUrl.trim()) {
-                    setUserAvatarUrl(data.readUrl.trim());
-                  } else {
-                    setUserAvatarUrl(null);
-                  }
-                })();
-              }}
+              onError={handleAvatarError}
             />
           ) : (
             <span
@@ -138,6 +83,7 @@ export function TmaHeader() {
       <div className="px-4 pb-3">
         <div className="flex items-center gap-2 overflow-x-auto">
           {items.map((item) => {
+            const isGuide = item.href === '/guide';
             const isActive = item.href === '/'
               ? pathname === '/'
               : pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -146,7 +92,9 @@ export function TmaHeader() {
                 key={item.name}
                 href={item.href as Route}
                 className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition ${
-                  isActive ? 'tma-chip-active' : 'tma-chip'
+                  isGuide
+                    ? (isActive ? 'text-orange-400' : 'text-orange-300')
+                    : (isActive ? 'tma-chip-active' : 'tma-chip')
                 }`}
               >
                 {item.name}
@@ -155,7 +103,7 @@ export function TmaHeader() {
           })}
           <button
             type="button"
-            onClick={handleSignOut}
+            onClick={onSignOut}
             className="whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition tma-chip-danger"
           >
             Выйти

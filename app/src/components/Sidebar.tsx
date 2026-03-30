@@ -4,25 +4,16 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { supabase } from '@/lib/supabaseClient';
-import type { Session } from '@supabase/supabase-js';
-import { UserRole } from '@/types';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
-import { navItems } from '@/lib/navigation';
-import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
+import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
+import { useUser } from '@/lib/UserProvider';
 
 type SidebarProps = {
   collapsed?: boolean;
   isTma?: boolean;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
-  /** На мобильных (ниже md) рендерить только выезжающую панель, не фиксированный сайдбар */
   mobileOnlyDrawer?: boolean;
-};
-
-const navActiveAliases: Record<string, string[]> = {
-  '/tools': ['/parsers'],
 };
 
 type TmaTheme = 'dark' | 'light';
@@ -35,117 +26,24 @@ function normalizeTmaTheme(value: string | null | undefined): TmaTheme {
 export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, onMobileClose, mobileOnlyDrawer = false }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const [userRole, setUserRole] = useState<UserRole | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [userFullName, setUserFullName] = useState<string | null>(null);
-  const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
-  const [avatarTriedSigned, setAvatarTriedSigned] = useState(false);
-  const [navTabVisibility, setNavTabVisibility] = useState<Record<string, boolean>>({});
+  const {
+    userRole,
+    userEmail,
+    userFullName,
+    userAvatarUrl,
+    navTabVisibility,
+    visibleTools,
+    badges,
+    handleAvatarError,
+    handleSignOut,
+  } = useUser();
   const [hovered, setHovered] = useState(false);
-  const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
-  const [badges, setBadges] = useState<Record<string, number>>({});
   const [tmaTheme, setTmaTheme] = useState<TmaTheme>(() => {
     if (typeof window === 'undefined') return 'dark';
     const root = document.documentElement;
     const storedTheme = window.localStorage.getItem(TMA_THEME_STORAGE_KEY);
     return normalizeTmaTheme(storedTheme ?? root.dataset.tmaTheme);
   });
-
-  async function fetchUserRole(userId: string) {
-    const { data } = await supabase
-      .from('profiles')
-      .select('role, full_name, avatar_url')
-      .eq('id', userId)
-      .single();
-
-    return {
-      role: (data?.role as UserRole | null) ?? null,
-      full_name: typeof data?.full_name === 'string' ? data.full_name : null,
-      avatar_url: typeof data?.avatar_url === 'string' ? data.avatar_url : null,
-    };
-  }
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const applySession = async (session: Session | null) => {
-      if (!isMounted) return;
-
-      if (!session) {
-        setUserEmail(null);
-        setUserRole(null);
-        setUserFullName(null);
-        setUserAvatarUrl(null);
-        setNavTabVisibility({});
-        return;
-      }
-
-      setUserEmail(session.user.email ?? null);
-      const [profile, navRows] = await Promise.all([
-        fetchUserRole(session.user.id),
-        supabase
-          .from('user_tool_visibility')
-          .select('tool_id, enabled')
-          .eq('user_id', session.user.id)
-          .in('tool_id', ALL_NAV_TAB_IDS as unknown as string[])
-          .then(({ data }) => data),
-      ]);
-      if (!isMounted) return;
-      setUserRole(profile.role);
-      setUserFullName(profile.full_name);
-      setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
-
-      const vis: Record<string, boolean> = {};
-      for (const id of ALL_NAV_TAB_IDS) {
-        const row = navRows?.find((r) => r.tool_id === id);
-        vis[id] = row?.enabled ?? false;
-      }
-      setNavTabVisibility(vis);
-    };
-
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      await applySession(session);
-    })();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      void applySession(session);
-    });
-
-    return () => {
-      isMounted = false;
-      subscription?.unsubscribe();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!userEmail) return;
-    let cancelled = false;
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token || cancelled) return;
-      const headers = { Authorization: `Bearer ${token}` };
-
-      const [toolsRes, submittedRes, reworkRes] = await Promise.all([
-        fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ toolIds: [] })),
-        fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
-        fetch('/api/database-review/requests', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
-      ]);
-      if (cancelled) return;
-      const tools = (toolsRes.toolIds ?? []) as string[];
-      setVisibleTools(tools);
-      const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
-      const reworkCount = ((reworkRes.requests ?? []) as Array<{ status: string }>).filter(
-        (r) => reworkStatuses.has(r.status),
-      ).length;
-      setBadges({
-        'review-count': tools.includes('database-review') ? (submittedRes.requests ?? []).length : 0,
-        'rework-count': reworkCount,
-      });
-    })();
-    return () => { cancelled = true; };
-  }, [userEmail]);
 
   useEffect(() => {
     if (!isTma || typeof window === 'undefined') return;
@@ -159,8 +57,8 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     setTmaTheme(nextTheme);
   }
 
-  async function handleSignOut() {
-    await supabase.auth.signOut();
+  async function onSignOut() {
+    await handleSignOut();
     router.push('/login' as Route);
     router.refresh();
   }
@@ -196,7 +94,8 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           if (item.navTabId && navTabVisibility[item.navTabId] === false) return null;
           if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
 
-          const aliases = navActiveAliases[item.href] ?? [];
+          const isGuide = item.href === '/guide';
+          const aliases = NAV_PATH_ALIASES[item.href] ?? [];
           const isActive = item.href === '/'
             ? pathname === '/'
             : pathname === item.href ||
@@ -210,9 +109,11 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               prefetch={false}
               onClick={() => onMobileClose?.()}
               className={`flex items-center rounded-lg px-2.5 py-1.5 text-[11px] truncate transition-all duration-200
-                ${isActive
-                  ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
-                  : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900')
+                ${isGuide
+                  ? (isActive ? 'text-orange-600 font-medium' : 'text-orange-500 hover:text-orange-600')
+                  : (isActive
+                    ? (isTma ? 'tma-chip-active font-medium' : 'bg-gray-100 text-gray-900 font-medium')
+                    : (isTma ? 'tma-nav-item' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'))
                 }
               `}
             >
@@ -247,35 +148,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               src={userAvatarUrl}
               alt=""
               className="h-7 w-7 rounded-full object-cover ring-1 ring-black/5"
-              onError={() => {
-                if (avatarTriedSigned) {
-                  setUserAvatarUrl(null);
-                  return;
-                }
-                setAvatarTriedSigned(true);
-                void (async () => {
-                  const { data: { session } } = await supabase.auth.getSession();
-                  const token = session?.access_token;
-                  if (!token) {
-                    setUserAvatarUrl(null);
-                    return;
-                  }
-                  const res = await fetch('/api/profile/avatar/signed', {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${token}` },
-                  });
-                  if (!res.ok) {
-                    setUserAvatarUrl(null);
-                    return;
-                  }
-                  const data = (await res.json()) as { readUrl?: unknown };
-                  if (typeof data.readUrl === 'string' && data.readUrl.trim()) {
-                    setUserAvatarUrl(data.readUrl.trim());
-                  } else {
-                    setUserAvatarUrl(null);
-                  }
-                })();
-              }}
+              onError={handleAvatarError}
             />
           ) : (
             <div
@@ -330,7 +203,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           </div>
         )}
         <button
-          onClick={handleSignOut}
+          onClick={onSignOut}
           className={`flex w-full items-center rounded-md px-1.5 py-1 text-[11px] transition-colors ${
             isTma
               ? 'tma-danger hover:bg-[color:var(--tma-surface-2)]'

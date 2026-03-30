@@ -7,6 +7,9 @@ import { Sidebar } from './Sidebar';
 import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
+import { UserProvider } from '@/lib/UserProvider';
+import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
+import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
 
 const MD_BREAKPOINT = 768;
 
@@ -64,11 +67,12 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     isRdpPage || isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || pathname === '/';
   const contentWidth = shouldUseFullHeightContent ? 'w-full flex flex-1 min-h-0 flex-col' : 'w-full';
 
+  /** Высота = окно + скролл только в main — иначе тянется вся страница и уезжает TopNav. */
   const shellClassName = isTma
     ? 'flex flex-col min-h-screen overflow-hidden'
     : isSpreadsheetPage
       ? 'flex flex-col h-screen overflow-hidden'
-      : 'flex flex-col min-h-screen overflow-x-hidden';
+      : 'flex flex-col min-h-0 overflow-hidden';
 
   const isClientPortal = pathname.startsWith('/client');
   const hideNav = isSpreadsheetPage || isGuestReviewPage || isMaintenancePage || isClientPortal;
@@ -78,10 +82,15 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
+    <>
+    <PortalDocumentTitle />
+    <UserProvider>
+    <PortalLoadingProvider>
     <div
       className={shellClassName}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
+        ...(!isTma ? { height: 'var(--app-viewport-height, 100vh)' } : {}),
       }}
     >
       {!isTma ? (
@@ -123,5 +132,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
         </main>
       </div>
     </div>
+    </PortalLoadingProvider>
+    </UserProvider>
+    </>
   );
 }

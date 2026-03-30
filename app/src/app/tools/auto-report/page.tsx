@@ -2,8 +2,8 @@
 
 import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
 import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import ExcelJS from 'exceljs';
+import type * as XLSXTypes from 'xlsx';
+import type ExcelJSTypes from 'exceljs';
 import { supabase } from '@/lib/supabaseClient';
 
 const ROW_HEIGHT = 44;
@@ -16,6 +16,13 @@ interface InstantlyCampaignItem {
   status?: number;
   timestamp_created?: string;
   timestamp_updated?: string;
+}
+
+interface CampaignsListMeta {
+  source: 'database' | 'instantly_fallback';
+  lastSyncedAt: string | null;
+  stale: boolean;
+  backgroundSync: boolean;
 }
 
 function formatCampaignTimestamp(value: string | null | undefined): string | null {
@@ -197,7 +204,7 @@ const thinGrayBorder = {
 };
 
 function setCellStyle(
-  cell: ExcelJS.Cell,
+  cell: ExcelJSTypes.Cell,
   opts: { fill?: string; fontBold?: boolean; fontColor?: string; border?: boolean }
 ) {
   if (opts.fill) {
@@ -861,12 +868,13 @@ function getColumnWidths(rows: (string | number)[][]): { wch: number }[] {
   return widths.map((w) => ({ wch: Math.max(w + 2, 12) }));
 }
 
-function setSheetColumnWidths(ws: XLSX.WorkSheet, rows: (string | number)[][]) {
+function setSheetColumnWidths(ws: XLSXTypes.WorkSheet, rows: (string | number)[][]) {
   const cols = getColumnWidths(rows);
   if (cols.length) ws['!cols'] = cols;
 }
 
-function downloadExcel(tableText: string, summaryRows: (string | number)[][], filename: string) {
+async function downloadExcel(tableText: string, summaryRows: (string | number)[][], filename: string) {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
   const fullReportRows = tableTextToRows(tableText);
   const wsReport = XLSX.utils.aoa_to_sheet(fullReportRows);
@@ -893,6 +901,7 @@ async function downloadExcelFormatted(
   periodText: string,
   filename: string
 ) {
+  const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Отчёт', { views: [{ rightToLeft: false }] });
 
@@ -1107,23 +1116,37 @@ export default function AutoReportPage() {
   }, []);
 
   const [campaignsList, setCampaignsList] = useState<InstantlyCampaignItem[]>([]);
-  const loadCampaigns = useCallback(async () => {
-    setCampaignsLoading(true);
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsFetched, setCampaignsFetched] = useState(false);
+  const [catalogSyncPending, setCatalogSyncPending] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState('');
+  const catalogSyncWaitAttemptsRef = useRef(0);
+
+  const loadCampaigns = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
+    if (!silent) {
+      setCampaignsLoading(true);
+    }
     setError('');
     try {
       const token = await getToken();
       if (!token) {
         setError('Нужна авторизация. Войдите в аккаунт.');
-        setCampaignsLoading(false);
+        if (!silent) setCampaignsLoading(false);
         return;
       }
       const res = await fetch('/api/tools/auto-report/campaigns', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = (await res.json().catch(() => ({}))) as { campaigns?: InstantlyCampaignItem[]; error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        campaigns?: InstantlyCampaignItem[];
+        meta?: CampaignsListMeta;
+        error?: string;
+      };
       if (!res.ok) {
         setError(data.error || `Ошибка ${res.status}`);
-        setCampaignsLoading(false);
+        if (!silent) setCampaignsLoading(false);
         return;
       }
       const sorted = [...(data.campaigns ?? [])].sort((a, b) => {
@@ -1138,20 +1161,45 @@ export default function AutoReportPage() {
       setCampaignsList(sorted);
       setSelectedIds(new Set());
       setCampaignsFetched(true);
+
+      const meta = data.meta;
+      const empty = sorted.length === 0;
+      const bg = meta?.backgroundSync === true;
+
+      if (empty && bg) {
+        catalogSyncWaitAttemptsRef.current += 1;
+        if (catalogSyncWaitAttemptsRef.current >= 48) {
+          setError(
+            'Каталог кампаний не подгрузился за ~3 минуты. Проверьте миграцию БД, INSTANTLY_API_KEY и CRON для /api/tools/auto-report/campaigns/sync, затем обновите страницу.',
+          );
+          setCatalogSyncPending(false);
+        } else {
+          setCatalogSyncPending(true);
+        }
+      } else {
+        catalogSyncWaitAttemptsRef.current = 0;
+        setCatalogSyncPending(false);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки кампаний');
     } finally {
-      setCampaignsLoading(false);
+      if (!silent) {
+        setCampaignsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     loadCampaigns();
   }, [loadCampaigns]);
-  const [campaignsLoading, setCampaignsLoading] = useState(false);
-  const [campaignsFetched, setCampaignsFetched] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    if (!catalogSyncPending || campaignsList.length > 0) return;
+    const id = window.setInterval(() => {
+      void loadCampaigns({ silent: true });
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [catalogSyncPending, campaignsList.length, loadCampaigns]);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
 
@@ -1332,6 +1380,14 @@ export default function AutoReportPage() {
                   Загрузка кампаний…
                 </span>
               ) : null}
+              {catalogSyncPending && !campaignsLoading && campaignsList.length === 0 ? (
+                <span className="inline-flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Синхронизация каталога с Instantly… Первая загрузка может занять до 3 минут (много
+                  кампаний — дольше). Список появится сам; дальше названия в БД обновляются примерно каждые
+                  10–15 мин.
+                </span>
+              ) : null}
               {campaignsList.length > 0 && (
                 <div className="inline-flex items-center gap-2">
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
@@ -1359,11 +1415,12 @@ export default function AutoReportPage() {
               )}
             </div>
 
-            {campaignsFetched && campaignsList.length === 0 && (
+            {campaignsFetched && campaignsList.length === 0 && !catalogSyncPending && !error ? (
               <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                Кампаний не найдено. Убедитесь, что API-ключ Instantly v2 с правом <code className="bg-amber-100 px-1 rounded">campaigns:read</code> и в workspace есть кампании.
+                Кампаний не найдено. Убедитесь, что API-ключ Instantly v2 с правом{' '}
+                <code className="bg-amber-100 px-1 rounded">campaigns:read</code> и в workspace есть кампании.
               </p>
-            )}
+            ) : null}
 
             {campaignsList.length > 0 && (
               <div className="space-y-2">
@@ -1387,9 +1444,7 @@ export default function AutoReportPage() {
                   onScroll={() => setScrollTop(listContainerRef.current?.scrollTop ?? 0)}
                   className="max-h-[28rem] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1.5 w-full min-w-0 shadow-inner"
                 >
-                  {filteredCampaigns.length === 0 && searchQuery ? (
-                    <p className="text-sm text-gray-500 py-6 text-center">По запросу «{searchQuery}» ничего не найдено</p>
-                  ) : filteredCampaigns.length > 0 ? (
+                  {filteredCampaigns.length > 0 ? (
                     <div style={{ height: totalHeight, position: 'relative' }}>
                       <ul
                         className="space-y-0.5 absolute left-0 right-0 px-0 list-none"

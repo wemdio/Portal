@@ -1,13 +1,35 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
 
-export function useNavData() {
+interface UserContextValue {
+  userId: string | null;
+  userRole: UserRole | null;
+  userEmail: string | null;
+  userFullName: string | null;
+  userAvatarUrl: string | null;
+  navTabVisibility: Record<string, boolean>;
+  visibleTools: string[] | null;
+  badges: Record<string, number>;
+  handleAvatarError: () => void;
+  handleSignOut: () => Promise<void>;
+}
+
+const UserContext = createContext<UserContextValue | null>(null);
+
+export function useUser(): UserContextValue {
+  const ctx = useContext(UserContext);
+  if (!ctx) throw new Error('useUser must be used within UserProvider');
+  return ctx;
+}
+
+export function UserProvider({ children }: { children: ReactNode }) {
+  const [userId, setUserId] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userFullName, setUserFullName] = useState<string | null>(null);
@@ -23,14 +45,18 @@ export function useNavData() {
     const applySession = async (session: Session | null) => {
       if (!isMounted) return;
       if (!session) {
+        setUserId(null);
         setUserEmail(null);
         setUserRole(null);
         setUserFullName(null);
         setUserAvatarUrl(null);
         setNavTabVisibility({});
+        setVisibleTools(null);
+        setBadges({});
         return;
       }
 
+      setUserId(session.user.id);
       setUserEmail(session.user.email ?? null);
       const [profile, navRows] = await Promise.all([
         supabase
@@ -62,11 +88,6 @@ export function useNavData() {
       }
       setNavTabVisibility(vis);
     };
-
-    void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      await applySession(session);
-    })();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
       void applySession(session);
@@ -107,7 +128,7 @@ export function useNavData() {
     return () => { cancelled = true; };
   }, [userEmail]);
 
-  const handleAvatarError = () => {
+  const handleAvatarError = useCallback(() => {
     if (avatarTriedSigned) {
       setUserAvatarUrl(null);
       return;
@@ -129,13 +150,14 @@ export function useNavData() {
         setUserAvatarUrl(null);
       }
     })();
-  };
+  }, [avatarTriedSigned]);
 
-  const handleSignOut = async () => {
+  const handleSignOut = useCallback(async () => {
     await supabase.auth.signOut();
-  };
+  }, []);
 
-  return {
+  const value = useMemo<UserContextValue>(() => ({
+    userId,
     userRole,
     userEmail,
     userFullName,
@@ -145,5 +167,7 @@ export function useNavData() {
     badges,
     handleAvatarError,
     handleSignOut,
-  };
+  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, handleAvatarError, handleSignOut]);
+
+  return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

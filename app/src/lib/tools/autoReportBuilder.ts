@@ -5,8 +5,8 @@
 
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
 /** Таймаут одного запроса к Instantly (увеличен для списка кампаний при медленной сети). */
-const INSTANTLY_TIMEOUT_MS = 45_000;
-const INSTANTLY_MAX_RETRIES = 2;
+const INSTANTLY_TIMEOUT_MS = 90_000;
+const INSTANTLY_MAX_RETRIES = 3;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -49,7 +49,7 @@ async function fetchInstantlyJson(
 
       const body = await res.text().catch(() => '');
       if (attempt < INSTANTLY_MAX_RETRIES && isRetryableStatus(res.status)) {
-        await sleep(400 * (attempt + 1));
+        await sleep(1000 * (attempt + 1));
         continue;
       }
 
@@ -62,7 +62,7 @@ async function fetchInstantlyJson(
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message);
       if (attempt < INSTANTLY_MAX_RETRIES && (isTimeout || isNetwork)) {
-        await sleep(400 * (attempt + 1));
+        await sleep(1000 * (attempt + 1));
         continue;
       }
       break;
@@ -97,14 +97,13 @@ function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {
 }
 
 /**
- * Список кампаний Instantly (API v2).
- * GET /api/v2/campaigns — ответ: { items: Campaign[], next_starting_after?: string }.
- * Авторизация: Bearer {{api_key}} в заголовке Authorization.
- * Поддержана пагинация (limit=100, starting_after).
+ * Постраничная выборка списка кампаний Instantly (API v2), по 100 штук.
+ * Используется синхронизацией каталога в БД и полным списком в fallback-режиме.
  */
-export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+export async function* iterateInstantlyCampaignPages(
+  apiKey: string,
+): AsyncGenerator<InstantlyCampaignItem[], void, void> {
   const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
-  const all: InstantlyCampaignItem[] = [];
   let startingAfter: string | null = null;
   const seenPageTokens = new Set<string>();
   let pageCount = 0;
@@ -122,12 +121,24 @@ export async function fetchInstantlyCampaignsList(apiKey: string): Promise<Insta
 
     const data = await fetchInstantlyJson(url.toString(), headers, 'Instantly list campaigns');
     const arr = extractCampaignsArray(data);
-    if (arr?.length) all.push(...arr);
+    if (arr?.length) yield arr;
 
     const next = data && typeof data === 'object' && (data as Record<string, unknown>).next_starting_after;
     startingAfter = typeof next === 'string' && next ? next : null;
   } while (startingAfter);
+}
 
+/**
+ * Список кампаний Instantly (API v2).
+ * GET /api/v2/campaigns — ответ: { items: Campaign[], next_starting_after?: string }.
+ * Авторизация: Bearer {{api_key}} в заголовке Authorization.
+ * Поддержана пагинация (limit=100, starting_after).
+ */
+export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+  const all: InstantlyCampaignItem[] = [];
+  for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+    all.push(...page);
+  }
   return all;
 }
 

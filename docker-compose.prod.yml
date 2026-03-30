@@ -1,3 +1,4 @@
+# Лимиты memory — потолки; сумма ~14G под 16G RAM (запас ОС/Docker). cpus — потолок на контейнер.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
@@ -42,6 +43,17 @@ services:
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 6144M
+          cpus: '4'
     restart: unless-stopped
     networks:
       - portal-network
@@ -64,6 +76,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=hh
     stop_grace_period: 3h
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
@@ -86,6 +103,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=search
     stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
@@ -104,6 +126,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=enrich
     stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -125,6 +152,11 @@ services:
     depends_on:
       - yandexmaps
     stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -142,6 +174,11 @@ services:
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=emailvalidation
     stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -159,6 +196,35 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
     stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-aicaller:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-aicaller
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - VAPI_API_KEY=${VAPI_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - AI_CALLER_PROVIDER=${AI_CALLER_PROVIDER:-vapi}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=aicaller
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -179,6 +245,35 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=salescopilot
     stop_grace_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-tg-parser:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-tg-parser
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - TG_LOCAL_API_URL=http://telegram-bot-api:8081
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=tgparser
+    depends_on:
+      - telegram-bot-api
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
@@ -192,6 +287,17 @@ services:
       - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
       - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
@@ -199,6 +305,17 @@ services:
   yandexmaps:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.5'
     restart: unless-stopped
     ports:
       - "8010:8000"
@@ -224,6 +341,11 @@ services:
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
     extra_hosts:
       - "polza-portal.ru:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
     restart: unless-stopped
     networks:
       - portal-network
@@ -231,6 +353,12 @@ services:
   atmos-bot:
     image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
     container_name: portal-atmos-bot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     env_file:
       - .env
     environment:
@@ -244,6 +372,11 @@ services:
       - ATMOS_WEBHOOK_URL=${ATMOS_WEBHOOK_URL}
     ports:
       - "8090:8090"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
     restart: unless-stopped
     networks:
       - portal-network
@@ -251,6 +384,12 @@ services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     container_name: portal-telegram-bot-api
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8081 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     environment:
       TELEGRAM_API_ID: "${TELEGRAM_API_ID}"
       TELEGRAM_API_HASH: "${TELEGRAM_API_HASH}"
@@ -259,6 +398,11 @@ services:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     ports:
       - "8081:8081"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -266,6 +410,11 @@ services:
   guacd:
     image: guacamole/guacd:1.5.5
     container_name: portal-guacd
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -287,6 +436,11 @@ services:
       - RDP_PASSWORD=${RDP_PASSWORD}
     ports:
       - "8082:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
     restart: unless-stopped
     networks:
       - portal-network

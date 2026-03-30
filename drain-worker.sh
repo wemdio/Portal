@@ -90,6 +90,8 @@ if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     "email_validation_jobs"
     "lead_import_jobs"
     "tg_outreach_jobs"
+    "ai_caller_jobs"
+    "tg_parser_jobs"
   )
 
   for table in "${tracked_tables[@]}"; do
@@ -179,6 +181,52 @@ PY
   else
     echo "[drain] tg_outreach_campaigns: running=0"
   fi
+
+  # AI Caller campaigns: running -> paused, then queue "start" job for auto-resume.
+  ai_rows="$(fetch_running_rows "ai_campaigns" "id,created_by" 2>/dev/null || true)"
+  ai_count="$(printf '%s' "$ai_rows" | count_json_rows)"
+  if [ "$ai_count" -gt 0 ]; then
+    echo "[drain] ai_campaigns: running=${ai_count}; scheduling auto-resume"
+    ai_pause_code="$(patch_running_to_pending "ai_campaigns" "{\"status\":\"paused\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")"
+    if [[ "$ai_pause_code" =~ ^(200|204)$ ]]; then
+      echo "[drain] ai_campaigns: running -> paused"
+    fi
+
+    export AI_RUNNING_ROWS="$ai_rows"
+    python3 - <<'PY' > /tmp/portal_ai_resume_jobs.json
+import json, os
+raw = os.environ.get("AI_RUNNING_ROWS", "")
+out = []
+try:
+    data = json.loads(raw) if raw else []
+except Exception:
+    data = []
+for row in data:
+    if not isinstance(row, dict):
+        continue
+    cid = str(row.get("id", "")).strip()
+    uid = str(row.get("created_by", "")).strip()
+    if cid and uid:
+        out.append({"campaign_id": cid, "user_id": uid, "action": "start", "status": "pending"})
+print(json.dumps(out, ensure_ascii=True))
+PY
+
+    if [ -s /tmp/portal_ai_resume_jobs.json ]; then
+      resume_payload="$(cat /tmp/portal_ai_resume_jobs.json)"
+      if [ "${resume_payload}" != "[]" ]; then
+        curl -sS -X POST \
+          "${SUPABASE_URL}/rest/v1/ai_caller_jobs" \
+          "${auth_headers[@]}" \
+          -H "Content-Type: application/json" \
+          -H "Prefer: return=minimal" \
+          -d "${resume_payload}" >/dev/null 2>&1 || true
+        echo "[drain] ai_caller_jobs: queued start jobs for paused campaigns"
+      fi
+    fi
+    rm -f /tmp/portal_ai_resume_jobs.json || true
+  else
+    echo "[drain] ai_campaigns: running=0"
+  fi
 else
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 fi
@@ -191,6 +239,7 @@ containers=(
   "portal-worker-yandexmaps"
   "portal-worker-emailvalidation"
   "portal-worker-tg-outreach"
+  "portal-worker-aicaller"
 )
 
 echo "[drain] Stopping worker containers (timeout 15s each)..."

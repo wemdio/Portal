@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2 } from 'lucide-react';
-import * as XLSX from 'xlsx';
+
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
 
@@ -110,7 +110,8 @@ function detectBestColumn(rows: unknown[][], hints: string[]): number {
   return best.index;
 }
 
-function parseWorkbook(file: File): Promise<ParsedCompany[]> {
+async function parseWorkbook(file: File): Promise<ParsedCompany[]> {
+  const XLSX = await import('xlsx');
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Не удалось прочитать файл'));
@@ -237,7 +238,7 @@ export function CryptoPaymentParserView() {
       const token = session?.access_token;
       if (!token) throw new Error('Требуется авторизация');
 
-      const chunks = chunkArray(prepared, 1);
+      const chunks = chunkArray(prepared, 10);
       const found: MatchRow[] = [];
       let checked = 0;
 
@@ -332,8 +333,9 @@ export function CryptoPaymentParserView() {
     saveAs(blob, 'crypto-payment-matches.csv');
   };
 
-  const exportXlsx = () => {
+  const exportXlsx = async () => {
     if (displayMatches.length === 0) return;
+    const XLSX = await import('xlsx');
     const sheetData = displayMatches.map((row) => ({
       Company: row.companyName,
       Website: row.website,

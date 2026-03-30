@@ -3,13 +3,9 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { navItems } from '@/lib/navigation';
-import { useNavData } from '@/lib/useNavData';
+import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
+import { useUser } from '@/lib/UserProvider';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
-
-const navActiveAliases: Record<string, string[]> = {
-  '/tools': ['/parsers'],
-};
 
 export function TopNav() {
   const pathname = usePathname();
@@ -24,7 +20,7 @@ export function TopNav() {
     badges,
     handleAvatarError,
     handleSignOut,
-  } = useNavData();
+  } = useUser();
 
   if (pathname === '/login') return null;
 
@@ -38,7 +34,7 @@ export function TopNav() {
   });
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
+    <header className="sticky top-0 z-40 w-full shrink-0 border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
       <div className="flex items-center gap-4 px-4 h-11">
         <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
           Portal
@@ -46,7 +42,8 @@ export function TopNav() {
 
         <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
           {visibleItems.map((item) => {
-            const aliases = navActiveAliases[item.href] ?? [];
+            const aliases = NAV_PATH_ALIASES[item.href] ?? [];
+            const isGuide = item.href === '/guide';
             const isActive = item.href === '/'
               ? pathname === '/'
               : pathname === item.href ||
@@ -59,9 +56,9 @@ export function TopNav() {
                 href={item.href as Route}
                 prefetch={false}
                 className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-medium transition-all duration-150 ${
-                  isActive
-                    ? 'bg-zinc-900 text-white shadow-sm'
-                    : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                  isGuide
+                    ? (isActive ? 'text-orange-600' : 'text-orange-500 hover:text-orange-600')
+                    : (isActive ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800')
                 }`}
               >
                 {item.name}

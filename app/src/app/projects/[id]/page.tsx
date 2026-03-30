@@ -6,7 +6,8 @@ import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigat
 import { supabase } from '@/lib/supabaseClient';
 import { Project, ProjectStatus, UserProfile } from '@/types';
 import Link from 'next/link';
-import { getCurrentUserRole, canEditProjects } from '@/lib/roles';
+import { canEditProjects } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 
@@ -128,29 +129,25 @@ export default function ProjectPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const isEditing = searchParams.get('mode') === 'edit';
+  const { userRole } = useUser();
   
   const [project, setProject] = useState<Project | null>(null);
   const [initialProject, setInitialProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
-  const [canEdit, setCanEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
 
+  const canEdit = canEditProjects(userRole);
+
   useEffect(() => {
     if (id) {
       void fetchProject(id);
-      void checkPermissions();
       void fetchAssigneeUsers();
     }
   }, [id]);
-
-  async function checkPermissions() {
-    const role = await getCurrentUserRole();
-    setCanEdit(canEditProjects(role));
-  }
 
   async function fetchAssigneeUsers() {
     try {
