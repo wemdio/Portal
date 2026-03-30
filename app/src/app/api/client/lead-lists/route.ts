@@ -3,22 +3,46 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { filterAllowedIds } from '@/lib/clientAccess';
 import { listLeads, listAllLeadLists } from '@/lib/instantly/client';
+import type { LeadList } from '@/lib/instantly/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { cached } from '@/lib/clientCache';
 
 export const dynamic = 'force-dynamic';
 
+const LEAD_LISTS_TTL = 10 * 60 * 1000;
+const MAX_LEADS_PER_CAMPAIGN = 500;
+const MAX_PAGES_PER_CAMPAIGN = 5;
+
 async function discoverLeadListIds(campaignIds: string[]): Promise<string[]> {
   const ids = new Set<string>();
-  const pages = await Promise.all(
-    campaignIds.map((cid) =>
-      listLeads({ campaign_id: cid, limit: 100 }).catch(() => ({ items: [] as { lead_list_id?: string | null }[] })),
-    ),
+
+  await Promise.all(
+    campaignIds.map(async (cid) => {
+      try {
+        let after: string | undefined;
+        for (let page = 0; page < MAX_PAGES_PER_CAMPAIGN; page++) {
+          const res = await listLeads({
+            campaign_id: cid,
+            limit: 100,
+            starting_after: after,
+          });
+          for (const lead of res.items ?? []) {
+            if (lead.lead_list_id) ids.add(lead.lead_list_id);
+          }
+          after = res.next_starting_after || undefined;
+          if (!after) break;
+          if (ids.size > 0 && page >= 1) break;
+          const itemsCount = (res.items?.length ?? 0);
+          if (itemsCount === 0) break;
+          const total = page * 100 + itemsCount;
+          if (total >= MAX_LEADS_PER_CAMPAIGN) break;
+        }
+      } catch {
+        // skip campaigns that fail
+      }
+    }),
   );
-  for (const page of pages) {
-    for (const lead of page.items ?? []) {
-      if (lead.lead_list_id) ids.add(lead.lead_list_id);
-    }
-  }
+
   return [...ids];
 }
 
@@ -39,7 +63,12 @@ export async function GET(req: NextRequest) {
         .map((r) => r.resource_id),
     );
 
-    const liveListIds = await discoverLeadListIds(allowedCampaignIds);
+    const cacheKey = `instantly:lead-lists:discover:${allowedCampaignIds.sort().join(',')}`;
+    const liveListIds = await cached(
+      cacheKey,
+      () => discoverLeadListIds(allowedCampaignIds),
+      LEAD_LISTS_TTL,
+    );
 
     const newIds = liveListIds.filter((id) => !storedListIds.has(id));
     if (newIds.length > 0 && supabaseAdmin) {
@@ -59,7 +88,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ items: [] });
     }
 
-    const allLists = await listAllLeadLists();
+    const allLists = await cached<LeadList[]>(
+      'instantly:lead-lists:all',
+      () => listAllLeadLists(),
+      LEAD_LISTS_TTL,
+    );
     const items = allLists.filter((l) => allListIds.has(l.id));
     return NextResponse.json({ items });
   } catch (err) {
