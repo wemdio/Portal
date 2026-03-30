@@ -29,9 +29,9 @@ blocks:
           commands:
             - source /tmp/env_vars
             - cd $APP_PATH
+            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run lint
             - npx tsc --noEmit
-            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             - npm run build
             - npm test -- --watchAll=false
             - npm audit --audit-level=critical

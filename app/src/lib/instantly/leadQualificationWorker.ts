@@ -1,10 +1,9 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { qualifyReply, getBodyText } from './leadQualifier';
 import * as instantly from './client';
-import type { Email, Campaign } from './types';
+import type { Email } from './types';
 
 const EMAILS_PER_CAMPAIGN = 30;
-const MAX_CAMPAIGNS_PER_TICK = 20;
 const MAX_QUALIFY_PER_TICK = 5;
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -23,8 +22,24 @@ function workerLog(
 }
 
 /**
- * Main polling function: fetches recent reply emails from the Instantly API,
- * deduplicates against already-processed records, and qualifies new ones via AI.
+ * Returns the distinct set of campaign IDs that at least one user has
+ * selected in their lead-feed preferences. Only these campaigns are polled.
+ */
+async function getSubscribedCampaignIds(): Promise<string[]> {
+  if (!supabaseAdmin) return [];
+  const { data, error } = await supabaseAdmin
+    .from('user_instantly_campaign_preferences')
+    .select('campaign_id');
+
+  if (error || !data) return [];
+
+  return [...new Set(data.map((r: { campaign_id: string }) => r.campaign_id))];
+}
+
+/**
+ * Main polling function: fetches recent reply emails from the Instantly API
+ * **only for campaigns that specialists have subscribed to**, deduplicates
+ * against already-processed records, and qualifies new ones via AI.
  * Returns the number of new replies qualified.
  */
 export async function pollAndQualifyReplies(): Promise<number> {
@@ -34,37 +49,25 @@ export async function pollAndQualifyReplies(): Promise<number> {
   const apiKey = API_KEY();
   if (!apiKey) return 0;
 
-  // 1. Get active campaigns to poll
-  let campaigns: Campaign[];
-  try {
-    campaigns = await instantly.listAllCampaigns(200);
-  } catch (err) {
-    workerLog('error', 'Failed to fetch campaigns from Instantly', err);
-    return 0;
-  }
+  // 1. Only poll campaigns that at least one specialist selected
+  const campaignIds = await getSubscribedCampaignIds();
+  if (campaignIds.length === 0) return 0;
 
-  const activeCampaigns = campaigns
-    .filter((c) => c.status === 1 || c.status === 2)
-    .slice(0, MAX_CAMPAIGNS_PER_TICK);
-
-  if (activeCampaigns.length === 0) return 0;
-
-  // 2. Fetch recent reply emails across campaigns
+  // 2. Fetch recent reply emails for subscribed campaigns
   const replyEmails: (Email & { _campaignName?: string })[] = [];
 
-  for (const campaign of activeCampaigns) {
+  for (const campaignId of campaignIds) {
     try {
       const res = await instantly.listEmails({
-        campaign_id: campaign.id,
+        campaign_id: campaignId,
         limit: EMAILS_PER_CAMPAIGN,
       });
       const replies = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 2);
       for (const r of replies) {
-        (r as Email & { _campaignName?: string })._campaignName = campaign.name;
         replyEmails.push(r as Email & { _campaignName?: string });
       }
     } catch (err) {
-      workerLog('warn', `Failed to fetch emails for campaign ${campaign.id}`, err);
+      workerLog('warn', `Failed to fetch emails for campaign ${campaignId}`, err);
     }
   }
 
@@ -84,7 +87,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   if (newReplies.length === 0) return 0;
 
-  workerLog('info', `Found ${newReplies.length} new reply email(s) to qualify`);
+  workerLog('info', `Found ${newReplies.length} new reply(s) across ${campaignIds.length} subscribed campaign(s)`);
 
   // 4. Qualify each new reply (capped per tick to stay within rate limits)
   let processed = 0;

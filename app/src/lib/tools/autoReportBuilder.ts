@@ -7,6 +7,8 @@ const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
 /** Таймаут одного запроса к Instantly (увеличен для списка кампаний при медленной сети). */
 const INSTANTLY_TIMEOUT_MS = 90_000;
 const INSTANTLY_MAX_RETRIES = 3;
+/** Задержка между кампаниями (мс) — не перегружать Instantly API при большом кол-ве кампаний. */
+const INTER_CAMPAIGN_DELAY_MS = 350;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -49,12 +51,14 @@ async function fetchInstantlyJson(
 
       const body = await res.text().catch(() => '');
       if (attempt < INSTANTLY_MAX_RETRIES && isRetryableStatus(res.status)) {
-        await sleep(1000 * (attempt + 1));
+        const backoff = res.status === 429 ? 5000 : 2000;
+        await sleep(backoff * (attempt + 1));
         continue;
       }
 
+      const cleanBody = body.includes('<html') ? `${res.status} Bad Gateway` : body.slice(0, 400);
       throw new Error(
-        `${context} failed: ${res.status}${body ? ` ${body.slice(0, 400)}` : ''}`,
+        `${context} failed: ${res.status}${cleanBody ? ` ${cleanBody}` : ''}`,
       );
     } catch (err) {
       lastError = err;
@@ -161,10 +165,9 @@ export async function fetchInstantlyCampaignData(
   const stepsUrl =
     `${INSTANTLY_BASE}/campaigns/analytics/steps?campaign_id=${encodeURIComponent(campaignId)}`;
 
-  const [analytics, steps] = await Promise.all([
-    fetchInstantlyJson(analyticsUrl, headers, 'Instantly analytics'),
-    fetchInstantlyJson(stepsUrl, headers, 'Instantly steps'),
-  ]);
+  const analytics = await fetchInstantlyJson(analyticsUrl, headers, 'Instantly analytics');
+  await sleep(200);
+  const steps = await fetchInstantlyJson(stepsUrl, headers, 'Instantly steps');
   return { analytics, steps };
 }
 
@@ -600,15 +603,40 @@ export async function buildAutoReport(
   }
 
   const mergeItems: { body?: unknown }[] = [];
-  for (const id of campaignIds) {
-    const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
-    // Same order as n8n Merge: summary first (analytics), then details (steps)
-    const analyticsBody = (analytics as { body?: unknown }).body ?? analytics;
-    const stepsBody = (steps as { body?: unknown }).body ?? steps;
-    mergeItems.push({ body: analyticsBody });
-    mergeItems.push({ body: stepsBody });
+  const failedCampaigns: string[] = [];
+
+  for (let i = 0; i < campaignIds.length; i++) {
+    const id = campaignIds[i];
+    try {
+      const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
+      const analyticsBody = (analytics as { body?: unknown }).body ?? analytics;
+      const stepsBody = (steps as { body?: unknown }).body ?? steps;
+      mergeItems.push({ body: analyticsBody });
+      mergeItems.push({ body: stepsBody });
+    } catch (err) {
+      console.error(`[auto-report] Skipping campaign ${id}: ${getErrorMessage(err)}`);
+      failedCampaigns.push(id);
+    }
+
+    if (i < campaignIds.length - 1) {
+      await sleep(INTER_CAMPAIGN_DELAY_MS);
+    }
+  }
+
+  if (mergeItems.length === 0) {
+    const reason = failedCampaigns.length > 0
+      ? `Все ${failedCampaigns.length} кампании не загрузились. Instantly API возвращает ошибки (502/таймаут). Попробуйте позже или выберите меньше кампаний.`
+      : 'Нет данных для отчёта';
+    throw new Error(reason);
   }
 
   const normalized = normalizeMergeItems(mergeItems as { body?: unknown; [k: string]: unknown }[]);
-  return buildReportFromNormalized(normalized);
+  const report = buildReportFromNormalized(normalized);
+
+  if (failedCampaigns.length > 0) {
+    const note = `\n⚠ ${failedCampaigns.length} из ${campaignIds.length} кампаний не загрузились (Instantly API вернул ошибку). Отчёт сформирован по остальным.`;
+    report.tableText = note + '\n' + report.tableText;
+  }
+
+  return report;
 }
