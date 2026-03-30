@@ -4,6 +4,8 @@ import { extractNormalizedUrls, fetchAndExtract, normalizeUrl } from '@/lib/enri
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
+import { startTrace } from '@/lib/tracer';
+import type { Span } from '@/lib/tracer';
 
 type QueueItem = {
   id: string;
@@ -479,6 +481,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     return;
   }
 
+  let trace: Span | null = null;
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('website_enrichment_jobs')
@@ -492,6 +495,15 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     }
 
     if (['failed', 'cancelled'].includes(job.status)) return;
+
+    const isEmail = job.extraction_type === 'email';
+    trace = await startTrace({
+      name: isEmail ? 'database.email_scraping' : 'database.website_enrichment',
+      input: { jobId, total: job.total, extraction_type: job.extraction_type },
+      message: isEmail ? `Поиск почт (${job.total} сайтов)` : `Обогащение сайтов (${job.total} строк)`,
+      userId: job.user_id,
+      jobId,
+    });
 
     let processed = job.processed ?? 0;
     let success = job.success_count ?? 0;
@@ -720,8 +732,10 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       success: finalSuccess,
       errors: finalErrors,
     });
+    await trace?.end({ processed: processedTotal, success: finalSuccess, errors: finalErrors, status: finalStatus });
   } catch (err) {
     await logError('website.enrichment.worker.failed', err, { jobId });
+    await trace?.fail(err);
     if (supabaseAdmin) {
       await supabaseAdmin
         .from('website_enrichment_jobs')
