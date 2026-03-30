@@ -256,7 +256,7 @@ export default function ProfilePage() {
 
       const [prefsRes, campsRes] = await Promise.all([
         fetch('/api/user/campaign-preferences', { headers: { Authorization: `Bearer ${t}` } }),
-        fetch('/api/tools/auto-report/campaigns', { headers: { Authorization: `Bearer ${t}` } }),
+        fetch('/api/instantly/campaigns?limit=all', { headers: { Authorization: `Bearer ${t}` } }),
       ]);
 
       if (prefsRes.ok) {
@@ -264,8 +264,8 @@ export default function ProfilePage() {
         setCampaignPrefs(prefsData.campaign_ids ?? []);
       }
       if (campsRes.ok) {
-        const campsData = (await campsRes.json()) as { campaigns?: { id: string; name: string; status?: number }[] };
-        setAllCampaigns((campsData.campaigns ?? []).map((c) => ({ id: c.id, name: c.name, status: c.status ?? 0 })));
+        const campsData = (await campsRes.json()) as { items?: { id: string; name: string; status: number }[] };
+        setAllCampaigns((campsData.items ?? []).map((c) => ({ id: c.id, name: c.name, status: c.status ?? 0 })));
       }
     } catch { /* ignore */ } finally {
       setCampaignsLoading(false);
