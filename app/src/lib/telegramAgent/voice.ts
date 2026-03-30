@@ -5,13 +5,38 @@ import { logError, logAudit } from '@/lib/loggerServer';
 const MAX_DURATION_SECONDS = 300;
 const FETCH_TIMEOUT_MS = 30_000;
 const REQUESTY_BASE = 'https://router.requesty.ai/v1';
-
-function getAgentApiKey(): string {
-  return (process.env.OPENROUTER_AGENT_API_KEY ?? '').trim();
-}
+const TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
 
 function getTranscriptApiKey(): string {
-  return (process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? '').trim() || getAgentApiKey();
+  return (process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? '').trim()
+    || (process.env.OPENROUTER_AGENT_API_KEY ?? '').trim();
+}
+
+async function asrTranscribe(mp3: Buffer): Promise<string | null> {
+  const apiKey = getTranscriptApiKey();
+  if (!apiKey) return null;
+
+  const blob = new Blob([Uint8Array.from(mp3)], { type: 'audio/mpeg' });
+  const form = new FormData();
+  form.append('file', blob, 'voice.mp3');
+  form.append('model', TRANSCRIBE_MODEL);
+  form.append('language', 'ru');
+
+  const res = await fetch(`${REQUESTY_BASE}/audio/transcriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    body: form,
+  });
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    await logAudit('telegram-agent.voice.asr-fail', `${res.status}: ${raw.slice(0, 200)}`, {});
+    return null;
+  }
+
+  const json = (await res.json()) as { text?: string };
+  return json.text?.trim() || null;
 }
 
 function extractText(json: { choices?: Array<{ message?: { content?: unknown } }> }): string | null {
@@ -27,7 +52,7 @@ function extractText(json: { choices?: Array<{ message?: { content?: unknown } }
   return null;
 }
 
-async function policyTranscribe(mp3: Buffer): Promise<string | null> {
+async function chatTranscribe(mp3: Buffer): Promise<string | null> {
   const apiKey = getTranscriptApiKey();
   if (!apiKey) return null;
 
@@ -58,45 +83,7 @@ async function policyTranscribe(mp3: Buffer): Promise<string | null> {
 
   if (!res.ok) {
     const raw = await res.text().catch(() => '');
-    await logAudit('telegram-agent.voice.policy-fail', `${res.status}: ${raw.slice(0, 200)}`, {});
-    return null;
-  }
-
-  return extractText(await res.json());
-}
-
-async function geminiTranscribe(mp3: Buffer): Promise<string | null> {
-  const apiKey = getAgentApiKey();
-  if (!apiKey) return null;
-
-  const base64 = mp3.toString('base64');
-  const res = await fetch(`${REQUESTY_BASE}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    body: JSON.stringify({
-      model: 'policy/gemini-flash',
-      temperature: 0,
-      max_tokens: 2000,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: 'Расшифруй это голосовое сообщение на русском языке. Выведи ТОЛЬКО точный текст сказанного. Без комментариев, без форматирования, без кавычек.',
-          },
-          { type: 'input_audio', input_audio: { data: base64, format: 'mp3' } },
-        ],
-      }],
-    }),
-  });
-
-  if (!res.ok) {
-    const raw = await res.text().catch(() => '');
-    await logAudit('telegram-agent.voice.gemini-fail', `${res.status}: ${raw.slice(0, 200)}`, {});
+    await logAudit('telegram-agent.voice.chat-fail', `${res.status}: ${raw.slice(0, 200)}`, {});
     return null;
   }
 
@@ -126,8 +113,8 @@ export async function transcribeVoiceMessage(
 
     await logAudit('telegram-agent.voice.converted', `ogg=${oggBuffer.length}b mp3=${mp3.length}b dur=${duration}s`, {});
 
-    const methods = [policyTranscribe, geminiTranscribe] as const;
-    const names = ['policy', 'gemini'] as const;
+    const methods = [asrTranscribe, chatTranscribe] as const;
+    const names = ['asr', 'chat'] as const;
 
     for (let i = 0; i < methods.length; i++) {
       try {
