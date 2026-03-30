@@ -3,13 +3,9 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { navItems } from '@/lib/navigation';
+import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
-
-const navActiveAliases: Record<string, string[]> = {
-  '/tools': ['/parsers'],
-};
 
 export function TopNav() {
   const pathname = usePathname();
@@ -46,7 +42,7 @@ export function TopNav() {
 
         <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
           {visibleItems.map((item) => {
-            const aliases = navActiveAliases[item.href] ?? [];
+            const aliases = NAV_PATH_ALIASES[item.href] ?? [];
             const isGuide = item.href === '/guide';
             const isActive = item.href === '/'
               ? pathname === '/'

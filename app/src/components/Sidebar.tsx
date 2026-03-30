@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
-import { navItems } from '@/lib/navigation';
+import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 
 type SidebarProps = {
@@ -14,10 +14,6 @@ type SidebarProps = {
   mobileOpen?: boolean;
   onMobileClose?: () => void;
   mobileOnlyDrawer?: boolean;
-};
-
-const navActiveAliases: Record<string, string[]> = {
-  '/tools': ['/parsers'],
 };
 
 type TmaTheme = 'dark' | 'light';
@@ -99,7 +95,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return null;
 
           const isGuide = item.href === '/guide';
-          const aliases = navActiveAliases[item.href] ?? [];
+          const aliases = NAV_PATH_ALIASES[item.href] ?? [];
           const isActive = item.href === '/'
             ? pathname === '/'
             : pathname === item.href ||

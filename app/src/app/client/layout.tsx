@@ -1,11 +1,13 @@
 'use client';
 
+import { useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Nunito } from 'next/font/google';
 import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
+import { getPortalPageSectionTitle } from '@/lib/pageTitle';
 
 const nunito = Nunito({
   subsets: ['latin', 'cyrillic'],
@@ -21,6 +23,10 @@ const clientNav = [
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+
+  useEffect(() => {
+    document.title = getPortalPageSectionTitle(pathname);
+  }, [pathname]);
 
   const isActive = (href: string) =>
     href === '/client'
