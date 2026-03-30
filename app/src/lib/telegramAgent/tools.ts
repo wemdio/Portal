@@ -67,6 +67,20 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'fetch_url',
+      description: 'Загрузить содержимое веб-страницы по URL. Возвращает текст страницы (без HTML-тегов). Используй для чтения статей, блогов, лендингов, документации и т.д.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Полный URL страницы (https://...)' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'think',
       description: 'Используй для планирования сложных задач. Запиши план анализа, гипотезы, промежуточные выводы. Инструмент вернет твой текст обратно — это твой блокнот.',
       parameters: {

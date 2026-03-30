@@ -32,9 +32,10 @@ describe('telegramAgent/handlers', () => {
     expect(typeof toolHandlers.query_database).toBe('function');
     expect(typeof toolHandlers.search_knowledge_base).toBe('function');
     expect(typeof toolHandlers.web_search).toBe('function');
+    expect(typeof toolHandlers.fetch_url).toBe('function');
     expect(typeof toolHandlers.think).toBe('function');
     expect(typeof toolHandlers.get_pipeline_status).toBe('function');
-    expect(Object.keys(toolHandlers)).toHaveLength(5);
+    expect(Object.keys(toolHandlers)).toHaveLength(6);
   });
 
   describe('query_database', () => {
@@ -217,6 +218,42 @@ describe('telegramAgent/handlers', () => {
       mockSerperSearch.mockRejectedValue(new Error('SERPER_API_KEY is not set'));
       const result = await toolHandlers.web_search({ query: 'test' });
       expect(result).toContain('SERPER_API_KEY');
+    });
+  });
+
+  describe('fetch_url', () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it('rejects empty URL', async () => {
+      const result = await toolHandlers.fetch_url({});
+      expect(result).toContain('URL');
+    });
+
+    it('rejects invalid URL', async () => {
+      const result = await toolHandlers.fetch_url({ url: 'not-a-url' });
+      expect(result).toContain('Некорректный URL');
+    });
+
+    it('fetches and strips HTML', async () => {
+      global.fetch = jest.fn().mockResolvedValue(new Response(
+        '<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      )) as unknown as typeof fetch;
+
+      const result = await toolHandlers.fetch_url({ url: 'https://example.com' });
+      expect(result).toContain('Hello');
+      expect(result).toContain('World');
+      expect(result).not.toContain('<h1>');
+    });
+
+    it('handles HTTP errors', async () => {
+      global.fetch = jest.fn().mockResolvedValue(new Response('Not Found', { status: 404 })) as unknown as typeof fetch;
+      const result = await toolHandlers.fetch_url({ url: 'https://example.com/404' });
+      expect(result).toContain('404');
     });
   });
 
