@@ -162,7 +162,24 @@ blocks:
                 fi;
                 echo '--- Step 1: pull new images ---';
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml pull;
+                export DOCKER_CLIENT_TIMEOUT=300;
+                export COMPOSE_HTTP_TIMEOUT=300;
+                pull_attempt=1;
+                pull_max=5;
+                while [ \"\${pull_attempt}\" -le \"\${pull_max}\" ]; do
+                  echo \"[scheduled] docker compose pull: attempt \${pull_attempt}/\${pull_max}\";
+                  if sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml pull; then
+                    break;
+                  fi;
+                  if [ \"\${pull_attempt}\" -eq \"\${pull_max}\" ]; then
+                    echo \"[scheduled] docker compose pull failed after \${pull_max} attempts\" >&2;
+                    exit 1;
+                  fi;
+                  sleep_for=$((15 * pull_attempt));
+                  echo \"[scheduled] docker compose pull failed; sleeping \${sleep_for}s before retry\" >&2;
+                  sleep \"\${sleep_for}\";
+                  pull_attempt=$((pull_attempt + 1));
+                done;
                 echo '--- Step 1.1: preflight migration check on new portal image ---';
                 MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network portal_portal-network --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
                 MIGRATION_RC=\${MIGRATION_RC:-0};
