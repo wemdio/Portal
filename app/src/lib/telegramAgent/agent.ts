@@ -15,6 +15,7 @@ import { logError, logAudit } from '@/lib/loggerServer';
 import { transcribeVoiceMessage } from './voice';
 
 const MAX_TOOL_ITERATIONS = 10;
+const PROCESS_TIMEOUT_MS = 110_000;
 
 const PROGRESS_MESSAGES: Record<number, string> = {
   3: '🔍 Анализирую данные...',
@@ -144,6 +145,23 @@ async function executeToolCalls(
 }
 
 export async function processMessage(chatId: number, user: AgentUser, text: string): Promise<void> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('PROCESS_TIMEOUT')), PROCESS_TIMEOUT_MS),
+  );
+
+  try {
+    await Promise.race([runAgentLoop(chatId, user, text), timeout]);
+  } catch (err) {
+    if (err instanceof Error && err.message === 'PROCESS_TIMEOUT') {
+      await logAudit('telegram-agent.loop', 'outcome=timeout', {});
+      await sendMessage(chatId, '⏱ Запрос занял слишком много времени. Попробуйте сформулировать проще или разбить на части.').catch(() => {});
+    } else {
+      throw err;
+    }
+  }
+}
+
+async function runAgentLoop(chatId: number, user: AgentUser, text: string): Promise<void> {
   await sendChatAction(chatId);
 
   const history = getHistory(chatId);
