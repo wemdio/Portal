@@ -136,13 +136,9 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/login', request.url))
     }
 
-    if (session && pathname === '/login') {
-      return NextResponse.redirect(new URL('/', request.url))
-    }
-
     let userRole: string | null = null
 
-    if (session && needsRoleCheck(pathname)) {
+    if (session && (needsRoleCheck(pathname) || pathname === '/login')) {
       const cachedRole = request.cookies.get(ROLE_COOKIE)?.value ?? null
       if (cachedRole) {
         userRole = cachedRole
@@ -166,10 +162,15 @@ export async function middleware(request: NextRequest) {
       }
     }
 
+    if (session && pathname === '/login') {
+      return NextResponse.redirect(
+        new URL(userRole === 'client' ? '/client' : '/', request.url)
+      )
+    }
+
     if (session && userRole === 'client') {
       const clientAllowed =
         pathname.startsWith('/client') ||
-        pathname === '/login' ||
         pathname === '/maintenance' ||
         pathname.startsWith('/review/base/')
       if (!clientAllowed) {
