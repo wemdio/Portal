@@ -22,6 +22,7 @@ create index if not exists idx_instantly_webhook_events_campaign
 
 alter table public.instantly_webhook_events enable row level security;
 
+drop policy if exists "Service role full access on instantly_webhook_events" on public.instantly_webhook_events;
 create policy "Service role full access on instantly_webhook_events"
   on public.instantly_webhook_events for all using (true) with check (true);
 
@@ -72,6 +73,7 @@ create unique index if not exists idx_instantly_lead_qualifications_event
 
 alter table public.instantly_lead_qualifications enable row level security;
 
+drop policy if exists "Internal users can read all qualifications" on public.instantly_lead_qualifications;
 create policy "Internal users can read all qualifications"
   on public.instantly_lead_qualifications for select using (
     exists (
@@ -80,6 +82,7 @@ create policy "Internal users can read all qualifications"
     )
   );
 
+drop policy if exists "Service role full access on instantly_lead_qualifications" on public.instantly_lead_qualifications;
 create policy "Service role full access on instantly_lead_qualifications"
   on public.instantly_lead_qualifications for all using (true) with check (true);
 
@@ -97,18 +100,22 @@ create index if not exists idx_user_instantly_campaign_prefs_user
 
 alter table public.user_instantly_campaign_preferences enable row level security;
 
+drop policy if exists "Users can read own campaign preferences" on public.user_instantly_campaign_preferences;
 create policy "Users can read own campaign preferences"
   on public.user_instantly_campaign_preferences for select
   using (user_id = auth.uid());
 
+drop policy if exists "Users can insert own campaign preferences" on public.user_instantly_campaign_preferences;
 create policy "Users can insert own campaign preferences"
   on public.user_instantly_campaign_preferences for insert
   with check (user_id = auth.uid());
 
+drop policy if exists "Users can delete own campaign preferences" on public.user_instantly_campaign_preferences;
 create policy "Users can delete own campaign preferences"
   on public.user_instantly_campaign_preferences for delete
   using (user_id = auth.uid());
 
+drop policy if exists "Service role full access on user_instantly_campaign_preferences" on public.user_instantly_campaign_preferences;
 create policy "Service role full access on user_instantly_campaign_preferences"
   on public.user_instantly_campaign_preferences for all
   using (true) with check (true);
