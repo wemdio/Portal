@@ -138,7 +138,7 @@ export async function middleware(request: NextRequest) {
 
     let userRole: string | null = null
 
-    if (session && (needsRoleCheck(pathname) || pathname === '/login')) {
+    if (session && !isPublicPath) {
       const cachedRole = request.cookies.get(ROLE_COOKIE)?.value ?? null
       if (cachedRole) {
         userRole = cachedRole
