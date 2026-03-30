@@ -1,9 +1,14 @@
 /** @jest-environment node */
 
 const mockRpc = jest.fn();
+const mockHybridSearch = jest.fn();
 
 jest.mock('@/lib/supabaseAdmin', () => ({
-  supabaseAdmin: { rpc: (...args: unknown[]) => mockRpc(...args) },
+  supabaseAdmin: { rpc: (...args: unknown[]) => mockRpc(...args), from: jest.fn() },
+}));
+
+jest.mock('@/lib/knowledgeBase/contextRetriever', () => ({
+  hybridSearchChunks: (...args: unknown[]) => mockHybridSearch(...args),
 }));
 
 jest.mock('@/lib/telegramAgent/pipeline', () => ({
@@ -18,10 +23,11 @@ beforeEach(() => {
 });
 
 describe('telegramAgent/handlers', () => {
-  it('exports query_database and get_pipeline_status', () => {
+  it('exports query_database, search_knowledge_base and get_pipeline_status', () => {
     expect(typeof toolHandlers.query_database).toBe('function');
+    expect(typeof toolHandlers.search_knowledge_base).toBe('function');
     expect(typeof toolHandlers.get_pipeline_status).toBe('function');
-    expect(Object.keys(toolHandlers)).toHaveLength(2);
+    expect(Object.keys(toolHandlers)).toHaveLength(3);
   });
 
   describe('query_database', () => {
@@ -112,6 +118,57 @@ describe('telegramAgent/handlers', () => {
       mockRpc.mockResolvedValue({ data: [], error: null });
       const result = await toolHandlers.query_database({ sql: 'SELECT * FROM projects WHERE 1=0' });
       expect(result).toContain('0 строк');
+    });
+  });
+
+  describe('search_knowledge_base', () => {
+    it('rejects empty query', async () => {
+      const result = await toolHandlers.search_knowledge_base({});
+      expect(result).toContain('поисковый запрос');
+    });
+
+    it('returns formatted results', async () => {
+      mockHybridSearch.mockResolvedValue({
+        chunks: [
+          { chunk_id: 'c1', document_id: 'd1', document_title: 'О продукте', category: 'product_info', content: 'Мы делаем CRM', rank: 1 },
+          { chunk_id: 'c2', document_id: 'd2', document_title: 'Кейс Альфа', category: 'cases', content: 'Автоматизация продаж', rank: 0.8 },
+        ],
+        total: 2,
+      });
+
+      const result = await toolHandlers.search_knowledge_base({ query: 'что мы делаем' });
+      expect(result).toContain('2 фрагмент');
+      expect(result).toContain('О продукте');
+      expect(result).toContain('Мы делаем CRM');
+      expect(result).toContain('Кейс Альфа');
+      expect(mockHybridSearch).toHaveBeenCalledWith(
+        expect.anything(),
+        'что мы делаем',
+        { categories: undefined, limit: 5 },
+      );
+    });
+
+    it('filters by category', async () => {
+      mockHybridSearch.mockResolvedValue({ chunks: [], total: 0 });
+
+      const result = await toolHandlers.search_knowledge_base({ query: 'кейсы', category: 'cases' });
+      expect(result).toContain('ничего не найдено');
+      expect(mockHybridSearch).toHaveBeenCalledWith(
+        expect.anything(),
+        'кейсы',
+        { categories: ['cases'], limit: 5 },
+      );
+    });
+
+    it('ignores invalid category', async () => {
+      mockHybridSearch.mockResolvedValue({ chunks: [], total: 0 });
+
+      await toolHandlers.search_knowledge_base({ query: 'test', category: 'invalid_cat' });
+      expect(mockHybridSearch).toHaveBeenCalledWith(
+        expect.anything(),
+        'test',
+        { categories: undefined, limit: 5 },
+      );
     });
   });
 

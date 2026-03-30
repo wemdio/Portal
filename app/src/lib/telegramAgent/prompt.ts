@@ -1,12 +1,29 @@
 import type { AgentUser } from './types';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-export function buildSystemPrompt(user: AgentUser): string {
+async function loadCompiledBrief(): Promise<string> {
+  if (!supabaseAdmin) return '';
+  try {
+    const { data } = await supabaseAdmin
+      .from('kb_compiled_brief')
+      .select('brief')
+      .eq('id', 'default')
+      .single();
+    return data?.brief?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export async function buildSystemPrompt(user: AgentUser): Promise<string> {
   const now = new Date().toLocaleDateString('ru-RU', {
     weekday: 'long',
     year: 'numeric',
     month: 'long',
     day: 'numeric',
   });
+
+  const brief = await loadCompiledBrief();
 
   return `Ты — AI-ассистент портала управления проектами. Ты можешь читать ЛЮБЫЕ данные через SQL и выполнять действия через write-инструменты.
 
@@ -100,11 +117,17 @@ audio_transcripts(id uuid, user_id, filename, length int, text, created_at)
 -- Логи
 application_logs(id uuid, created_at, level, source, event, message, context jsonb, user_id)
 
+-- База знаний компании
+kb_documents(id uuid, user_id, title, category text, source_type, content_text, token_count int, status, created_at)
+kb_chunks(id uuid, document_id uuid, content, search_vector tsvector, created_at)
+kb_compiled_brief(id text, brief, token_count int, updated_at)
+
 TIPS ДЛЯ SQL:
 - Для задач текущего пользователя: WHERE user_id = '${user.userId}'
 - Для последних записей: ORDER BY created_at DESC LIMIT N
 - Для статистики: COUNT(*), SUM(), AVG()
 - Для поиска по тексту: ILIKE '%текст%'
 - Для джойнов: JOIN profiles ON profiles.id = ...user_id
-- jsonb поля: config->>'text', steps->0->>'type'`;
+- jsonb поля: config->>'text', steps->0->>'type'
+- Для поиска по базе знаний компании используй search_knowledge_base (гибридный поиск: текст + семантика). SQL по kb_* таблицам — для аналитики (количество документов и т.п.).${brief ? `\n\n[БАЗА ЗНАНИЙ КОМПАНИИ]\n${brief}\n[/БАЗА ЗНАНИЙ КОМПАНИИ]` : ''}`;
 }
