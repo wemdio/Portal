@@ -33,6 +33,25 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'search_knowledge_base',
+      description: 'Поиск по базе знаний компании (продукт, кейсы, процессы, переписки, встречи). Используй когда пользователь спрашивает о компании, продукте, услугах, опыте или клиентах. Гибридный поиск: текст + семантика.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Поисковый запрос на русском языке' },
+          category: {
+            type: 'string',
+            enum: ['product_info', 'cases', 'sales_chats', 'video_transcripts', 'client_chats', 'other'],
+            description: 'Фильтр по категории (необязательно). product_info=О продукте, cases=Кейсы, sales_chats=Переписки сейлзов, video_transcripts=Расшифровки встреч, client_chats=Чаты с клиентами',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_pipeline_status',
       description: 'Получить статус пайплайна(ов). Без параметров — показать последние пайплайны текущего пользователя.',
       parameters: {
