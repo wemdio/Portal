@@ -1,7 +1,7 @@
 import type { ConversationMessage, ToolDefinition, LlmResponse, ToolCall } from './types';
 
-const MODEL = 'policy/gemini-flash';
-const TIMEOUT_MS = 60_000;
+const MODEL = 'anthropic/claude-sonnet-4-6';
+const TIMEOUT_MS = 90_000;
 const MAX_RETRIES = 2;
 
 function getApiKey(): string {
@@ -56,7 +56,7 @@ export async function callLlm(
           tools: tools.length > 0 ? tools : undefined,
           tool_choice: tools.length > 0 ? 'auto' : undefined,
           temperature: 0.2,
-          max_tokens: 4000,
+          max_tokens: 8000,
         }),
       });
 
