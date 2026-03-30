@@ -20,6 +20,10 @@ import { transcribeVoiceMessage } from '@/lib/telegramAgent/voice';
 import { downloadVoiceFile } from '@/lib/telegramAgent/telegram';
 import { extractOrConvertToMp3 } from '@/lib/transcription';
 
+function asrOk(text: string) {
+  return new Response(JSON.stringify({ text }), { status: 200 });
+}
+
 function chatOk(text: string) {
   return new Response(
     JSON.stringify({ choices: [{ message: { content: text } }] }),
@@ -39,22 +43,21 @@ describe('telegramAgent/voice', () => {
 
   afterEach(() => jest.clearAllMocks());
 
-  it('transcribes via policy/transcription (primary)', async () => {
-    mockFetch.mockResolvedValueOnce(chatOk('привет'));
+  it('transcribes via ASR endpoint (primary)', async () => {
+    mockFetch.mockResolvedValueOnce(asrOk('привет как дела'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBe('привет');
+    expect(result).toBe('привет как дела');
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url] = mockFetch.mock.calls[0];
-    expect(url).toContain('requesty.ai');
-    expect(url).toContain('/chat/completions');
+    expect(url).toContain('/audio/transcriptions');
   });
 
-  it('falls back to Gemini if policy fails', async () => {
+  it('falls back to chat completions if ASR fails', async () => {
     mockFetch
-      .mockResolvedValueOnce(fail(500))
-      .mockResolvedValueOnce(chatOk('через гемини'));
+      .mockResolvedValueOnce(fail(404))
+      .mockResolvedValueOnce(chatOk('через фоллбек'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBe('через гемини');
+    expect(result).toBe('через фоллбек');
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
@@ -84,11 +87,11 @@ describe('telegramAgent/voice', () => {
     expect(result).toBeNull();
   });
 
-  it('skips empty policy result and tries Gemini', async () => {
+  it('skips empty ASR result and tries chat fallback', async () => {
     mockFetch
-      .mockResolvedValueOnce(chatOk('   '))
-      .mockResolvedValueOnce(chatOk('текст из гемини'));
+      .mockResolvedValueOnce(asrOk('   '))
+      .mockResolvedValueOnce(chatOk('текст из фоллбека'));
     const result = await transcribeVoiceMessage('file-123', 10);
-    expect(result).toBe('текст из гемини');
+    expect(result).toBe('текст из фоллбека');
   });
 });
