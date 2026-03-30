@@ -2,13 +2,17 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 const ROLE_COOKIE = 'x-portal-role'
-/** Дольше, чтобы реже дергать profiles при каждой RSC-навигации (ускоряет TTFB на защищённых маршрутах). */
-const ROLE_COOKIE_MAX_AGE = 30 * 60 // 30 minutes
+const ROLE_COOKIE_MAX_AGE = 30 * 60
 
-const ROLE_GATED_PREFIXES = ['/admin', '/billing-calendar', '/client'] as const
+function encodeRoleCache(userId: string, role: string): string {
+  return `${userId}:${role}`
+}
 
-function needsRoleCheck(pathname: string): boolean {
-  return ROLE_GATED_PREFIXES.some(p => pathname.startsWith(p))
+function decodeRoleCache(raw: string, currentUserId: string): string | null {
+  const sep = raw.indexOf(':')
+  if (sep === -1) return null
+  if (raw.substring(0, sep) !== currentUserId) return null
+  return raw.substring(sep + 1) || null
 }
 
 export async function middleware(request: NextRequest) {
@@ -138,10 +142,11 @@ export async function middleware(request: NextRequest) {
 
     let userRole: string | null = null
 
-    if (session && !isPublicPath) {
-      const cachedRole = request.cookies.get(ROLE_COOKIE)?.value ?? null
-      if (cachedRole) {
-        userRole = cachedRole
+    if (session) {
+      const raw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
+      const cached = raw ? decodeRoleCache(raw, session.user.id) : null
+      if (cached) {
+        userRole = cached
       } else {
         const { data: profile } = await supabase
           .from('profiles')
@@ -152,7 +157,7 @@ export async function middleware(request: NextRequest) {
         if (userRole) {
           response.cookies.set({
             name: ROLE_COOKIE,
-            value: userRole,
+            value: encodeRoleCache(session.user.id, userRole),
             httpOnly: true,
             sameSite: 'lax',
             path: '/',
