@@ -58,6 +58,56 @@ const webSearch: ToolHandler = async (params) => {
   }
 };
 
+const FETCH_URL_TIMEOUT_MS = 15_000;
+const MAX_PAGE_CHARS = 12_000;
+
+const fetchUrl: ToolHandler = async (params) => {
+  const url = (params.url as string | undefined)?.trim();
+  if (!url) return 'Необходимо указать URL.';
+
+  try {
+    new URL(url);
+  } catch {
+    return 'Некорректный URL. Укажи полный адрес с https://';
+  }
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PortalBot/1.0)' },
+      signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
+      redirect: 'follow',
+    });
+
+    if (!res.ok) return `Ошибка загрузки: HTTP ${res.status}`;
+
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/html') && !contentType.includes('text/plain')) {
+      return `Страница вернула неподдерживаемый тип: ${contentType}`;
+    }
+
+    const html = await res.text();
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&[a-z]+;/gi, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    if (!text) return 'Страница пуста или не содержит текстового контента.';
+
+    const truncated = text.length > MAX_PAGE_CHARS;
+    return truncated
+      ? `${text.slice(0, MAX_PAGE_CHARS)}\n\n[...обрезано, показано ${MAX_PAGE_CHARS} из ${text.length} символов]`
+      : text;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    if (msg.includes('AbortError') || msg.includes('timeout')) return 'Таймаут: страница не ответила за 15 секунд.';
+    return `Ошибка загрузки: ${msg}`;
+  }
+};
+
 const think: ToolHandler = async (params) => {
   const thought = params.thought as string | undefined;
   if (!thought) return 'Запиши свои мысли в параметр thought.';
@@ -73,6 +123,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   query_database: queryDb,
   search_knowledge_base: searchKb,
   web_search: webSearch,
+  fetch_url: fetchUrl,
   think,
   get_pipeline_status: getAgentPipelineStatus,
 };
