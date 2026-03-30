@@ -288,9 +288,31 @@ async function handleChat(
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
   await sleep(preReadDelay);
 
-  await client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 }));
+  try {
+    await client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 }));
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // Some accounts get rate-limited / partially frozen for read operations (MTProto error 420).
+    // We still want to reply; just skip marking as read.
+    if (errMsg.includes('FROZEN_METHOD_INVALID') || errMsg.includes('FrozenMethodInvalid')) {
+      log('warning', `${displayName}: не удалось отметить прочитанным (TG freeze) — продолжаю без ReadHistory`);
+    } else {
+      throw err;
+    }
+  }
 
-  const history = await client.getMessages(entity, { limit: tg.history_limit });
+  let history;
+  try {
+    history = await client.getMessages(entity, { limit: tg.history_limit });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // GramJS sometimes reports offset out-of-range for history pagination; a smaller retry is usually enough.
+    if (errMsg.includes("offset") && errMsg.includes('out of range')) {
+      history = await client.getMessages(entity, { limit: Math.min(20, Math.max(5, tg.history_limit)) });
+    } else {
+      throw err;
+    }
+  }
   const chatMessages: DialogMessage[] = [];
 
   for (const msg of history.reverse()) {
@@ -539,7 +561,12 @@ export async function runCampaignLoop(
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
 
-              if (errMsg.includes('PeerFloodError') || errMsg.includes('FloodWaitError') || errMsg.includes('FrozenMethodInvalidError')) {
+              if (
+                errMsg.includes('PeerFloodError') ||
+                errMsg.includes('FloodWaitError') ||
+                errMsg.includes('FrozenMethodInvalidError') ||
+                errMsg.includes('FROZEN_METHOD_INVALID')
+              ) {
                 const cooldownUntil = new Date(Date.now() + tg.account_cooldown_hours * 3600 * 1000).toISOString();
                 await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
                 (account as OutreachAccount).cooldown_until = cooldownUntil;
