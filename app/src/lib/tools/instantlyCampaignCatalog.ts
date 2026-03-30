@@ -49,22 +49,32 @@ export async function readInstantlyCampaignCatalog(): Promise<{
     return { campaigns: [], lastSyncedAt: null };
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('instantly_campaign_catalog')
-    .select('id,name,status,timestamp_created,timestamp_updated,synced_at');
+  const PAGE_SIZE = 1000;
+  const allRows: CatalogRow[] = [];
+  let from = 0;
 
-  if (error) {
-    throw new Error(error.message);
+  for (;;) {
+    const { data, error } = await supabaseAdmin
+      .from('instantly_campaign_catalog')
+      .select('id,name,status,timestamp_created,timestamp_updated,synced_at')
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) throw new Error(error.message);
+    if (!data?.length) break;
+
+    allRows.push(...(data as CatalogRow[]));
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
   }
 
-  if (!data?.length) {
+  if (!allRows.length) {
     return { campaigns: [], lastSyncedAt: null };
   }
 
   let maxSyncMs = 0;
   const campaigns: InstantlyCampaignItem[] = [];
 
-  for (const raw of data as CatalogRow[]) {
+  for (const raw of allRows) {
     if (raw.synced_at) {
       const m = Date.parse(raw.synced_at);
       if (Number.isFinite(m) && m > maxSyncMs) maxSyncMs = m;
