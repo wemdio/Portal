@@ -9,6 +9,7 @@ import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
 import { UserProvider } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
+import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
 
 const MD_BREAKPOINT = 768;
 
@@ -81,6 +82,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
+    <>
+    <PortalDocumentTitle />
     <UserProvider>
     <PortalLoadingProvider>
     <div
@@ -131,5 +134,6 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     </div>
     </PortalLoadingProvider>
     </UserProvider>
+    </>
   );
 }
