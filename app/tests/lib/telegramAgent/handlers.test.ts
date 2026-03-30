@@ -2,6 +2,7 @@
 
 const mockRpc = jest.fn();
 const mockHybridSearch = jest.fn();
+const mockSerperSearch = jest.fn();
 
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { rpc: (...args: unknown[]) => mockRpc(...args), from: jest.fn() },
@@ -9,6 +10,10 @@ jest.mock('@/lib/supabaseAdmin', () => ({
 
 jest.mock('@/lib/knowledgeBase/contextRetriever', () => ({
   hybridSearchChunks: (...args: unknown[]) => mockHybridSearch(...args),
+}));
+
+jest.mock('@/lib/parsers/serperSearch', () => ({
+  serperSearchDetailed: (...args: unknown[]) => mockSerperSearch(...args),
 }));
 
 jest.mock('@/lib/telegramAgent/pipeline', () => ({
@@ -23,11 +28,13 @@ beforeEach(() => {
 });
 
 describe('telegramAgent/handlers', () => {
-  it('exports query_database, search_knowledge_base and get_pipeline_status', () => {
+  it('exports all read tool handlers', () => {
     expect(typeof toolHandlers.query_database).toBe('function');
     expect(typeof toolHandlers.search_knowledge_base).toBe('function');
+    expect(typeof toolHandlers.web_search).toBe('function');
+    expect(typeof toolHandlers.think).toBe('function');
     expect(typeof toolHandlers.get_pipeline_status).toBe('function');
-    expect(Object.keys(toolHandlers)).toHaveLength(3);
+    expect(Object.keys(toolHandlers)).toHaveLength(5);
   });
 
   describe('query_database', () => {
@@ -169,6 +176,59 @@ describe('telegramAgent/handlers', () => {
         'test',
         { categories: undefined, limit: 5 },
       );
+    });
+  });
+
+  describe('web_search', () => {
+    it('rejects empty query', async () => {
+      const result = await toolHandlers.web_search({});
+      expect(result).toContain('поисковый запрос');
+    });
+
+    it('returns formatted search results', async () => {
+      mockSerperSearch.mockResolvedValue({
+        results: [
+          { query: 'test', title: 'Result 1', link: 'https://example.com', snippet: 'Snippet 1', position: 1 },
+          { query: 'test', title: 'Result 2', link: 'https://example.org', snippet: 'Snippet 2', position: 2 },
+        ],
+        debug: { request_url: '', status: 200, organic_count: 2 },
+      });
+
+      const result = await toolHandlers.web_search({ query: 'тест' });
+      expect(result).toContain('Result 1');
+      expect(result).toContain('https://example.com');
+      expect(result).toContain('Result 2');
+      expect(mockSerperSearch).toHaveBeenCalledWith('тест', { num: 5, gl: 'ru', hl: 'ru' });
+    });
+
+    it('respects num parameter capped at 10', async () => {
+      mockSerperSearch.mockResolvedValue({ results: [], debug: { request_url: '', status: 200, organic_count: 0 } });
+      await toolHandlers.web_search({ query: 'test', num: 50 });
+      expect(mockSerperSearch).toHaveBeenCalledWith('test', { num: 10, gl: 'ru', hl: 'ru' });
+    });
+
+    it('handles empty results', async () => {
+      mockSerperSearch.mockResolvedValue({ results: [], debug: { request_url: '', status: 200, organic_count: 0 } });
+      const result = await toolHandlers.web_search({ query: 'nonsense' });
+      expect(result).toContain('ничего не найдено');
+    });
+
+    it('handles missing API key', async () => {
+      mockSerperSearch.mockRejectedValue(new Error('SERPER_API_KEY is not set'));
+      const result = await toolHandlers.web_search({ query: 'test' });
+      expect(result).toContain('SERPER_API_KEY');
+    });
+  });
+
+  describe('think', () => {
+    it('returns the thought back', async () => {
+      const result = await toolHandlers.think({ thought: 'Plan: 1) query DB 2) search web' });
+      expect(result).toBe('Plan: 1) query DB 2) search web');
+    });
+
+    it('rejects empty thought', async () => {
+      const result = await toolHandlers.think({});
+      expect(result).toContain('thought');
     });
   });
 

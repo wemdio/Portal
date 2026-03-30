@@ -52,6 +52,35 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'web_search',
+      description: 'Поиск в интернете через Google. Используй для поиска трендов рынка, информации о конкурентах, новостей отрасли, актуальных данных. Возвращает топ результатов (заголовок + сниппет + ссылка).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Поисковый запрос' },
+          num: { type: 'number', description: 'Количество результатов (по умолчанию 5, макс 10)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'think',
+      description: 'Используй для планирования сложных задач. Запиши план анализа, гипотезы, промежуточные выводы. Инструмент вернет твой текст обратно — это твой блокнот.',
+      parameters: {
+        type: 'object',
+        properties: {
+          thought: { type: 'string', description: 'Твои мысли, план, промежуточные выводы' },
+        },
+        required: ['thought'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_pipeline_status',
       description: 'Получить статус пайплайна(ов). Без параметров — показать последние пайплайны текущего пользователя.',
       parameters: {
