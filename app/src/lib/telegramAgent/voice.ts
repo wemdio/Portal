@@ -97,7 +97,13 @@ export async function transcribeVoiceMessage(
   if (duration > MAX_DURATION_SECONDS) return null;
 
   try {
-    const oggBuffer = await downloadVoiceFile(fileId);
+    let oggBuffer: Buffer | null;
+    try {
+      oggBuffer = await downloadVoiceFile(fileId);
+    } catch (dlErr) {
+      await logError('telegram-agent.voice.download-error', dlErr);
+      return null;
+    }
     if (!oggBuffer) {
       await logAudit('telegram-agent.voice.download-fail', `fileId=${fileId}`, {});
       return null;
