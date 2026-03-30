@@ -111,7 +111,7 @@ describe('telegramAgent/agent', () => {
 
       await processMessage(100, testUser, 'Бесконечный цикл');
 
-      expect(mockCallLlm).toHaveBeenCalledTimes(3);
+      expect(mockCallLlm).toHaveBeenCalledTimes(10);
       expect(mockSendMessage).toHaveBeenCalledWith(
         100,
         expect.stringContaining('слишком сложным'),
