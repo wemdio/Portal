@@ -23,6 +23,7 @@ import {
   Pencil,
   Save,
   Briefcase,
+  Landmark,
 } from 'lucide-react';
 import type { KbCategory, KbDocument } from '@/lib/knowledgeBase/types';
 import { KB_CATEGORIES } from '@/lib/knowledgeBase/types';
@@ -52,6 +53,7 @@ const CATEGORY_ICONS: Record<KbCategory | 'all', React.ElementType> = {
   product_info: ShoppingBag,
   cases: Briefcase,
   client_chats: ScrollText,
+  banks: Landmark,
   other: FileText,
 };
 
@@ -62,6 +64,7 @@ const CATEGORY_LABELS: Record<KbCategory | 'all', string> = {
   product_info: 'О продукте',
   cases: 'Кейсы',
   client_chats: 'Рабочие чаты',
+  banks: 'Банковские выписки',
   other: 'Другое',
 };
 
