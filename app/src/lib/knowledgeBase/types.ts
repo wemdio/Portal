@@ -1,4 +1,4 @@
-export type KbCategory = 'sales_chats' | 'video_transcripts' | 'product_info' | 'client_chats' | 'other' | 'cases';
+export type KbCategory = 'sales_chats' | 'video_transcripts' | 'product_info' | 'client_chats' | 'other' | 'cases' | 'banks';
 export type KbSourceType = 'upload' | 'manual' | 'imported';
 export type KbDocStatus = 'processing' | 'ready' | 'error';
 
@@ -35,6 +35,7 @@ export const KB_CATEGORIES: { value: KbCategory; label: string }[] = [
   { value: 'product_info', label: 'О продукте' },
   { value: 'cases', label: 'Кейсы' },
   { value: 'client_chats', label: 'Рабочие чаты с клиентами' },
+  { value: 'banks', label: 'Банковские выписки' },
   { value: 'other', label: 'Другое' },
 ];
 
