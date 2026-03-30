@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
             { role: 'user', content: userMessage },
           ],
           temperature: 0.7,
-          max_tokens: 500,
+          max_tokens: 1500,
         }),
       });
     } catch (err) {

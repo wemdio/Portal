@@ -644,7 +644,7 @@ async function stepPersonalize(
         const content = await callOpenRouter(OPENROUTER_PERSONALIZATION_API_KEY, AI_MODEL, [
           { role: 'system', content: PERSONALIZATION_SYSTEM_PROMPT },
           { role: 'user', content: userMsg },
-        ], { temperature: 0.7, max_tokens: 500, title: 'Portal - DFYB Personalization' });
+        ], { temperature: 0.7, max_tokens: 1500, title: 'Portal - DFYB Personalization' });
         return [...row, content.trim()];
       } catch {
         return [...row, ''];
