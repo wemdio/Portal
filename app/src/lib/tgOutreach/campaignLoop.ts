@@ -549,7 +549,18 @@ export async function runCampaignLoop(
         }
 
         try {
-          const dialogs = await client.getDialogs({ limit: 20 });
+          let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
+          try {
+            dialogs = await client.getDialogs({ limit: 20 });
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            if (errMsg.includes('offset') && errMsg.includes('out of range')) {
+              // GramJS off-by-a-few bug in internal pagination; retry with smaller limit.
+              dialogs = await client.getDialogs({ limit: 10 });
+            } else {
+              throw err;
+            }
+          }
 
           for (const dialog of dialogs) {
             if (shouldStop()) break;

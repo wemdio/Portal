@@ -1,6 +1,8 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { scoreBriefCompanies, type BriefScoringResult } from '@/lib/briefScoring/scoring';
+import { startTrace } from '@/lib/tracer';
+import type { Span } from '@/lib/tracer';
 
 type QueueItem = {
   id: string;
@@ -159,6 +161,8 @@ export async function runBriefScoringJob(jobId: string) {
     return;
   }
 
+  let trace: Span | null = null;
+
   if (!OPENROUTER_BRIEF_API_KEY) {
     await logError(
       'brief.scoring.worker.missing_api_key',
@@ -189,6 +193,14 @@ export async function runBriefScoringJob(jobId: string) {
     }
 
     if (['failed', 'cancelled'].includes(job.status)) return;
+
+    trace = await startTrace({
+      name: 'database.brief_scoring',
+      input: { jobId, total: job.total },
+      message: `Скоринг по брифу (${job.total} компаний)`,
+      userId: job.user_id,
+      jobId,
+    });
 
     let processed = job.processed ?? 0;
     let success = job.success_count ?? 0;
@@ -375,8 +387,10 @@ export async function runBriefScoringJob(jobId: string) {
       success: completedCount,
       errors: failedCount,
     });
+    await trace?.end({ processed: processedTotal, success: completedCount, errors: failedCount, status: finalStatus });
   } catch (err) {
     await logError('brief.scoring.worker.failed', err, { jobId });
+    await trace?.fail(err);
     if (supabaseAdmin) {
       await supabaseAdmin
         .from('brief_scoring_jobs')
