@@ -1,5 +1,6 @@
 const TG_MAX_MESSAGE_LENGTH = 4096;
-const MAX_VOICE_SIZE = 20 * 1024 * 1024; // 20 MB
+const MAX_VOICE_SIZE = 20 * 1024 * 1024;
+const TG_FETCH_TIMEOUT_MS = 15_000;
 
 function getToken(): string {
   return process.env.TG_AGENT_BOT_TOKEN ?? '';
@@ -12,6 +13,7 @@ async function tgApi(method: string, body: Record<string, unknown>): Promise<voi
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
   });
 }
 
@@ -22,6 +24,7 @@ async function tgApiJson<T>(method: string, body: Record<string, unknown>): Prom
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) return null;
   const json = await res.json() as { ok: boolean; result?: T };
