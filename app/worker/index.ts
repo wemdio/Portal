@@ -18,6 +18,7 @@ import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWork
 import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
+import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
@@ -384,6 +385,17 @@ async function pollOnce(): Promise<boolean> {
     log('info', `Running lead import job ${leadImportJobId}`);
     await runLeadImportJob(leadImportJobId);
     return true;
+  }
+
+  // Instantly lead qualification: poll Instantly API for new reply emails and qualify via AI
+  try {
+    const qualCount = await pollAndQualifyReplies();
+    if (qualCount > 0) {
+      log('info', `Instantly lead qualification processed ${qualCount} reply(s)`);
+      return true;
+    }
+  } catch (err) {
+    log('warn', 'Instantly lead qualification poll failed', err);
   }
 
   // Low-priority continuous enrichment: probe phones for Telegram identity.
