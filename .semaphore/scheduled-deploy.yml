@@ -26,9 +26,14 @@ blocks:
               set -e
               COMMIT_SHA=$(git rev-parse HEAD)
               echo "Current main SHA: $COMMIT_SHA"
+              echo "CI egress: $(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || echo '<unknown>')"
+              # Без маскировки ошибки: иначе при таймауте LAST пустой и деплой идёт как «новый коммит» ~20 мин впустую.
+              # ConnectTimeout — не висеть минутами на мёртвом маршруте; keepalive — длинный remote-скрипт (docker pull).
+              SSH_BASE="-o StrictHostKeyChecking=no -o ConnectTimeout=60 -o ConnectionAttempts=2"
+              SSH_LONG="${SSH_BASE} -o ServerAliveInterval=30 -o ServerAliveCountMax=8"
 
-              LAST=$(sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
-                "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true") || true
+              LAST=$(sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+                "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true")
               echo "Last deployed SHA: ${LAST:-<none>}"
 
               if [ "$COMMIT_SHA" = "$LAST" ]; then
@@ -38,13 +43,13 @@ blocks:
 
               echo "[scheduled] New commits detected — pulling images and deploying."
 
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
 
-              sshpass -p "${SERVER_PASSWORD}" scp -o StrictHostKeyChecking=no \
+              sshpass -p "${SERVER_PASSWORD}" scp ${SSH_BASE} \
                 docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
-              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+              printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_LONG} ${USER}@${HOST} \
                 "set -e;
                 cd /home/Portal/prod;
                 chmod +x drain-worker.sh;
@@ -156,13 +161,13 @@ blocks:
               sleep 15
 
               echo "--- Docker container status ---"
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
                 "sudo -n docker ps -a --filter name=portal --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
 
               echo "--- Portal container logs (last 200 lines) ---"
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
                 "sudo -n docker logs portal --tail 200 2>&1" || true
 
-              sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no ${USER}@${HOST} \
+              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"
               echo "[scheduled] Saved last_deploy_sha on server."
