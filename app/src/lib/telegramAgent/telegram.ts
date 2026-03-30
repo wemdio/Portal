@@ -37,7 +37,7 @@ export async function downloadVoiceFile(fileId: string): Promise<Buffer | null> 
   if (file.file_size && file.file_size > MAX_VOICE_SIZE) return null;
 
   const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) return null;
 
   return Buffer.from(await res.arrayBuffer());
