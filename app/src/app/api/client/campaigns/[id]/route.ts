@@ -7,8 +7,11 @@ import {
   getCampaignAnalytics,
   getCampaignAnalyticsSteps,
 } from '@/lib/instantly/client';
+import { cached } from '@/lib/clientCache';
 
 export const dynamic = 'force-dynamic';
+
+const DETAIL_TTL = 5 * 60 * 1000;
 
 export async function GET(
   req: NextRequest,
@@ -26,9 +29,17 @@ export async function GET(
 
   try {
     const [campaign, analyticsData, stepsData] = await Promise.all([
-      getCampaign(campaignId),
-      getCampaignAnalytics({ campaign_id: campaignId }).catch(() => []),
-      getCampaignAnalyticsSteps({ campaign_id: campaignId }).catch(() => []),
+      cached(`instantly:campaign:${campaignId}`, () => getCampaign(campaignId), DETAIL_TTL),
+      cached(
+        `instantly:analytics:${campaignId}`,
+        () => getCampaignAnalytics({ campaign_id: campaignId }).catch(() => []),
+        DETAIL_TTL,
+      ),
+      cached(
+        `instantly:steps:${campaignId}`,
+        () => getCampaignAnalyticsSteps({ campaign_id: campaignId }).catch(() => []),
+        DETAIL_TTL,
+      ),
     ]);
 
     const analyticsArr = Array.isArray(analyticsData) ? analyticsData : [];

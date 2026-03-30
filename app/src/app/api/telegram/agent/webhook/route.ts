@@ -5,9 +5,10 @@ import { logError } from '@/lib/loggerServer';
 import { isInAppBotEnabled } from '@/lib/adminBots/inAppState';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 120;
 
 const recentMessages = new Set<string>();
-const DEDUP_TTL_MS = 120_000;
+const DEDUP_TTL_MS = 180_000;
 
 function isDuplicate(chatId: number, messageId: number): boolean {
   const key = `${chatId}:${messageId}`;
@@ -36,7 +37,7 @@ export async function POST(req: NextRequest) {
 
   if (msg?.from?.id && (msg.text || msg.voice)) {
     if (!isDuplicate(msg.chat.id, msg.message_id)) {
-      void handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
+      await handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
     }
   }
 
@@ -45,7 +46,7 @@ export async function POST(req: NextRequest) {
     | undefined;
 
   if (cbq) {
-    void handleCallbackQuery(cbq).catch((err) => logError('telegram-agent.callback.webhook.error', err));
+    await handleCallbackQuery(cbq).catch((err) => logError('telegram-agent.callback.webhook.error', err));
   }
 
   return NextResponse.json({ ok: true });

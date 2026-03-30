@@ -276,7 +276,8 @@ export default function ProfilePage() {
     if (userId && !userIsClient) void loadCampaignPrefs();
   }, [userId, userIsClient, loadCampaignPrefs]);
 
-  async function handleSaveCampaignPrefs() {
+  async function handleSaveCampaignPrefs(overrideIds?: string[]) {
+    const idsToSave = overrideIds ?? campaignPrefs;
     setSavingPrefs(true);
     setError('');
     try {
@@ -286,9 +287,12 @@ export default function ProfilePage() {
       const res = await fetch('/api/user/campaign-preferences', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
-        body: JSON.stringify({ campaign_ids: campaignPrefs }),
+        body: JSON.stringify({ campaign_ids: idsToSave }),
       });
-      if (!res.ok) throw new Error('Ошибка сохранения');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `Ошибка сохранения (${res.status})`);
+      }
       setMessage('Кампании для лидов сохранены');
     } catch (err) {
       setError(getErrorMessage(err));
@@ -730,7 +734,7 @@ export default function ProfilePage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setCampaignPrefs([]); void handleSaveCampaignPrefs(); }}
+                    onClick={() => { setCampaignPrefs([]); void handleSaveCampaignPrefs([]); }}
                     className="text-xs text-gray-400 hover:text-gray-600"
                   >
                     Сбросить
