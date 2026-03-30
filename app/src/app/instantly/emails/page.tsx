@@ -229,9 +229,28 @@ export default function EmailsPage() {
   const [typeFilter, setTypeFilter] = useState<'' | '2'>('');
 
   useEffect(() => {
-    instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all')
-      .then((d) => setCampaigns(d.items ?? []))
-      .catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        const all: Campaign[] = [];
+        let after: string | undefined;
+        do {
+          const url = after
+            ? `/campaigns?limit=100&starting_after=${after}`
+            : '/campaigns?limit=100';
+          const page = await instantlyFetch<{ items?: Campaign[]; next_starting_after?: string }>(url);
+          if (cancelled) return;
+          const items = page.items ?? [];
+          if (items.length === 0) break;
+          all.push(...items);
+          after = page.next_starting_after ?? undefined;
+        } while (after);
+        if (!cancelled) setCampaigns(all);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Ошибка загрузки кампаний');
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const loadEmails = useCallback(async (append = false) => {
