@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   Mail, Users, BarChart3, Send, Pause, FileText, ChevronRight,
-  Loader2, AlertCircle, Activity, ListChecks, AlertTriangle,
+  Loader2, AlertCircle, Activity, ListChecks, AlertTriangle, CheckCircle2,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { isAdmin } from '@/lib/roles';
@@ -70,6 +70,7 @@ function StatCard({ label, value, icon: Icon, href, color, loading: isLoading }:
 }
 
 const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: string; adminOnly?: boolean }[] = [
+  { label: 'Входящие лиды', href: '/instantly/incoming-leads', icon: CheckCircle2, desc: 'AI-квалификация входящих ответов: кто видел предложение и проявил интерес' },
   { label: 'Кампании', href: '/instantly/campaigns', icon: Send, desc: 'Создание, настройка и управление кампаниями' },
   { label: 'Аккаунты', href: '/instantly/accounts', icon: Mail, desc: 'Email-аккаунты, прогрев, статусы' },
   { label: 'Lead списки', href: '/instantly/lead-lists', icon: ListChecks, desc: 'Списки лидов и импорт баз' },
