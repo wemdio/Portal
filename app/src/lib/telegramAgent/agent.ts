@@ -141,7 +141,7 @@ export async function processMessage(chatId: number, user: AgentUser, text: stri
   await sendChatAction(chatId);
 
   const history = getHistory(chatId);
-  const systemMsg: ConversationMessage = { role: 'system', content: buildSystemPrompt(user) };
+  const systemMsg: ConversationMessage = { role: 'system', content: await buildSystemPrompt(user) };
   const userMsg: ConversationMessage = { role: 'user', content: text };
 
   const messages: ConversationMessage[] = [systemMsg, ...history, userMsg];
@@ -319,6 +319,8 @@ export async function handleAgentMessage(msg: {
   }
 
   try {
+    await logAudit('telegram-agent.incoming', `tgId=${telegramId} chat=${chatId} text=${text.slice(0, 60)}`, {});
+
     const user = await identifyUser(telegramId);
 
     if (!user) {
