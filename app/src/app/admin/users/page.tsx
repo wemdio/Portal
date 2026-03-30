@@ -221,10 +221,10 @@ export default function UsersPage() {
     if (allCampaigns.length > 0) return;
     setAllCampaignsLoading(true);
     try {
-      const res = await apiFetch<{ items: { id: string; name: string; status: number }[] }>(
-        '/api/instantly/campaigns?limit=all'
+      const res = await apiFetch<{ campaigns: { id: string; name: string; status?: number }[] }>(
+        '/api/tools/auto-report/campaigns'
       );
-      setAllCampaigns(res.items ?? []);
+      setAllCampaigns((res.campaigns ?? []).map((c) => ({ id: c.id, name: c.name, status: c.status ?? 0 })));
     } catch {
       setAllCampaigns([]);
     } finally {
