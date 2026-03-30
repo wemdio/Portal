@@ -14,7 +14,13 @@ import { exportParserResults } from './exportCsv';
 import { logError, logAudit } from '@/lib/loggerServer';
 import { transcribeVoiceMessage } from './voice';
 
-const MAX_TOOL_ITERATIONS = 3;
+const MAX_TOOL_ITERATIONS = 10;
+
+const PROGRESS_MESSAGES: Record<number, string> = {
+  3: '🔍 Анализирую данные...',
+  6: '🌐 Ищу дополнительную информацию...',
+  9: '📝 Формирую выводы...',
+};
 const CONFIRM_DATA = 'confirm';
 const CANCEL_DATA = 'cancel';
 
@@ -147,7 +153,9 @@ export async function processMessage(chatId: number, user: AgentUser, text: stri
   const messages: ConversationMessage[] = [systemMsg, ...history, userMsg];
   const newMessages: ConversationMessage[] = [userMsg];
 
+  let iterations = 0;
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
+    iterations = i + 1;
     const response = await callLlm(messages, ALL_TOOLS);
 
     if (response.toolCalls.length > 0) {
@@ -159,6 +167,10 @@ export async function processMessage(chatId: number, user: AgentUser, text: stri
       messages.push(assistantMsg);
       newMessages.push(assistantMsg);
 
+      const progressMsg = PROGRESS_MESSAGES[iterations];
+      if (progressMsg) {
+        await sendMessage(chatId, progressMsg);
+      }
       if (i < MAX_TOOL_ITERATIONS - 1) {
         await sendChatAction(chatId);
       }
@@ -174,6 +186,7 @@ export async function processMessage(chatId: number, user: AgentUser, text: stri
           const descriptions = pending.items.map((item) => item.description);
           const confirmText = buildConfirmationMessage(descriptions);
           await sendMessage(chatId, confirmText, CONFIRM_BUTTONS);
+          await logAudit('telegram-agent.loop', `iterations=${iterations} outcome=pending`, {});
           return;
         }
       }
@@ -186,9 +199,11 @@ export async function processMessage(chatId: number, user: AgentUser, text: stri
     newMessages.push(assistantFinal);
     pushMessages(chatId, newMessages);
     await sendMessage(chatId, finalText);
+    await logAudit('telegram-agent.loop', `iterations=${iterations} outcome=done`, {});
     return;
   }
 
+  await logAudit('telegram-agent.loop', `iterations=${iterations} outcome=max_reached`, {});
   const fallback = 'Извините, запрос оказался слишком сложным. Попробуйте переформулировать.';
   newMessages.push({ role: 'assistant', content: fallback });
   pushMessages(chatId, newMessages);
