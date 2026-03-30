@@ -27,13 +27,59 @@ blocks:
               COMMIT_SHA=$(git rev-parse HEAD)
               echo "Current main SHA: $COMMIT_SHA"
               echo "CI egress: $(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || echo '<unknown>')"
-              # Без маскировки ошибки: иначе при таймауте LAST пустой и деплой идёт как «новый коммит» ~20 мин впустую.
-              # ConnectTimeout — не висеть минутами на мёртвом маршруте; keepalive — длинный remote-скрипт (docker pull).
-              SSH_BASE="-o StrictHostKeyChecking=no -o ConnectTimeout=60 -o ConnectionAttempts=2"
+              # Без маскировки ошибки: иначе при таймауте LAST пустой и деплой идёт как «новый коммит» впустую.
+              # ConnectTimeout — не висеть на мёртвом маршруте; keepalive — длинный remote-скрипт (docker pull).
+              # Ретраи: «Connection closed by … port 22» часто при шторме брутфорса / MaxStartups — второй заход через паузу проходит.
+              SSH_BASE="-o StrictHostKeyChecking=no -o ConnectTimeout=60 -o ConnectionAttempts=2 -o TCPKeepAlive=yes"
               SSH_LONG="${SSH_BASE} -o ServerAliveInterval=30 -o ServerAliveCountMax=8"
+              SSH_RETRIES=4
+              SSH_RETRY_PAUSE=25
 
-              LAST=$(sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
-                "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true")
+              run_ssh() {
+                desc="$1"
+                remote="$2"
+                n=1
+                while [ "$n" -le "$SSH_RETRIES" ]; do
+                  if sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} "$remote"; then
+                    return 0
+                  fi
+                  echo "[scheduled] ${desc}: SSH не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                  n=$((n + 1))
+                  [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                done
+                return 1
+              }
+
+              run_scp() {
+                desc="$1"
+                shift
+                n=1
+                while [ "$n" -le "$SSH_RETRIES" ]; do
+                  if sshpass -p "${SERVER_PASSWORD}" scp ${SSH_BASE} "$@"; then
+                    return 0
+                  fi
+                  echo "[scheduled] ${desc}: scp не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                  n=$((n + 1))
+                  [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                done
+                return 1
+              }
+
+              LAST=""
+              ok_last=0
+              n=1
+              while [ "$n" -le "$SSH_RETRIES" ]; do
+                if t=$(sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+                  "cat /home/Portal/prod/last_deploy_sha 2>/dev/null || true"); then
+                  LAST="$t"
+                  ok_last=1
+                  break
+                fi
+                echo "[scheduled] чтение last_deploy_sha: попытка ${n}/${SSH_RETRIES} не удалась (сервер оборвал до входа?)" >&2
+                n=$((n + 1))
+                [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+              done
+              [ "$ok_last" = 1 ] || { echo "[scheduled] Не удалось подключиться по SSH после ${SSH_RETRIES} попыток. Проверь с сервера: ss -tn state established '( sport = :22 )' | wc -l и MaxStartups в sshd_config." >&2; exit 1; }
               echo "Last deployed SHA: ${LAST:-<none>}"
 
               if [ "$COMMIT_SHA" = "$LAST" ]; then
@@ -43,10 +89,10 @@ blocks:
 
               echo "[scheduled] New commits detected — pulling images and deploying."
 
-              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+              run_ssh "mkdir prod" \
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
 
-              sshpass -p "${SERVER_PASSWORD}" scp ${SSH_BASE} \
+              run_scp "copy compose files" \
                 docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
               printf '%s\n' "${DOCKER_PASSWORD}" | sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_LONG} ${USER}@${HOST} \
@@ -161,13 +207,13 @@ blocks:
               sleep 15
 
               echo "--- Docker container status ---"
-              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+              run_ssh "docker ps" \
                 "sudo -n docker ps -a --filter name=portal --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
 
               echo "--- Portal container logs (last 200 lines) ---"
-              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+              run_ssh "docker logs" \
                 "sudo -n docker logs portal --tail 200 2>&1" || true
 
-              sshpass -p "${SERVER_PASSWORD}" ssh ${SSH_BASE} ${USER}@${HOST} \
+              run_ssh "write last_deploy_sha" \
                 "echo $COMMIT_SHA > /home/Portal/prod/last_deploy_sha"
               echo "[scheduled] Saved last_deploy_sha on server."
