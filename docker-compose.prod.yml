@@ -352,6 +352,28 @@ services:
     networks:
       - portal-network
 
+  instantly-sync-bot:
+    image: ${DOCKER_USERNAME}/portal-instantly-sync-bot:prod
+    container_name: portal-instantly-sync-bot
+    env_file:
+      - .env
+    environment:
+      - POLZA_INSTANTLY_SYNC_BOT_API_KEY=${POLZA_INSTANTLY_SYNC_BOT_API_KEY}
+      - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
+      - INSTANTLY_PORTAL_API_KEY=${INSTANTLY_PORTAL_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - INSTANTLY_SYNC_BOT_CHAT_ID=${INSTANTLY_SYNC_BOT_CHAT_ID}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   atmos-bot:
     image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
     container_name: portal-atmos-bot
