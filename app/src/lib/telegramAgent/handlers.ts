@@ -108,6 +108,63 @@ const fetchUrl: ToolHandler = async (params) => {
   }
 };
 
+type TipTapNode = { type?: string; text?: string; content?: TipTapNode[] };
+
+function extractTipTapText(node: TipTapNode): string {
+  if (node.text) return node.text;
+  if (!node.content) return '';
+  return node.content.map(extractTipTapText).join(node.type === 'doc' || node.type === 'paragraph' ? '\n' : '');
+}
+
+const MAX_REGLAMENT_CHARS = 10_000;
+
+const searchReglament: ToolHandler = async (params) => {
+  if (!supabaseAdmin) return 'Supabase admin not configured.';
+
+  const { data, error } = await supabaseAdmin
+    .from('reglament_documents')
+    .select('title, summary, content')
+    .eq('status', 'published')
+    .order('order_index', { ascending: true });
+
+  if (error) return `Ошибка загрузки регламентов: ${error.message}`;
+  if (!data || data.length === 0) return 'Опубликованных регламентов не найдено.';
+
+  const query = ((params.query as string | undefined) ?? '').trim().toLowerCase();
+
+  const docs = (data as Array<{ title: string; summary?: string | null; content: TipTapNode }>).map((d) => ({
+    title: d.title,
+    summary: d.summary ?? '',
+    text: extractTipTapText(d.content),
+  }));
+
+  if (!query) {
+    return `Регламенты (${docs.length}):\n\n` + docs.map((d, i) =>
+      `${i + 1}. ${d.title}${d.summary ? `\n   ${d.summary}` : ''}`,
+    ).join('\n');
+  }
+
+  const matched = docs.filter((d) =>
+    d.title.toLowerCase().includes(query)
+    || d.summary.toLowerCase().includes(query)
+    || d.text.toLowerCase().includes(query),
+  );
+
+  if (matched.length === 0) return `По запросу «${query}» ничего не найдено в регламентах.`;
+
+  let result = '';
+  for (const d of matched) {
+    const block = `📄 ${d.title}\n${d.summary ? d.summary + '\n' : ''}\n${d.text}`;
+    if (result.length + block.length > MAX_REGLAMENT_CHARS) {
+      result += `\n\n[...ещё ${matched.length - matched.indexOf(d)} регламент(ов) не показано]`;
+      break;
+    }
+    result += (result ? '\n\n---\n\n' : '') + block;
+  }
+
+  return result;
+};
+
 const think: ToolHandler = async (params) => {
   const thought = params.thought as string | undefined;
   if (!thought) return 'Запиши свои мысли в параметр thought.';
@@ -122,6 +179,7 @@ const getAgentPipelineStatus: ToolHandler = async (params) => {
 export const toolHandlers: Record<string, ToolHandler> = {
   query_database: queryDb,
   search_knowledge_base: searchKb,
+  search_reglament: searchReglament,
   web_search: webSearch,
   fetch_url: fetchUrl,
   think,

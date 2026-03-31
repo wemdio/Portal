@@ -52,6 +52,19 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'search_reglament',
+      description: 'Поиск по регламентам компании. Используй когда пользователь спрашивает о правилах, процессах, регламентах, инструкциях, стандартах работы.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Поисковый запрос или тема (необязательно — без запроса вернет список всех регламентов)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'web_search',
       description: 'Поиск в интернете через Google. Используй для поиска трендов рынка, информации о конкурентах, новостей отрасли, актуальных данных. Возвращает топ результатов (заголовок + сниппет + ссылка).',
       parameters: {

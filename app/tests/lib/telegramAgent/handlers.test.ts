@@ -31,11 +31,12 @@ describe('telegramAgent/handlers', () => {
   it('exports all read tool handlers', () => {
     expect(typeof toolHandlers.query_database).toBe('function');
     expect(typeof toolHandlers.search_knowledge_base).toBe('function');
+    expect(typeof toolHandlers.search_reglament).toBe('function');
     expect(typeof toolHandlers.web_search).toBe('function');
     expect(typeof toolHandlers.fetch_url).toBe('function');
     expect(typeof toolHandlers.think).toBe('function');
     expect(typeof toolHandlers.get_pipeline_status).toBe('function');
-    expect(Object.keys(toolHandlers)).toHaveLength(6);
+    expect(Object.keys(toolHandlers)).toHaveLength(7);
   });
 
   describe('query_database', () => {
