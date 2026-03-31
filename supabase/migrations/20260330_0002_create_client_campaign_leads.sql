@@ -21,11 +21,13 @@ create index if not exists idx_client_campaign_leads_user_campaign
 
 alter table public.client_campaign_leads enable row level security;
 
+drop policy if exists "Clients can read own leads" on public.client_campaign_leads;
 create policy "Clients can read own leads"
   on public.client_campaign_leads
   for select
   using (client_user_id = auth.uid());
 
+drop policy if exists "Service role full access on client_campaign_leads" on public.client_campaign_leads;
 create policy "Service role full access on client_campaign_leads"
   on public.client_campaign_leads
   for all
