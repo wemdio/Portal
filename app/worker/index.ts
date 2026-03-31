@@ -19,10 +19,15 @@ import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
+import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
+
+// Interval for syncing Instantly campaign analytics to DB (used by client portal).
+// Default: 1 hour. Runs in parallel with the job poll loop.
+const ANALYTICS_SYNC_INTERVAL_MS = Number(process.env.WORKER_ANALYTICS_SYNC_INTERVAL_MS ?? String(60 * 60 * 1000));
 
 let shuttingDown = false;
 
@@ -524,6 +529,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// --------------------------------------------------------------------------
+// Periodic analytics sync (Instantly → DB) — runs independently of jobs
+// --------------------------------------------------------------------------
+
+async function analyticsSync(): Promise<void> {
+  try {
+    log('info', 'Syncing Instantly campaign analytics to DB...');
+    const { rows } = await syncInstantlyCampaignAnalytics();
+    log('info', `Analytics sync done: ${rows} campaign(s) updated`);
+  } catch (err) {
+    log('warn', 'Analytics sync failed', err);
+  }
+}
+
+async function analyticsSyncLoop(): Promise<void> {
+  // Run immediately on startup so fresh data is available right away,
+  // then repeat on the configured interval.
+  await analyticsSync();
+
+  while (!shuttingDown) {
+    await sleep(ANALYTICS_SYNC_INTERVAL_MS);
+    if (shuttingDown) break;
+    await analyticsSync();
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Portal worker (pid=${process.pid})`);
 
@@ -537,6 +568,9 @@ async function main(): Promise<void> {
   log('info', 'Running startup recovery...');
   await startupRecovery();
   log('info', 'Startup recovery done');
+
+  // Start analytics sync loop in the background (does not block job processing).
+  void analyticsSyncLoop();
 
   await pollLoop();
 }

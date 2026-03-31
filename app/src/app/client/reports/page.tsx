@@ -2,7 +2,13 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
+
+interface CampaignRow {
+  id: string;
+  name: string;
+  emails_sent_count: number | null;
+  reply_count: number | null;
+}
 
 interface ReportSummary {
   totalCampaigns: number;
@@ -24,8 +30,7 @@ interface ReportResponse {
 }
 
 export default function ClientReportsPage() {
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [analytics, setAnalytics] = useState<CampaignAnalytics[]>([]);
+  const [campaigns, setCampaigns] = useState<CampaignRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,9 +40,8 @@ export default function ClientReportsPage() {
   const loadCampaigns = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await clientApiFetch<{ campaigns: Campaign[]; analytics: CampaignAnalytics[] }>('/campaigns');
+      const data = await clientApiFetch<{ campaigns: CampaignRow[] }>('/campaigns');
       setCampaigns(data.campaigns ?? []);
-      setAnalytics(data.analytics ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
@@ -134,9 +138,8 @@ export default function ClientReportsPage() {
           {campaigns.length > 0 && (
             <div className="neu-card mb-6 max-h-64 overflow-y-auto">
               {campaigns.map((c, idx) => {
-                const a = analytics.find((x) => x.campaign_id === c.id);
-                const sent = Number(a?.emails_sent_count ?? 0);
-                const replied = Number(a?.reply_count ?? 0);
+                const sent = Number(c.emails_sent_count ?? 0);
+                const replied = Number(c.reply_count ?? 0);
                 const checked = selectedIds.has(c.id);
                 return (
                   <label
