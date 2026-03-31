@@ -305,6 +305,8 @@ services:
   yandexmaps:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
+    environment:
+      - YANDEXMAPS_CONCURRENCY=1
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -314,8 +316,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.5'
+          memory: 2048M
+          cpus: '1.0'
     restart: unless-stopped
     ports:
       - "8010:8000"
