@@ -163,6 +163,7 @@ export default function TasksPage() {
   const { userRole: currentUserRole, userFullName: currentUserName, userId: currentUserId } = useUser();
   const [allProfiles, setAllProfiles] = useState<ProfileOption[]>([]);
   const [userDefaultBoardId, setUserDefaultBoardId] = useState<string | null>(null);
+  const [boardPreferenceLoaded, setBoardPreferenceLoaded] = useState(false);
   const [savingDefaultBoard, setSavingDefaultBoard] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
@@ -209,12 +210,12 @@ export default function TasksPage() {
   }, []);
 
   useEffect(() => {
-    if (boards.length > 0 && selectedBoardId === null) {
+    if (boards.length > 0 && selectedBoardId === null && boardPreferenceLoaded) {
       const personalDefault = userDefaultBoardId ? boards.find((b) => b.id === userDefaultBoardId) : null;
       const systemDefault = boards.find((b) => b.is_default) ?? boards[0];
       setSelectedBoardId((personalDefault ?? systemDefault).id);
     }
-  }, [boards, selectedBoardId, userDefaultBoardId]);
+  }, [boards, selectedBoardId, userDefaultBoardId, boardPreferenceLoaded]);
 
   useEffect(() => {
     if (!taskModalTaskId) {
@@ -262,6 +263,7 @@ export default function TasksPage() {
           // non-critical — fall back to system default
         }
       }
+      setBoardPreferenceLoaded(true);
     } catch (error) {
       void logError('tasks.fetch.failed', error);
     } finally {
