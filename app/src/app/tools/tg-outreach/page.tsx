@@ -22,6 +22,7 @@ import {
   X,
   Network,
   Upload,
+  Ban,
 } from 'lucide-react';
 import type {
   OutreachCampaign,
@@ -266,7 +267,11 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== DIALOGS TAB =================== */
-function DialogsTab({ campaignId }: { campaignId: string }) {
+function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
+  campaignId: string;
+  campaign: OutreachCampaign;
+  onCampaignUpdate: () => void;
+}) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -310,6 +315,29 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
   const deleteDialog = async (id: string) => {
     const token = await getToken();
     await fetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    void fetchDialogs();
+  };
+
+  const addToBlacklist = async (dialog: OutreachDialog) => {
+    const token = await getToken();
+    const tg = campaign.telegram_settings as TelegramSettings;
+    const username = (dialog.tg_username ?? '').toLowerCase().replace(/^@/, '');
+    if (username) {
+      const current = (tg.blocked_usernames ?? []).map(u => u.trim().toLowerCase().replace(/^@/, ''));
+      if (!current.includes(username)) {
+        await fetch(`${API_BASE}/campaigns/${campaign.id}`, {
+          method: 'PUT', headers: authHeaders(token),
+          body: JSON.stringify({
+            telegram_settings: { ...tg, blocked_usernames: [...(tg.blocked_usernames ?? []), username] },
+          }),
+        });
+        onCampaignUpdate();
+      }
+    }
+    await fetch(`${API_BASE}/dialogs/${dialog.id}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ can_send: false }),
+    });
     void fetchDialogs();
   };
 
@@ -426,15 +454,14 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
-                      <label className="ml-2 inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-[10px] font-medium text-gray-700">
-                        <input
-                          type="checkbox"
-                          checked={d.can_send !== false}
-                          onChange={e => void updateDialog(d.id, { can_send: e.target.checked })}
-                          className="rounded border-gray-300"
-                        />
-                        Разрешить отправку
-                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void addToBlacklist(d)}
+                        className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition cursor-pointer"
+                      >
+                        <Ban className="h-3 w-3" />
+                        В черный список
+                      </button>
                       <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
                     <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
@@ -1041,7 +1068,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} campaign={campaign} onCampaignUpdate={onUpdate} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
       </div>
     </div>
