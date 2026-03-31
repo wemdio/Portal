@@ -21,15 +21,13 @@ import {
   Search,
   X,
   Network,
-  Tag,
-  Shield,
+  Upload,
+  Ban,
 } from 'lucide-react';
-import { AccountsTab as AccountPoolTab } from '@/components/tg-outreach/AccountsTab';
-import { ProxiesTab as ProxyPoolTab } from '@/components/tg-outreach/ProxiesTab';
-import { TagManager } from '@/components/tg-outreach/TagManager';
-import { useTgOutreachTags } from '@/lib/tgOutreach/hooks';
 import type {
   OutreachCampaign,
+  OutreachAccount,
+  OutreachProxy,
   OutreachDialog,
   OutreachProcessed,
   OutreachLog,
@@ -91,10 +89,15 @@ function SettingsTab({ campaign, onSave }: {
     },
   });
   const [saving, setSaving] = useState(false);
+  const [blockedRaw, setBlockedRaw] = useState(
+    (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
+  );
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(openai, telegram); } finally { setSaving(false); }
+    const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
+    const updatedTelegram = { ...telegram, blocked_usernames: parsed };
+    try { await onSave(openai, updatedTelegram); } finally { setSaving(false); }
   };
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
@@ -164,8 +167,8 @@ function SettingsTab({ campaign, onSave }: {
         </div>
         <Field
           label="Чёрный список username (через запятую)"
-          value={telegram.blocked_usernames.join(', ')}
-          onChange={v => setTG('blocked_usernames', v.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean))}
+          value={blockedRaw}
+          onChange={setBlockedRaw}
           placeholder="SpamBot, another_bot"
         />
       </section>
@@ -269,7 +272,11 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== DIALOGS TAB =================== */
-function DialogsTab({ campaignId }: { campaignId: string }) {
+function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
+  campaignId: string;
+  campaign: OutreachCampaign;
+  onCampaignUpdate: () => void;
+}) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -313,6 +320,29 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
   const deleteDialog = async (id: string) => {
     const token = await getToken();
     await fetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    void fetchDialogs();
+  };
+
+  const addToBlacklist = async (dialog: OutreachDialog) => {
+    const token = await getToken();
+    const tg = campaign.telegram_settings as TelegramSettings;
+    const username = (dialog.tg_username ?? '').toLowerCase().replace(/^@/, '');
+    if (username) {
+      const current = (tg.blocked_usernames ?? []).map(u => u.trim().toLowerCase().replace(/^@/, ''));
+      if (!current.includes(username)) {
+        await fetch(`${API_BASE}/campaigns/${campaign.id}`, {
+          method: 'PUT', headers: authHeaders(token),
+          body: JSON.stringify({
+            telegram_settings: { ...tg, blocked_usernames: [...(tg.blocked_usernames ?? []), username] },
+          }),
+        });
+        onCampaignUpdate();
+      }
+    }
+    await fetch(`${API_BASE}/dialogs/${dialog.id}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ can_send: false }),
+    });
     void fetchDialogs();
   };
 
@@ -429,15 +459,14 @@ function DialogsTab({ campaignId }: { campaignId: string }) {
                           {DIALOG_STATUS_LABELS[s]?.label}
                         </button>
                       ))}
-                      <label className="ml-2 inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-[10px] font-medium text-gray-700">
-                        <input
-                          type="checkbox"
-                          checked={d.can_send !== false}
-                          onChange={e => void updateDialog(d.id, { can_send: e.target.checked })}
-                          className="rounded border-gray-300"
-                        />
-                        Разрешить отправку
-                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void addToBlacklist(d)}
+                        className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition cursor-pointer"
+                      >
+                        <Ban className="h-3 w-3" />
+                        В черный список
+                      </button>
                       <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
                     <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
@@ -560,9 +589,412 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
   );
 }
 
+/* =================== CAMPAIGN ACCOUNTS TAB =================== */
+function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
+  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState('');
+  const [apiId, setApiId] = useState('');
+  const [apiHash, setApiHash] = useState('');
+  const [phone, setPhone] = useState('');
+  const [proxyId, setProxyId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const token = await getToken();
+    const [accRes, proxRes] = await Promise.all([
+      fetch(`${API_BASE}/accounts?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
+      fetch(`${API_BASE}/proxies?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
+    ]);
+    if (accRes.ok) {
+      const d = await accRes.json() as { items: OutreachAccount[] };
+      setAccounts(d.items);
+    }
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      setProxies(d.items);
+    }
+    setLoading(false);
+  }, [campaignId]);
+
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  const addAccount = async () => {
+    if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
+    setSaving(true);
+    const token = await getToken();
+    await fetch(`${API_BASE}/accounts`, {
+      method: 'POST', headers: authHeaders(token),
+      body: JSON.stringify({
+        campaign_id: campaignId,
+        session_name: sessionName.trim(),
+        api_id: Number(apiId),
+        api_hash: apiHash.trim(),
+        phone: phone.trim(),
+        proxy_id: proxyId || null,
+      }),
+    });
+    setSaving(false);
+    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId('');
+    setShowAdd(false);
+    void load();
+  };
+
+  const toggleActive = async (id: string, current: boolean) => {
+    const token = await getToken();
+    await fetch(`${API_BASE}/accounts/${id}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ is_active: !current }),
+    });
+    void load();
+  };
+
+  const deleteAccount = async (id: string) => {
+    if (!confirm('Удалить аккаунт?')) return;
+    const token = await getToken();
+    await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    void load();
+  };
+
+  const assignProxy = async (accountId: string, newProxyId: string) => {
+    const token = await getToken();
+    await fetch(`${API_BASE}/accounts/${accountId}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ proxy_id: newProxyId || null }),
+    });
+    setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, proxy_id: newProxyId || null } : a));
+    setEditingProxyFor(null);
+  };
+
+  const handleFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const token = await getToken();
+      const formData = new FormData();
+      Array.from(files).forEach(f => formData.append('files', f));
+      const res = await fetch(`${API_BASE}/accounts/bulk-files?campaign_id=${campaignId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) {
+        const d = await res.json() as { error?: string };
+        setUploadError(d.error ?? 'Ошибка загрузки');
+      }
+    } finally {
+      setUploading(false);
+      void load();
+    }
+    e.target.value = '';
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-sm font-medium text-gray-700">
+          Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
+        </span>
+        <div className="flex items-center gap-2">
+          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+            Загрузить файлы
+            <input type="file" multiple accept=".json,.session" className="hidden" onChange={e => { void handleFiles(e); }} />
+          </label>
+          <button type="button" onClick={() => setShowAdd(!showAdd)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
+            <Plus className="h-3.5 w-3.5" /> Добавить
+          </button>
+        </div>
+      </div>
+
+      {uploadError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
+      )}
+
+      {showAdd && (
+        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <label className="space-y-1 col-span-2">
+              <span className="text-[11px] font-medium text-gray-500">Session name</span>
+              <input value={sessionName} onChange={e => setSessionName(e.target.value)} placeholder="my_account"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">API ID</span>
+              <input type="number" value={apiId} onChange={e => setApiId(e.target.value)}
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">API Hash</span>
+              <input value={apiHash} onChange={e => setApiHash(e.target.value)}
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Телефон</span>
+              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Прокси</span>
+              <select value={proxyId} onChange={e => setProxyId(e.target.value)}
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400">
+                <option value="">Без прокси</option>
+                {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => { void addAccount(); }} disabled={saving || !sessionName.trim() || !apiId || !apiHash.trim()}
+              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
+            </button>
+            <button type="button" onClick={() => setShowAdd(false)}
+              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+      ) : accounts.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
+          <Users className="mx-auto h-8 w-8 text-gray-300 mb-2" />
+          <p className="text-xs text-gray-400">Нет аккаунтов. Добавьте вручную или загрузите файлы.</p>
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="grid grid-cols-[1fr_120px_150px_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50">
+            <span>Аккаунт</span><span>Телефон</span><span>Прокси</span><span>Активен</span><span />
+          </div>
+          {accounts.map(a => {
+            const proxy = proxies.find(p => p.id === a.proxy_id);
+            const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
+            return (
+              <div key={a.id} className="grid grid-cols-[1fr_120px_150px_80px_40px] gap-4 items-center px-4 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-gray-800 truncate">{a.session_name}</p>
+                  {onCooldown && (
+                    <p className="text-[10px] text-amber-600">
+                      Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                    </p>
+                  )}
+                </div>
+                <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
+                {editingProxyFor === a.id ? (
+                  <select
+                    autoFocus
+                    defaultValue={a.proxy_id ?? ''}
+                    onBlur={e => { void assignProxy(a.id, e.target.value); }}
+                    onChange={e => { void assignProxy(a.id, e.target.value); }}
+                    className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="">Без прокси</option>
+                    {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                  </select>
+                ) : (
+                  <button
+                    type="button"
+                    title="Назначить прокси"
+                    onClick={() => setEditingProxyFor(a.id)}
+                    className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
+                  >
+                    {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
+                  </button>
+                )}
+                <button type="button" onClick={() => { void toggleActive(a.id, a.is_active); }}
+                  className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+                  {a.is_active ? 'Да' : 'Нет'}
+                </button>
+                <button type="button" onClick={() => { void deleteAccount(a.id); }}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* =================== CAMPAIGN PROXIES TAB =================== */
+function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
+  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
+  const [url, setUrl] = useState('');
+  const [name, setName] = useState('');
+  const [bulkText, setBulkText] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}/proxies?campaign_id=${campaignId}`, { headers: authHeaders(token) });
+    if (res.ok) {
+      const d = await res.json() as { items: OutreachProxy[] };
+      setProxies(d.items);
+    }
+    setLoading(false);
+  }, [campaignId]);
+
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  const addProxy = async () => {
+    if (!url.trim()) return;
+    setSaving(true);
+    const token = await getToken();
+    await fetch(`${API_BASE}/proxies`, {
+      method: 'POST', headers: authHeaders(token),
+      body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
+    });
+    setSaving(false);
+    setUrl(''); setName(''); setShowAdd(false);
+    void load();
+  };
+
+  const addBulk = async () => {
+    const lines = bulkText.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    setSaving(true);
+    const token = await getToken();
+    for (const line of lines) {
+      await fetch(`${API_BASE}/proxies`, {
+        method: 'POST', headers: authHeaders(token),
+        body: JSON.stringify({ campaign_id: campaignId, url: line, name: '' }),
+      });
+    }
+    setSaving(false);
+    setBulkText(''); setShowBulk(false);
+    void load();
+  };
+
+  const toggleActive = async (id: string, current: boolean) => {
+    const token = await getToken();
+    await fetch(`${API_BASE}/proxies/${id}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ is_active: !current }),
+    });
+    void load();
+  };
+
+  const deleteProxy = async (id: string) => {
+    if (!confirm('Удалить прокси? Аккаунты с этим прокси будут отвязаны.')) return;
+    const token = await getToken();
+    await fetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    void load();
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-sm font-medium text-gray-700">
+          Прокси кампании <span className="text-gray-400 font-normal">({proxies.length})</span>
+        </span>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); }}
+            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            Массовое добавление
+          </button>
+          <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); }}
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
+            <Plus className="h-3.5 w-3.5" /> Добавить
+          </button>
+        </div>
+      </div>
+
+      {showAdd && (
+        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
+              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="socks5://user:pass@host:port"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Название (необязательно)</span>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Proxy 1"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => { void addProxy(); }} disabled={saving || !url.trim()}
+              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
+            </button>
+            <button type="button" onClick={() => setShowAdd(false)}
+              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+          </div>
+        </div>
+      )}
+
+      {showBulk && (
+        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+          <p className="text-xs text-gray-500">Введите по одному URL прокси на строку:</p>
+          <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
+            placeholder={'socks5://user:pass@host:port\nhttp://user:pass@host:port'}
+            className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
+          <div className="flex gap-2">
+            <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
+              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
+            </button>
+            <button type="button" onClick={() => setShowBulk(false)}
+              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+      ) : proxies.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
+          <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
+          <p className="text-xs text-gray-400">Нет прокси. Добавьте для этой кампании.</p>
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="grid grid-cols-[1fr_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50">
+            <span>URL / Название</span><span>Активен</span><span />
+          </div>
+          {proxies.map(p => (
+            <div key={p.id} className="grid grid-cols-[1fr_80px_40px] gap-4 items-center px-4 py-2.5">
+              <div className="min-w-0">
+                {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
+                <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
+              </div>
+              <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
+                className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+                {p.is_active ? 'Да' : 'Нет'}
+              </button>
+              <button type="button" onClick={() => { void deleteProxy(p.id); }}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
   { id: 'settings', label: 'Настройки', icon: Settings },
+  { id: 'accounts', label: 'Аккаунты', icon: Users },
+  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'processed', label: 'Обработанные', icon: UserCheck },
@@ -638,8 +1070,10 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 
       <div>
         {tab === 'settings' && <SettingsTab campaign={campaign} onSave={saveSettings} />}
+        {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
+        {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} campaign={campaign} onCampaignUpdate={onUpdate} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
       </div>
     </div>
@@ -808,99 +1242,12 @@ function CampaignsSection() {
   );
 }
 
-/* =================== ACCOUNT POOL SECTION =================== */
-function AccountPoolSection() {
-  const { tags, reload: reloadTags } = useTgOutreachTags();
-  const [showTagManager, setShowTagManager] = useState(false);
-
-  return (
-    <div className="min-w-0 flex-1 max-w-7xl space-y-6">
-      <header className="space-y-2">
-        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
-          <Shield className="h-3.5 w-3.5" />
-          Пул аккаунтов
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Управление аккаунтами</h1>
-            <p className="max-w-2xl text-sm text-gray-500">
-              Глобальный пул Telegram-аккаунтов. Добавляйте, настраивайте лимиты, проверяйте статус и разблокируйте.
-            </p>
-          </div>
-          <button type="button" onClick={() => setShowTagManager(true)}
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Tag className="h-3.5 w-3.5" /> Теги
-          </button>
-        </div>
-      </header>
-      <AccountPoolTab allTags={tags} onTagsChange={reloadTags} />
-      {showTagManager && <TagManager tags={tags} onClose={() => setShowTagManager(false)} onUpdate={reloadTags} />}
-    </div>
-  );
-}
-
-/* =================== PROXY POOL SECTION =================== */
-function ProxyPoolSection() {
-  const { tags, reload: reloadTags } = useTgOutreachTags();
-  const [showTagManager, setShowTagManager] = useState(false);
-
-  return (
-    <div className="min-w-0 flex-1 max-w-7xl space-y-6">
-      <header className="space-y-2">
-        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
-          <Network className="h-3.5 w-3.5" />
-          Пул прокси
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Управление прокси</h1>
-            <p className="max-w-2xl text-sm text-gray-500">
-              Глобальный пул прокси-серверов для Telegram-аккаунтов. Привязывайте к аккаунтам и отслеживайте использование.
-            </p>
-          </div>
-          <button type="button" onClick={() => setShowTagManager(true)}
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Tag className="h-3.5 w-3.5" /> Теги
-          </button>
-        </div>
-      </header>
-      <ProxyPoolTab allTags={tags} onTagsChange={reloadTags} />
-      {showTagManager && <TagManager tags={tags} onClose={() => setShowTagManager(false)} onUpdate={reloadTags} />}
-    </div>
-  );
-}
-
-/* =================== MAIN PAGE (TOP-LEVEL TABS) =================== */
-const TOP_TABS = [
-  { id: 'campaigns', label: 'Кампании', icon: MessageSquareMore },
-  { id: 'accounts', label: 'Аккаунты', icon: Users },
-  { id: 'proxies', label: 'Прокси', icon: Network },
-] as const;
-
-type TopTab = (typeof TOP_TABS)[number]['id'];
-
+/* =================== MAIN PAGE =================== */
 export default function TgOutreachPage() {
-  const [topTab, setTopTab] = useState<TopTab>('campaigns');
-
   return (
     <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl space-y-6">
-        <div className="flex gap-1 border-b border-gray-200">
-          {TOP_TABS.map(t => {
-            const Icon = t.icon;
-            return (
-              <button key={t.id} type="button" onClick={() => setTopTab(t.id)}
-                className={`inline-flex items-center gap-1.5 px-5 py-3 text-sm font-medium transition border-b-2 -mb-px cursor-pointer ${topTab === t.id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
-                <Icon className="h-4 w-4" />
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {topTab === 'campaigns' && <CampaignsSection />}
-        {topTab === 'accounts' && <AccountPoolSection />}
-        {topTab === 'proxies' && <ProxyPoolSection />}
+      <div className="min-w-0 flex-1 max-w-7xl">
+        <CampaignsSection />
       </div>
     </div>
   );

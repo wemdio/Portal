@@ -12,9 +12,12 @@ export function isStoppedByUser(status: ParserJobStatus, errorMessage?: string |
 export function JobStatus({ status, errorMessage }: { status: ParserJobStatus; errorMessage?: string | null }) {
   if (status === 'pending') {
     return (
-      <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">
+      <span
+        className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800"
+        title="Задача в очереди — воркер обрабатывает по одной задаче за раз"
+      >
         <Clock className="h-3.5 w-3.5 mr-1" />
-        Ожидание
+        В очереди
       </span>
     );
   }

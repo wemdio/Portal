@@ -2,7 +2,13 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
+
+interface CampaignRow {
+  id: string;
+  name: string;
+  emails_sent_count: number | null;
+  reply_count: number | null;
+}
 
 interface ReportSummary {
   totalCampaigns: number;
@@ -24,8 +30,7 @@ interface ReportResponse {
 }
 
 export default function ClientReportsPage() {
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [analytics, setAnalytics] = useState<CampaignAnalytics[]>([]);
+  const [campaigns, setCampaigns] = useState<CampaignRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,9 +40,8 @@ export default function ClientReportsPage() {
   const loadCampaigns = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await clientApiFetch<{ campaigns: Campaign[]; analytics: CampaignAnalytics[] }>('/campaigns');
+      const data = await clientApiFetch<{ campaigns: CampaignRow[] }>('/campaigns');
       setCampaigns(data.campaigns ?? []);
-      setAnalytics(data.analytics ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
@@ -112,25 +116,30 @@ export default function ClientReportsPage() {
         </div>
       ) : (
         <>
-          <div className="mb-4 flex items-center gap-3">
-            <button
-              onClick={selectAll}
-              className="text-xs font-semibold transition-colors"
-              style={{ color: 'var(--cp-accent)' }}
-            >
-              {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
-            </button>
-            <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-              {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
-            </span>
-          </div>
+          {campaigns.length === 0 ? (
+            <div className="neu-inset mb-4 rounded-2xl px-5 py-3.5 text-sm" style={{ color: 'var(--cp-text-l)' }}>
+              Нет доступных кампаний
+            </div>
+          ) : (
+            <div className="mb-4 flex items-center gap-3">
+              <button
+                onClick={selectAll}
+                className="text-xs font-semibold transition-colors"
+                style={{ color: 'var(--cp-accent)' }}
+              >
+                {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
+              </button>
+              <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
+                {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
+              </span>
+            </div>
+          )}
 
           {campaigns.length > 0 && (
             <div className="neu-card mb-6 max-h-64 overflow-y-auto">
               {campaigns.map((c, idx) => {
-                const a = analytics.find((x) => x.campaign_id === c.id);
-                const sent = Number(a?.emails_sent_count ?? 0);
-                const replied = Number(a?.reply_count ?? 0);
+                const sent = Number(c.emails_sent_count ?? 0);
+                const replied = Number(c.reply_count ?? 0);
                 const checked = selectedIds.has(c.id);
                 return (
                   <label
@@ -156,7 +165,7 @@ export default function ClientReportsPage() {
           <div className="mb-8">
             <button
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || campaigns.length === 0}
               className="neu-btn inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold w-full sm:w-auto justify-center"
             >
               {generating ? 'Генерация...' : 'Сформировать отчёт'}

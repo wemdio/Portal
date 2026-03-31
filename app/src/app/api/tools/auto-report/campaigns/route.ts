@@ -4,7 +4,6 @@ import { createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { fetchInstantlyCampaignsList } from '@/lib/tools/autoReportBuilder';
 import {
   readInstantlyCampaignCatalog,
-  syncInstantlyCampaignCatalog,
   isCatalogStale,
 } from '@/lib/tools/instantlyCampaignCatalog';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -40,14 +39,7 @@ export async function GET(_req: NextRequest) {
         try {
           if (supabaseAdmin) {
             const { campaigns, lastSyncedAt } = await readInstantlyCampaignCatalog();
-            const empty = campaigns.length === 0;
             const stale = isCatalogStale(lastSyncedAt);
-
-            if (empty || stale) {
-              void syncInstantlyCampaignCatalog(INSTANTLY_API_KEY).catch((err) => {
-                console.error('[instantly-catalog] background sync failed', err);
-              });
-            }
 
             return NextResponse.json({
               campaigns,
@@ -55,7 +47,7 @@ export async function GET(_req: NextRequest) {
                 source: 'database' as const,
                 lastSyncedAt,
                 stale,
-                backgroundSync: empty || stale,
+                backgroundSync: false,
               },
             });
           }

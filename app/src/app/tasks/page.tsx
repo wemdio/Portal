@@ -160,8 +160,11 @@ export default function TasksPage() {
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const [editingResultValue, setEditingResultValue] = useState('');
 
-  const { userRole: currentUserRole, userFullName: currentUserName } = useUser();
+  const { userRole: currentUserRole, userFullName: currentUserName, userId: currentUserId } = useUser();
   const [allProfiles, setAllProfiles] = useState<ProfileOption[]>([]);
+  const [userDefaultBoardId, setUserDefaultBoardId] = useState<string | null>(null);
+  const [boardPreferenceLoaded, setBoardPreferenceLoaded] = useState(false);
+  const [savingDefaultBoard, setSavingDefaultBoard] = useState(false);
 
   const [showAddForm, setShowAddForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -207,11 +210,12 @@ export default function TasksPage() {
   }, []);
 
   useEffect(() => {
-    if (boards.length > 0 && selectedBoardId === null) {
-      const defaultBoard = boards.find((b) => b.is_default) ?? boards[0];
-      setSelectedBoardId(defaultBoard.id);
+    if (boards.length > 0 && selectedBoardId === null && boardPreferenceLoaded) {
+      const personalDefault = userDefaultBoardId ? boards.find((b) => b.id === userDefaultBoardId) : null;
+      const systemDefault = boards.find((b) => b.is_default) ?? boards[0];
+      setSelectedBoardId((personalDefault ?? systemDefault).id);
     }
-  }, [boards, selectedBoardId]);
+  }, [boards, selectedBoardId, userDefaultBoardId, boardPreferenceLoaded]);
 
   useEffect(() => {
     if (!taskModalTaskId) {
@@ -223,6 +227,9 @@ export default function TasksPage() {
   async function loadData() {
     try {
       setLoading(true);
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
 
       const [projRes, taskRes, boardsRes, columnsRes, profilesRes] = await Promise.all([
         supabase.from('projects').select('*'),
@@ -242,6 +249,21 @@ export default function TasksPage() {
           .map(buildProfileOption)
           .filter((p) => p.value)
       );
+
+      if (token) {
+        try {
+          const prefRes = await fetch('/api/user/board-preference', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (prefRes.ok) {
+            const prefData = (await prefRes.json()) as { default_board_id: string | null };
+            setUserDefaultBoardId(prefData.default_board_id ?? null);
+          }
+        } catch {
+          // non-critical — fall back to system default
+        }
+      }
+      setBoardPreferenceLoaded(true);
     } catch (error) {
       void logError('tasks.fetch.failed', error);
     } finally {
@@ -629,6 +651,27 @@ export default function TasksPage() {
       void logError('tasks.board.add.failed', error);
     } finally {
       setAddingBoard(false);
+    }
+  }
+
+  async function handleSetDefaultBoard(boardId: string | null) {
+    setSavingDefaultBoard(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/user/board-preference', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ default_board_id: boardId }),
+      });
+      if (res.ok) {
+        setUserDefaultBoardId(boardId);
+      }
+    } catch (error) {
+      void logError('tasks.board.set-default.failed', error);
+    } finally {
+      setSavingDefaultBoard(false);
     }
   }
 
@@ -1151,10 +1194,28 @@ export default function TasksPage() {
                 <option value="">{boards.length === 0 ? 'Нет досок' : 'Выберите доску'}</option>
                 {sortedBoards.map((b) => (
                   <option key={b.id} value={b.id}>
-                    {b.name} {b.is_default ? '(по умолчанию)' : ''}
+                    {b.name}{b.id === userDefaultBoardId ? ' ★' : b.is_default && !userDefaultBoardId ? ' (по умолчанию)' : ''}
                   </option>
                 ))}
               </select>
+              {selectedBoardId && currentUserId && (
+                <button
+                  type="button"
+                  title={selectedBoardId === userDefaultBoardId ? 'Убрать как основную доску' : 'Сделать основной доской'}
+                  onClick={() => void handleSetDefaultBoard(selectedBoardId === userDefaultBoardId ? null : selectedBoardId)}
+                  disabled={savingDefaultBoard}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors disabled:opacity-50 ${
+                    selectedBoardId === userDefaultBoardId
+                      ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                      : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-amber-600'
+                  }`}
+                >
+                  <span>{selectedBoardId === userDefaultBoardId ? '★' : '☆'}</span>
+                  {!isTma && (
+                    <span>{selectedBoardId === userDefaultBoardId ? 'Основная' : 'Сделать основной'}</span>
+                  )}
+                </button>
+              )}
               {userIsLead && (
                 <>
                   <button

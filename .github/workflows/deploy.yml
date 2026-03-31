@@ -83,6 +83,13 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/portal-worker:prod
 
+      - name: Push instantly-sync-bot image to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/instantly-sync-bot
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/portal-instantly-sync-bot:prod
+
   deploy_to_prod_dir:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: self-hosted
@@ -100,8 +107,9 @@ jobs:
             cd /home/Portal/prod/
             echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
             sudo docker compose version
-            sudo docker compose -p portal -f docker-compose.prod.yml pull portal
+            sudo docker compose -p portal -f docker-compose.prod.yml pull portal instantly-sync-bot
             sudo docker ps -a --filter "label=com.docker.compose.service=portal" -q | xargs -r sudo docker rm -f
             sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal
+            sudo docker compose -p portal -f docker-compose.prod.yml up -d --no-deps instantly-sync-bot
             sudo docker image prune --force
             sudo docker volume prune --force

@@ -78,6 +78,20 @@ SUPABASE_REST_API_KEY = (
     or os.environ.get("SUPABASE_ANON_KEY")
     or ""
 )
+# Timeout specifically for PostgREST — higher than general HTTP_TIMEOUT because
+# Supabase projects can cold-start (wake from pause) in 30–60 s.
+HEALTH_POSTGREST_TIMEOUT_SEC = int(os.environ.get("HEALTH_POSTGREST_TIMEOUT_SEC", "30"))
+# How often to silently ping PostgREST to prevent Supabase from pausing (0 = disabled).
+SUPABASE_KEEPALIVE_INTERVAL_SEC = int(os.environ.get("SUPABASE_KEEPALIVE_INTERVAL_SEC", "600"))
+
+# Alert only after this many consecutive failed check cycles (default 2).
+# Set to 1 to restore legacy "alert on every failure" behaviour.
+HEALTH_ALERT_MIN_CONSECUTIVE = max(1, int(os.environ.get("HEALTH_ALERT_MIN_CONSECUTIVE", "2")))
+# Re-send an ongoing alert every this many additional failed cycles (0 = never repeat).
+HEALTH_ALERT_REPEAT_CYCLES = max(0, int(os.environ.get("HEALTH_ALERT_REPEAT_CYCLES", "15")))
+
+# Per-check consecutive-failure counters; reset to 0 on first success.
+_FAIL_COUNT: dict[str, int] = {}
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
@@ -363,19 +377,27 @@ async def poll_telegram_commands() -> None:
 # ── Individual checks ───────────────────────────────────────────────────────
 
 async def check_site() -> tuple[bool, str]:
-    try:
-        # Do not follow redirects: we want to validate the public entrypoint itself,
-        # not fail because an auth page or downstream route returns 5xx.
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
-            r = await c.get(PORTAL_URL)
-            # Treat any 2xx-3xx as OK (e.g. 307 -> /login is expected for unauth users)
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code}"
-            return True, f"OK ({r.status_code})"
-    except httpx.TimeoutException:
-        return False, "timeout"
-    except Exception as e:
-        return False, str(e)[:120]
+    # Do not follow redirects: validate the public entrypoint itself.
+    # 2xx-3xx are OK (307 → /login is expected for unauth users).
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+                r = await c.get(PORTAL_URL)
+                if r.status_code >= 400:
+                    last_error = f"HTTP {r.status_code}"
+                else:
+                    return True, f"OK ({r.status_code})"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            print(f"[health] site check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: {last_error}")
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, last_error
 
 
 async def check_critical_endpoint(path_or_url: str) -> tuple[bool, str, str]:
@@ -387,36 +409,62 @@ async def check_critical_endpoint(path_or_url: str) -> tuple[bool, str, str]:
     else:
         target = f"{PORTAL_URL.rstrip('/')}/{raw.lstrip('/')}"
 
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
-            r = await c.get(target)
-            if r.status_code >= 500:
-                return False, target, f"HTTP {r.status_code}"
-            return True, target, f"OK ({r.status_code})"
-    except httpx.TimeoutException:
-        return False, target, "timeout"
-    except Exception as e:
-        return False, target, _normalize_network_error(e)
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+                r = await c.get(target)
+                if r.status_code >= 500:
+                    last_error = f"HTTP {r.status_code}"
+                else:
+                    return True, target, f"OK ({r.status_code})"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, target, last_error
 
 
 async def check_postgrest() -> tuple[bool, str]:
-    """Check that PostgREST entrypoint is reachable (not 5xx/timeout)."""
+    """Check that PostgREST entrypoint is reachable (not 5xx/timeout).
+
+    Uses a longer timeout than general HTTP checks because Supabase projects may
+    cold-start (wake from pause) in 30–60 s.  Retries mirror check_db() logic.
+    """
     if not SUPABASE_REST_URL:
         return True, "not configured (skip)"
     headers = {}
     if SUPABASE_REST_API_KEY:
         headers["apikey"] = SUPABASE_REST_API_KEY
         headers["Authorization"] = f"Bearer {SUPABASE_REST_API_KEY}"
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
-            r = await c.get(SUPABASE_REST_URL, headers=headers)
-            if r.status_code >= 500:
-                return False, f"HTTP {r.status_code}"
-            return True, f"OK ({r.status_code})"
-    except httpx.TimeoutException:
-        return False, "timeout"
-    except Exception as e:
-        return False, _normalize_network_error(e)
+
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(
+                timeout=HEALTH_POSTGREST_TIMEOUT_SEC, follow_redirects=False
+            ) as c:
+                r = await c.get(SUPABASE_REST_URL, headers=headers)
+                if r.status_code >= 500:
+                    last_error = f"HTTP {r.status_code}"
+                else:
+                    return True, f"OK ({r.status_code})"
+        except httpx.TimeoutException:
+            last_error = f"timeout (>{HEALTH_POSTGREST_TIMEOUT_SEC}s)"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            print(
+                f"[health] PostgREST check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: {last_error}"
+            )
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, last_error
 
 
 async def check_db() -> tuple[bool, str, int | None, int | None]:
@@ -500,16 +548,24 @@ async def check_s3() -> tuple[bool, str]:
     """Check Supabase Storage / S3 availability via HEAD on the endpoint."""
     if not S3_ENDPOINT:
         return True, "not configured (skip)"
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as c:
-            r = await c.head(S3_ENDPOINT)
-            if r.status_code < 500:
-                return True, f"OK ({r.status_code})"
-            return False, f"HTTP {r.status_code}"
-    except httpx.TimeoutException:
-        return False, "timeout"
-    except Exception as e:
-        return False, str(e)[:120]
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as c:
+                r = await c.head(S3_ENDPOINT)
+                if r.status_code < 500:
+                    return True, f"OK ({r.status_code})"
+                last_error = f"HTTP {r.status_code}"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            print(f"[health] S3 check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: {last_error}")
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, last_error
 
 
 async def check_server() -> tuple[bool, str]:
@@ -530,17 +586,58 @@ async def check_server() -> tuple[bool, str]:
     return False, f"Сервер {SERVER_IP} не отвечает ни на одном порту (80/443/22)"
 
 
+# ── Consecutive-failure tracking ─────────────────────────────────────────────
+
+def _track(key: str, failed: bool) -> tuple[bool, bool]:
+    """Update consecutive-failure counter for *key*.
+
+    Returns ``(emit_alert, emit_recovery)``:
+    - ``emit_alert`` — True the first time failures reach HEALTH_ALERT_MIN_CONSECUTIVE,
+      then again every HEALTH_ALERT_REPEAT_CYCLES additional failures (if configured).
+    - ``emit_recovery`` — True on the first success after a sustained failure.
+    """
+    prev = _FAIL_COUNT.get(key, 0)
+    if failed:
+        count = prev + 1
+        _FAIL_COUNT[key] = count
+        if count == HEALTH_ALERT_MIN_CONSECUTIVE:
+            return True, False  # threshold just reached
+        if (
+            HEALTH_ALERT_REPEAT_CYCLES > 0
+            and count > HEALTH_ALERT_MIN_CONSECUTIVE
+            and (count - HEALTH_ALERT_MIN_CONSECUTIVE) % HEALTH_ALERT_REPEAT_CYCLES == 0
+        ):
+            return True, False  # periodic re-alert
+        return False, False
+    else:
+        _FAIL_COUNT[key] = 0
+        return False, prev >= HEALTH_ALERT_MIN_CONSECUTIVE  # recovery
+
+
 # ── Health check (every 5 min) ──────────────────────────────────────────────
 
 async def run_health_check():
-    """Check all services. Alert immediately on any failure."""
+    """Check all services. Alert on sustained failures (>= HEALTH_ALERT_MIN_CONSECUTIVE)."""
     global LAST_HEALTH_CHECK_TS
     LAST_HEALTH_CHECK_TS = asyncio.get_running_loop().time()
     problems: list[str] = []
+    recoveries: list[str] = []
+
+    def _check(key: str, failed: bool, problem_text: str, recovery_text: str) -> None:
+        emit_alert, emit_recovery = _track(key, failed)
+        count = _FAIL_COUNT.get(key, 0)
+        suffix = f" (×{count})" if failed and count > HEALTH_ALERT_MIN_CONSECUTIVE else ""
+        if emit_alert:
+            problems.append(problem_text + suffix)
+        if emit_recovery:
+            recoveries.append(recovery_text)
 
     site_ok, site_msg = await check_site()
-    if not site_ok:
-        problems.append(f"🔴 <b>Сайт</b> {PORTAL_URL}: {site_msg}")
+    _check(
+        "site", not site_ok,
+        f"🔴 <b>Сайт</b> {PORTAL_URL}: {site_msg}",
+        f"✅ <b>Сайт</b> {PORTAL_URL}: восстановлен",
+    )
 
     if CRITICAL_ENDPOINTS:
         endpoint_results = await asyncio.gather(
@@ -555,17 +652,26 @@ async def run_health_check():
             ok, endpoint, msg = outcome
             if not ok:
                 endpoint_failures.append(f"  ✖ {endpoint}: {msg}")
-        if endpoint_failures:
-            problems.append("🔴 <b>Критичные endpoint'ы</b>:\n" + "\n".join(endpoint_failures))
+        _check(
+            "endpoints", bool(endpoint_failures),
+            "🔴 <b>Критичные endpoint'ы</b>:\n" + "\n".join(endpoint_failures),
+            "✅ <b>Критичные endpoint'ы</b>: восстановлены",
+        )
 
     postgrest_ok, postgrest_msg = await check_postgrest()
-    if not postgrest_ok:
-        problems.append(f"🔴 <b>PostgREST</b> {SUPABASE_REST_URL}: {postgrest_msg}")
+    _check(
+        "postgrest", not postgrest_ok,
+        f"🔴 <b>PostgREST</b> {SUPABASE_REST_URL}: {postgrest_msg}",
+        f"✅ <b>PostgREST</b>: восстановлен",
+    )
 
     db_ok, db_msg, db_cur, db_max = await check_db()
-    if not db_ok:
-        problems.append(f"🔴 <b>БД</b>: {db_msg}")
-    elif db_cur is not None and db_max is not None:
+    _check(
+        "db", not db_ok,
+        f"🔴 <b>БД</b>: {db_msg}",
+        "✅ <b>БД</b>: восстановлена",
+    )
+    if db_ok and db_cur is not None and db_max is not None:
         usage_pct = db_cur / db_max * 100
         if usage_pct > 80:
             problems.append(
@@ -580,23 +686,40 @@ async def run_health_check():
         lines = [f"🔴 <b>Прокси</b>: {alive}/{total} работают"]
         for g, addr, msg in dead_proxies:
             lines.append(f"  ✖ [{g}] {addr}: {msg}")
-        problems.append("\n".join(lines))
+        proxy_problem = "\n".join(lines)
+    else:
+        proxy_problem = ""
+    _check(
+        "proxies", bool(dead_proxies),
+        proxy_problem,
+        "✅ <b>Прокси</b>: все работают",
+    )
 
     s3_ok, s3_msg = await check_s3()
-    if not s3_ok:
-        problems.append(f"🔴 <b>S3 хранилище</b>: {s3_msg}")
+    _check(
+        "s3", not s3_ok,
+        f"🔴 <b>S3 хранилище</b>: {s3_msg}",
+        "✅ <b>S3 хранилище</b>: восстановлено",
+    )
 
     srv_ok, srv_msg = await check_server()
-    if not srv_ok:
-        problems.append(f"🔴 <b>Сервер {SERVER_IP}</b>: {srv_msg}")
+    _check(
+        "server", not srv_ok,
+        f"🔴 <b>Сервер {SERVER_IP}</b>: {srv_msg}",
+        f"✅ <b>Сервер {SERVER_IP}</b>: восстановлен",
+    )
 
     if problems:
         header = f"⚠️ <b>HEALTH CHECK</b>  —  {_now_msk()}\n"
-        text = header + "\n" + "\n\n".join(problems)
-        await send_telegram(text)
+        await send_telegram(header + "\n" + "\n\n".join(problems))
         print(f"[health] ALERT sent: {len(problems)} problem(s)")
     else:
         print(f"[health] OK at {_now_msk()}")
+
+    if recoveries:
+        recovery_text = f"✅ <b>RECOVERED</b>  —  {_now_msk()}\n\n" + "\n".join(recoveries)
+        await send_telegram(recovery_text)
+        print(f"[health] RECOVERY sent: {len(recoveries)} item(s)")
 
     await _collect_metrics()
 
@@ -1109,6 +1232,29 @@ async def send_heartbeat():
         await send_telegram("\n\n".join(extra_parts))
 
 
+async def run_supabase_keepalive() -> None:
+    """Silently ping PostgREST to prevent the Supabase project from pausing.
+
+    Runs every SUPABASE_KEEPALIVE_INTERVAL_SEC (default 10 min).  No alert is
+    sent — keepalive failures are only logged.  The health check cycle handles
+    alerting independently.
+    """
+    if not SUPABASE_REST_URL or not SUPABASE_KEEPALIVE_INTERVAL_SEC:
+        return
+    headers: dict[str, str] = {}
+    if SUPABASE_REST_API_KEY:
+        headers["apikey"] = SUPABASE_REST_API_KEY
+        headers["Authorization"] = f"Bearer {SUPABASE_REST_API_KEY}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=HEALTH_POSTGREST_TIMEOUT_SEC, follow_redirects=False
+        ) as c:
+            r = await c.get(SUPABASE_REST_URL, headers=headers)
+            print(f"[health] keepalive PostgREST: {r.status_code}")
+    except Exception as e:
+        print(f"[health] keepalive PostgREST error: {_normalize_network_error(e)}")
+
+
 async def run_deadman_check():
     """Alert when health checks stop running on schedule."""
     if LAST_HEALTH_CHECK_TS <= 0:
@@ -1150,6 +1296,12 @@ async def main():
         seconds=HEARTBEAT_INTERVAL_SEC,
         id="heartbeat",
     )
+    if SUPABASE_KEEPALIVE_INTERVAL_SEC > 0 and SUPABASE_REST_URL:
+        scheduler.add_job(
+            run_supabase_keepalive, "interval",
+            seconds=SUPABASE_KEEPALIVE_INTERVAL_SEC,
+            id="supabase_keepalive",
+        )
 
     # Run first health check now
     await run_health_check()
@@ -1161,10 +1313,15 @@ async def main():
     poll_task = asyncio.create_task(poll_telegram_commands())
 
     proxy_count = len(ALL_PROXIES)
+    keepalive_info = (
+        f"keepalive every {SUPABASE_KEEPALIVE_INTERVAL_SEC}s"
+        if SUPABASE_KEEPALIVE_INTERVAL_SEC > 0 and SUPABASE_REST_URL
+        else "keepalive disabled"
+    )
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
         f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, "
-        f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s. "
+        f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s, {keepalive_info}. "
         "Commands in chat: /mute /вкл /alerts"
     )
 
