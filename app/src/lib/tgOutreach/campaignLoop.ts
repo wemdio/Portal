@@ -258,16 +258,6 @@ async function handleChat(
   const tgIsBot = Boolean(entity.bot);
   const displayName = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
 
-  await ensureDialogMeta(
-    db,
-    campaign.id,
-    account.id,
-    tgUserId,
-    tgUsername,
-    tgIsBot,
-    Boolean(tg.auto_allow_new_dialogs),
-  );
-
   const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
   if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) {
     log('info', `${displayName}: в чёрном списке username`);
@@ -280,6 +270,16 @@ async function handleChat(
   if (tg.ignore_no_username && !tgUsername) {
     return { replied: false, triggerType: null };
   }
+
+  await ensureDialogMeta(
+    db,
+    campaign.id,
+    account.id,
+    tgUserId,
+    tgUsername,
+    tgIsBot,
+    Boolean(tg.auto_allow_new_dialogs),
+  );
 
   if (await isProcessed(db, campaign.id, tgUserId)) {
     return { replied: false, triggerType: null };
