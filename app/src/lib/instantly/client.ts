@@ -74,8 +74,10 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new InstantlyApiError(`Instantly API ${res.status}: ${text}`, res.status, text);
+    const raw = await res.text().catch(() => '');
+    const isHtml = raw.trimStart().startsWith('<');
+    const detail = isHtml ? res.statusText || 'Service unavailable' : raw.slice(0, 300);
+    throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
   }
 
   if (res.status === 204) return undefined as T;
