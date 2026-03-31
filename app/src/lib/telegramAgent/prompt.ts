@@ -122,6 +122,9 @@ kb_documents(id uuid, user_id, title, category text, source_type, content_text, 
 kb_chunks(id uuid, document_id uuid, content, search_vector tsvector, created_at)
 kb_compiled_brief(id text, brief, token_count int, updated_at)
 
+-- Регламенты
+reglament_documents(id uuid, slug, title, status text, content jsonb, summary, order_index int, created_at, updated_at, published_at)
+
 TIPS ДЛЯ SQL:
 - Для задач текущего пользователя: WHERE user_id = '${user.userId}'
 - Для последних записей: ORDER BY created_at DESC LIMIT N
@@ -130,6 +133,7 @@ TIPS ДЛЯ SQL:
 - Для джойнов: JOIN profiles ON profiles.id = ...user_id
 - jsonb поля: config->>'text', steps->0->>'type'
 - Для поиска по базе знаний компании используй search_knowledge_base (гибридный поиск: текст + семантика). SQL по kb_* таблицам — для аналитики (количество документов и т.п.).
+- Для регламентов используй search_reglament (текст документов). SQL по reglament_documents — для аналитики (количество, даты).
 
 MULTI-STEP REASONING (до 10 итераций инструментов за один запрос):
 - Для сложных аналитических задач СНАЧАЛА вызови think, чтобы составить план: какие данные нужны, какие запросы выполнить, в каком порядке.
