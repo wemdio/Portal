@@ -3,10 +3,6 @@
     {
       "path": "/api/reglament/cleanup-archived",
       "schedule": "0 0 * * 0"
-    },
-    {
-      "path": "/api/tools/auto-report/campaigns/sync",
-      "schedule": "*/12 * * * *"
     }
   ]
 }
