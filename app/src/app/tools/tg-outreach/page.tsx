@@ -89,10 +89,15 @@ function SettingsTab({ campaign, onSave }: {
     },
   });
   const [saving, setSaving] = useState(false);
+  const [blockedRaw, setBlockedRaw] = useState(
+    (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
+  );
 
   const handleSave = async () => {
     setSaving(true);
-    try { await onSave(openai, telegram); } finally { setSaving(false); }
+    const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
+    const updatedTelegram = { ...telegram, blocked_usernames: parsed };
+    try { await onSave(openai, updatedTelegram); } finally { setSaving(false); }
   };
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
@@ -162,8 +167,8 @@ function SettingsTab({ campaign, onSave }: {
         </div>
         <Field
           label="Чёрный список username (через запятую)"
-          value={telegram.blocked_usernames.join(', ')}
-          onChange={v => setTG('blocked_usernames', v.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean))}
+          value={blockedRaw}
+          onChange={setBlockedRaw}
           placeholder="SpamBot, another_bot"
         />
       </section>
