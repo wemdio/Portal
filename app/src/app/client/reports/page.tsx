@@ -112,18 +112,24 @@ export default function ClientReportsPage() {
         </div>
       ) : (
         <>
-          <div className="mb-4 flex items-center gap-3">
-            <button
-              onClick={selectAll}
-              className="text-xs font-semibold transition-colors"
-              style={{ color: 'var(--cp-accent)' }}
-            >
-              {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
-            </button>
-            <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-              {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
-            </span>
-          </div>
+          {campaigns.length === 0 ? (
+            <div className="neu-inset mb-4 rounded-2xl px-5 py-3.5 text-sm" style={{ color: 'var(--cp-text-l)' }}>
+              Нет доступных кампаний
+            </div>
+          ) : (
+            <div className="mb-4 flex items-center gap-3">
+              <button
+                onClick={selectAll}
+                className="text-xs font-semibold transition-colors"
+                style={{ color: 'var(--cp-accent)' }}
+              >
+                {selectedIds.size === campaigns.length ? 'Снять все' : 'Выбрать все'}
+              </button>
+              <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
+                {selectedIds.size > 0 ? `Выбрано: ${selectedIds.size}` : 'Все кампании'}
+              </span>
+            </div>
+          )}
 
           {campaigns.length > 0 && (
             <div className="neu-card mb-6 max-h-64 overflow-y-auto">
@@ -156,7 +162,7 @@ export default function ClientReportsPage() {
           <div className="mb-8">
             <button
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || campaigns.length === 0}
               className="neu-btn inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold w-full sm:w-auto justify-center"
             >
               {generating ? 'Генерация...' : 'Сформировать отчёт'}

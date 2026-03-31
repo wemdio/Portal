@@ -1336,6 +1336,8 @@ export default function AutoReportPage() {
               setReport(reportData);
               setReportCreatedAt(now);
               setProgress(null);
+              setSelectedIds(new Set());
+              setSearchQuery('');
               const saved: SavedReport = {
                 id: crypto.randomUUID?.() ?? `report-${Date.now()}`,
                 createdAt: now,
