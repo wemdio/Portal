@@ -571,6 +571,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const [phone, setPhone] = useState('');
   const [proxyId, setProxyId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -627,6 +628,16 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
     const token = await getToken();
     await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE', headers: authHeaders(token) });
     void load();
+  };
+
+  const assignProxy = async (accountId: string, newProxyId: string) => {
+    const token = await getToken();
+    await fetch(`${API_BASE}/accounts/${accountId}`, {
+      method: 'PUT', headers: authHeaders(token),
+      body: JSON.stringify({ proxy_id: newProxyId || null }),
+    });
+    setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, proxy_id: newProxyId || null } : a));
+    setEditingProxyFor(null);
   };
 
   const handleFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -746,7 +757,27 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
                   )}
                 </div>
                 <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
-                <span className="text-xs text-gray-500 truncate">{proxy ? (proxy.name || proxy.url) : '—'}</span>
+                {editingProxyFor === a.id ? (
+                  <select
+                    autoFocus
+                    defaultValue={a.proxy_id ?? ''}
+                    onBlur={e => { void assignProxy(a.id, e.target.value); }}
+                    onChange={e => { void assignProxy(a.id, e.target.value); }}
+                    className="w-full rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="">Без прокси</option>
+                    {proxies.map(p => <option key={p.id} value={p.id}>{p.name || p.url}</option>)}
+                  </select>
+                ) : (
+                  <button
+                    type="button"
+                    title="Назначить прокси"
+                    onClick={() => setEditingProxyFor(a.id)}
+                    className="w-full text-left text-xs truncate rounded px-1 py-0.5 hover:bg-indigo-50 hover:text-indigo-700 transition cursor-pointer group"
+                  >
+                    {proxy ? (proxy.name || proxy.url) : <span className="text-gray-300 group-hover:text-indigo-400">—</span>}
+                  </button>
+                )}
                 <button type="button" onClick={() => { void toggleActive(a.id, a.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
