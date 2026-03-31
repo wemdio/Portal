@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { filterAllowedIds } from '@/lib/clientAccess';
-import { listAllLeads, listAllCampaigns } from '@/lib/instantly/client';
-import type { Campaign } from '@/lib/instantly/types';
+import { listAllLeads, listAllCampaigns, getCampaignAnalytics } from '@/lib/instantly/client';
+import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { cached, invalidate } from '@/lib/clientCache';
 
@@ -27,9 +27,27 @@ export async function POST(req: NextRequest) {
   try {
     let totalSynced = 0;
 
+    const analytics = await cached<CampaignAnalytics[]>(
+      'instantly:analytics:all',
+      () => getCampaignAnalytics({}).catch(() => [] as CampaignAnalytics[]),
+      CAMPAIGNS_TTL,
+    );
+    const leadsCountMap = new Map(
+      analytics.map((a) => [a.campaign_id, Number(a.leads_count ?? 0)]),
+    );
+
     for (const campaignId of allowedCampaignIds) {
-      const rawLeads = await listAllLeads(campaignId, 10_000);
-      const leads = rawLeads.filter((l) => l.campaign_id === campaignId);
+      if ((leadsCountMap.get(campaignId) ?? 0) === 0) {
+        await supabaseAdmin
+          .from('client_instantly_access')
+          .update({ leads_synced_at: new Date().toISOString() })
+          .eq('client_user_id', userId)
+          .eq('resource_type', 'campaign')
+          .eq('resource_id', campaignId);
+        continue;
+      }
+
+      const leads = await listAllLeads(campaignId, 10_000);
 
       if (leads.length > 0) {
         const rows = leads.map((l) => ({
