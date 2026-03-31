@@ -7,8 +7,8 @@ import {
   type InstantlyCampaignItem,
 } from '@/lib/tools/autoReportBuilder';
 
-/** Интервал, после которого фоново перезапрашиваем каталог у Instantly (мс). */
-export const INSTANTLY_CATALOG_STALE_MS = 12 * 60 * 1000;
+/** Порог актуальности каталога (синхронизация ведётся TG-ботом раз в час). */
+export const INSTANTLY_CATALOG_STALE_MS = 65 * 60 * 1000;
 
 const NAME_MAX_LEN = 2000;
 
