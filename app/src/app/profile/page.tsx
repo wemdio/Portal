@@ -541,7 +541,7 @@ export default function ProfilePage() {
 
         <div className="min-w-0 flex-1 flex flex-col min-h-[96px]">
           <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold tracking-tight text-gray-900`}>
-            Профиль
+            Профиль специалиста портала
           </h1>
           <p className="mt-1 text-sm text-gray-500 truncate">
             {displayName}{roleLabel ? ` · ${roleLabel}` : ''}

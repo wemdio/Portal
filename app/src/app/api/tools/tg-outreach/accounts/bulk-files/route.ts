@@ -86,6 +86,15 @@ export async function POST(req: NextRequest) {
 
       if (ordered.length === 0) return jsonError('Нет валидных JSON-файлов с аккаунтами', 400);
 
+      // Verify campaign belongs to the authenticated user before inserting
+      const { data: campaign, error: campaignError } = await auth.supabase
+        .from('tg_outreach_campaigns')
+        .select('id')
+        .eq('id', campaignId)
+        .single();
+
+      if (campaignError || !campaign) return jsonError('Кампания не найдена или нет доступа', 403);
+
       const insertRows = ordered.map(({ acc }) => ({
         campaign_id: campaignId,
         session_name: acc.session_name,
@@ -97,7 +106,8 @@ export async function POST(req: NextRequest) {
         is_active: true,
       }));
 
-      const { data: inserted, error: insertError } = await auth.supabase
+      const db = supabaseAdmin ?? auth.supabase;
+      const { data: inserted, error: insertError } = await db
         .from('tg_outreach_accounts')
         .insert(insertRows)
         .select('id, session_name');
@@ -118,7 +128,7 @@ export async function POST(req: NextRequest) {
           if (uploadErr) {
             return jsonError(`Не удалось загрузить .session для ${base}: ${uploadErr.message}`, 500);
           }
-          await auth.supabase
+          await db
             .from('tg_outreach_accounts')
             .update({ session_file_path: path })
             .eq('id', row.id);

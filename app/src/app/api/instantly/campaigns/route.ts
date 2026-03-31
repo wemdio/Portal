@@ -1,9 +1,18 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
-import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
+import {
+  upsertInstantlyCatalogFromCampaign,
+  readInstantlyCampaignCatalog,
+  syncInstantlyCampaignCatalog,
+  isCatalogStale,
+} from '@/lib/tools/instantlyCampaignCatalog';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
+
+const INSTANTLY_API_KEY =
+  (process.env.INSTANTLY_API_KEY ?? process.env.INSTANTLY_PORTAL_API_KEY ?? '').trim();
 
 export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
@@ -13,6 +22,23 @@ export const GET = withAuth(async (req) => {
   const tag_ids = url.searchParams.get('tag_ids') ?? undefined;
 
   if (limit === 'all') {
+    if (supabaseAdmin && INSTANTLY_API_KEY) {
+      const { campaigns, lastSyncedAt } = await readInstantlyCampaignCatalog();
+      const empty = campaigns.length === 0;
+      const stale = isCatalogStale(lastSyncedAt);
+
+      if (empty || stale) {
+        void syncInstantlyCampaignCatalog(INSTANTLY_API_KEY).catch((err) => {
+          console.error('[instantly-catalog] background sync failed', err);
+        });
+      }
+
+      if (!empty) {
+        return NextResponse.json({ items: campaigns });
+      }
+    }
+
+    // Fallback: БД недоступна или пуста — тянем напрямую из Instantly
     const campaigns = await instantly.listAllCampaigns();
     return NextResponse.json({ items: campaigns });
   }
