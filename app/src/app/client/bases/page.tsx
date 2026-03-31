@@ -44,7 +44,8 @@ export default function ClientBasesPage() {
         doSync(false);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      const msg = err instanceof Error ? err.message : 'Ошибка загрузки';
+      setError(msg.length > 200 || msg.includes('<') ? 'Ошибка загрузки данных. Попробуйте позже.' : msg);
     } finally {
       setLoading(false);
     }
@@ -58,7 +59,10 @@ export default function ClientBasesPage() {
       const data = await clientApiFetch<BasesResponse>('/bases/sync', { method: 'POST' });
       setCampaigns(data.campaigns ?? []);
     } catch (err) {
-      if (manual) setError(err instanceof Error ? err.message : 'Ошибка синхронизации');
+      if (manual) {
+        const msg = err instanceof Error ? err.message : 'Ошибка синхронизации';
+        setError(msg.length > 200 || msg.includes('<') ? 'Ошибка синхронизации. Попробуйте позже.' : msg);
+      }
     } finally {
       setSyncing(false);
     }
