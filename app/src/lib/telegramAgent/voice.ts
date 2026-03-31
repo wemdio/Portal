@@ -5,7 +5,7 @@ import { logError, logAudit } from '@/lib/loggerServer';
 const MAX_DURATION_SECONDS = 300;
 const FETCH_TIMEOUT_MS = 30_000;
 const REQUESTY_BASE = 'https://router.requesty.ai/v1';
-const TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
+const TRANSCRIBE_MODEL = 'openai/gpt-4o-mini-transcribe';
 
 function getTranscriptApiKey(): string {
   return (process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? '').trim()
