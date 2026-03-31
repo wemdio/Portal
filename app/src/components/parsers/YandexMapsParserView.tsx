@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import type { YandexMapsJob, YandexMapsLinkRow, YandexMapsOrganizationRow } from '@/types/parsers';
+import type { QueueStatusResponse } from '@/app/api/parsers/yandexmaps/queue-status/route';
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
@@ -52,6 +53,7 @@ export function YandexMapsParserView() {
   const [loadingResults, setLoadingResults] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
+  const [queueStatus, setQueueStatus] = useState<QueueStatusResponse | null>(null);
   const { flag: refreshed, trigger: triggerRefreshed } = useTimedFlag(1200);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
@@ -88,6 +90,15 @@ export function YandexMapsParserView() {
     }
   }, []);
 
+  const refreshQueueStatus = useCallback(async () => {
+    try {
+      const data = await apiFetch<QueueStatusResponse>('/api/parsers/yandexmaps/queue-status');
+      setQueueStatus(data);
+    } catch {
+      // non-critical, ignore
+    }
+  }, [apiFetch]);
+
   const loadLinks = useCallback(async (jobId: string) => {
     const data = await apiFetch<{ links: YandexMapsLinkRow[] }>(`/api/parsers/yandexmaps/${jobId}/links`);
     const lines = (data.links ?? []).map((l) => l.link).filter(Boolean);
@@ -106,7 +117,8 @@ export function YandexMapsParserView() {
 
   useEffect(() => {
     refreshJobs();
-  }, [refreshJobs]);
+    void refreshQueueStatus();
+  }, [refreshJobs, refreshQueueStatus]);
 
   useEffect(() => {
     if (!activeJobId) {
@@ -123,12 +135,13 @@ export function YandexMapsParserView() {
     if (activeJob.status === 'running' || activeJob.status === 'pending') {
       const interval = window.setInterval(() => {
         void refreshJobs();
+        void refreshQueueStatus();
         void loadLinks(activeJobId);
         void loadResults(activeJobId);
       }, 5000);
       return () => window.clearInterval(interval);
     }
-  }, [activeJob, activeJobId, refreshJobs, loadLinks, loadResults]);
+  }, [activeJob, activeJobId, refreshJobs, refreshQueueStatus, loadLinks, loadResults]);
 
   const handleCreate = useCallback(async (payload: {
     search_urls: string[];
@@ -593,15 +606,76 @@ export function YandexMapsParserView() {
                               )}
                             </>
                           )}
-                          {activeJob.status === 'pending' && (
-                            <span className="inline-flex items-center gap-1.5 text-sm text-gray-500">
-                              <svg className="h-4 w-4 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                              </svg>
-                              Ожидание запуска...
-                            </span>
-                          )}
+                          {activeJob.status === 'pending' && (() => {
+                            const pendingJobs = jobs.filter((j) => j.status === 'pending').sort((a, b) => a.created_at.localeCompare(b.created_at));
+                            const posInQueue = pendingJobs.findIndex((j) => j.id === activeJob.id) + 1;
+                            const qs = queueStatus;
+                            const runningJobs = qs?.running_jobs ?? [];
+                            const freeSlots = qs?.free_slots ?? 0;
+                            return (
+                              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 max-w-sm space-y-2">
+                                <div className="flex items-center gap-1.5 font-medium">
+                                  <svg className="h-4 w-4 animate-spin text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                  </svg>
+                                  В очереди{posInQueue > 1 ? ` — позиция ${posInQueue}` : ''}
+                                </div>
+                                {freeSlots > 0 ? (
+                                  <p className="text-xs text-amber-800">Слот освободился, запуск начнётся в ближайшие секунды...</p>
+                                ) : runningJobs.length > 0 ? (
+                                  <div className="space-y-2">
+                                    <p className="text-xs text-amber-800">
+                                      Сейчас выполняется {runningJobs.length} из 2 задач. Ваша запустится, как только освободится слот.
+                                    </p>
+                                    {runningJobs.map((rj, i) => {
+                                      const stageLabel = (() => {
+                                        const s = rj.progress_stage ?? '';
+                                        if (s.startsWith('collecting_links:')) return `Сбор ссылок (URL ${s.split(':')[1]})`;
+                                        if (s === 'collecting_links') return 'Сбор ссылок';
+                                        if (s === 'links_collected') return 'Ссылки собраны';
+                                        if (s.startsWith('parsing_organizations:')) return `Парсинг (${s.split(':')[1]})`;
+                                        if (s === 'parsing_organizations') return 'Парсинг организаций';
+                                        return s || 'Запускается';
+                                      })();
+                                      const pct = rj.total_organizations > 0
+                                        ? Math.round((rj.processed_organizations / rj.total_organizations) * 100)
+                                        : rj.total_links > 0
+                                          ? Math.round((rj.processed_links / rj.total_links) * 100)
+                                          : null;
+                                      const elapsed = rj.started_at
+                                        ? Math.floor((Date.now() - new Date(rj.started_at).getTime()) / 60000)
+                                        : null;
+                                      return (
+                                        <div key={i} className="rounded border border-amber-200 bg-white/60 px-2.5 py-2 text-xs">
+                                          <div className="flex items-center justify-between mb-1 gap-2">
+                                            <span className="font-medium text-amber-900 truncate">{stageLabel}</span>
+                                            {elapsed !== null && <span className="shrink-0 text-amber-600">{elapsed} мин</span>}
+                                          </div>
+                                          {pct !== null ? (
+                                            <>
+                                              <div className="h-1.5 w-full rounded-full bg-amber-100 overflow-hidden mb-1">
+                                                <div className="h-full bg-amber-400 transition-all duration-300" style={{ width: `${pct}%` }} />
+                                              </div>
+                                              <div className="text-amber-700">
+                                                {rj.total_organizations > 0
+                                                  ? `${rj.processed_organizations} / ${rj.total_organizations} орг. (${pct}%)`
+                                                  : `${rj.processed_links} / ${rj.total_links} ссыл. (${pct}%)`}
+                                              </div>
+                                            </>
+                                          ) : (
+                                            <div className="h-1.5 w-1/3 bg-amber-300 rounded-full animate-pulse" />
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <p className="text-xs text-amber-800">Задача ожидает воркера. Запуск начнётся автоматически.</p>
+                                )}
+                              </div>
+                            );
+                          })()}
                           <button
                             type="button"
                             onClick={() => deleteJob(activeJob.id)}
