@@ -414,6 +414,22 @@ def _format_sync_result(result: dict) -> str:
     return "\n".join(lines)
 
 
+# ── Health check ──────────────────────────────────────────────────────────────
+
+async def _check_instantly_api() -> bool:
+    """Quick ping: fetch 1 campaign to verify the API key and connectivity."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{INSTANTLY_BASE}/campaigns",
+                params={"limit": "1"},
+                headers={"Authorization": f"Bearer {INSTANTLY_API_KEY}"},
+            )
+            return r.is_success
+    except Exception:
+        return False
+
+
 # ── Sync orchestration ────────────────────────────────────────────────────────
 
 async def run_sync(manual: bool = False) -> dict:
@@ -498,10 +514,17 @@ async def main() -> None:
     _require("DATABASE_URL", DATABASE_URL)
     _require("INSTANTLY_SYNC_BOT_CHAT_ID or TELEGRAM_HEALTH_CHAT_ID", CHAT_ID)
 
+    api_ok = await _check_instantly_api()
+    api_status = "✅ API доступно" if api_ok else "⚠️ API недоступно"
+
+    msk = timezone(timedelta(hours=3))
+    next_sync_str = (datetime.now(msk) + timedelta(seconds=SYNC_INTERVAL_SEC)).strftime("%H:%M MSK")
+
     await send_telegram(
-        f"🔄 <b>Instantly Sync Bot ONLINE</b>\n"
+        f"🟢 <b>Instantly Sync Bot ONLINE</b>\n"
         f"🕐 {_now_msk()}\n\n"
-        f"Расписание: каждые {SYNC_INTERVAL_SEC // 60} мин.\n"
+        f"🔍 Тестовый запрос выполнен — {api_status}\n"
+        f"⏱ Следующее обновление в {next_sync_str}\n\n"
         f"/sync — ручной запуск · /last — последний результат · /help — справка"
     )
 
