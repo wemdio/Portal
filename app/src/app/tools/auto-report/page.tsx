@@ -1103,8 +1103,17 @@ function normalizeForSearch(s: string): string {
     .trim();
 }
 
+interface ProgressState {
+  current: number;
+  total: number;
+  campaignId: string;
+  phase: 'fetching' | 'done' | 'error';
+}
+
 export default function AutoReportPage() {
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [progressTotal, setProgressTotal] = useState<number>(0);
   const [error, setError] = useState('');
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [reportCreatedAt, setReportCreatedAt] = useState<string | null>(null);
@@ -1244,6 +1253,8 @@ export default function AutoReportPage() {
     e.preventDefault();
     setError('');
     setReport(null);
+    setProgress(null);
+    setProgressTotal(0);
     const token = await getToken();
     if (!token) {
       setError('Нужна авторизация. Войдите в аккаунт.');
@@ -1258,7 +1269,7 @@ export default function AutoReportPage() {
 
     setLoading(true);
     try {
-      const res = await fetch('/api/tools/auto-report', {
+      const res = await fetch('/api/tools/auto-report/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1266,30 +1277,89 @@ export default function AutoReportPage() {
         },
         body: JSON.stringify({ campaignIds: ids }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError((data.error as string) || `Ошибка ${res.status}`);
+
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        setError((data as { error?: string }).error || `Ошибка ${res.status}`);
         setLoading(false);
         return;
       }
-      const reportData = data as ReportResponse;
-      const now = new Date().toISOString();
-      setReport(reportData);
-      setReportCreatedAt(now);
-      const saved: SavedReport = {
-        id: crypto.randomUUID?.() ?? `report-${Date.now()}`,
-        createdAt: now,
-        report: reportData,
-      };
-      setReportHistory((prev) => {
-        const next = [saved, ...prev].slice(0, REPORT_HISTORY_MAX);
-        saveReportHistory(next);
-        return next;
-      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() ?? '';
+
+        for (const chunk of lines) {
+          const dataLine = chunk.split('\n').find((l) => l.startsWith('data: '));
+          if (!dataLine) continue;
+          try {
+            const event = JSON.parse(dataLine.slice(6)) as {
+              type: string;
+              total?: number;
+              current?: number;
+              campaignId?: string;
+              phase?: 'fetching' | 'done' | 'error';
+              message?: string;
+              tableText?: string;
+              csvText?: string;
+              rows?: (string | number)[][];
+              summary?: ReportSummary;
+              campaignData?: Record<string, unknown>;
+            };
+
+            if (event.type === 'start') {
+              setProgressTotal(event.total ?? 0);
+            } else if (event.type === 'progress') {
+              setProgress({
+                current: event.current ?? 0,
+                total: event.total ?? 0,
+                campaignId: event.campaignId ?? '',
+                phase: event.phase ?? 'fetching',
+              });
+            } else if (event.type === 'result') {
+              const reportData: ReportResponse = {
+                tableText: event.tableText ?? '',
+                csvText: event.csvText ?? '',
+                rows: event.rows ?? [],
+                summary: event.summary!,
+                campaignData: event.campaignData ?? {},
+              };
+              const now = new Date().toISOString();
+              setReport(reportData);
+              setReportCreatedAt(now);
+              setProgress(null);
+              const saved: SavedReport = {
+                id: crypto.randomUUID?.() ?? `report-${Date.now()}`,
+                createdAt: now,
+                report: reportData,
+              };
+              setReportHistory((prev) => {
+                const next = [saved, ...prev].slice(0, REPORT_HISTORY_MAX);
+                saveReportHistory(next);
+                return next;
+              });
+            } else if (event.type === 'error') {
+              setError(event.message ?? 'Ошибка формирования отчёта');
+              setProgress(null);
+            }
+          } catch {
+            // skip malformed SSE line
+          }
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка запроса');
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   };
 
@@ -1466,21 +1536,48 @@ export default function AutoReportPage() {
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              disabled={loading || selectedIds.size === 0}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Формирую отчёт…
-                </>
-              ) : (
-                'Сформировать отчёт'
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                disabled={loading || selectedIds.size === 0}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Формирую отчёт…
+                  </>
+                ) : (
+                  'Сформировать отчёт'
+                )}
+              </button>
+              {loading && progressTotal > 0 && (
+                <span className="text-sm text-gray-500">
+                  {progress ? `${progress.current} / ${progress.total}` : `0 / ${progressTotal}`} кампаний
+                </span>
               )}
-            </button>
+            </div>
+
+            {loading && progressTotal > 0 && (
+              <div className="space-y-1.5">
+                <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
+                  <div
+                    className="h-2.5 rounded-full bg-indigo-500 transition-all duration-300"
+                    style={{
+                      width: `${progress ? Math.round((progress.current / progress.total) * 100) : 0}%`,
+                    }}
+                  />
+                </div>
+                {progress && (
+                  <p className="text-xs text-gray-500 truncate">
+                    {progress.phase === 'fetching' && `Загружаю кампанию ${progress.current}…`}
+                    {progress.phase === 'done' && `✓ Кампания ${progress.current} готова`}
+                    {progress.phase === 'error' && `⚠ Кампания ${progress.current} — ошибка, продолжаю…`}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </form>
 

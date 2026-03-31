@@ -4,11 +4,22 @@
  */
 
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
-/** Таймаут одного запроса к Instantly (увеличен для списка кампаний при медленной сети). */
-const INSTANTLY_TIMEOUT_MS = 90_000;
+/** Таймаут одного запроса к Instantly. */
+const INSTANTLY_TIMEOUT_MS = 180_000;
 const INSTANTLY_MAX_RETRIES = 3;
-/** Задержка между кампаниями (мс) — не перегружать Instantly API при большом кол-ве кампаний. */
-const INTER_CAMPAIGN_DELAY_MS = 350;
+/** Размер батча при обработке кампаний параллельно. */
+const BATCH_SIZE = 5;
+/** Задержка между батчами (мс). */
+const INTER_BATCH_DELAY_MS = 600;
+
+export interface AutoReportProgress {
+  current: number;
+  total: number;
+  campaignId: string;
+  phase: 'fetching' | 'done' | 'error';
+}
+
+export type OnProgressCallback = (progress: AutoReportProgress) => void;
 
 const UUID_PATTERN = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
 
@@ -578,7 +589,8 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
  */
 export async function buildAutoReport(
   campaignIds: string[],
-  apiKey: string
+  apiKey: string,
+  onProgress?: OnProgressCallback
 ): Promise<{
   tableText: string;
   csvText: string;
@@ -605,21 +617,47 @@ export async function buildAutoReport(
   const mergeItems: { body?: unknown }[] = [];
   const failedCampaigns: string[] = [];
 
-  for (let i = 0; i < campaignIds.length; i++) {
-    const id = campaignIds[i];
-    try {
-      const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
-      const analyticsBody = (analytics as { body?: unknown }).body ?? analytics;
-      const stepsBody = (steps as { body?: unknown }).body ?? steps;
-      mergeItems.push({ body: analyticsBody });
-      mergeItems.push({ body: stepsBody });
-    } catch (err) {
-      console.error(`[auto-report] Skipping campaign ${id}: ${getErrorMessage(err)}`);
-      failedCampaigns.push(id);
+  // Process in parallel batches: faster for many campaigns, safe for the API.
+  const useBatches = campaignIds.length > BATCH_SIZE;
+  const effectiveBatchSize = useBatches ? BATCH_SIZE : 1;
+  let completedCount = 0;
+
+  for (let batchStart = 0; batchStart < campaignIds.length; batchStart += effectiveBatchSize) {
+    const batch = campaignIds.slice(batchStart, batchStart + effectiveBatchSize);
+
+    const batchResults = await Promise.allSettled(
+      batch.map(async (id) => {
+        onProgress?.({
+          current: completedCount + 1,
+          total: campaignIds.length,
+          campaignId: id,
+          phase: 'fetching',
+        });
+        const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
+        return { id, analytics, steps };
+      }),
+    );
+
+    for (let i = 0; i < batchResults.length; i++) {
+      const result = batchResults[i];
+      const id = batch[i];
+      completedCount += 1;
+      if (result.status === 'fulfilled') {
+        const { analytics, steps } = result.value;
+        const analyticsBody = (analytics as { body?: unknown }).body ?? analytics;
+        const stepsBody = (steps as { body?: unknown }).body ?? steps;
+        mergeItems.push({ body: analyticsBody });
+        mergeItems.push({ body: stepsBody });
+        onProgress?.({ current: completedCount, total: campaignIds.length, campaignId: id, phase: 'done' });
+      } else {
+        console.error(`[auto-report] Skipping campaign ${id}: ${getErrorMessage(result.reason)}`);
+        failedCampaigns.push(id);
+        onProgress?.({ current: completedCount, total: campaignIds.length, campaignId: id, phase: 'error' });
+      }
     }
 
-    if (i < campaignIds.length - 1) {
-      await sleep(INTER_CAMPAIGN_DELAY_MS);
+    if (batchStart + effectiveBatchSize < campaignIds.length) {
+      await sleep(INTER_BATCH_DELAY_MS);
     }
   }
 
