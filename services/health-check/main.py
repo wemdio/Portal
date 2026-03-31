@@ -377,19 +377,27 @@ async def poll_telegram_commands() -> None:
 # ── Individual checks ───────────────────────────────────────────────────────
 
 async def check_site() -> tuple[bool, str]:
-    try:
-        # Do not follow redirects: we want to validate the public entrypoint itself,
-        # not fail because an auth page or downstream route returns 5xx.
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
-            r = await c.get(PORTAL_URL)
-            # Treat any 2xx-3xx as OK (e.g. 307 -> /login is expected for unauth users)
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code}"
-            return True, f"OK ({r.status_code})"
-    except httpx.TimeoutException:
-        return False, "timeout"
-    except Exception as e:
-        return False, str(e)[:120]
+    # Do not follow redirects: validate the public entrypoint itself.
+    # 2xx-3xx are OK (307 → /login is expected for unauth users).
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+                r = await c.get(PORTAL_URL)
+                if r.status_code >= 400:
+                    last_error = f"HTTP {r.status_code}"
+                else:
+                    return True, f"OK ({r.status_code})"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            print(f"[health] site check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: {last_error}")
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, last_error
 
 
 async def check_critical_endpoint(path_or_url: str) -> tuple[bool, str, str]:
@@ -401,16 +409,24 @@ async def check_critical_endpoint(path_or_url: str) -> tuple[bool, str, str]:
     else:
         target = f"{PORTAL_URL.rstrip('/')}/{raw.lstrip('/')}"
 
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
-            r = await c.get(target)
-            if r.status_code >= 500:
-                return False, target, f"HTTP {r.status_code}"
-            return True, target, f"OK ({r.status_code})"
-    except httpx.TimeoutException:
-        return False, target, "timeout"
-    except Exception as e:
-        return False, target, _normalize_network_error(e)
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as c:
+                r = await c.get(target)
+                if r.status_code >= 500:
+                    last_error = f"HTTP {r.status_code}"
+                else:
+                    return True, target, f"OK ({r.status_code})"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, target, last_error
 
 
 async def check_postgrest() -> tuple[bool, str]:
@@ -532,16 +548,24 @@ async def check_s3() -> tuple[bool, str]:
     """Check Supabase Storage / S3 availability via HEAD on the endpoint."""
     if not S3_ENDPOINT:
         return True, "not configured (skip)"
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as c:
-            r = await c.head(S3_ENDPOINT)
-            if r.status_code < 500:
-                return True, f"OK ({r.status_code})"
-            return False, f"HTTP {r.status_code}"
-    except httpx.TimeoutException:
-        return False, "timeout"
-    except Exception as e:
-        return False, str(e)[:120]
+    last_error: str = "unknown"
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as c:
+                r = await c.head(S3_ENDPOINT)
+                if r.status_code < 500:
+                    return True, f"OK ({r.status_code})"
+                last_error = f"HTTP {r.status_code}"
+        except httpx.TimeoutException:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = _normalize_network_error(e)
+
+        if attempt < HEALTH_RETRY_ATTEMPTS:
+            print(f"[health] S3 check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: {last_error}")
+            await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    return False, last_error
 
 
 async def check_server() -> tuple[bool, str]:
