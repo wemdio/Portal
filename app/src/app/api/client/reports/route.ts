@@ -2,21 +2,14 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { scopeAutoReportCampaignIds } from '@/lib/clientAccess';
-import { buildAutoReport } from '@/lib/tools/autoReportBuilder';
+import { readCampaignAnalyticsFromDb, buildClientReport } from '@/lib/tools/instantlyCampaignCatalog';
 
 export const dynamic = 'force-dynamic';
-
-const INSTANTLY_API_KEY =
-  (process.env.INSTANTLY_API_KEY ?? process.env.INSTANTLY_PORTAL_API_KEY ?? '').trim();
 
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   const { accessRows } = result.auth;
-
-  if (!INSTANTLY_API_KEY) {
-    return jsonError('Сервис отчётов не настроен', 503);
-  }
 
   let body: { campaignIds?: string[] };
   try {
@@ -35,13 +28,20 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const report = await buildAutoReport(campaignIds, INSTANTLY_API_KEY);
+    const { campaigns } = await readCampaignAnalyticsFromDb(campaignIds);
+
+    if (campaigns.length === 0) {
+      return jsonError('Данные кампаний ещё не синхронизированы. Попробуйте через несколько минут.', 503);
+    }
+
+    const report = buildClientReport(campaigns);
+
     return NextResponse.json({
       tableText: report.tableText,
       csvText: report.csvText,
       rows: report.rows,
       summary: report.summary,
-      campaignData: report.campaignData,
+      campaignData: {},
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка формирования отчёта';
