@@ -162,7 +162,7 @@ export default function ClientReportsPage() {
           <div className="mb-8">
             <button
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || campaigns.length === 0}
               className="neu-btn inline-flex items-center gap-2 px-5 sm:px-6 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold w-full sm:w-auto justify-center"
             >
               {generating ? 'Генерация...' : 'Сформировать отчёт'}
