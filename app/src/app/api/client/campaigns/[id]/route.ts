@@ -11,7 +11,7 @@ import { cached } from '@/lib/clientCache';
 
 export const dynamic = 'force-dynamic';
 
-const DETAIL_TTL = 5 * 60 * 1000;
+const DETAIL_TTL = 15 * 60 * 1000;
 
 export async function GET(
   req: NextRequest,
