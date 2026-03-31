@@ -28,7 +28,8 @@ export async function POST(req: NextRequest) {
     let totalSynced = 0;
 
     for (const campaignId of allowedCampaignIds) {
-      const leads = await listAllLeads(campaignId, 10_000);
+      const rawLeads = await listAllLeads(campaignId, 10_000);
+      const leads = rawLeads.filter((l) => l.campaign_id === campaignId);
 
       if (leads.length > 0) {
         const rows = leads.map((l) => ({

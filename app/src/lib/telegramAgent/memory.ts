@@ -33,7 +33,19 @@ export function getHistory(chatId: number): ConversationMessage[] {
   const entry = store.get(chatId);
   if (!entry) return [];
   entry.lastAccess = Date.now();
-  return [...entry.messages];
+
+  const msgs = [...entry.messages];
+  let start = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === 'tool' || (m.role === 'assistant' && m.tool_calls?.length)) {
+      continue;
+    }
+    start = i;
+    break;
+  }
+
+  return msgs.slice(start);
 }
 
 export function pushMessages(chatId: number, messages: ConversationMessage[]): void {
