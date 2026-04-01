@@ -78,6 +78,21 @@ _sync_lock = asyncio.Lock()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _parse_ts(val: Any) -> datetime | None:
+    """Parse an ISO-8601 string into a timezone-aware datetime, or return None."""
+    if isinstance(val, datetime):
+        return val
+    if not isinstance(val, str) or not val.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 def _now_msk() -> str:
     msk = timezone(timedelta(hours=3))
     return datetime.now(msk).strftime("%d.%m.%Y %H:%M MSK")
@@ -314,7 +329,7 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
 
     Returns: before, after, added, removed, updated.
     """
-    sync_marker = datetime.now(timezone.utc).isoformat()
+    sync_marker = datetime.now(timezone.utc)
 
     rows: list[dict] = []
     for c in campaigns:
@@ -325,8 +340,8 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
             "id": cid,
             "name": str(c.get("name") or "")[:NAME_MAX_LEN],
             "status": c.get("status") if isinstance(c.get("status"), int) else None,
-            "timestamp_created": c.get("timestamp_created"),
-            "timestamp_updated": c.get("timestamp_updated"),
+            "timestamp_created": _parse_ts(c.get("timestamp_created")),
+            "timestamp_updated": _parse_ts(c.get("timestamp_updated")),
             "synced_at": sync_marker,
         })
 
