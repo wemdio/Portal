@@ -372,8 +372,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
-          cpus: '0.1'
+          memory: 384M
+          cpus: '0.25'
     restart: unless-stopped
     networks:
       - portal-network
