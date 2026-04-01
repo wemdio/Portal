@@ -71,6 +71,10 @@ create unique index if not exists idx_instantly_lead_qualifications_event
   on public.instantly_lead_qualifications (webhook_event_id)
   where webhook_event_id is not null;
 
+create unique index if not exists idx_instantly_lead_qualifications_email_id
+  on public.instantly_lead_qualifications (instantly_email_id)
+  where instantly_email_id is not null;
+
 alter table public.instantly_lead_qualifications enable row level security;
 
 drop policy if exists "Internal users can read all qualifications" on public.instantly_lead_qualifications;
