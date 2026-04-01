@@ -3,13 +3,8 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { filterAllowedIds } from '@/lib/clientAccess';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
-import { listAllCampaigns } from '@/lib/instantly/client';
-import type { Campaign } from '@/lib/instantly/types';
-import { cached } from '@/lib/clientCache';
 
 export const dynamic = 'force-dynamic';
-
-const CAMPAIGNS_TTL = 5 * 60 * 1000;
 
 interface StoredLead {
   email: string;
@@ -42,8 +37,11 @@ export async function GET(req: NextRequest) {
   const search = req.nextUrl.searchParams.get('search')?.trim().toLowerCase() ?? '';
 
   try {
-    const [campaignNames, leadsResult, syncResult] = await Promise.all([
-      cached<Campaign[]>('instantly:campaigns:all', () => listAllCampaigns(), CAMPAIGNS_TTL),
+    const [catalogResult, leadsResult, syncResult] = await Promise.all([
+      supabaseAdmin
+        .from('instantly_campaign_catalog')
+        .select('id, name')
+        .in('id', allowedCampaignIds),
       supabaseAdmin
         .from('client_campaign_leads')
         .select('campaign_id, email, first_name, last_name, company_name, website, linkedin_url')
@@ -57,7 +55,9 @@ export async function GET(req: NextRequest) {
         .in('resource_id', allowedCampaignIds),
     ]);
 
-    const nameMap = new Map(campaignNames.map((c) => [c.id, c.name]));
+    const nameMap = new Map(
+      (catalogResult.data ?? []).map((c) => [c.id as string, c.name as string]),
+    );
     const syncMap = new Map(
       (syncResult.data ?? []).map((r) => [r.resource_id as string, r.leads_synced_at as string | null]),
     );
@@ -96,9 +96,7 @@ export async function GET(req: NextRequest) {
       leads: grouped.get(cid) ?? [],
     }));
 
-    const needsSync = campaigns.some((c) => !c.leads_synced_at);
-
-    return NextResponse.json({ campaigns, needsSync });
+    return NextResponse.json({ campaigns });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка загрузки';
     return jsonError(message, 500);
