@@ -293,6 +293,27 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
     return all_campaigns, error_count[0]
 
 
+# ── Instantly Analytics API ──────────────────────────────────────────────────
+
+async def fetch_campaign_analytics() -> list[dict]:
+    """Fetch analytics for all campaigns from Instantly API."""
+    headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.get(
+            f"{INSTANTLY_BASE}/campaigns/analytics",
+            headers=headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("data", "items", "campaigns"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 async def _db_count(conn) -> int:
@@ -387,6 +408,71 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
     return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
 
 
+def _safe_int(val: Any) -> int | None:
+    if isinstance(val, int):
+        return val
+    if isinstance(val, (float, str)):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+async def sync_analytics_to_db(analytics: list[dict]) -> int:
+    """
+    Update analytics columns in instantly_campaign_catalog for campaigns
+    returned by the /campaigns/analytics endpoint.
+    Returns: number of rows updated.
+    """
+    rows: list[tuple] = []
+    sync_marker = datetime.now(timezone.utc)
+    for a in analytics:
+        cid = a.get("campaign_id") or ""
+        if not cid:
+            continue
+        rows.append((
+            cid,
+            _safe_int(a.get("emails_sent_count")),
+            _safe_int(a.get("open_count")),
+            _safe_int(a.get("reply_count")),
+            _safe_int(a.get("new_leads_contacted_count")),
+            _safe_int(a.get("bounced_count")),
+            _safe_int(a.get("unsubscribed_count")),
+            _safe_int(a.get("leads_count")),
+            sync_marker,
+        ))
+
+    if not rows:
+        return 0
+
+    async def _do() -> int:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            BATCH = 200
+            for i in range(0, len(rows), BATCH):
+                await conn.executemany(
+                    """
+                    UPDATE public.instantly_campaign_catalog SET
+                        emails_sent_count          = $2,
+                        open_count                 = $3,
+                        reply_count                = $4,
+                        new_leads_contacted_count  = $5,
+                        bounced_count              = $6,
+                        unsubscribed_count         = $7,
+                        leads_count                = $8,
+                        analytics_synced_at        = $9
+                    WHERE id = $1::uuid
+                    """,
+                    rows[i : i + BATCH],
+                )
+            return len(rows)
+        finally:
+            await conn.close()
+
+    return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def _format_sync_result(result: dict) -> str:
@@ -409,6 +495,7 @@ def _format_sync_result(result: dict) -> str:
     updated = result.get("updated", 0)
     after = result.get("after", fetched)
     api_errors = result.get("api_errors", 0)
+    analytics_synced = result.get("analytics_synced", 0)
 
     lines = [f"✅ <b>Instantly Sync</b>{manual_str}", f"🕐 {ts}{dur_str}", ""]
 
@@ -422,6 +509,8 @@ def _format_sync_result(result: dict) -> str:
         changes.append(f"➖ Удалено (нет в Instantly): <b>{removed}</b>")
     if updated:
         changes.append(f"🔄 Обновлено: <b>{updated}</b>")
+    if analytics_synced:
+        changes.append(f"📊 Аналитика: <b>{analytics_synced}</b> кампаний")
     if api_errors:
         changes.append(f"⚠️ Ошибок API (с ретраями): <b>{api_errors}</b>")
 
@@ -464,6 +553,16 @@ async def run_sync(manual: bool = False) -> dict:
         print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
 
         stats = await sync_to_db(campaigns)
+
+        analytics_count = 0
+        try:
+            analytics = await fetch_campaign_analytics()
+            print(f"[sync] Fetched analytics for {len(analytics)} campaigns")
+            analytics_count = await sync_analytics_to_db(analytics)
+            print(f"[sync] Analytics synced: {analytics_count} campaigns updated")
+        except Exception as e:
+            print(f"[sync] Analytics sync warning: {e}")
+
         duration = round(loop.time() - t0, 1)
 
         result: dict = {
@@ -472,13 +571,14 @@ async def run_sync(manual: bool = False) -> dict:
             "duration_sec": duration,
             "manual": manual,
             "api_errors": api_errors,
+            "analytics_synced": analytics_count,
             **stats,
         }
         print(
             f"[sync] Done: fetched={stats['fetched']}, added={stats['added']}, "
             f"removed={stats['removed']}, updated={stats['updated']}, "
             f"before={stats['before']}, after={stats['after']}, "
-            f"api_errors={api_errors}, duration={duration}s"
+            f"api_errors={api_errors}, analytics={analytics_count}, duration={duration}s"
         )
         return result
 
