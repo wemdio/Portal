@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export const dynamic = 'force-dynamic';
 
 export const GET = withAuth(async (req) => {
+  if (!supabaseInstantly) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
   const token = getBearerToken(req.headers.get('authorization'))!;
-  const supabase = createAuthedSupabaseClient(token);
+  const authClient = createAuthedSupabaseClient(token);
+  const { data: { user } } = await authClient.auth.getUser();
 
   const url = new URL(req.url);
   const status = url.searchParams.get('status');
@@ -16,7 +22,7 @@ export const GET = withAuth(async (req) => {
   const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
   const usePreferences = url.searchParams.get('use_preferences') !== 'false';
 
-  let query = supabase
+  let query = supabaseInstantly
     .from('instantly_lead_qualifications')
     .select('*', { count: 'exact' })
     .order('created_at', { ascending: false })
@@ -30,10 +36,11 @@ export const GET = withAuth(async (req) => {
 
   if (campaignId) {
     query = query.eq('campaign_id', campaignId);
-  } else if (usePreferences) {
-    const { data: prefs } = await supabase
+  } else if (usePreferences && user) {
+    const { data: prefs } = await supabaseInstantly
       .from('user_instantly_campaign_preferences')
-      .select('campaign_id');
+      .select('campaign_id')
+      .eq('user_id', user.id);
 
     if (prefs && prefs.length > 0) {
       const campaignIds = prefs.map((p) => p.campaign_id);

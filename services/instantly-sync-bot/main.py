@@ -20,7 +20,7 @@ PolzaInstantlySync Bot
 Переменные окружения (обязательные):
   POLZA_INSTANTLY_SYNC_BOT_API_KEY   — токен этого бота
   INSTANTLY_API_KEY или INSTANTLY_PORTAL_API_KEY — ключ Instantly
-  DATABASE_URL                        — PostgreSQL connection string
+  INSTANTLY_DATABASE_URL              — PostgreSQL connection string (новая Instantly-БД)
   INSTANTLY_SYNC_BOT_CHAT_ID или TELEGRAM_HEALTH_CHAT_ID — чат для отчётов
 """
 from __future__ import annotations
@@ -57,7 +57,12 @@ INSTANTLY_API_KEY: str = (
     or os.environ.get("INSTANTLY_PORTAL_API_KEY")
     or ""
 ).strip()
-DATABASE_URL: str = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or "")
+DATABASE_URL: str = (
+    os.environ.get("INSTANTLY_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+    or os.environ.get("SUPABASE_DB_URL")
+    or ""
+)
 
 SYNC_INTERVAL_SEC: int = int(os.environ.get("INSTANTLY_SYNC_INTERVAL_SEC", str(60 * 60)))  # 1 hour
 INSTANTLY_BASE = "https://api.instantly.ai/api/v2"

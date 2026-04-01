@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,16 +9,19 @@ function jsonError(message: string, status: number) {
 }
 
 export async function GET(req: NextRequest) {
+  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return jsonError('Необходима авторизация', 401);
 
-  const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
+  const authClient = createAuthedSupabaseClient(token);
+  const { data: { user } } = await authClient.auth.getUser();
   if (!user) return jsonError('Необходима авторизация', 401);
 
-  const { data, error } = await supabase
+  const { data, error } = await supabaseInstantly
     .from('instantly_lead_imports')
     .select('*')
+    .eq('imported_by', user.id)
     .order('created_at', { ascending: false })
     .limit(50);
 
@@ -26,16 +30,18 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
+
   const token = getBearerToken(req.headers.get('authorization'));
   if (!token) return jsonError('Необходима авторизация', 401);
 
-  const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
+  const authClient = createAuthedSupabaseClient(token);
+  const { data: { user } } = await authClient.auth.getUser();
   if (!user) return jsonError('Необходима авторизация', 401);
 
   const body = await req.json();
 
-  const { data, error } = await supabase
+  const { data, error } = await supabaseInstantly
     .from('instantly_lead_imports')
     .insert({
       project_id: body.project_id || null,
