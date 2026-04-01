@@ -51,7 +51,7 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
   const syncOneCampaign = async (campaignId: string, userIds: string[]) => {
     const campaignName = nameMap.get(campaignId) ?? campaignId;
 
-    const rawLeads = await listAllLeads(campaignId, 10_000);
+    const rawLeads = await listAllLeads(campaignId);
     if (rawLeads.length === 0) {
       console.log(`[leads-sync] "${campaignName}" — 0 leads from Instantly`);
       campaignsDone++;
