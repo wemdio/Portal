@@ -1,4 +1,4 @@
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { qualifyReply, getBodyText } from './leadQualifier';
 import * as instantly from './client';
 import type { Email } from './types';

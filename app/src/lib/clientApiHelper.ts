@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { ClientAccessRow } from '@/lib/clientAccess';
 
 export function jsonError(message: string, status: number) {
@@ -27,6 +28,7 @@ export async function requireClientAuth(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { error: jsonError('Unauthorized', 401) };
   if (!supabaseAdmin) return { error: jsonError('Server misconfigured', 500) };
+  if (!supabaseInstantly) return { error: jsonError('Server misconfigured', 500) };
 
   const { data: profile } = await supabaseAdmin
     .from('profiles')
@@ -39,7 +41,7 @@ export async function requireClientAuth(
     return { error: jsonError('Forbidden', 403) };
   }
 
-  const { data: rows } = await supabaseAdmin
+  const { data: rows } = await supabaseInstantly
     .from('client_instantly_access')
     .select('resource_type, resource_id')
     .eq('client_user_id', user.id);

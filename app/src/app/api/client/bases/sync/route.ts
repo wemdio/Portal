@@ -3,7 +3,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { filterAllowedIds } from '@/lib/clientAccess';
 import { listAllLeads, listAllCampaigns } from '@/lib/instantly/client';
 import type { Campaign } from '@/lib/instantly/types';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { cached, invalidate } from '@/lib/clientCache';
 
 export const dynamic = 'force-dynamic';
