@@ -1,15 +1,14 @@
 import { NextResponse } from 'next/server';
-import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * Diagnostic endpoint: runs one polling cycle inline and returns step-by-step results.
- * GET /api/instantly/qualified-leads/debug
+ * Diagnostic endpoint — temporarily open (no auth) for browser debugging.
+ * TODO: restore withAuth after debugging is complete.
  */
-export const GET = withAuth(async () => {
+export async function GET() {
   const steps: { step: string; result: unknown }[] = [];
 
   // Step 1: Check env keys
@@ -94,4 +93,4 @@ export const GET = withAuth(async () => {
   });
 
   return NextResponse.json({ steps });
-});
+}
