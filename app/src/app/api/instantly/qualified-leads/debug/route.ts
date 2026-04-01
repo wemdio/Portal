@@ -1,17 +1,33 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import * as instantly from '@/lib/instantly/client';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * Diagnostic endpoint — temporarily open (no auth) for browser debugging.
+ * GET /api/instantly/qualified-leads/debug          — diagnostic info
+ * GET /api/instantly/qualified-leads/debug?run=true  — run one qualification cycle
  * TODO: restore withAuth after debugging is complete.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const shouldRun = req.nextUrl.searchParams.get('run') === 'true';
+
+  if (shouldRun) {
+    try {
+      const count = await pollAndQualifyReplies();
+      return NextResponse.json({ action: 'run', qualified: count });
+    } catch (err) {
+      return NextResponse.json(
+        { action: 'run', error: err instanceof Error ? err.message : String(err) },
+        { status: 500 },
+      );
+    }
+  }
+
   const steps: { step: string; result: unknown }[] = [];
 
-  // Step 1: Check env keys
   const hasLeadKey = !!process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
   const hasBriefKey = !!process.env.OPENROUTER_BRIEF_API_KEY;
   const model = process.env.INSTANTLY_LEAD_QUAL_MODEL ?? 'policy/gemini-flash (default)';
@@ -25,7 +41,6 @@ export async function GET() {
     },
   });
 
-  // Step 2: Check supabaseAdmin
   steps.push({
     step: '2. supabaseAdmin',
     result: supabaseAdmin ? 'OK' : 'NOT CONFIGURED — worker cannot run',
@@ -35,7 +50,6 @@ export async function GET() {
     return NextResponse.json({ steps });
   }
 
-  // Step 3: Check campaign preferences
   const { data: prefs, error: prefsErr } = await supabaseAdmin
     .from('user_instantly_campaign_preferences')
     .select('user_id, campaign_id');
@@ -53,7 +67,6 @@ export async function GET() {
     return NextResponse.json({ steps });
   }
 
-  // Step 4: Fetch emails from Instantly for each campaign
   for (const cid of campaignIds) {
     try {
       const res = await instantly.listEmails({ campaign_id: cid, limit: 10 });
@@ -80,7 +93,6 @@ export async function GET() {
     }
   }
 
-  // Step 5: Check existing qualifications
   const { data: existing, error: existErr } = await supabaseAdmin
     .from('instantly_lead_qualifications')
     .select('id, instantly_email_id, status, lead_email')
