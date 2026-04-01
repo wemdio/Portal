@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const cluster = require('cluster');
 const { spawn } = require('child_process');
+const path = require('path');
 const { ensureDatabase } = require('./db/ensureDatabase');
 
 const WEB_CONCURRENCY = Math.max(1, parseInt(process.env.WEB_CONCURRENCY || '1', 10));
@@ -41,7 +42,7 @@ async function main() {
 
   if (useCluster) {
     console.log(`[start] Cluster worker pid=${process.pid} starting server`);
-    spawnServer();
+    require(path.resolve(__dirname, '..', 'server.js'));
     return;
   }
 
