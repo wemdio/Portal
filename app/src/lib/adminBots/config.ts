@@ -39,6 +39,13 @@ export const BOTS: BotConfig[] = [
     containerName: 'portal-atmos-bot',
   },
   {
+    id: 'instantly-sync-bot',
+    name: 'Instantly Sync Bot',
+    description: 'Синхронизация каталога кампаний Instantly → БД; отчёты в Telegram раз в час',
+    kind: 'container',
+    containerName: 'portal-instantly-sync-bot',
+  },
+  {
     id: 'tg-agent',
     name: 'TG-агент',
     description: 'Бот для взаимодействия с порталом через Telegram (встроен в портал)',

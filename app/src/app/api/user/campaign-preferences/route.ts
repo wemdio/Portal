@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,21 +13,22 @@ async function getUser(req: NextRequest) {
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    return user ? { user, supabase, token } : null;
+    return user ?? null;
   } catch {
     return null;
   }
 }
 
 export async function GET(req: NextRequest) {
+  if (!supabaseInstantly) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   try {
-    const auth = await getUser(req);
-    if (!auth) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const user = await getUser(req);
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const { data, error } = await auth.supabase
+    const { data, error } = await supabaseInstantly
       .from('user_instantly_campaign_preferences')
       .select('campaign_id, created_at')
-      .eq('user_id', auth.user.id)
+      .eq('user_id', user.id)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -47,9 +49,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  if (!supabaseInstantly) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   try {
-    const auth = await getUser(req);
-    if (!auth) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const user = await getUser(req);
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     let body: { campaign_ids?: string[] };
     try {
@@ -64,10 +67,10 @@ export async function PUT(req: NextRequest) {
         )
       : [];
 
-    const { error: delErr } = await auth.supabase
+    const { error: delErr } = await supabaseInstantly
       .from('user_instantly_campaign_preferences')
       .delete()
-      .eq('user_id', auth.user.id);
+      .eq('user_id', user.id);
 
     if (delErr) {
       console.error('[campaign-preferences] DELETE error:', delErr);
@@ -76,10 +79,10 @@ export async function PUT(req: NextRequest) {
 
     if (campaignIds.length > 0) {
       const rows = campaignIds.map((id) => ({
-        user_id: auth.user.id,
+        user_id: user.id,
         campaign_id: id.trim(),
       }));
-      const { error: insErr } = await auth.supabase
+      const { error: insErr } = await supabaseInstantly
         .from('user_instantly_campaign_preferences')
         .insert(rows);
       if (insErr) {
