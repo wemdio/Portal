@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as instantly from '@/lib/instantly/client';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { qualifyReply, getBodyText } from '@/lib/instantly/leadQualifier';
+import type { Email } from '@/lib/instantly/types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -63,7 +64,7 @@ export async function GET(req: NextRequest) {
   }
 
   // Fetch reply emails from Instantly
-  type EmailWithCampaign = instantly.Email & { _cid: string };
+  type EmailWithCampaign = Email & { _cid: string };
   const replyEmails: EmailWithCampaign[] = [];
 
   for (const cid of campaignIds) {
@@ -196,14 +197,16 @@ export async function GET(req: NextRequest) {
       const errMsg = err instanceof Error ? err.message : String(err);
       steps.push({ step: `6. FAILED ${leadEmail}`, result: errMsg });
 
-      await db.from('instantly_lead_qualifications').insert({
-        campaign_id: campaignId,
-        lead_email: leadEmail,
-        thread_id: reply.thread_id,
-        instantly_email_id: reply.id,
-        status: 'error',
-        error_message: errMsg,
-      }).catch(() => {});
+      try {
+        await db.from('instantly_lead_qualifications').insert({
+          campaign_id: campaignId,
+          lead_email: leadEmail,
+          thread_id: reply.thread_id,
+          instantly_email_id: reply.id,
+          status: 'error',
+          error_message: errMsg,
+        });
+      } catch { /* ignore insert failure */ }
     }
   }
 
