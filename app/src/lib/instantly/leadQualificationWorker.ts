@@ -43,14 +43,21 @@ async function getSubscribedCampaignIds(): Promise<string[]> {
  * Returns the number of new replies qualified.
  */
 export async function pollAndQualifyReplies(): Promise<number> {
-  if (!supabaseAdmin) return 0;
+  if (!supabaseAdmin) {
+    workerLog('warn', 'supabaseAdmin not configured — skipping');
+    return 0;
+  }
   const db = supabaseAdmin;
 
   const apiKey = API_KEY();
-  if (!apiKey) return 0;
+  if (!apiKey) {
+    workerLog('warn', 'No AI API key (OPENROUTER_INSTANTLY_LEAD_API_KEY / OPENROUTER_BRIEF_API_KEY) — skipping');
+    return 0;
+  }
 
   // 1. Only poll campaigns that at least one specialist selected
   const campaignIds = await getSubscribedCampaignIds();
+  workerLog('info', `Subscribed campaigns: ${campaignIds.length} (${campaignIds.join(', ')})`);
   if (campaignIds.length === 0) return 0;
 
   // 2. Fetch recent reply emails for subscribed campaigns
@@ -62,16 +69,21 @@ export async function pollAndQualifyReplies(): Promise<number> {
         campaign_id: campaignId,
         limit: EMAILS_PER_CAMPAIGN,
       });
-      const replies = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 2);
+      const allEmails = res.items ?? [];
+      const replies = allEmails.filter((e) => (e.ue_type ?? 1) === 2);
+      workerLog('info', `Campaign ${campaignId}: ${allEmails.length} emails fetched, ${replies.length} replies (ue_type=2)`);
       for (const r of replies) {
         replyEmails.push(r as Email & { _campaignName?: string });
       }
     } catch (err) {
-      workerLog('warn', `Failed to fetch emails for campaign ${campaignId}`, err);
+      workerLog('error', `Failed to fetch emails for campaign ${campaignId}`, err);
     }
   }
 
-  if (replyEmails.length === 0) return 0;
+  if (replyEmails.length === 0) {
+    workerLog('info', 'No reply emails found across subscribed campaigns');
+    return 0;
+  }
 
   // 3. Deduplicate: skip emails that already have a qualification record
   const emailIds = replyEmails.map((e) => e.id).filter(Boolean);
