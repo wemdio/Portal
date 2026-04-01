@@ -73,7 +73,7 @@ NAME_MAX_LEN = 2000
 HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 
-_CONNECT_KWARGS: dict = {"statement_cache_size": 0}
+_CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
