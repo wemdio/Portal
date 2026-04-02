@@ -9,7 +9,7 @@ async function main() {
     console.error('[start] DB migration failed — starting server anyway:', err?.message ?? err);
   }
 
-  const child = spawn('node', ['server.js'], { stdio: 'inherit' });
+  const child = spawn('node', ['scripts/cluster.js'], { stdio: 'inherit' });
   child.on('exit', (code, signal) => {
     if (signal) {
       process.kill(process.pid, signal);
