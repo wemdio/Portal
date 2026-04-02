@@ -256,7 +256,7 @@ export default function BillingCalendarView() {
     fetchProjects();
   }, [fetchSubscriptions, fetchProjects]);
 
-  /* ─── Auto-update status to pending_review 2 days before billing ─── */
+  /* ─── Auto-update status to pending_review 7 days before billing ─── */
 
   useEffect(() => {
     if (subscriptions.length === 0) return;
@@ -267,7 +267,7 @@ export default function BillingCalendarView() {
     subscriptions.forEach((sub) => {
       if (sub.status === 'active') {
         const daysUntil = daysBetween(today, sub.next_billing_date);
-        if (daysUntil <= 2 && daysUntil >= 0) {
+        if (daysUntil <= 7 && daysUntil >= 0) {
           toUpdate.push(sub.id);
         }
       }
@@ -770,7 +770,7 @@ export default function BillingCalendarView() {
                           const rect = e.currentTarget.getBoundingClientRect();
                           setDayPopover((prev) => prev?.dateStr === dateStr ? null : { dateStr, rect });
                         }}
-                        className="text-[9px] sm:text-[10px] text-blue-500 hover:text-blue-700 font-medium px-1.5 cursor-pointer transition-colors"
+                        className="w-full text-center py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] sm:text-[11px] font-semibold cursor-pointer hover:bg-amber-200 transition-colors"
                       >
                         +{daySubs.length - 3} ещё
                       </button>
