@@ -1,4 +1,4 @@
-# Лимиты memory — потолки; сумма ~14G под 16G RAM (запас ОС/Docker). cpus — потолок на контейнер.
+# Лимиты memory — потолки; сумма ~22G под 32G RAM (запас ОС/Docker). cpus — потолок на контейнер.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
@@ -46,6 +46,8 @@ services:
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      - NODE_OPTIONS=--max-old-space-size=8192
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -55,8 +57,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6144M
-          cpus: '4'
+          memory: 10240M
+          cpus: '6'
     restart: unless-stopped
     networks:
       - portal-network
