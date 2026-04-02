@@ -1,24 +1,5 @@
 # Лимиты memory — потолки; сумма ~14G под 16G RAM (запас ОС/Docker). cpus — потолок на контейнер.
 services:
-  nginx:
-    image: nginx:alpine
-    container_name: portal-nginx
-    ports:
-      - "3000:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - next-static:/app/.next/static:ro
-    depends_on:
-      - portal
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: '0.25'
-    restart: unless-stopped
-    networks:
-      - portal-network
-
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
     container_name: portal
@@ -31,12 +12,11 @@ services:
       - transcribe-worker
     env_file:
       - .env
-    expose:
-      - "3000"
+    ports:
+      - "3000:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/host.env
-      - next-static:/app/.next/static
     group_add:
       - "${DOCKER_GID:-999}"
     environment:
@@ -69,7 +49,6 @@ services:
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -79,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
+          memory: 6144M
           cpus: '4'
     restart: unless-stopped
     networks:
@@ -99,7 +78,7 @@ services:
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_HH:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=hh
     stop_grace_period: 3h
@@ -126,7 +105,7 @@ services:
       - HH_REQUEST_INTERVAL_MS=${HH_REQUEST_INTERVAL_MS}
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_SEARCH:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=search
     stop_grace_period: 30m
@@ -197,7 +176,7 @@ services:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_EMAILVALIDATION:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
       - WORKER_KIND=emailvalidation
     stop_grace_period: 30m
@@ -220,7 +199,7 @@ services:
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_TGOUTREACH:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
     stop_grace_period: 30m
     deploy:
@@ -244,7 +223,7 @@ services:
       - VAPI_API_KEY=${VAPI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - AI_CALLER_PROVIDER=${AI_CALLER_PROVIDER:-vapi}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_AICALLER:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=aicaller
     stop_grace_period: 30m
     deploy:
@@ -269,7 +248,7 @@ services:
       - OPENROUTER_TG_OUTREACH_API_KEY=${OPENROUTER_TG_OUTREACH_API_KEY}
       - TG_API_ID=${TG_API_ID}
       - TG_API_HASH=${TG_API_HASH}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_SALESCOPILOT:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=salescopilot
     stop_grace_period: 5m
     deploy:
@@ -291,7 +270,7 @@ services:
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - TG_LOCAL_API_URL=http://telegram-bot-api:8081
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS_TGPARSER:-15000}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgparser
     depends_on:
       - telegram-bot-api
@@ -343,7 +322,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2560M
+          memory: 4096M
           cpus: '2.0'
     restart: unless-stopped
     ports:
@@ -499,7 +478,6 @@ services:
 
 volumes:
   telegram-bot-api-data:
-  next-static:
 
 networks:
   portal-network:

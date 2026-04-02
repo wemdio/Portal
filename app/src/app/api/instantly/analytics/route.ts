@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { serverCached } from '@/lib/serverCache';
 
 export const dynamic = 'force-dynamic';
 
@@ -51,20 +50,16 @@ export const GET = withAuth(async (req) => {
     case 'overview': {
       if (supabaseInstantly) {
         try {
-          const cacheKey = `instantly:analytics:overview:${campaign_id ?? 'all'}`;
-          const rows = await serverCached<AnalyticsRow[]>(
-            cacheKey,
-            async () => {
-              let query = supabaseInstantly!
-                .from('instantly_campaign_catalog')
-                .select(ANALYTICS_COLS);
-              if (campaign_id) query = query.eq('id', campaign_id);
-              const { data, error } = await query;
-              if (error) throw new Error(error.message);
-              return (data ?? []) as AnalyticsRow[];
-            },
-            60_000,
-          );
+          let query = supabaseInstantly
+            .from('instantly_campaign_catalog')
+            .select(ANALYTICS_COLS);
+
+          if (campaign_id) query = query.eq('id', campaign_id);
+
+          const { data, error } = await query;
+          if (error) throw new Error(error.message);
+
+          const rows = (data ?? []) as AnalyticsRow[];
           let totalSent = 0, totalOpened = 0, totalReplied = 0, totalBounced = 0, totalLeads = 0;
           for (const row of rows) {
             totalSent += toNum(row.emails_sent_count);
@@ -111,25 +106,19 @@ export const GET = withAuth(async (req) => {
     }
 
     default: {
-      // type=campaigns — read from DB, cached 60s
+      // type=campaigns — read from DB
       if (supabaseInstantly) {
         try {
-          const cacheKey = `instantly:analytics:campaigns:${campaign_id ?? 'all'}`;
-          const rows = await serverCached<AnalyticsRow[]>(
-            cacheKey,
-            async () => {
-              let query = supabaseInstantly!
-                .from('instantly_campaign_catalog')
-                .select(ANALYTICS_COLS);
-              if (campaign_id) query = query.eq('id', campaign_id);
-              const { data, error } = await query;
-              if (error) throw new Error(error.message);
-              return (data ?? []) as AnalyticsRow[];
-            },
-            60_000,
-          );
+          let query = supabaseInstantly
+            .from('instantly_campaign_catalog')
+            .select(ANALYTICS_COLS);
 
-          const items = rows.map(rowToAnalytics);
+          if (campaign_id) query = query.eq('id', campaign_id);
+
+          const { data, error } = await query;
+          if (error) throw new Error(error.message);
+
+          const items = ((data ?? []) as AnalyticsRow[]).map(rowToAnalytics);
           return NextResponse.json(items);
         } catch (dbErr) {
           console.error('[instantly-analytics] campaigns DB read failed:', dbErr);
