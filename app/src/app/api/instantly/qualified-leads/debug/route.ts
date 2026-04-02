@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as instantly from '@/lib/instantly/client';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { qualifyReply, getBodyText } from '@/lib/instantly/leadQualifier';
 import type { Email } from '@/lib/instantly/types';
 
