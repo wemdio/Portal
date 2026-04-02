@@ -1,4 +1,4 @@
-# Лимиты memory — потолки; сумма ~14G под 16G RAM (запас ОС/Docker). cpus — потолок на контейнер.
+# Лимиты memory — потолки; сумма ~28G под 32G RAM (запас ОС/Docker). cpus — потолок на контейнер.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
@@ -46,6 +46,8 @@ services:
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      - NODE_OPTIONS=--max-old-space-size=8192
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -55,8 +57,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6144M
-          cpus: '4'
+          memory: 11264M
+          cpus: '7'
     restart: unless-stopped
     networks:
       - portal-network
@@ -82,7 +84,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1536M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -109,7 +111,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1536M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -132,8 +134,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 768M
+          cpus: '0.75'
     restart: unless-stopped
     networks:
       - portal-network
@@ -158,8 +160,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 768M
+          cpus: '0.75'
     restart: unless-stopped
     networks:
       - portal-network
@@ -180,8 +182,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 768M
+          cpus: '0.75'
     restart: unless-stopped
     networks:
       - portal-network
@@ -202,8 +204,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 768M
+          cpus: '0.75'
     restart: unless-stopped
     networks:
       - portal-network
@@ -275,7 +277,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1536M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -299,7 +301,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1536M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -319,7 +321,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4096M
+          memory: 4608M
           cpus: '2.0'
     restart: unless-stopped
     ports:
@@ -372,8 +374,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
-          cpus: '0.25'
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network

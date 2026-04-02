@@ -65,6 +65,7 @@ DATABASE_URL: str = (
 )
 
 SYNC_INTERVAL_SEC: int = int(os.environ.get("INSTANTLY_SYNC_INTERVAL_SEC", str(60 * 60)))  # 1 hour
+MIN_SYNC_INTERVAL_SEC = 60 * 60
 INSTANTLY_BASE = "https://api.instantly.ai/api/v2"
 PAGE_LIMIT = 100
 MAX_PAGES = 200
@@ -76,6 +77,8 @@ RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 LEADS_PAGE_LIMIT = 100
 LEADS_CONCURRENCY = 3
 LEADS_UPSERT_BATCH = 500
+LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "3"))
+LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
 
 _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
 
@@ -491,9 +494,23 @@ async def _fetch_leads_page(
     if starting_after:
         body["starting_after"] = starting_after
 
-    r = await client.post(url, json=body, headers=headers, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    last_err: Exception | None = None
+    for attempt in range(LEADS_RETRY_ATTEMPTS):
+        try:
+            r = await client.post(url, json=body, headers=headers, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if attempt < LEADS_RETRY_ATTEMPTS - 1:
+                delay = LEADS_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+                print(
+                    f"[leads-sync] campaign {campaign_id}: leads/list attempt "
+                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {e!r}. "
+                    f"Retry in {delay:.1f}s…"
+                )
+                await asyncio.sleep(delay)
+    raise last_err  # type: ignore[misc]
 
 
 async def _fetch_all_leads_for_campaign(
@@ -610,7 +627,7 @@ async def sync_client_leads() -> dict[str, int]:
             f"[leads-sync] done: {campaigns_done} campaigns, "
             f"{total_leads} leads, {campaigns_errors} errors"
         )
-        return {"campaigns": campaigns_done, "leads": total_leads}
+        return {"campaigns": campaigns_done, "leads": total_leads, "campaigns_failed": campaigns_errors}
     finally:
         await conn.close()
 
@@ -652,6 +669,7 @@ def _format_sync_result(result: dict) -> str:
     analytics_synced = result.get("analytics_synced", 0)
     leads_campaigns = result.get("leads_campaigns", 0)
     leads_total = result.get("leads_total", 0)
+    leads_failed = result.get("leads_campaigns_failed", 0)
 
     lines = [f"✅ <b>Instantly Sync</b>{manual_str}", f"🕐 {ts}{dur_str}", ""]
 
@@ -669,6 +687,8 @@ def _format_sync_result(result: dict) -> str:
         changes.append(f"📊 Аналитика: <b>{analytics_synced}</b> кампаний")
     if leads_campaigns:
         changes.append(f"👥 Лиды: <b>{leads_total}</b> контактов из <b>{leads_campaigns}</b> кампаний")
+    if leads_failed:
+        changes.append(f"⚠️ Лиды не обновлены по <b>{leads_failed}</b> кампаниям")
     if api_errors:
         changes.append(f"⚠️ Ошибок API (с ретраями): <b>{api_errors}</b>")
 
@@ -742,6 +762,7 @@ async def run_sync(manual: bool = False) -> dict:
             "analytics_synced": analytics_count,
             "leads_campaigns": leads_stats["campaigns"],
             "leads_total": leads_stats["leads"],
+            "leads_campaigns_failed": leads_stats.get("campaigns_failed", 0),
             **stats,
         }
         print(
@@ -750,6 +771,7 @@ async def run_sync(manual: bool = False) -> dict:
             f"before={stats['before']}, after={stats['after']}, "
             f"api_errors={api_errors}, analytics={analytics_count}, "
             f"leads_campaigns={leads_stats['campaigns']}, leads_total={leads_stats['leads']}, "
+            f"leads_failed={leads_stats.get('campaigns_failed', 0)}, "
             f"duration={duration}s"
         )
         return result
@@ -783,6 +805,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
             result.get("added", 0) > 0
             or result.get("removed", 0) > 0
             or result.get("api_errors", 0) > 0
+            or result.get("leads_campaigns_failed", 0) > 0
         )
 
         if manual or result.get("status") == "error" or has_changes:
@@ -806,11 +829,18 @@ async def main() -> None:
     _require("DATABASE_URL", DATABASE_URL)
     _require("INSTANTLY_SYNC_BOT_CHAT_ID or TELEGRAM_HEALTH_CHAT_ID", CHAT_ID)
 
+    effective_interval_sec = max(SYNC_INTERVAL_SEC, MIN_SYNC_INTERVAL_SEC)
+    if effective_interval_sec != SYNC_INTERVAL_SEC:
+        print(
+            f"[sync] INSTANTLY_SYNC_INTERVAL_SEC={SYNC_INTERVAL_SEC}s is below minimum "
+            f"{MIN_SYNC_INTERVAL_SEC}s. Using {effective_interval_sec}s."
+        )
+
     api_ok = await _check_instantly_api()
     api_status = "✅ API доступно" if api_ok else "⚠️ API недоступно"
 
     msk = timezone(timedelta(hours=3))
-    next_sync_str = (datetime.now(msk) + timedelta(seconds=SYNC_INTERVAL_SEC)).strftime("%H:%M MSK")
+    next_sync_str = (datetime.now(msk) + timedelta(seconds=effective_interval_sec)).strftime("%H:%M MSK")
 
     await send_telegram(
         f"🟢 <b>Instantly Sync Bot ONLINE</b>\n"
@@ -827,7 +857,7 @@ async def main() -> None:
     scheduler.add_job(
         lambda: asyncio.create_task(_run_sync_and_report()),
         "interval",
-        seconds=SYNC_INTERVAL_SEC,
+        seconds=effective_interval_sec,
         id="instantly_sync",
     )
     scheduler.start()
@@ -835,8 +865,8 @@ async def main() -> None:
     poll_task = asyncio.create_task(poll_telegram_commands())
 
     print(
-        f"[sync] Started. interval={SYNC_INTERVAL_SEC}s, "
-        f"retry_attempts={RETRY_ATTEMPTS}. Commands: /sync /last /help"
+        f"[sync] Started. interval={effective_interval_sec}s, retry_attempts={RETRY_ATTEMPTS}, "
+        f"leads_retry_attempts={LEADS_RETRY_ATTEMPTS}. Commands: /sync /last /help"
     )
 
     try:
