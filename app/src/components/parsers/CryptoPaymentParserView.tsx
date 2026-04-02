@@ -145,12 +145,32 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
+  let token = session?.access_token ?? null;
+  if (!token) {
+    const { data: refreshed } = await supabase.auth.refreshSession();
+    token = refreshed.session?.access_token ?? null;
+  }
   if (!token) throw new Error('Требуется авторизация');
   return {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
   };
+}
+
+async function readApiError(res: Response): Promise<string> {
+  const raw = await res.text().catch(() => '');
+  if (!raw) return `Ошибка запроса: ${res.status}`;
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown };
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
+      return parsed.error;
+    }
+  } catch {
+    // noop
+  }
+  if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
+  return raw;
 }
 
 export function CryptoPaymentParserView() {
@@ -245,8 +265,7 @@ export function CryptoPaymentParserView() {
       });
 
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(text || `Ошибка создания задачи: ${res.status}`);
+        throw new Error(await readApiError(res));
       }
 
       const job = (await res.json()) as JobEntry;
@@ -281,8 +300,7 @@ export function CryptoPaymentParserView() {
         headers,
       });
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(text || 'Не удалось возобновить');
+        throw new Error(await readApiError(res));
       }
       setJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, status: 'pending' as const, error_message: null } : j)));
       setActiveJobId(jobId);
