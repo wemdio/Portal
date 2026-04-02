@@ -43,6 +43,13 @@ export async function POST(req: NextRequest) {
 
   if (items.length === 0) return jsonError('No items to scan', 400);
 
+  const nowIso = new Date().toISOString();
+  await supabaseAdmin
+    .from('crypto_payment_jobs')
+    .update({ status: 'stopped', updated_at: nowIso })
+    .eq('user_id', user.id)
+    .in('status', ['pending', 'running']);
+
   const { data: job, error } = await supabaseAdmin
     .from('crypto_payment_jobs')
     .insert({
