@@ -7,7 +7,6 @@ import {
   isCatalogStale,
 } from '@/lib/tools/instantlyCampaignCatalog';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { serverCached, invalidateServer } from '@/lib/serverCache';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,21 +28,17 @@ export const GET = withAuth(async (req) => {
   const starting_after = url.searchParams.get('starting_after') ?? undefined;
   const status = url.searchParams.get('status');
 
-  // --- Primary: read from Instantly Supabase DB (synced hourly), cached 60s ---
+  // --- Primary: read from Instantly Supabase DB (synced hourly) ---
   if (supabaseInstantly) {
     try {
-      const rows = await serverCached<CatalogRow[]>(
-        'instantly:campaign_catalog',
-        async () => {
-          const { data, error } = await supabaseInstantly!
-            .from('instantly_campaign_catalog')
-            .select('id,name,status,timestamp_created,timestamp_updated,synced_at')
-            .order('timestamp_created', { ascending: false, nullsFirst: false });
-          if (error) throw new Error(error.message);
-          return (data ?? []) as CatalogRow[];
-        },
-        60_000,
-      );
+      const { data, error } = await supabaseInstantly
+        .from('instantly_campaign_catalog')
+        .select('id,name,status,timestamp_created,timestamp_updated,synced_at')
+        .order('timestamp_created', { ascending: false, nullsFirst: false });
+
+      if (error) throw new Error(error.message);
+
+      const rows = (data ?? []) as CatalogRow[];
 
       if (rows.length > 0) {
         let maxSyncMs = 0;
@@ -130,6 +125,5 @@ export const POST = withAuth(async (req) => {
   const body = await req.json();
   const campaign = await instantly.createCampaign(body);
   await upsertInstantlyCatalogFromCampaign(campaign);
-  invalidateServer('instantly:');
   return NextResponse.json(campaign, { status: 201 });
 });

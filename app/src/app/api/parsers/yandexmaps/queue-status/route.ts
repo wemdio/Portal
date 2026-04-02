@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { serverCached } from '@/lib/serverCache';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,44 +35,37 @@ export async function GET(req: NextRequest) {
 
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
+  const { data: runningJobs, error: runningError } = await supabaseAdmin
+    .from('yandex_maps_jobs')
+    .select('progress_stage,processed_organizations,total_organizations,total_links,processed_links,started_at')
+    .eq('status', 'running');
+
+  if (runningError) return jsonError(runningError.message, 500);
+
+  const { count: pendingCount, error: pendingError } = await supabaseAdmin
+    .from('yandex_maps_jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'pending');
+
+  if (pendingError) return jsonError(pendingError.message, 500);
+
   const CAPACITY = 2;
+  const runningCount = (runningJobs ?? []).length;
 
-  const response = await serverCached<QueueStatusResponse>(
-    'yandexmaps:queue-status',
-    async () => {
-      const { data: runningJobs, error: runningError } = await supabaseAdmin!
-        .from('yandex_maps_jobs')
-        .select('progress_stage,processed_organizations,total_organizations,total_links,processed_links,started_at')
-        .eq('status', 'running');
-
-      if (runningError) throw new Error(runningError.message);
-
-      const { count: pendingCount, error: pendingError } = await supabaseAdmin!
-        .from('yandex_maps_jobs')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'pending');
-
-      if (pendingError) throw new Error(pendingError.message);
-
-      const runningCount = (runningJobs ?? []).length;
-
-      return {
-        running_count: runningCount,
-        pending_count: pendingCount ?? 0,
-        capacity: CAPACITY,
-        free_slots: Math.max(0, CAPACITY - runningCount),
-        running_jobs: (runningJobs ?? []).map((j) => ({
-          progress_stage: j.progress_stage ?? null,
-          processed_organizations: j.processed_organizations ?? 0,
-          total_organizations: j.total_organizations ?? 0,
-          total_links: j.total_links ?? 0,
-          processed_links: j.processed_links ?? 0,
-          started_at: j.started_at ?? null,
-        })),
-      };
-    },
-    10_000,
-  );
+  const response: QueueStatusResponse = {
+    running_count: runningCount,
+    pending_count: pendingCount ?? 0,
+    capacity: CAPACITY,
+    free_slots: Math.max(0, CAPACITY - runningCount),
+    running_jobs: (runningJobs ?? []).map((j) => ({
+      progress_stage: j.progress_stage ?? null,
+      processed_organizations: j.processed_organizations ?? 0,
+      total_organizations: j.total_organizations ?? 0,
+      total_links: j.total_links ?? 0,
+      processed_links: j.processed_links ?? 0,
+      started_at: j.started_at ?? null,
+    })),
+  };
 
   return NextResponse.json(response);
 }
