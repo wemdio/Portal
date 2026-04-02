@@ -2,7 +2,7 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 const ROLE_COOKIE = 'x-portal-role'
-const ROLE_COOKIE_MAX_AGE = 4 * 60 * 60 // 4 hours — roles change rarely
+const ROLE_COOKIE_MAX_AGE = 30 * 60
 
 function encodeRoleCache(userId: string, role: string): string {
   return `${userId}:${role}`
@@ -57,12 +57,6 @@ export async function middleware(request: NextRequest) {
     if (pathname === '/maintenance' && hasBypassAccess) {
       return NextResponse.redirect(new URL('/', request.url))
     }
-  }
-
-  // Next.js data prefetches and RSC payloads — skip heavy auth work.
-  // The actual page render will still go through the full middleware.
-  if (pathname.startsWith('/_next/data')) {
-    return response
   }
 
   if (pathname.startsWith('/api/ai-caller')) {
