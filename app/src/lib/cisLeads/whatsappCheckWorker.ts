@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 /**
  * WhatsApp number verification worker.
@@ -30,29 +31,22 @@ export async function runWhatsAppCheckBatch(
 ): Promise<{ processed: number; registered: number }> {
   if (!supabaseAdmin) return { processed: 0, registered: 0 };
 
-  // Get company IDs for this job
-  const { data: leads } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(new Set(
-    (leads ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean),
-  ));
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, registered: 0 };
 
-  // Get contacts with phones but no WA check yet
-  const { data: contactsToCheck } = await supabaseAdmin
-    .from('company_contacts')
-    .select('id, channel_phone')
-    .eq('user_id', userId)
-    .in('company_id', companyIds)
-    .not('channel_phone', 'is', null)
-    .is('wa_registered', null)
-    .limit(WA_CHECK_BATCH);
+  const contactsToCheck: Array<Record<string, unknown>> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (contactsToCheck.length >= WA_CHECK_BATCH) break;
+    const { data } = await supabaseAdmin
+      .from('company_contacts')
+      .select('id, channel_phone')
+      .eq('user_id', userId)
+      .in('company_id', chunk)
+      .not('channel_phone', 'is', null)
+      .is('wa_registered', null)
+      .limit(WA_CHECK_BATCH - contactsToCheck.length);
+    if (data) contactsToCheck.push(...data);
+  }
 
   if (!contactsToCheck?.length) return { processed: 0, registered: 0 };
 

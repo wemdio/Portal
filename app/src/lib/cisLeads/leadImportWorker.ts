@@ -367,14 +367,20 @@ async function normalizeCompaniesForJob(jobId: string, userId: string, checkCanc
     });
 
     if (leadCompanyLinks.length > 0) {
-      for (let i = 0; i < leadCompanyLinks.length; i += RAW_LEADS_LINK_BATCH_SIZE) {
+      const byCompany = new Map<string, string[]>();
+      for (const link of leadCompanyLinks) {
+        const list = byCompany.get(link.company_id) ?? [];
+        list.push(link.id);
+        byCompany.set(link.company_id, list);
+      }
+      for (const [companyId, ids] of byCompany) {
         await checkCancelled();
-        const slice = leadCompanyLinks.slice(i, i + RAW_LEADS_LINK_BATCH_SIZE);
         const { error: linkErr } = await db
           .from('raw_leads')
-          .upsert(slice, { onConflict: 'id' });
+          .update({ company_id: companyId })
+          .in('id', ids);
         if (linkErr) {
-          console.error('[cis-leads] bulk raw_leads company link failed:', linkErr.message, { jobId, batchSize: slice.length });
+          console.error('[cis-leads] raw_leads company link failed:', linkErr.message, { jobId, companyId, count: ids.length });
         }
       }
     }

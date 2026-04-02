@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 const SOCIAL_LIMIT = 30;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -100,26 +101,21 @@ export async function runSocialProfileEnrichment(
 ): Promise<{ processed: number; linksFound: number }> {
   if (!supabaseAdmin || !getLprKey()) return { processed: 0, linksFound: 0 };
 
-  const { data: leadRows } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(
-    new Set((leadRows ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean)),
-  );
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, linksFound: 0 };
 
-  const { data: contacts } = await supabaseAdmin
-    .from('company_contacts')
-    .select('id, company_id, full_name, profile_links, source_details')
-    .eq('user_id', userId)
-    .in('company_id', companyIds)
-    .order('score', { ascending: false })
-    .limit(SOCIAL_LIMIT * 2);
+  const contacts: Array<Record<string, unknown>> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (contacts.length >= SOCIAL_LIMIT * 2) break;
+    const { data } = await supabaseAdmin
+      .from('company_contacts')
+      .select('id, company_id, full_name, profile_links, source_details')
+      .eq('user_id', userId)
+      .in('company_id', chunk)
+      .order('score', { ascending: false })
+      .limit(SOCIAL_LIMIT * 2 - contacts.length);
+    if (data) contacts.push(...data);
+  }
 
   if (!contacts?.length) return { processed: 0, linksFound: 0 };
 
@@ -129,16 +125,18 @@ export async function runSocialProfileEnrichment(
 
   if (withoutProfiles.length === 0) return { processed: 0, linksFound: 0 };
 
-  const { data: companies } = await supabaseAdmin
-    .from('companies')
-    .select('id, name, short_name')
-    .in('id', [...new Set(withoutProfiles.map((c) => c.company_id))]);
+  const profileCompanyIds = [...new Set(withoutProfiles.map((c) => c.company_id))];
+  const companiesForProfiles: Array<{ id: string; name: string; short_name: string | null }> = [];
+  for (const chunk of chunkArray(profileCompanyIds, IN_CHUNK_SIZE)) {
+    const { data } = await supabaseAdmin
+      .from('companies')
+      .select('id, name, short_name')
+      .in('id', chunk);
+    if (data) companiesForProfiles.push(...(data as typeof companiesForProfiles));
+  }
 
   const companyMap = new Map(
-    (companies ?? []).map((c) => [
-      String((c as { id?: unknown }).id),
-      (c as { id: string; name: string; short_name: string | null }),
-    ]),
+    companiesForProfiles.map((c) => [c.id, c]),
   );
 
   let linksFound = 0;
