@@ -139,6 +139,9 @@ blocks:
                   echo '[scheduled] maintenance fail-safe executed';
                   upsert_env MAINTENANCE_MODE false || true;
                   SAFE_DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
+                  sudo -n docker stop portal 2>/dev/null || true;
+                  sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                  sleep 2;
                   sudo -n env DOCKER_GID=\"\${SAFE_DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal || true;
                   maintenance_enabled=0;
                 };
@@ -193,6 +196,9 @@ blocks:
                 fi;
                 echo '--- Step 2: enable maintenance mode ---';
                 upsert_env MAINTENANCE_MODE true;
+                sudo -n docker stop portal 2>/dev/null || true;
+                sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                sleep 2;
                 sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
                 maintenance_enabled=1;
                 echo '--- Step 3: drain worker ---';
