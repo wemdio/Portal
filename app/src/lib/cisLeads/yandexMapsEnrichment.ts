@@ -7,6 +7,7 @@ import {
   yandexMapsParseOrgs,
   type YandexMapsOrganization,
 } from '@/lib/parsers/yandexMapsServiceClient';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 const BATCH_LIMIT = 15;
 
@@ -35,27 +36,22 @@ export async function runYandexMapsEnrichment(
     return { processed: 0, updated: 0 };
   }
 
-  const { data: leads } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(new Set(
-    (leads ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean),
-  ));
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, updated: 0 };
 
-  const { data: companiesWithoutPhone } = await supabaseAdmin
-    .from('companies')
-    .select('id, name, short_name, city')
-    .in('id', companyIds)
-    .is('phone', null)
-    .limit(BATCH_LIMIT);
+  const companiesWithoutPhone: Array<{ id: string; name: string; short_name: string | null; city: string | null }> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (companiesWithoutPhone.length >= BATCH_LIMIT) break;
+    const { data } = await supabaseAdmin
+      .from('companies')
+      .select('id, name, short_name, city')
+      .in('id', chunk)
+      .is('phone', null)
+      .limit(BATCH_LIMIT - companiesWithoutPhone.length);
+    if (data) companiesWithoutPhone.push(...(data as typeof companiesWithoutPhone));
+  }
 
-  if (!companiesWithoutPhone?.length) return { processed: 0, updated: 0 };
+  if (!companiesWithoutPhone.length) return { processed: 0, updated: 0 };
 
   let processed = 0;
   let updated = 0;
