@@ -165,9 +165,45 @@ async function pollOnce(): Promise<boolean> {
   return true;
 }
 
+async function resumeRunningCampaigns() {
+  const { data: running } = await db
+    .from('tg_outreach_campaigns')
+    .select('id, user_id')
+    .in('status', ['running', 'paused']);
+
+  if (!running?.length) return;
+
+  log('info', `Found ${running.length} campaigns with status running/paused, scheduling auto-resume`);
+  for (const campaign of running) {
+    const { data: existingJob } = await db
+      .from('tg_outreach_jobs')
+      .select('id')
+      .eq('campaign_id', campaign.id)
+      .in('status', ['pending', 'running'])
+      .maybeSingle();
+
+    if (!existingJob) {
+      await db.from('tg_outreach_jobs').insert({
+        campaign_id: campaign.id,
+        user_id: campaign.user_id ?? '00000000-0000-0000-0000-000000000000',
+        action: 'start',
+        status: 'pending',
+      });
+      log('info', `Queued auto-resume start job for campaign ${campaign.id}`);
+    }
+  }
+
+  // Обновляем paused → running, т.к. start job уже в очереди
+  await db
+    .from('tg_outreach_campaigns')
+    .update({ status: 'running', updated_at: new Date().toISOString() })
+    .eq('status', 'paused');
+}
+
 async function main() {
   log('info', 'TG Outreach worker starting...');
   await resetStuckJobs();
+  await resumeRunningCampaigns();
 
   await pollLoop({
     log,
