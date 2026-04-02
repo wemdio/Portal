@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2 } from 'lucide-react';
+import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2, Play } from 'lucide-react';
 
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
@@ -17,38 +17,17 @@ type MatchRow = {
   paymentSystem: string;
 };
 
-type HistoryEntry = {
+type JobEntry = {
   id: string;
-  fileName: string;
-  startedAt: string;
-  checkedCount: number;
-  totalCount: number;
-  matchCount: number;
+  file_name: string;
+  status: 'pending' | 'running' | 'completed' | 'stopped' | 'error';
+  checked_count: number;
+  total_count: number;
   matches: MatchRow[];
-  status: 'running' | 'completed' | 'stopped';
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
 };
-
-const STORAGE_KEY = 'crypto-payment-parser-history';
-const MAX_HISTORY = 10;
-
-function loadHistory(): HistoryEntry[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as HistoryEntry[];
-    return Array.isArray(parsed) ? parsed.slice(0, MAX_HISTORY) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(entries: HistoryEntry[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
-  } catch {
-    // quota exceeded — ignore
-  }
-}
 
 const WEBSITE_HEADER_HINTS = [
   'website', 'web site', 'site', 'url', 'domain', 'web', 'company website', 'company url',
@@ -145,12 +124,6 @@ async function parseWorkbook(file: File): Promise<ParsedCompany[]> {
   });
 }
 
-function chunkArray<T>(items: T[], size: number): Array<T[]> {
-  const out: Array<T[]> = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
-}
-
 function formatDate(dateStr: string) {
   try {
     return new Date(dateStr).toLocaleString('ru-RU', {
@@ -162,38 +135,90 @@ function formatDate(dateStr: string) {
   }
 }
 
+const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
+  pending: { label: 'В очереди', cls: 'bg-gray-100 text-gray-700' },
+  running: { label: 'В процессе', cls: 'bg-blue-100 text-blue-700' },
+  completed: { label: 'Готово', cls: 'bg-emerald-100 text-emerald-700' },
+  stopped: { label: 'Остановлен', cls: 'bg-amber-100 text-amber-700' },
+  error: { label: 'Ошибка', cls: 'bg-red-100 text-red-700' },
+};
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new Error('Требуется авторизация');
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  };
+}
+
 export function CryptoPaymentParserView() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [matches, setMatches] = useState<MatchRow[]>([]);
-  const [checkedCount, setCheckedCount] = useState(0);
-  const [totalToCheck, setTotalToCheck] = useState(0);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const [jobs, setJobs] = useState<JobEntry[]>([]);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
+  const displayMatches = activeJob?.matches ?? [];
+  const checkedCount = activeJob?.checked_count ?? 0;
+  const totalToCheck = activeJob?.total_count ?? 0;
+  const progress = totalToCheck > 0 ? Math.round((checkedCount / totalToCheck) * 100) : 0;
+  const isActive = activeJob?.status === 'running' || activeJob?.status === 'pending';
+
+  // Load jobs on mount
+  const loadJobs = useCallback(async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch('/api/parsers/crypto-payments/jobs', { headers });
+      if (res.ok) {
+        const data = (await res.json()) as JobEntry[];
+        setJobs(data);
+      }
+    } catch {
+      // silent
+    }
+  }, []);
 
   useEffect(() => {
-    setHistory(loadHistory());
-  }, []);
+    void loadJobs();
+  }, [loadJobs]);
 
-  const progress = useMemo(() => {
-    if (totalToCheck <= 0) return 0;
-    return Math.round((checkedCount / totalToCheck) * 100);
-  }, [checkedCount, totalToCheck]);
+  // Poll active job
+  useEffect(() => {
+    if (!activeJobId) return;
+    const active = jobs.find((j) => j.id === activeJobId);
+    if (!active || (active.status !== 'running' && active.status !== 'pending')) {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      return;
+    }
 
-  const persistEntry = useCallback((entry: HistoryEntry) => {
-    setHistory((prev) => {
-      const filtered = prev.filter((h) => h.id !== entry.id);
-      const next = [entry, ...filtered].slice(0, MAX_HISTORY);
-      saveHistory(next);
-      return next;
-    });
-  }, []);
+    const poll = async () => {
+      try {
+        const headers = await getAuthHeaders();
+        const res = await fetch(`/api/parsers/crypto-payments/jobs/${activeJobId}`, { headers });
+        if (res.ok) {
+          const fresh = (await res.json()) as JobEntry;
+          setJobs((prev) => prev.map((j) => (j.id === fresh.id ? fresh : j)));
+        }
+      } catch {
+        // silent
+      }
+    };
 
-  const handleStop = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+    pollRef.current = setInterval(() => void poll(), 60_000);
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [activeJobId, jobs]);
 
   const handleRun = async () => {
     if (!file) {
@@ -201,17 +226,8 @@ export function CryptoPaymentParserView() {
       return;
     }
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     setBusy(true);
     setError(null);
-    setMatches([]);
-    setCheckedCount(0);
-    setTotalToCheck(0);
-
-    const runId = crypto.randomUUID();
-    setActiveHistoryId(runId);
 
     try {
       const parsed = await parseWorkbook(file);
@@ -220,105 +236,73 @@ export function CryptoPaymentParserView() {
         if (!uniqueBySite.has(row.website)) uniqueBySite.set(row.website, row);
       }
       const prepared = Array.from(uniqueBySite.values());
-      setTotalToCheck(prepared.length);
 
-      const entry: HistoryEntry = {
-        id: runId,
-        fileName: file.name,
-        startedAt: new Date().toISOString(),
-        checkedCount: 0,
-        totalCount: prepared.length,
-        matchCount: 0,
-        matches: [],
-        status: 'running',
-      };
-      persistEntry(entry);
-
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) throw new Error('Требуется авторизация');
-
-      const chunks = chunkArray(prepared, 10);
-      const found: MatchRow[] = [];
-      let checked = 0;
-
-      for (const chunk of chunks) {
-        if (controller.signal.aborted) break;
-
-        const res = await fetch('/api/parsers/crypto-payments/scan', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ items: chunk }),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          throw new Error(text || `Ошибка проверки: ${res.status}`);
-        }
-
-        const data = (await res.json()) as { matches: MatchRow[]; checked: number };
-        found.push(...(data.matches ?? []));
-        checked += data.checked ?? chunk.length;
-
-        setMatches([...found]);
-        setCheckedCount(checked);
-
-        persistEntry({
-          ...entry,
-          checkedCount: checked,
-          matchCount: found.length,
-          matches: [...found],
-          status: 'running',
-        });
-      }
-
-      const finalStatus = controller.signal.aborted ? 'stopped' : 'completed';
-      persistEntry({
-        ...entry,
-        checkedCount: checked,
-        matchCount: found.length,
-        matches: [...found],
-        status: finalStatus,
+      const headers = await getAuthHeaders();
+      const res = await fetch('/api/parsers/crypto-payments/jobs', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ fileName: file.name, items: prepared }),
       });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        // stopped by user — already persisted
-      } else {
-        setError(err instanceof Error ? err.message : 'Не удалось выполнить проверку');
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Ошибка создания задачи: ${res.status}`);
       }
+
+      const job = (await res.json()) as JobEntry;
+      setJobs((prev) => [{ ...job, matches: [], error_message: null, file_name: file.name, updated_at: job.created_at }, ...prev]);
+      setActiveJobId(job.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать задачу');
     } finally {
       setBusy(false);
-      abortRef.current = null;
     }
   };
 
-  const loadFromHistory = useCallback((entry: HistoryEntry) => {
-    setActiveHistoryId(entry.id);
-    setMatches(entry.matches);
-    setCheckedCount(entry.checkedCount);
-    setTotalToCheck(entry.totalCount);
-    setError(null);
-  }, []);
-
-  const deleteFromHistory = useCallback((id: string) => {
-    setHistory((prev) => {
-      const next = prev.filter((h) => h.id !== id);
-      saveHistory(next);
-      return next;
-    });
-    if (activeHistoryId === id) {
-      setActiveHistoryId(null);
-      setMatches([]);
-      setCheckedCount(0);
-      setTotalToCheck(0);
+  const handleStop = async () => {
+    if (!activeJobId) return;
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/parsers/crypto-payments/jobs/${activeJobId}/stop`, {
+        method: 'POST',
+        headers,
+      });
+      setJobs((prev) => prev.map((j) => (j.id === activeJobId ? { ...j, status: 'stopped' as const } : j)));
+    } catch {
+      // silent
     }
-  }, [activeHistoryId]);
+  };
 
-  const displayMatches = matches;
+  const handleResume = async (jobId: string) => {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/parsers/crypto-payments/jobs/${jobId}/resume`, {
+        method: 'POST',
+        headers,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || 'Не удалось возобновить');
+      }
+      setJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, status: 'pending' as const, error_message: null } : j)));
+      setActiveJobId(jobId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось возобновить задачу');
+    }
+  };
+
+  const handleDelete = async (jobId: string) => {
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/parsers/crypto-payments/jobs/${jobId}`, { method: 'DELETE', headers });
+      setJobs((prev) => prev.filter((j) => j.id !== jobId));
+      if (activeJobId === jobId) {
+        setActiveJobId(null);
+      }
+    } catch {
+      // silent
+    }
+  };
 
   const exportCsv = () => {
     if (displayMatches.length === 0) return;
@@ -363,16 +347,16 @@ export function CryptoPaymentParserView() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <input
             type="file"
-            accept=".xlsx,.xls"
+            accept=".xlsx,.xls,.csv"
             disabled={busy}
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             className="block w-full text-sm text-gray-700 disabled:opacity-40 disabled:pointer-events-none file:mr-3 file:cursor-pointer file:rounded-md file:border file:border-gray-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-gray-700 file:transition-colors hover:file:border-blue-300 hover:file:bg-blue-50 hover:file:text-blue-700"
           />
           <div className="flex items-center gap-2 shrink-0">
-            {busy ? (
+            {isActive ? (
               <button
                 type="button"
-                onClick={handleStop}
+                onClick={() => void handleStop()}
                 className="inline-flex items-center justify-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
               >
                 <CirclePause className="h-4 w-4" />
@@ -382,32 +366,39 @@ export function CryptoPaymentParserView() {
               <button
                 type="button"
                 onClick={() => void handleRun()}
-                disabled={!file}
+                disabled={!file || busy}
                 className="inline-flex items-center justify-center rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
               >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
                 Запустить
               </button>
             )}
           </div>
         </div>
 
-        {busy || totalToCheck > 0 ? (
+        {activeJob && (isActive || totalToCheck > 0) ? (
           <div className="space-y-1">
             <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
               <div
-                className={`h-full transition-all ${busy ? 'bg-emerald-500' : 'bg-emerald-500'}`}
+                className={`h-full transition-all ${isActive ? 'bg-emerald-500' : 'bg-emerald-500'}`}
                 style={{ width: `${progress}%` }}
               />
             </div>
             <div className="text-xs text-gray-500">
               Проверено: {checkedCount} / {totalToCheck} ({progress}%)
-              {busy ? ' — идёт проверка…' : ''}
+              {isActive ? ' — идёт проверка…' : ''}
             </div>
           </div>
         ) : null}
 
         {error ? (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+        ) : null}
+
+        {activeJob?.error_message ? (
+          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {activeJob.error_message}
+          </div>
         ) : null}
       </div>
 
@@ -418,44 +409,54 @@ export function CryptoPaymentParserView() {
             <h3 className="text-sm font-semibold text-gray-900">История запусков</h3>
           </div>
           <div className="divide-y divide-gray-100 max-h-[520px] overflow-y-auto">
-            {history.length === 0 ? (
+            {jobs.length === 0 ? (
               <div className="px-4 py-8 text-center text-sm text-gray-400">Нет запусков</div>
             ) : (
-              history.map((entry) => (
-                <div
-                  key={entry.id}
-                  className={`group relative px-4 py-3 cursor-pointer transition-colors ${
-                    activeHistoryId === entry.id ? 'bg-blue-50' : 'hover:bg-gray-50'
-                  }`}
-                  onClick={() => loadFromHistory(entry)}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                      entry.status === 'completed'
-                        ? 'bg-emerald-100 text-emerald-700'
-                        : entry.status === 'stopped'
-                          ? 'bg-amber-100 text-amber-700'
-                          : 'bg-blue-100 text-blue-700'
-                    }`}>
-                      {entry.status === 'completed' ? 'Готово' : entry.status === 'stopped' ? 'Остановлен' : 'В процессе'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); deleteFromHistory(entry.id); }}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
-                      title="Удалить"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+              jobs.map((entry) => {
+                const canResume = (entry.status === 'stopped' || entry.status === 'error') && entry.checked_count < entry.total_count;
+                const st = STATUS_LABELS[entry.status] ?? STATUS_LABELS.pending;
+                return (
+                  <div
+                    key={entry.id}
+                    className={`group relative px-4 py-3 cursor-pointer transition-colors ${
+                      activeJobId === entry.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                    }`}
+                    onClick={() => setActiveJobId(entry.id)}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${st.cls}`}>
+                        {st.label}
+                      </span>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {canResume ? (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); void handleResume(entry.id); }}
+                            className="p-1 rounded hover:bg-emerald-50 text-gray-400 hover:text-emerald-600"
+                            title="Продолжить"
+                          >
+                            <Play className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); void handleDelete(entry.id); }}
+                          className="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
+                          title="Удалить"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="text-xs font-medium text-gray-900 truncate" title={entry.file_name}>
+                      {entry.file_name}
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      {formatDate(entry.created_at)} · {entry.checked_count}/{entry.total_count} проверено · {(entry.matches ?? []).length} найдено
+                    </div>
                   </div>
-                  <div className="text-xs font-medium text-gray-900 truncate" title={entry.fileName}>
-                    {entry.fileName}
-                  </div>
-                  <div className="text-[11px] text-gray-500 mt-0.5">
-                    {formatDate(entry.startedAt)} · {entry.checkedCount}/{entry.totalCount} проверено · {entry.matchCount} найдено
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -479,7 +480,7 @@ export function CryptoPaymentParserView() {
               </button>
               <button
                 type="button"
-                onClick={exportXlsx}
+                onClick={() => void exportXlsx()}
                 disabled={displayMatches.length === 0}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
@@ -501,7 +502,7 @@ export function CryptoPaymentParserView() {
                 {displayMatches.length === 0 ? (
                   <tr>
                     <td colSpan={3} className="px-4 py-8 text-center text-gray-500">
-                      {busy ? (
+                      {isActive ? (
                         <span className="inline-flex items-center gap-2">
                           <Loader2 className="h-4 w-4 animate-spin" />
                           Идёт проверка…

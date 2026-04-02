@@ -1,5 +1,6 @@
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
+import { runCryptoPaymentJob } from '@/lib/parsers/cryptoPaymentsWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -26,6 +27,15 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (briefError) log('warn', 'Startup recovery: brief_scoring_jobs update failed', briefError);
   else if (briefJobs?.length) log('info', `Startup recovery: reset ${briefJobs.length} brief_scoring_jobs to pending`);
+
+  // Crypto payment jobs — reset running to pending (worker resumes from checked_count)
+  const { data: cryptoJobs, error: cryptoError } = await db
+    .from('crypto_payment_jobs')
+    .update({ status: 'pending', updated_at: new Date().toISOString() })
+    .eq('status', 'running')
+    .select('id');
+  if (cryptoError) log('warn', 'Startup recovery: crypto_payment_jobs update failed', cryptoError);
+  else if (cryptoJobs?.length) log('info', `Startup recovery: reset ${cryptoJobs.length} crypto_payment_jobs to pending`);
 }
 
 async function claimEnrichJob(): Promise<string | null> {
@@ -74,6 +84,29 @@ async function claimBriefScoringJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
+async function claimCryptoPaymentJob(): Promise<string | null> {
+  const db = requireSupabaseAdmin(log);
+  const { data: pending } = await db
+    .from('crypto_payment_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('crypto_payment_jobs')
+    .update({ status: 'running', updated_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
+}
+
 async function pollOnce(): Promise<boolean> {
   if (running.size >= MAX_CONCURRENCY) {
     await sleep(500);
@@ -91,11 +124,22 @@ async function pollOnce(): Promise<boolean> {
   }
 
   const briefJobId = await claimBriefScoringJob();
-  if (!briefJobId) return false;
+  if (briefJobId) {
+    const task = (async () => {
+      log('info', `Running brief scoring job ${briefJobId}`);
+      await runBriefScoringJob(briefJobId);
+    })();
+    running.add(task);
+    void task.finally(() => running.delete(task));
+    return true;
+  }
+
+  const cryptoJobId = await claimCryptoPaymentJob();
+  if (!cryptoJobId) return false;
 
   const task = (async () => {
-    log('info', `Running brief scoring job ${briefJobId}`);
-    await runBriefScoringJob(briefJobId);
+    log('info', `Running crypto payment job ${cryptoJobId}`);
+    await runCryptoPaymentJob(cryptoJobId);
   })();
   running.add(task);
   void task.finally(() => running.delete(task));
@@ -111,7 +155,7 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['website_enrichment_jobs', 'brief_scoring_jobs'] });
+  await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['website_enrichment_jobs', 'brief_scoring_jobs', 'crypto_payment_jobs'] });
 }
 
 main().catch((err) => {
