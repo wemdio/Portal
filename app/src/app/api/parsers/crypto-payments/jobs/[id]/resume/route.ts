@@ -42,10 +42,18 @@ export async function POST(
     return jsonError('Job is already fully checked', 400);
   }
 
+  const nowIso = new Date().toISOString();
+  await supabaseAdmin
+    .from('crypto_payment_jobs')
+    .update({ status: 'stopped', updated_at: nowIso })
+    .eq('user_id', user.id)
+    .neq('id', id)
+    .in('status', ['pending', 'running']);
+
   // Set back to pending — enrich worker will pick it up and resume from checked_count
   await supabaseAdmin
     .from('crypto_payment_jobs')
-    .update({ status: 'pending', error_message: null, updated_at: new Date().toISOString() })
+    .update({ status: 'pending', error_message: null, updated_at: nowIso })
     .eq('id', id);
 
   return NextResponse.json({ ok: true, resumeFrom: job.checked_count });
