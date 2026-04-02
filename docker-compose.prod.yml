@@ -3,9 +3,6 @@ services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
     container_name: portal
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     depends_on:
       - yandexmaps
       - telegram-bot-api
