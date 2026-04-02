@@ -139,6 +139,9 @@ blocks:
                   echo '[scheduled] maintenance fail-safe executed';
                   upsert_env MAINTENANCE_MODE false || true;
                   SAFE_DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
+                  sudo -n docker stop portal 2>/dev/null || true;
+                  sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                  wait_port_free 3000 15 2>/dev/null || true;
                   sudo -n env DOCKER_GID=\"\${SAFE_DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal || true;
                   maintenance_enabled=0;
                 };
@@ -191,16 +194,36 @@ blocks:
                   send_health_alert \"\${ALERT}\";
                   exit 1;
                 fi;
+                wait_port_free() {
+                  local port=\"\$1\" max_wait=\"\${2:-30}\";
+                  local i=0;
+                  while [ \"\$i\" -lt \"\$max_wait\" ]; do
+                    if ! sudo -n ss -tlnp 2>/dev/null | grep -q \":\${port} \"; then
+                      echo \"[scheduled] port \${port} is free\";
+                      return 0;
+                    fi;
+                    echo \"[scheduled] port \${port} still in use, waiting... (\$((i+1))/\${max_wait})\";
+                    sleep 2;
+                    i=\$((i + 1));
+                  done;
+                  echo \"[scheduled] port \${port} still occupied after \${max_wait} checks, killing holder\" >&2;
+                  sudo -n fuser -k \"\${port}/tcp\" 2>/dev/null || true;
+                  sleep 2;
+                };
                 echo '--- Step 2: enable maintenance mode ---';
                 upsert_env MAINTENANCE_MODE true;
+                sudo -n docker stop portal 2>/dev/null || true;
+                sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                wait_port_free 3000 15;
                 sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
                 maintenance_enabled=1;
                 echo '--- Step 3: drain worker ---';
                 sudo -n bash drain-worker.sh;
                 echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
-                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot 2>/dev/null || true;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot;
+                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot 2>/dev/null || true;
+                wait_port_free 3000 15;
+                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot;
                 echo '--- Step 4.1: verify Docker socket access inside portal ---';
                 PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                 echo \"portal GroupAdd=\${PORTAL_GROUPS}\";

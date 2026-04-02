@@ -8,14 +8,15 @@
  *
  * Supabase Dashboard → Connect → "Transaction" (порт 6543).
  * Формат: postgres://user:pass@...pooler.supabase.com:6543/postgres
+ *
+ * Для второй Instantly DB используется INSTANTLY_DATABASE_URL.
+ * Если переменная не задана — миграции для Instantly DB пропускаются.
  */
 const path = require('path');
 const fs = require('fs/promises');
 const dns = require('dns').promises;
 const dotenv = require('dotenv');
 const { Client } = require('pg');
-
-const MIGRATION_TABLE = 'portal_migrations';
 
 const MAX_RETRIES = 6;
 const RETRY_DELAY_MS = 5000;
@@ -82,14 +83,16 @@ function shouldUseSsl(dbUrl) {
   return false;
 }
 
-function resolveMigrationsDirCandidates() {
-  if (process.env.DB_MIGRATIONS_DIR) return [process.env.DB_MIGRATIONS_DIR];
+function resolveMigrationsDirCandidates(subdir) {
+  if (subdir === 'migrations' && process.env.DB_MIGRATIONS_DIR) {
+    return [process.env.DB_MIGRATIONS_DIR];
+  }
 
-  // In local dev, cwd is usually `app/` → migrations are `../supabase/migrations`.
-  // In Docker image we copy migrations into `/app/supabase/migrations`.
+  // In local dev, cwd is usually `app/` → migrations are `../supabase/<subdir>`.
+  // In Docker image we copy migrations into `/app/supabase/<subdir>`.
   return [
-    path.resolve(process.cwd(), 'supabase', 'migrations'),
-    path.resolve(process.cwd(), '..', 'supabase', 'migrations'),
+    path.resolve(process.cwd(), 'supabase', subdir),
+    path.resolve(process.cwd(), '..', 'supabase', subdir),
   ];
 }
 
@@ -129,33 +132,27 @@ async function connectionConfigWithIPv4(dbUrl, ssl) {
   }
 }
 
-async function ensureDatabase() {
-  loadEnvFiles();
-
-  const dbUrl = resolveDbUrl();
+/**
+ * Применяет все непримененные SQL-файлы из migrationsDir к указанной БД.
+ * Состояние применённых миграций хранится в таблице trackingTable.
+ */
+async function runMigrations(dbUrl, migrationsDir, trackingTable) {
   if (!dbUrl) {
-    console.warn('[db] Не задан URL базы данных. Пропускаем миграции.');
+    console.warn(`[db] Не задан URL базы данных (${trackingTable}). Пропускаем миграции.`);
     return;
-  }
-  if (process.env.NODE_ENV === 'production' && dbUrl.includes(':5432') && !dbUrl.includes(':6543')) {
-    console.warn('[db] ВНИМАНИЕ: используется порт 5432 (Session pooler). Рекомендуется 6543 (Transaction pooler) — меньше риска MaxClientsInSessionMode.');
   }
 
-  const dirCandidates = resolveMigrationsDirCandidates();
-  let migrationsDir = '';
-  for (const dir of dirCandidates) {
-    try {
-      await fs.access(dir);
-      migrationsDir = dir;
-      break;
-    } catch {
-      // try next
-    }
-  }
-  if (!migrationsDir) {
-    console.warn(`[db] Папка миграций не найдена. Пробовали: ${dirCandidates.join(', ')}. Пропускаем.`);
+  try {
+    await fs.access(migrationsDir);
+  } catch {
+    console.warn(`[db] Папка миграций не найдена: ${migrationsDir}. Пропускаем.`);
     return;
   }
+
+  if (process.env.NODE_ENV === 'production' && dbUrl.includes(':5432') && !dbUrl.includes(':6543')) {
+    console.warn(`[db] ВНИМАНИЕ (${trackingTable}): используется порт 5432 (Session pooler). Рекомендуется 6543 (Transaction pooler).`);
+  }
+
   const ssl = shouldUseSsl(dbUrl) ? { rejectUnauthorized: false } : undefined;
   const clientConfig = await connectionConfigWithIPv4(dbUrl, ssl);
 
@@ -167,14 +164,14 @@ async function ensureDatabase() {
       await client.query('select 1');
 
       await client.query(
-        `create table if not exists public.${MIGRATION_TABLE} (
+        `create table if not exists public.${trackingTable} (
           name text primary key,
           applied_at timestamptz not null default now()
         );`,
       );
 
       const { rows } = await client.query(
-        `select name from public.${MIGRATION_TABLE}`,
+        `select name from public.${trackingTable}`,
       );
       const applied = new Set(rows.map((row) => row.name));
 
@@ -186,14 +183,14 @@ async function ensureDatabase() {
         const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
         const trimmed = sql.trim();
 
-        console.log(`[db] Применяем миграцию: ${file}`);
+        console.log(`[db] Применяем миграцию (${trackingTable}): ${file}`);
         await client.query('begin');
         try {
           if (trimmed) {
             await client.query(sql);
           }
           await client.query(
-            `insert into public.${MIGRATION_TABLE} (name) values ($1)`,
+            `insert into public.${trackingTable} (name) values ($1)`,
             [file],
           );
           await client.query('commit');
@@ -211,7 +208,7 @@ async function ensureDatabase() {
       if (attempt < MAX_RETRIES && isRetryableDbError(err)) {
         const isMaxClients = (err && err.message && String(err.message).includes('MaxClientsInSessionMode'));
         if (isMaxClients && attempt === 1) console.warn(MAX_CLIENTS_HINT);
-        console.warn(`[db] Подключение не удалось (попытка ${attempt}/${MAX_RETRIES}), повтор через ${RETRY_DELAY_MS} мс:`, err.message);
+        console.warn(`[db] Подключение не удалось (${trackingTable}, попытка ${attempt}/${MAX_RETRIES}), повтор через ${RETRY_DELAY_MS} мс:`, err.message);
         await sleep(RETRY_DELAY_MS);
       } else {
         if (lastError && lastError.message && String(lastError.message).includes('MaxClientsInSessionMode')) {
@@ -222,6 +219,54 @@ async function ensureDatabase() {
     }
   }
   throw lastError;
+}
+
+async function ensureDatabase() {
+  loadEnvFiles();
+
+  // ── Основная БД ──────────────────────────────────────────────────────────────
+  const mainDbUrl = resolveDbUrl();
+  const mainMigrationsDirCandidates = resolveMigrationsDirCandidates('migrations');
+  let mainMigrationsDir = '';
+  for (const dir of mainMigrationsDirCandidates) {
+    try {
+      await fs.access(dir);
+      mainMigrationsDir = dir;
+      break;
+    } catch {
+      // try next
+    }
+  }
+
+  if (!mainDbUrl) {
+    console.warn('[db] Не задан URL базы данных. Пропускаем миграции.');
+  } else if (!mainMigrationsDir) {
+    console.warn(`[db] Папка миграций не найдена. Пробовали: ${mainMigrationsDirCandidates.join(', ')}. Пропускаем.`);
+  } else {
+    await runMigrations(mainDbUrl, mainMigrationsDir, 'portal_migrations');
+  }
+
+  // ── Instantly DB ─────────────────────────────────────────────────────────────
+  const instantlyDbUrl = (process.env.INSTANTLY_DATABASE_URL || '').trim();
+  if (instantlyDbUrl) {
+    const instantlyMigrationsDirCandidates = resolveMigrationsDirCandidates('instantly-migrations');
+    let instantlyMigrationsDir = '';
+    for (const dir of instantlyMigrationsDirCandidates) {
+      try {
+        await fs.access(dir);
+        instantlyMigrationsDir = dir;
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    if (!instantlyMigrationsDir) {
+      console.warn(`[db] Папка instantly-migrations не найдена. Пробовали: ${instantlyMigrationsDirCandidates.join(', ')}. Пропускаем.`);
+    } else {
+      await runMigrations(instantlyDbUrl, instantlyMigrationsDir, 'portal_instantly_migrations');
+    }
+  }
 }
 
 if (require.main === module) {

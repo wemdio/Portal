@@ -20,7 +20,7 @@ PolzaInstantlySync Bot
 Переменные окружения (обязательные):
   POLZA_INSTANTLY_SYNC_BOT_API_KEY   — токен этого бота
   INSTANTLY_API_KEY или INSTANTLY_PORTAL_API_KEY — ключ Instantly
-  DATABASE_URL                        — PostgreSQL connection string
+  INSTANTLY_DATABASE_URL              — PostgreSQL connection string (новая Instantly-БД)
   INSTANTLY_SYNC_BOT_CHAT_ID или TELEGRAM_HEALTH_CHAT_ID — чат для отчётов
 """
 from __future__ import annotations
@@ -57,9 +57,15 @@ INSTANTLY_API_KEY: str = (
     or os.environ.get("INSTANTLY_PORTAL_API_KEY")
     or ""
 ).strip()
-DATABASE_URL: str = (os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or "")
+DATABASE_URL: str = (
+    os.environ.get("INSTANTLY_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+    or os.environ.get("SUPABASE_DB_URL")
+    or ""
+)
 
 SYNC_INTERVAL_SEC: int = int(os.environ.get("INSTANTLY_SYNC_INTERVAL_SEC", str(60 * 60)))  # 1 hour
+MIN_SYNC_INTERVAL_SEC = 60 * 60
 INSTANTLY_BASE = "https://api.instantly.ai/api/v2"
 PAGE_LIMIT = 100
 MAX_PAGES = 200
@@ -68,7 +74,13 @@ NAME_MAX_LEN = 2000
 HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 
-_CONNECT_KWARGS: dict = {"statement_cache_size": 0}
+LEADS_PAGE_LIMIT = 100
+LEADS_CONCURRENCY = 3
+LEADS_UPSERT_BATCH = 500
+LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "3"))
+LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
+
+_CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -77,6 +89,21 @@ _sync_lock = asyncio.Lock()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_ts(val: Any) -> datetime | None:
+    """Parse an ISO-8601 string into a timezone-aware datetime, or return None."""
+    if isinstance(val, datetime):
+        return val
+    if not isinstance(val, str) or not val.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
 
 def _now_msk() -> str:
     msk = timezone(timedelta(hours=3))
@@ -273,6 +300,27 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
     return all_campaigns, error_count[0]
 
 
+# ── Instantly Analytics API ──────────────────────────────────────────────────
+
+async def fetch_campaign_analytics() -> list[dict]:
+    """Fetch analytics for all campaigns from Instantly API."""
+    headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.get(
+            f"{INSTANTLY_BASE}/campaigns/analytics",
+            headers=headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("data", "items", "campaigns"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 async def _db_count(conn) -> int:
@@ -314,7 +362,7 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
 
     Returns: before, after, added, removed, updated.
     """
-    sync_marker = datetime.now(timezone.utc).isoformat()
+    sync_marker = datetime.now(timezone.utc)
 
     rows: list[dict] = []
     for c in campaigns:
@@ -325,8 +373,8 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
             "id": cid,
             "name": str(c.get("name") or "")[:NAME_MAX_LEN],
             "status": c.get("status") if isinstance(c.get("status"), int) else None,
-            "timestamp_created": c.get("timestamp_created"),
-            "timestamp_updated": c.get("timestamp_updated"),
+            "timestamp_created": _parse_ts(c.get("timestamp_created")),
+            "timestamp_updated": _parse_ts(c.get("timestamp_updated")),
             "synced_at": sync_marker,
         })
 
@@ -367,6 +415,235 @@ async def sync_to_db(campaigns: list[dict]) -> dict[str, int]:
     return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
 
 
+def _safe_int(val: Any) -> int | None:
+    if isinstance(val, int):
+        return val
+    if isinstance(val, (float, str)):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+async def sync_analytics_to_db(analytics: list[dict]) -> int:
+    """
+    Update analytics columns in instantly_campaign_catalog for campaigns
+    returned by the /campaigns/analytics endpoint.
+    Returns: number of rows updated.
+    """
+    rows: list[tuple] = []
+    sync_marker = datetime.now(timezone.utc)
+    for a in analytics:
+        cid = a.get("campaign_id") or ""
+        if not cid:
+            continue
+        rows.append((
+            cid,
+            _safe_int(a.get("emails_sent_count")),
+            _safe_int(a.get("open_count")),
+            _safe_int(a.get("reply_count")),
+            _safe_int(a.get("new_leads_contacted_count")),
+            _safe_int(a.get("bounced_count")),
+            _safe_int(a.get("unsubscribed_count")),
+            _safe_int(a.get("leads_count")),
+            sync_marker,
+        ))
+
+    if not rows:
+        return 0
+
+    async def _do() -> int:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            BATCH = 200
+            for i in range(0, len(rows), BATCH):
+                await conn.executemany(
+                    """
+                    UPDATE public.instantly_campaign_catalog SET
+                        emails_sent_count          = $2,
+                        open_count                 = $3,
+                        reply_count                = $4,
+                        new_leads_contacted_count  = $5,
+                        bounced_count              = $6,
+                        unsubscribed_count         = $7,
+                        leads_count                = $8,
+                        analytics_synced_at        = $9
+                    WHERE id = $1::uuid
+                    """,
+                    rows[i : i + BATCH],
+                )
+            return len(rows)
+        finally:
+            await conn.close()
+
+    return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
+
+
+# ── Client leads sync ─────────────────────────────────────────────────────────
+
+async def _fetch_leads_page(
+    client: httpx.AsyncClient,
+    campaign_id: str,
+    starting_after: str | None,
+) -> dict:
+    """Fetch one page of leads for a campaign from Instantly."""
+    url = f"{INSTANTLY_BASE}/leads/list"
+    headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
+    body: dict[str, Any] = {"campaign_id": campaign_id, "limit": LEADS_PAGE_LIMIT}
+    if starting_after:
+        body["starting_after"] = starting_after
+
+    last_err: Exception | None = None
+    for attempt in range(LEADS_RETRY_ATTEMPTS):
+        try:
+            r = await client.post(url, json=body, headers=headers, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if attempt < LEADS_RETRY_ATTEMPTS - 1:
+                delay = LEADS_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+                print(
+                    f"[leads-sync] campaign {campaign_id}: leads/list attempt "
+                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {e!r}. "
+                    f"Retry in {delay:.1f}s…"
+                )
+                await asyncio.sleep(delay)
+    raise last_err  # type: ignore[misc]
+
+
+async def _fetch_all_leads_for_campaign(
+    client: httpx.AsyncClient,
+    campaign_id: str,
+) -> list[dict]:
+    """Paginate all leads for a single campaign."""
+    all_leads: list[dict] = []
+    after: str | None = None
+    pages = 0
+
+    while True:
+        data = await _fetch_leads_page(client, campaign_id, after)
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if items:
+            all_leads.extend(items)
+        nsa = data.get("next_starting_after") if isinstance(data, dict) else None
+        after = nsa if isinstance(nsa, str) and nsa else None
+        pages += 1
+        if not after:
+            break
+
+    return all_leads
+
+
+async def sync_client_leads() -> dict[str, int]:
+    """
+    Sync leads from Instantly API into client_campaign_leads for all client users.
+    Reads access pairs from client_instantly_access, fetches leads once per campaign,
+    upserts for each user.  Campaigns are processed sequentially to stay within
+    the tight container memory budget.
+    """
+    conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    try:
+        access_rows = await conn.fetch(
+            "SELECT client_user_id, resource_id FROM public.client_instantly_access "
+            "WHERE resource_type = 'campaign'"
+        )
+        if not access_rows:
+            print("[leads-sync] no access rows — skipping")
+            return {"campaigns": 0, "leads": 0}
+
+        campaign_users: dict[str, list[str]] = {}
+        for row in access_rows:
+            cid = str(row["resource_id"])
+            uid = str(row["client_user_id"])
+            campaign_users.setdefault(cid, []).append(uid)
+
+        print(f"[leads-sync] {len(campaign_users)} campaigns for {len(access_rows)} access rows")
+
+        total_leads = 0
+        campaigns_done = 0
+        campaigns_errors = 0
+
+        for campaign_id, user_ids in campaign_users.items():
+            try:
+                async with httpx.AsyncClient() as client:
+                    leads = await _fetch_all_leads_for_campaign(client, campaign_id)
+
+                if not leads:
+                    campaigns_done += 1
+                    await _update_leads_synced_at(conn, campaign_id, user_ids)
+                    continue
+
+                print(f"[leads-sync] campaign {campaign_id} — {len(leads)} leads for {len(user_ids)} user(s)")
+                now = datetime.now(timezone.utc)
+
+                for uid in user_ids:
+                    rows = [
+                        (
+                            uid,
+                            campaign_id,
+                            l.get("email", ""),
+                            l.get("first_name"),
+                            l.get("last_name"),
+                            l.get("company_name"),
+                            l.get("website"),
+                            l.get("linkedin_url"),
+                            now,
+                        )
+                        for l in leads
+                        if l.get("email")
+                    ]
+                    for i in range(0, len(rows), LEADS_UPSERT_BATCH):
+                        batch = rows[i : i + LEADS_UPSERT_BATCH]
+                        await conn.executemany(
+                            """
+                            INSERT INTO public.client_campaign_leads
+                                (client_user_id, campaign_id, email,
+                                 first_name, last_name, company_name,
+                                 website, linkedin_url, synced_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
+                                first_name   = EXCLUDED.first_name,
+                                last_name    = EXCLUDED.last_name,
+                                company_name = EXCLUDED.company_name,
+                                website      = EXCLUDED.website,
+                                linkedin_url = EXCLUDED.linkedin_url,
+                                synced_at    = EXCLUDED.synced_at
+                            """,
+                            batch,
+                        )
+
+                total_leads += len(leads)
+                campaigns_done += 1
+                await _update_leads_synced_at(conn, campaign_id, user_ids)
+
+            except Exception as e:
+                print(f"[leads-sync] ERROR campaign {campaign_id}: {e}")
+                campaigns_done += 1
+                campaigns_errors += 1
+
+        print(
+            f"[leads-sync] done: {campaigns_done} campaigns, "
+            f"{total_leads} leads, {campaigns_errors} errors"
+        )
+        return {"campaigns": campaigns_done, "leads": total_leads, "campaigns_failed": campaigns_errors}
+    finally:
+        await conn.close()
+
+
+async def _update_leads_synced_at(conn, campaign_id: str, user_ids: list[str]) -> None:
+    now = datetime.now(timezone.utc)
+    await conn.execute(
+        "UPDATE public.client_instantly_access SET leads_synced_at = $1 "
+        "WHERE resource_type = 'campaign' AND resource_id = $2 "
+        "AND client_user_id = ANY($3::uuid[])",
+        now,
+        campaign_id,
+        user_ids,
+    )
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def _format_sync_result(result: dict) -> str:
@@ -389,6 +666,10 @@ def _format_sync_result(result: dict) -> str:
     updated = result.get("updated", 0)
     after = result.get("after", fetched)
     api_errors = result.get("api_errors", 0)
+    analytics_synced = result.get("analytics_synced", 0)
+    leads_campaigns = result.get("leads_campaigns", 0)
+    leads_total = result.get("leads_total", 0)
+    leads_failed = result.get("leads_campaigns_failed", 0)
 
     lines = [f"✅ <b>Instantly Sync</b>{manual_str}", f"🕐 {ts}{dur_str}", ""]
 
@@ -402,6 +683,12 @@ def _format_sync_result(result: dict) -> str:
         changes.append(f"➖ Удалено (нет в Instantly): <b>{removed}</b>")
     if updated:
         changes.append(f"🔄 Обновлено: <b>{updated}</b>")
+    if analytics_synced:
+        changes.append(f"📊 Аналитика: <b>{analytics_synced}</b> кампаний")
+    if leads_campaigns:
+        changes.append(f"👥 Лиды: <b>{leads_total}</b> контактов из <b>{leads_campaigns}</b> кампаний")
+    if leads_failed:
+        changes.append(f"⚠️ Лиды не обновлены по <b>{leads_failed}</b> кампаниям")
     if api_errors:
         changes.append(f"⚠️ Ошибок API (с ретраями): <b>{api_errors}</b>")
 
@@ -444,6 +731,26 @@ async def run_sync(manual: bool = False) -> dict:
         print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
 
         stats = await sync_to_db(campaigns)
+
+        analytics_count = 0
+        try:
+            analytics = await fetch_campaign_analytics()
+            print(f"[sync] Fetched analytics for {len(analytics)} campaigns")
+            analytics_count = await sync_analytics_to_db(analytics)
+            print(f"[sync] Analytics synced: {analytics_count} campaigns updated")
+        except Exception as e:
+            print(f"[sync] Analytics sync warning: {e}")
+
+        leads_stats: dict[str, int] = {"campaigns": 0, "leads": 0}
+        try:
+            print("[sync] Starting client leads sync…")
+            leads_stats = await sync_client_leads()
+            print(f"[sync] Client leads sync OK: {leads_stats}")
+        except Exception as e:
+            import traceback
+            print(f"[sync] Client leads sync ERROR: {e}")
+            traceback.print_exc()
+
         duration = round(loop.time() - t0, 1)
 
         result: dict = {
@@ -452,13 +759,20 @@ async def run_sync(manual: bool = False) -> dict:
             "duration_sec": duration,
             "manual": manual,
             "api_errors": api_errors,
+            "analytics_synced": analytics_count,
+            "leads_campaigns": leads_stats["campaigns"],
+            "leads_total": leads_stats["leads"],
+            "leads_campaigns_failed": leads_stats.get("campaigns_failed", 0),
             **stats,
         }
         print(
             f"[sync] Done: fetched={stats['fetched']}, added={stats['added']}, "
             f"removed={stats['removed']}, updated={stats['updated']}, "
             f"before={stats['before']}, after={stats['after']}, "
-            f"api_errors={api_errors}, duration={duration}s"
+            f"api_errors={api_errors}, analytics={analytics_count}, "
+            f"leads_campaigns={leads_stats['campaigns']}, leads_total={leads_stats['leads']}, "
+            f"leads_failed={leads_stats.get('campaigns_failed', 0)}, "
+            f"duration={duration}s"
         )
         return result
 
@@ -491,6 +805,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
             result.get("added", 0) > 0
             or result.get("removed", 0) > 0
             or result.get("api_errors", 0) > 0
+            or result.get("leads_campaigns_failed", 0) > 0
         )
 
         if manual or result.get("status") == "error" or has_changes:
@@ -514,11 +829,18 @@ async def main() -> None:
     _require("DATABASE_URL", DATABASE_URL)
     _require("INSTANTLY_SYNC_BOT_CHAT_ID or TELEGRAM_HEALTH_CHAT_ID", CHAT_ID)
 
+    effective_interval_sec = max(SYNC_INTERVAL_SEC, MIN_SYNC_INTERVAL_SEC)
+    if effective_interval_sec != SYNC_INTERVAL_SEC:
+        print(
+            f"[sync] INSTANTLY_SYNC_INTERVAL_SEC={SYNC_INTERVAL_SEC}s is below minimum "
+            f"{MIN_SYNC_INTERVAL_SEC}s. Using {effective_interval_sec}s."
+        )
+
     api_ok = await _check_instantly_api()
     api_status = "✅ API доступно" if api_ok else "⚠️ API недоступно"
 
     msk = timezone(timedelta(hours=3))
-    next_sync_str = (datetime.now(msk) + timedelta(seconds=SYNC_INTERVAL_SEC)).strftime("%H:%M MSK")
+    next_sync_str = (datetime.now(msk) + timedelta(seconds=effective_interval_sec)).strftime("%H:%M MSK")
 
     await send_telegram(
         f"🟢 <b>Instantly Sync Bot ONLINE</b>\n"
@@ -535,7 +857,7 @@ async def main() -> None:
     scheduler.add_job(
         lambda: asyncio.create_task(_run_sync_and_report()),
         "interval",
-        seconds=SYNC_INTERVAL_SEC,
+        seconds=effective_interval_sec,
         id="instantly_sync",
     )
     scheduler.start()
@@ -543,8 +865,8 @@ async def main() -> None:
     poll_task = asyncio.create_task(poll_telegram_commands())
 
     print(
-        f"[sync] Started. interval={SYNC_INTERVAL_SEC}s, "
-        f"retry_attempts={RETRY_ATTEMPTS}. Commands: /sync /last /help"
+        f"[sync] Started. interval={effective_interval_sec}s, retry_attempts={RETRY_ATTEMPTS}, "
+        f"leads_retry_attempts={LEADS_RETRY_ATTEMPTS}. Commands: /sync /last /help"
     )
 
     try:

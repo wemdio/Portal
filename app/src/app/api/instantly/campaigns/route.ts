@@ -3,42 +3,99 @@ import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
 import {
   upsertInstantlyCatalogFromCampaign,
-  readInstantlyCampaignCatalog,
   syncInstantlyCampaignCatalog,
   isCatalogStale,
 } from '@/lib/tools/instantlyCampaignCatalog';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export const dynamic = 'force-dynamic';
 
 const INSTANTLY_API_KEY =
   (process.env.INSTANTLY_API_KEY ?? process.env.INSTANTLY_PORTAL_API_KEY ?? '').trim();
 
+type CatalogRow = {
+  id: string;
+  name: string;
+  status: number | null;
+  timestamp_created: string | null;
+  timestamp_updated: string | null;
+  synced_at: string;
+};
+
 export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
   const limit = url.searchParams.get('limit');
   const starting_after = url.searchParams.get('starting_after') ?? undefined;
   const status = url.searchParams.get('status');
-  const tag_ids = url.searchParams.get('tag_ids') ?? undefined;
 
-  if (limit === 'all') {
-    if (supabaseAdmin && INSTANTLY_API_KEY) {
-      const { campaigns, lastSyncedAt } = await readInstantlyCampaignCatalog();
-      const empty = campaigns.length === 0;
-      const stale = isCatalogStale(lastSyncedAt);
+  // --- Primary: read from Instantly Supabase DB (synced hourly) ---
+  if (supabaseInstantly) {
+    try {
+      const { data, error } = await supabaseInstantly
+        .from('instantly_campaign_catalog')
+        .select('id,name,status,timestamp_created,timestamp_updated,synced_at')
+        .order('timestamp_created', { ascending: false, nullsFirst: false });
 
-      if (empty || stale) {
-        void syncInstantlyCampaignCatalog(INSTANTLY_API_KEY).catch((err) => {
-          console.error('[instantly-catalog] background sync failed', err);
+      if (error) throw new Error(error.message);
+
+      const rows = (data ?? []) as CatalogRow[];
+
+      if (rows.length > 0) {
+        let maxSyncMs = 0;
+        for (const row of rows) {
+          if (row.synced_at) {
+            const ms = Date.parse(row.synced_at);
+            if (Number.isFinite(ms) && ms > maxSyncMs) maxSyncMs = ms;
+          }
+        }
+        const lastSyncedAt = maxSyncMs > 0 ? new Date(maxSyncMs).toISOString() : null;
+
+        if (INSTANTLY_API_KEY && isCatalogStale(lastSyncedAt)) {
+          void syncInstantlyCampaignCatalog(INSTANTLY_API_KEY).catch((err) => {
+            console.error('[instantly-catalog] background sync failed', err);
+          });
+        }
+
+        let items = rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          status: row.status,
+          timestamp_created: row.timestamp_created,
+          timestamp_updated: row.timestamp_updated,
+        }));
+
+        if (status) {
+          const statusNum = parseInt(status, 10);
+          items = items.filter((c) => c.status === statusNum);
+        }
+
+        if (limit === 'all') {
+          return NextResponse.json({ items });
+        }
+
+        const numLimit = limit ? parseInt(limit, 10) : 100;
+
+        let startIdx = 0;
+        if (starting_after) {
+          const idx = items.findIndex((c) => c.id === starting_after);
+          if (idx >= 0) startIdx = idx + 1;
+        }
+
+        const page = items.slice(startIdx, startIdx + numLimit);
+        const hasMore = startIdx + numLimit < items.length;
+
+        return NextResponse.json({
+          items: page,
+          ...(hasMore ? { next_starting_after: page[page.length - 1]?.id } : {}),
         });
       }
-
-      if (!empty) {
-        return NextResponse.json({ items: campaigns });
-      }
+    } catch (dbErr) {
+      console.error('[instantly-campaigns] DB read failed, falling back to API:', dbErr);
     }
+  }
 
-    // Fallback: БД недоступна или пуста — тянем напрямую из Instantly
+  // --- Fallback: DB unavailable or empty — use Instantly API ---
+  if (limit === 'all') {
     const campaigns = await instantly.listAllCampaigns();
     return NextResponse.json({ items: campaigns });
   }
@@ -59,7 +116,7 @@ export const GET = withAuth(async (req) => {
     limit: numLimit,
     starting_after,
     status: status ? parseInt(status, 10) : undefined,
-    tag_ids,
+    tag_ids: url.searchParams.get('tag_ids') ?? undefined,
   });
   return NextResponse.json(data);
 });

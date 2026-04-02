@@ -2,8 +2,6 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import { supabase } from '@/lib/supabaseClient';
-import type { SyncProgressEvent } from '@/app/api/client/bases/sync/route';
 
 interface Lead {
   email: string;
@@ -24,26 +22,11 @@ interface CampaignGroup {
 
 interface BasesResponse {
   campaigns: CampaignGroup[];
-  needsSync: boolean;
-  synced?: number;
-}
-
-interface SyncProgress {
-  done: number;
-  total: number;
-  current: string;
-}
-
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
 }
 
 export default function ClientBasesPage() {
   const [campaigns, setCampaigns] = useState<CampaignGroup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -54,80 +37,11 @@ export default function ClientBasesPage() {
     try {
       const data = await clientApiFetch<BasesResponse>('/bases');
       setCampaigns(data.campaigns ?? []);
-      if (data.needsSync) {
-        doSync(false);
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Ошибка загрузки';
       setError(msg.length > 200 || msg.includes('<') ? 'Ошибка загрузки данных. Попробуйте позже.' : msg);
     } finally {
       setLoading(false);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const doSync = useCallback(async (manual: boolean) => {
-    setSyncing(true);
-    setSyncProgress(null);
-    if (manual) setError('');
-
-    try {
-      const token = await getToken();
-      const res = await fetch('/api/client/bases/sync', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!res.ok || !res.body) {
-        throw new Error(`Ошибка ${res.status}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (value) buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let event: SyncProgressEvent;
-          try {
-            event = JSON.parse(trimmed) as SyncProgressEvent;
-          } catch {
-            continue;
-          }
-
-          if (event.type === 'start') {
-            setSyncProgress({ done: 0, total: event.total, current: '' });
-          } else if (event.type === 'progress') {
-            setSyncProgress({ done: event.done, total: event.total, current: event.campaign_name });
-          } else if (event.type === 'done') {
-            setCampaigns(event.campaigns as CampaignGroup[]);
-            setSyncProgress(null);
-          } else if (event.type === 'error') {
-            if (manual) setError(event.message);
-          }
-        }
-
-        if (done) break;
-      }
-    } catch (err) {
-      if (manual) {
-        const msg = err instanceof Error ? err.message : 'Ошибка синхронизации';
-        setError(msg.length > 200 || msg.includes('<') ? 'Ошибка синхронизации. Попробуйте позже.' : msg);
-      }
-    } finally {
-      setSyncing(false);
-      setSyncProgress(null);
     }
   }, []);
 
@@ -162,9 +76,11 @@ export default function ClientBasesPage() {
         .filter(Boolean) as CampaignGroup[]
     : campaigns;
 
-  const pct = syncProgress && syncProgress.total > 0
-    ? Math.round((syncProgress.done / syncProgress.total) * 100)
-    : 0;
+  const lastSyncAt = campaigns.reduce<string | null>((latest, c) => {
+    if (!c.leads_synced_at) return latest;
+    if (!latest) return c.leads_synced_at;
+    return c.leads_synced_at > latest ? c.leads_synced_at : latest;
+  }, null);
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -177,40 +93,13 @@ export default function ClientBasesPage() {
               : 'Контакты из ваших кампаний'}
           </p>
         </div>
-        <button
-          onClick={() => doSync(true)}
-          disabled={syncing}
-          className="neu-btn px-4 py-2 text-xs sm:text-sm font-semibold shrink-0 disabled:opacity-50"
-        >
-          {syncing ? 'Синхронизация...' : 'Синхронизировать'}
-        </button>
+        {lastSyncAt && (
+          <p className="text-[11px] sm:text-xs shrink-0" style={{ color: 'var(--cp-text-l)' }}>
+            Обновлено {new Date(lastSyncAt).toLocaleDateString('ru-RU')}{' '}
+            {new Date(lastSyncAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+          </p>
+        )}
       </div>
-
-      {/* Sync progress bar — only when campaigns already loaded (not first sync) */}
-      {syncing && totalLeads > 0 && syncProgress && syncProgress.total > 0 && (
-        <div className="mb-5 neu-card px-5 py-4 space-y-2">
-          <div className="flex items-center justify-between text-xs font-medium" style={{ color: 'var(--cp-text-m)' }}>
-            <span>
-              Синхронизация кампаний: {syncProgress.done} из {syncProgress.total}
-            </span>
-            <span style={{ color: 'var(--cp-accent)' }}>{pct}%</span>
-          </div>
-          <div
-            className="w-full rounded-full overflow-hidden"
-            style={{ height: '6px', background: 'rgba(180,173,164,0.2)' }}
-          >
-            <div
-              className="h-full rounded-full transition-all duration-500"
-              style={{ width: `${pct}%`, background: 'var(--cp-accent)' }}
-            />
-          </div>
-          {syncProgress.current && (
-            <p className="text-[11px] truncate" style={{ color: 'var(--cp-text-l)' }}>
-              Обрабатывается: {syncProgress.current}
-            </p>
-          )}
-        </div>
-      )}
 
       <div className="mb-4 sm:mb-6 sm:max-w-sm">
         <input
@@ -232,24 +121,10 @@ export default function ClientBasesPage() {
         <div className="flex items-center justify-center py-24">
           <div className="neu-spinner animate-spin" />
         </div>
-      ) : syncing && totalLeads === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24 gap-3">
-          <div className="neu-spinner animate-spin" />
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            {syncProgress && syncProgress.total > 0
-              ? `Синхронизация кампаний: ${syncProgress.done} из ${syncProgress.total}`
-              : 'Первая синхронизация...'}
-          </p>
-          {syncProgress?.current && (
-            <p className="text-xs max-w-xs text-center truncate" style={{ color: 'var(--cp-text-l)' }}>
-              {syncProgress.current}
-            </p>
-          )}
-        </div>
       ) : filtered.length === 0 && totalLeads === 0 ? (
         <div className="neu-card py-16 text-center">
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            Нет загруженных контактов. Нажмите «Синхронизировать» для загрузки.
+            Контакты ещё не загружены. Данные обновляются автоматически каждый час.
           </p>
         </div>
       ) : filtered.length === 0 ? (
@@ -271,7 +146,7 @@ export default function ClientBasesPage() {
                     <p className="text-[10px] sm:text-xs mt-0.5" style={{ color: 'var(--cp-text-l)' }}>
                       {c.leads_synced_at
                         ? `Синхр. ${new Date(c.leads_synced_at).toLocaleDateString('ru-RU')} ${new Date(c.leads_synced_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                        : 'Не синхронизировано'}
+                        : 'Ожидает синхронизации'}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
@@ -355,7 +230,7 @@ export default function ClientBasesPage() {
                 {isOpen && c.leads.length === 0 && (
                   <div className="px-6 py-8 text-center" style={{ borderTop: '1px solid rgba(180,173,164,0.15)' }}>
                     <p className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                      Нет контактов. Нажмите «Синхронизировать».
+                      Контакты ещё не загружены. Данные обновляются автоматически.
                     </p>
                   </div>
                 )}

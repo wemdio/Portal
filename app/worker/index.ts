@@ -20,6 +20,7 @@ import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
 import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
+import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
@@ -530,7 +531,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // --------------------------------------------------------------------------
-// Periodic analytics sync (Instantly → DB) — runs independently of jobs
+// Periodic sync (Instantly → DB) — runs independently of jobs
 // --------------------------------------------------------------------------
 
 async function analyticsSync(): Promise<void> {
@@ -543,15 +544,25 @@ async function analyticsSync(): Promise<void> {
   }
 }
 
-async function analyticsSyncLoop(): Promise<void> {
-  // Run immediately on startup so fresh data is available right away,
-  // then repeat on the configured interval.
+async function clientLeadsSync(): Promise<void> {
+  try {
+    log('info', 'Syncing client campaign leads from Instantly...');
+    const { campaigns, leads } = await syncClientLeads();
+    log('info', `Client leads sync done: ${campaigns} campaign(s), ${leads} lead(s)`);
+  } catch (err) {
+    log('warn', 'Client leads sync failed', err);
+  }
+}
+
+async function periodicSyncLoop(): Promise<void> {
   await analyticsSync();
+  await clientLeadsSync();
 
   while (!shuttingDown) {
     await sleep(ANALYTICS_SYNC_INTERVAL_MS);
     if (shuttingDown) break;
     await analyticsSync();
+    await clientLeadsSync();
   }
 }
 
@@ -569,8 +580,8 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
-  // Start analytics sync loop in the background (does not block job processing).
-  void analyticsSyncLoop();
+  // Start periodic sync loop in the background (does not block job processing).
+  void periodicSyncLoop();
 
   await pollLoop();
 }

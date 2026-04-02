@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(ls -la /c/Users/dimak/PycharmProjects/Portal/app/src/lib/*.ts)",
-      "Bash(npx tsc --noEmit --pretty)"
+      "Bash(npx tsc --noEmit --pretty)",
+      "Bash(grep -r \"PORT\\\\|HOSTNAME\" /g/PycharmProjects/Portal/Dockerfile*)",
+      "Bash(grep -r \"BODY_SIZE\\\\|WORKER\\\\|health\" /g/PycharmProjects/Portal/docker-compose*.yml)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(find /g/PycharmProjects/Portal -type f \\\\\\(-name *.sql -o -name *migration* -o -name *schema* \\\\\\))",
+      "Bash(xargs grep:*)",
+      "Bash(grep -r crypto /g/PycharmProjects/Portal/supabase/migrations/*.sql)",
+      "Bash(find /g/PycharmProjects/Portal/app/src/lib -type f -name *parser* -o -name *job*)",
+      "Bash(grep -r parser_jobs /g/PycharmProjects/Portal/supabase/migrations/*.sql)",
+      "Bash(grep -r \"crypto_payment\\\\|cryptoPayment\" /g/PycharmProjects/Portal/supabase/migrations/*.sql)",
+      "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]\")",
+      "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]/stop\")",
+      "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]/resume\")"
     ]
   }
 }

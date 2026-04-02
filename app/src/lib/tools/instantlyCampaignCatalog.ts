@@ -1,7 +1,7 @@
 import 'server-only';
 
 import type { Campaign } from '@/lib/instantly/types';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,

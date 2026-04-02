@@ -58,6 +58,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=deps /app/node_modules ./node_modules
 COPY app/scripts ./scripts
 COPY supabase/migrations ./supabase/migrations
+COPY supabase/instantly-migrations ./supabase/instantly-migrations
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
@@ -38,10 +39,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   const auth = await requireAdminAuth(req);
   if ('error' in auth) return auth.error;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
   const { id: targetUserId } = await ctx.params;
 
-  const { data: rows, error } = await supabaseAdmin
+  const { data: rows, error } = await supabaseInstantly
     .from('client_instantly_access')
     .select('id, resource_type, resource_id, created_at')
     .eq('client_user_id', targetUserId)
@@ -63,6 +65,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   const auth = await requireAdminAuth(req);
   if ('error' in auth) return auth.error;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
   const { user } = auth;
   const { id: targetUserId } = await ctx.params;
@@ -77,7 +80,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const campaigns = Array.isArray(body.campaigns) ? body.campaigns.filter((s): s is string => typeof s === 'string' && s.trim().length > 0) : [];
 
-  const { error: delErr } = await supabaseAdmin
+  const { error: delErr } = await supabaseInstantly
     .from('client_instantly_access')
     .delete()
     .eq('client_user_id', targetUserId);
@@ -95,7 +98,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   }));
 
   if (newRows.length > 0) {
-    const { error: insErr } = await supabaseAdmin
+    const { error: insErr } = await supabaseInstantly
       .from('client_instantly_access')
       .insert(newRows);
 
