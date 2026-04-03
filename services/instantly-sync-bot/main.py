@@ -77,8 +77,12 @@ RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 LEADS_PAGE_LIMIT = 100
 LEADS_CONCURRENCY = 3
 LEADS_UPSERT_BATCH = 500
-LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "3"))
+# Leads/list is heavier than catalog endpoints; allow more attempts for 502/connection blips.
+LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "5"))
 LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
+LEADS_RETRY_5XX_MULTIPLIER: float = float(
+    os.environ.get("INSTANTLY_LEADS_RETRY_5XX_MULTIPLIER", "1.5")
+)
 
 _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
 
@@ -482,6 +486,27 @@ async def sync_analytics_to_db(analytics: list[dict]) -> int:
 
 # ── Client leads sync ─────────────────────────────────────────────────────────
 
+def _format_leads_sync_error(exc: BaseException) -> str:
+    """Non-empty diagnostic for logs / Telegram (some httpx errors stringify to '')."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        r = exc.response
+        snippet = (r.text or "").strip().replace("\n", " ")[:240]
+        base = str(exc).strip() or f"HTTP {r.status_code} for {r.request.method} {r.url}"
+        return f"{base} | body: {snippet!r}" if snippet else base
+    if isinstance(exc, httpx.RequestError):
+        msg = str(exc).strip() or exc.__class__.__name__
+        return f"{exc.__class__.__name__}: {msg}"
+    msg = str(exc).strip()
+    return f"{exc.__class__.__name__}: {msg}" if msg else repr(exc)
+
+
+def _leads_retry_delay(attempt: int, *, status_code: int | None) -> float:
+    base = LEADS_RETRY_BASE_DELAY_SEC * (2**attempt)
+    if status_code is not None and status_code in (502,503,504,429):
+        base *= LEADS_RETRY_5XX_MULTIPLIER
+    return base
+
+
 async def _fetch_leads_page(
     client: httpx.AsyncClient,
     campaign_id: str,
@@ -494,23 +519,35 @@ async def _fetch_leads_page(
     if starting_after:
         body["starting_after"] = starting_after
 
-    last_err: Exception | None = None
+    last_err: BaseException | None = None
     for attempt in range(LEADS_RETRY_ATTEMPTS):
         try:
-            r = await client.post(url, json=body, headers=headers, timeout=HTTP_TIMEOUT)
+            r = await client.post(url, json=body, headers=headers)
             r.raise_for_status()
             return r.json()
-        except Exception as e:
+        except httpx.HTTPStatusError as e:
             last_err = e
+            code = e.response.status_code if e.response is not None else None
             if attempt < LEADS_RETRY_ATTEMPTS - 1:
-                delay = LEADS_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+                delay = _leads_retry_delay(attempt, status_code=code)
                 print(
                     f"[leads-sync] campaign {campaign_id}: leads/list attempt "
-                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {e!r}. "
+                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {_format_leads_sync_error(e)}. "
                     f"Retry in {delay:.1f}s…"
                 )
                 await asyncio.sleep(delay)
-    raise last_err  # type: ignore[misc]
+        except Exception as e:
+            last_err = e
+            if attempt < LEADS_RETRY_ATTEMPTS - 1:
+                delay = _leads_retry_delay(attempt, status_code=None)
+                print(
+                    f"[leads-sync] campaign {campaign_id}: leads/list attempt "
+                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {_format_leads_sync_error(e)}. "
+                    f"Retry in {delay:.1f}s…"
+                )
+                await asyncio.sleep(delay)
+    assert last_err is not None
+    raise last_err
 
 
 async def _fetch_all_leads_for_campaign(
@@ -565,63 +602,71 @@ async def sync_client_leads() -> dict[str, int]:
         campaigns_done = 0
         campaigns_errors = 0
 
-        for campaign_id, user_ids in campaign_users.items():
-            try:
-                async with httpx.AsyncClient() as client:
-                    leads = await _fetch_all_leads_for_campaign(client, campaign_id)
+        _timeout = httpx.Timeout(HTTP_TIMEOUT)
+        _limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
+        async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
+            for campaign_id, user_ids in campaign_users.items():
+                try:
+                    leads = await _fetch_all_leads_for_campaign(http_client, campaign_id)
 
-                if not leads:
+                    if not leads:
+                        campaigns_done += 1
+                        await _update_leads_synced_at(conn, campaign_id, user_ids)
+                        continue
+
+                    print(
+                        f"[leads-sync] campaign {campaign_id} — {len(leads)} leads "
+                        f"for {len(user_ids)} user(s)"
+                    )
+                    now = datetime.now(timezone.utc)
+
+                    for uid in user_ids:
+                        rows = [
+                            (
+                                uid,
+                                campaign_id,
+                                l.get("email", ""),
+                                l.get("first_name"),
+                                l.get("last_name"),
+                                l.get("company_name"),
+                                l.get("website"),
+                                l.get("linkedin_url"),
+                                now,
+                            )
+                            for l in leads
+                            if l.get("email")
+                        ]
+                        for i in range(0, len(rows), LEADS_UPSERT_BATCH):
+                            batch = rows[i : i + LEADS_UPSERT_BATCH]
+                            await conn.executemany(
+                                """
+                                INSERT INTO public.client_campaign_leads
+                                    (client_user_id, campaign_id, email,
+                                     first_name, last_name, company_name,
+                                     website, linkedin_url, synced_at)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
+                                    first_name   = EXCLUDED.first_name,
+                                    last_name    = EXCLUDED.last_name,
+                                    company_name = EXCLUDED.company_name,
+                                    website      = EXCLUDED.website,
+                                    linkedin_url = EXCLUDED.linkedin_url,
+                                    synced_at    = EXCLUDED.synced_at
+                                """,
+                                batch,
+                            )
+
+                    total_leads += len(leads)
                     campaigns_done += 1
                     await _update_leads_synced_at(conn, campaign_id, user_ids)
-                    continue
 
-                print(f"[leads-sync] campaign {campaign_id} — {len(leads)} leads for {len(user_ids)} user(s)")
-                now = datetime.now(timezone.utc)
-
-                for uid in user_ids:
-                    rows = [
-                        (
-                            uid,
-                            campaign_id,
-                            l.get("email", ""),
-                            l.get("first_name"),
-                            l.get("last_name"),
-                            l.get("company_name"),
-                            l.get("website"),
-                            l.get("linkedin_url"),
-                            now,
-                        )
-                        for l in leads
-                        if l.get("email")
-                    ]
-                    for i in range(0, len(rows), LEADS_UPSERT_BATCH):
-                        batch = rows[i : i + LEADS_UPSERT_BATCH]
-                        await conn.executemany(
-                            """
-                            INSERT INTO public.client_campaign_leads
-                                (client_user_id, campaign_id, email,
-                                 first_name, last_name, company_name,
-                                 website, linkedin_url, synced_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                            ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
-                                first_name   = EXCLUDED.first_name,
-                                last_name    = EXCLUDED.last_name,
-                                company_name = EXCLUDED.company_name,
-                                website      = EXCLUDED.website,
-                                linkedin_url = EXCLUDED.linkedin_url,
-                                synced_at    = EXCLUDED.synced_at
-                            """,
-                            batch,
-                        )
-
-                total_leads += len(leads)
-                campaigns_done += 1
-                await _update_leads_synced_at(conn, campaign_id, user_ids)
-
-            except Exception as e:
-                print(f"[leads-sync] ERROR campaign {campaign_id}: {e}")
-                campaigns_done += 1
-                campaigns_errors += 1
+                except Exception as e:
+                    print(
+                        f"[leads-sync] ERROR campaign {campaign_id}: "
+                        f"{_format_leads_sync_error(e)}"
+                    )
+                    campaigns_done += 1
+                    campaigns_errors += 1
 
         print(
             f"[leads-sync] done: {campaigns_done} campaigns, "
