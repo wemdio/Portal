@@ -535,6 +535,111 @@ function TraceCard({ trace }: { trace: TraceGroup }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Real-time active tasks counter                                            */
+/* -------------------------------------------------------------------------- */
+
+type RealtimeSpanPayload = {
+  id: string;
+  parent_span_id: string | null;
+  status: string;
+};
+
+function useActiveTaskCount() {
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  const [initialised, setInitialised] = useState(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    async function fetchInitial() {
+      const { data } = await supabase
+        .from('trace_spans')
+        .select('id')
+        .is('parent_span_id', null)
+        .eq('status', 'running');
+
+      if (mountedRef.current) {
+        setRunningIds(new Set((data ?? []).map((r) => r.id)));
+        setInitialised(true);
+      }
+    }
+    void fetchInitial();
+
+    const channel = supabase
+      .channel('active_tasks_counter')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'trace_spans' },
+        (payload) => {
+          const row = payload.new as RealtimeSpanPayload;
+          if (row.parent_span_id !== null) return;
+          if (row.status === 'running') {
+            setRunningIds((prev) => new Set(prev).add(row.id));
+          }
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'trace_spans' },
+        (payload) => {
+          const row = payload.new as RealtimeSpanPayload;
+          if (row.parent_span_id !== null) return;
+          setRunningIds((prev) => {
+            const next = new Set(prev);
+            if (row.status === 'running') {
+              next.add(row.id);
+            } else {
+              next.delete(row.id);
+            }
+            return next;
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      mountedRef.current = false;
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
+  return { count: runningIds.size, initialised };
+}
+
+function ActiveTasksBadge() {
+  const { count, initialised } = useActiveTaskCount();
+
+  return (
+    <div className="mb-4 flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-5 py-3.5 shadow-sm">
+      <div className="flex items-center gap-2.5">
+        {count > 0 ? (
+          <span className="relative flex h-3 w-3">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
+          </span>
+        ) : (
+          <span className="h-3 w-3 rounded-full bg-gray-300" />
+        )}
+        <span className="text-sm font-medium text-gray-600">Активные задачи</span>
+      </div>
+
+      {!initialised ? (
+        <div className="h-8 w-10 animate-pulse rounded bg-gray-100" />
+      ) : (
+        <span
+          className={`text-3xl font-bold tabular-nums transition-all duration-300 ${
+            count > 0 ? 'text-blue-600' : 'text-gray-400'
+          }`}
+        >
+          {count}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Main Panel                                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -618,14 +723,12 @@ export function AdminTracesPanel({
     mountedRef.current = true;
     void fetchTraces();
 
-    // Subscribe to realtime updates on trace_spans to auto-refresh
     const channel = supabase
       .channel('trace_spans_realtime')
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'trace_spans' },
         () => {
-          // Debounce: refetch after a short delay to batch rapid updates
           clearTimeout(realtimeRefreshTimer);
           realtimeRefreshTimer = setTimeout(() => {
             if (mountedRef.current) void fetchTraces();
@@ -634,8 +737,6 @@ export function AdminTracesPanel({
       )
       .subscribe();
 
-    // Also poll periodically (Google-like realtime can be flaky in some environments)
-    // Use jittered interval (10-15s) and rely on in-flight dedupe.
     let pollTimer: ReturnType<typeof setTimeout>;
     const scheduleNextPoll = () => {
       clearTimeout(pollTimer);
@@ -691,57 +792,61 @@ export function AdminTracesPanel({
   }, [traces, search]);
 
   return (
-    <div className="bg-white p-4 sm:p-7 rounded-xl border border-gray-200 shadow-sm">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-lg sm:text-2xl font-semibold text-gray-900">{title}</h2>
-          <p className="text-xs sm:text-base text-gray-500">{description}</p>
+    <div>
+      <ActiveTasksBadge />
+
+      <div className="bg-white p-4 sm:p-7 rounded-xl border border-gray-200 shadow-sm">
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg sm:text-2xl font-semibold text-gray-900">{title}</h2>
+            <p className="text-xs sm:text-base text-gray-500">{description}</p>
+          </div>
         </div>
+
+        {/* Filters */}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as 'all' | SpanRow['status'])}
+            className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm sm:text-lg text-gray-700"
+          >
+            <option value="all">Все статусы</option>
+            <option value="running">Выполняется</option>
+            <option value="completed">Завершено</option>
+            <option value="failed">Ошибка</option>
+            <option value="cancelled">Отменено</option>
+          </select>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Поиск по имени, событию, сообщению, job_id..."
+            className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-sm sm:text-lg text-gray-700"
+          />
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm sm:text-lg text-red-700">
+            {error}
+          </div>
+        )}
+
+        {/* Content */}
+        {loading && traces.length === 0 ? (
+          <div className="mt-6 text-sm sm:text-base text-gray-500">Загрузка трассировок...</div>
+        ) : filtered.length === 0 ? (
+          <div className="mt-6 text-sm sm:text-base text-gray-500">
+            {traces.length === 0 ? 'Трассировки не найдены' : 'Нет совпадений по фильтру'}
+          </div>
+        ) : (
+          <div className="mt-6 space-y-3">
+            {filtered.map((trace) => (
+              <TraceCard key={trace.trace_id} trace={trace} />
+            ))}
+          </div>
+        )}
       </div>
-
-      {/* Filters */}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as 'all' | SpanRow['status'])}
-          className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm sm:text-lg text-gray-700"
-        >
-          <option value="all">Все статусы</option>
-          <option value="running">Выполняется</option>
-          <option value="completed">Завершено</option>
-          <option value="failed">Ошибка</option>
-          <option value="cancelled">Отменено</option>
-        </select>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Поиск по имени, событию, сообщению, job_id..."
-          className="flex-1 min-w-[220px] rounded-md border border-gray-200 px-3 py-2 text-sm sm:text-lg text-gray-700"
-        />
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm sm:text-lg text-red-700">
-          {error}
-        </div>
-      )}
-
-      {/* Content */}
-      {loading && traces.length === 0 ? (
-        <div className="mt-6 text-sm sm:text-base text-gray-500">Загрузка трассировок...</div>
-      ) : filtered.length === 0 ? (
-        <div className="mt-6 text-sm sm:text-base text-gray-500">
-          {traces.length === 0 ? 'Трассировки не найдены' : 'Нет совпадений по фильтру'}
-        </div>
-      ) : (
-        <div className="mt-6 space-y-3">
-          {filtered.map((trace) => (
-            <TraceCard key={trace.trace_id} trace={trace} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

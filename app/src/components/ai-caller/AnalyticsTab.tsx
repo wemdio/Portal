@@ -27,6 +27,10 @@ import {
   Send,
   Check,
   Mic,
+  ArrowUpDown,
+  Clock,
+  Hash,
+  Timer,
 } from 'lucide-react';
 import type { VapiCall } from '@/types/ai-caller';
 
@@ -48,6 +52,8 @@ interface Analysis {
   contact_name: string | null;
   contact_email: string | null;
   contact_extra: Record<string, string> | null;
+  call_duration: number | null;
+  called_at: string | null;
 }
 
 interface Campaign {
@@ -78,6 +84,57 @@ const FILTER_OPTIONS = [
   { id: 'no_answer', label: 'Без ответа' },
 ];
 
+type SortField = 'date' | 'number' | 'company' | 'duration';
+type SortDir = 'asc' | 'desc';
+
+const SORT_OPTIONS: { id: SortField; label: string; icon: typeof Clock }[] = [
+  { id: 'date', label: 'Дата', icon: Clock },
+  { id: 'number', label: 'Номер', icon: Hash },
+  { id: 'company', label: 'Компания', icon: Building2 },
+  { id: 'duration', label: 'Длительность', icon: Timer },
+];
+
+function compareAnalyses(a: Analysis, b: Analysis, field: SortField, dir: SortDir): number {
+  let cmp = 0;
+  switch (field) {
+    case 'date': {
+      const aT = new Date(a.called_at ?? a.analyzed_at).getTime();
+      const bT = new Date(b.called_at ?? b.analyzed_at).getTime();
+      cmp = aT - bT;
+      break;
+    }
+    case 'number': {
+      const aNum = a.customer_number ?? '';
+      const bNum = b.customer_number ?? '';
+      cmp = aNum.localeCompare(bNum, 'ru');
+      break;
+    }
+    case 'company': {
+      const aCo = a.contact_company ?? a.company_name ?? '';
+      const bCo = b.contact_company ?? b.company_name ?? '';
+      if (!aCo && bCo) return 1;
+      if (aCo && !bCo) return -1;
+      cmp = aCo.localeCompare(bCo, 'ru');
+      break;
+    }
+    case 'duration': {
+      const aD = a.call_duration ?? 0;
+      const bD = b.call_duration ?? 0;
+      cmp = aD - bD;
+      break;
+    }
+  }
+  return dir === 'asc' ? cmp : -cmp;
+}
+
+function formatDuration(seconds: number | null): string {
+  if (!seconds || seconds <= 0) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m === 0) return `${s} сек`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
@@ -90,6 +147,8 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [loadingTranscript, setLoadingTranscript] = useState<string | null>(null);
   const [playingCallId, setPlayingCallId] = useState<string | null>(null);
   const [loadingAudio, setLoadingAudio] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<SortField>('date');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [recordingUrls, setRecordingUrls] = useState<Record<string, string>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const analysesLoaded = useRef<boolean | null>(null);
@@ -188,7 +247,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   }
 
   async function fetchTranscript(vapiCallId: string) {
-    if (transcriptCache[vapiCallId]) return;
+    if (transcriptCache[vapiCallId] !== undefined) return;
     setLoadingTranscript(vapiCallId);
     try {
       const token = await getToken();
@@ -208,13 +267,13 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
           .join('\n');
       } else if (transcript) {
         formatted = transcript;
-      } else {
-        formatted = 'Расшифровка недоступна';
       }
 
+      // Empty string = provider had no data; render will fall through to transcript_snippet
       setTranscriptCache((prev) => ({ ...prev, [vapiCallId]: formatted }));
     } catch {
-      setTranscriptCache((prev) => ({ ...prev, [vapiCallId]: 'Ошибка загрузки расшифровки' }));
+      // Mark as attempted so we don't retry, but empty → fallback to snippet
+      setTranscriptCache((prev) => ({ ...prev, [vapiCallId]: '' }));
     }
     setLoadingTranscript(null);
   }
@@ -447,9 +506,10 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   }
 
   // Stats
-  const filtered = filter === 'all'
-    ? analyses
-    : analyses.filter((a) => a.outcome === filter);
+  const filtered = (filter === 'all'
+    ? [...analyses]
+    : analyses.filter((a) => a.outcome === filter)
+  ).sort((a, b) => compareAnalyses(a, b, sortBy, sortDir));
 
   const stats = {
     total: analyses.length,
@@ -555,27 +615,63 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
         </div>
       )}
 
-      {/* Filters */}
+      {/* Filters + Sort */}
       {analyses.length > 0 && (
-        <div className="flex gap-2 flex-wrap">
-          {FILTER_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setFilter(opt.id)}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                filter === opt.id
-                  ? 'bg-gray-900 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              {opt.label}
-              {opt.id !== 'all' && (
-                <span className="ml-1 opacity-60">
-                  ({analyses.filter((a) => a.outcome === opt.id).length})
-                </span>
-              )}
-            </button>
-          ))}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex gap-2 flex-wrap">
+            {FILTER_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => setFilter(opt.id)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  filter === opt.id
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {opt.label}
+                {opt.id !== 'all' && (
+                  <span className="ml-1 opacity-60">
+                    ({analyses.filter((a) => a.outcome === opt.id).length})
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <ArrowUpDown className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+            {SORT_OPTIONS.map((opt) => {
+              const active = sortBy === opt.id;
+              const SortIcon = opt.icon;
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => {
+                    if (active) {
+                      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+                    } else {
+                      setSortBy(opt.id);
+                      setSortDir(opt.id === 'date' ? 'desc' : 'asc');
+                    }
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                    active
+                      ? 'bg-blue-100 text-blue-700'
+                      : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+                  }`}
+                >
+                  <SortIcon className="h-3 w-3" />
+                  {opt.label}
+                  {active && (
+                    <span className="text-[10px] opacity-70">
+                      {sortDir === 'asc' ? '↑' : '↓'}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -665,15 +761,21 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
                       )}
                     </div>
 
-                    <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                    <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
                       <span className="text-xs text-gray-400">
-                        {new Date(a.analyzed_at).toLocaleDateString('ru-RU', {
+                        {new Date(a.called_at ?? a.analyzed_at).toLocaleDateString('ru-RU', {
                           day: '2-digit',
                           month: '2-digit',
                           hour: '2-digit',
                           minute: '2-digit',
                         })}
                       </span>
+                      {a.call_duration != null && a.call_duration > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs text-gray-400">
+                          <Timer className="h-3 w-3" />
+                          {formatDuration(a.call_duration)}
+                        </span>
+                      )}
                       {isExpanded
                         ? <ChevronUp className="h-4 w-4 text-gray-400" />
                         : <ChevronDown className="h-4 w-4 text-gray-400" />}
