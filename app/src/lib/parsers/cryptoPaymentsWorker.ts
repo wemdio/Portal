@@ -300,10 +300,10 @@ export async function runCryptoPaymentJob(jobId: string, db?: SupabaseClient): P
 
     console.log(`[crypto-payments] Job ${jobId} completed: checked=${checkedCount}, matches=${matches.length}`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[crypto-payments] Job ${jobId} failed:`, msg);
+    const raw = err instanceof Error ? err.message : String(err);
+    const msg = /^\s*</.test(raw) ? 'Internal error (HTML response)' : raw.slice(0, 500);
+    console.error(`[crypto-payments] Job ${jobId} failed:`, raw);
 
-    // Save progress even on failure so it can be resumed
     await client
       .from('crypto_payment_jobs')
       .update({

@@ -158,19 +158,21 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
 }
 
 async function readApiError(res: Response): Promise<string> {
+  if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
   const raw = await res.text().catch(() => '');
   if (!raw) return `Ошибка запроса: ${res.status}`;
   try {
     const parsed = JSON.parse(raw) as { error?: unknown };
     if (typeof parsed.error === 'string' && parsed.error.trim()) {
-      if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
       return parsed.error;
     }
   } catch {
-    // noop
+    // Response is not JSON (e.g. HTML maintenance page) — return a friendly message
   }
-  if (res.status === 401) return 'Сессия истекла. Обновите страницу и войдите снова.';
-  return raw;
+  if (/^\s*</.test(raw)) {
+    return `Сервер вернул неожиданный ответ (${res.status}). Попробуйте позже.`;
+  }
+  return raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
 }
 
 export function CryptoPaymentParserView() {
@@ -415,7 +417,11 @@ export function CryptoPaymentParserView() {
 
         {activeJob?.error_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-            {activeJob.error_message}
+            {/^\s*</.test(activeJob.error_message)
+              ? 'Произошла внутренняя ошибка. Попробуйте возобновить задачу.'
+              : activeJob.error_message.length > 500
+                ? `${activeJob.error_message.slice(0, 500)}…`
+                : activeJob.error_message}
           </div>
         ) : null}
       </div>
