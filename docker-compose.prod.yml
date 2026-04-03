@@ -283,6 +283,33 @@ services:
     networks:
       - portal-network
 
+  worker-instantly-leads:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-instantly-leads
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - INSTANTLY_SUPABASE_URL=${INSTANTLY_SUPABASE_URL}
+      - INSTANTLY_SUPABASE_SERVICE_ROLE_KEY=${INSTANTLY_SUPABASE_SERVICE_ROLE_KEY}
+      - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
+      - INSTANTLY_PORTAL_API_KEY=${INSTANTLY_PORTAL_API_KEY}
+      - OPENROUTER_INSTANTLY_LEAD_API_KEY=${OPENROUTER_INSTANTLY_LEAD_API_KEY}
+      - INSTANTLY_LEAD_QUAL_MODEL=${INSTANTLY_LEAD_QUAL_MODEL}
+      - WORKER_POLL_INTERVAL_MS=30000
+      - WORKER_KIND=instantlyleads
+    stop_grace_period: 1m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   transcribe-worker:
     image: ${DOCKER_USERNAME}/portal-transcribe-worker:prod
     container_name: portal-transcribe-worker
