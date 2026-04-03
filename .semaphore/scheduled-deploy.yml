@@ -219,8 +219,18 @@ blocks:
                 maintenance_enabled=1;
                 echo '--- Step 3: drain worker ---';
                 sudo -n bash drain-worker.sh;
+                force_rm_svc() {
+                  local svc=\"\$1\";
+                  local cids=\$(sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q);
+                  if [ -z \"\${cids}\" ]; then return 0; fi;
+                  if echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null; then return 0; fi;
+                  echo \"[deploy] docker rm -f failed for \${svc}, trying SIGKILL...\" >&2;
+                  echo \"\${cids}\" | xargs -r sudo -n docker kill --signal=SIGKILL 2>/dev/null || true;
+                  sleep 3;
+                  echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
+                };
                 echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
-                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do force_rm_svc \"\$svc\"; done;
                 sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot 2>/dev/null || true;
                 wait_port_free 3000 15;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot;
@@ -233,7 +243,7 @@ blocks:
                 esac;
                 sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
                 echo '--- Step 5: restart workers ---';
-                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser; do force_rm_svc \"\$svc\"; done;
                 sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach portal-worker-aicaller portal-worker-sales-copilot portal-worker-tg-parser 2>/dev/null || true;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser;
                 echo '--- Step 6: disable maintenance mode (normal path) ---';
