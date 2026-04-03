@@ -1,5 +1,5 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
-import { runCampaignLoop } from '@/lib/tgOutreach/campaignLoop';
+import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
 import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
@@ -128,6 +128,22 @@ async function handleRestartJob(job: { id: string; campaign_id: string }) {
   await handleStartJob(job);
 }
 
+async function handleRefetchJob(job: { id: string; campaign_id: string }) {
+  const campaignId = job.campaign_id;
+  log('info', `Refetch messages for campaign ${campaignId}`);
+
+  try {
+    await refetchEmptyDialogs(campaignId, db);
+  } catch (err) {
+    log('error', `Refetch failed for ${campaignId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  await db.from('tg_outreach_jobs').update({
+    status: 'completed',
+    finished_at: new Date().toISOString(),
+  }).eq('id', job.id);
+}
+
 async function pollOnce(): Promise<boolean> {
   const job = await claimJob();
   if (!job) return false;
@@ -144,6 +160,9 @@ async function pollOnce(): Promise<boolean> {
         break;
       case 'restart':
         await handleRestartJob(job);
+        break;
+      case 'refetch_messages':
+        await handleRefetchJob(job);
         break;
       default:
         log('warn', `Unknown action: ${job.action}`);

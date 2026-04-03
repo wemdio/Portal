@@ -66,7 +66,7 @@ export type AccountAction =
 
 export type CampaignStatus = 'stopped' | 'running' | 'paused' | 'error';
 export type DialogStatus = 'none' | 'lead' | 'not_lead' | 'later';
-export type JobAction = 'start' | 'stop' | 'restart';
+export type JobAction = 'start' | 'stop' | 'restart' | 'refetch_messages';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
 export type LogLevel = 'info' | 'warning' | 'error';
 
