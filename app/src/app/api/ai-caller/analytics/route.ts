@@ -419,6 +419,8 @@ export async function GET(req: NextRequest) {
       contact_name: string | null;
       email: string | null;
       extra_data: Record<string, string> | null;
+      call_duration: number | null;
+      called_at: string | null;
     }
   > = {};
 
@@ -426,7 +428,7 @@ export async function GET(req: NextRequest) {
     for (const numbersChunk of chunkArray(uniqueCustomerNumbers, IN_CHUNK_SIZE)) {
       const { data: contacts } = await supabase
         .from('ai_campaign_contacts')
-        .select('phone_number, company_name, contact_name, email, extra_data')
+        .select('phone_number, company_name, contact_name, email, extra_data, call_duration, called_at')
         .in('phone_number', numbersChunk);
 
       if (contacts) {
@@ -436,6 +438,8 @@ export async function GET(req: NextRequest) {
             contact_name: c.contact_name,
             email: c.email,
             extra_data: c.extra_data,
+            call_duration: c.call_duration,
+            called_at: c.called_at,
           };
         }
       }
@@ -452,6 +456,8 @@ export async function GET(req: NextRequest) {
       contact_name: contact?.contact_name ?? null,
       contact_email: contact?.email ?? null,
       contact_extra: contact?.extra_data ?? null,
+      call_duration: contact?.call_duration ?? null,
+      called_at: contact?.called_at ?? null,
     };
   });
 
