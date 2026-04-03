@@ -61,6 +61,15 @@ const MONTH_NAMES = [
    HELPERS
    ═══════════════════════════════════════════ */
 
+function ruPlural(n: number, forms: [string, string, string]): string {
+  const abs = Math.abs(n) % 100;
+  const lastDigit = abs % 10;
+  if (abs > 10 && abs < 20) return forms[2];
+  if (lastDigit > 1 && lastDigit < 5) return forms[1];
+  if (lastDigit === 1) return forms[0];
+  return forms[2];
+}
+
 function formatCurrency(val: number): string {
   return new Intl.NumberFormat('ru-RU', {
     style: 'currency',
@@ -271,6 +280,11 @@ export default function PaymentsPageView() {
     }));
   }, [requests, profiles, projects]);
 
+  const expenseRows = useMemo(
+    () => enrichedRequests.filter((r) => r.status === 'approved'),
+    [enrichedRequests],
+  );
+
   /* ─── Filter for stats tab ─── */
 
   const statsRequests = useMemo(
@@ -415,19 +429,19 @@ export default function PaymentsPageView() {
             <div className="lg:col-span-2 space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-bold text-gray-900">
-                  Все расходы <span className="text-gray-400 font-normal text-sm">({enrichedRequests.length})</span>
+                  Все расходы <span className="text-gray-400 font-normal text-sm">({expenseRows.length})</span>
                 </h2>
               </div>
 
               {loading ? (
                 <div className="text-center text-gray-400 py-16">Загрузка...</div>
-              ) : enrichedRequests.length === 0 ? (
+              ) : expenseRows.length === 0 ? (
                 <div className="text-center text-gray-400 py-16 bg-white rounded-2xl border border-gray-200">
                   Нет записей о расходах
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {enrichedRequests.map((r) => {
+                  {expenseRows.map((r) => {
                     const sc = { label: 'Расход', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' };
                     return (
                       <div
@@ -525,12 +539,12 @@ export default function PaymentsPageView() {
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Расходы за месяц</p>
                 <p className="mt-2 text-2xl font-bold text-gray-900">{formatCurrency(monthlyStats.grandTotal)}</p>
-                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} расходов</p>
+                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} {ruPlural(monthlyStats.count, ['расход', 'расхода', 'расходов'])}</p>
               </div>
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего расходов (все время)</p>
                 <p className="mt-2 text-2xl font-bold text-emerald-600">{formatCurrency(allTimeStats.total)}</p>
-                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} расходов</p>
+                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} {ruPlural(allTimeStats.count, ['расход', 'расхода', 'расходов'])}</p>
               </div>
             </div>
 
