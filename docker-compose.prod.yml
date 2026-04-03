@@ -301,7 +301,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 2048M
           cpus: '1.0'
     restart: unless-stopped
     networks:
@@ -374,7 +374,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 768M
           cpus: '0.5'
     restart: unless-stopped
     networks:
