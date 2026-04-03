@@ -80,6 +80,7 @@ export default function AdminEnvPage() {
   const [envPath, setEnvPath] = useState('');
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -195,6 +196,35 @@ export default function AdminEnvPage() {
       setSaving(false);
     }
   }, [getToken, rawMode, rawContent, entries]);
+
+  const reloadEnv = useCallback(async () => {
+    setReloading(true);
+    setError('');
+    setSuccess('');
+    try {
+      const token = await getToken();
+      if (!token) throw new Error('Not authenticated');
+      const res = await fetch('/api/admin/env/reload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(j?.error ?? 'Ошибка применения');
+      }
+      const data = await res.json() as { mode: string };
+      setSuccess(
+        data.mode === 'cluster'
+          ? 'Перезапуск воркеров запущен. Изменения применятся в течение нескольких секунд.'
+          : 'Переменные окружения перезагружены в текущем процессе.',
+      );
+      setTimeout(() => setSuccess(''), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка применения');
+    } finally {
+      setReloading(false);
+    }
+  }, [getToken]);
 
   const updateEntry = useCallback((id: string, field: 'key' | 'value', val: string) => {
     setEntries((prev) => prev.map((e) => e.id === id ? { ...e, [field]: val } : e));
@@ -522,6 +552,15 @@ export default function AdminEnvPage() {
         >
           {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : saved ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
           {saving ? 'Сохранение...' : saved ? 'Сохранено' : 'Сохранить'}
+        </button>
+        <button
+          onClick={reloadEnv}
+          disabled={reloading || dirty}
+          title={dirty ? 'Сначала сохраните изменения' : 'Применить env-переменные без перезапуска контейнера'}
+          className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <RefreshCw className={`h-4 w-4 ${reloading ? 'animate-spin' : ''}`} />
+          {reloading ? 'Применение...' : 'Применить изменения'}
         </button>
         <button
           onClick={loadEnv}
