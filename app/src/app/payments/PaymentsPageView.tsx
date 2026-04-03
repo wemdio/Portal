@@ -52,12 +52,6 @@ const DEPARTMENT_LABELS: Record<string, string> = Object.fromEntries(
   DEPARTMENTS.map((d) => [d.value, d.label]),
 );
 
-const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
-  pending: { label: 'Ожидает', bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
-  approved: { label: 'Согласовано', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-  rejected: { label: 'Отклонено', bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500' },
-};
-
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
@@ -434,10 +428,7 @@ export default function PaymentsPageView() {
               ) : (
                 <div className="space-y-3">
                   {enrichedRequests.map((r) => {
-                    const isDirectExpense = r.status === 'approved' && r.decision_comment === 'Занесено в расход';
-                    const sc = isDirectExpense
-                      ? { label: 'Расход', bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' }
-                      : (STATUS_CONFIG[r.status] || STATUS_CONFIG.pending);
+                    const sc = { label: 'Расход', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' };
                     return (
                       <div
                         key={r.id}
@@ -469,11 +460,9 @@ export default function PaymentsPageView() {
                               {r.comment && (
                                 <p className="mt-2 text-xs text-gray-500 leading-relaxed">{r.comment}</p>
                               )}
-                              {r.status !== 'pending' && r.decided_at && (
+                              {r.decided_at && (
                                 <p className="mt-1.5 text-xs text-gray-400">
-                                  {isDirectExpense
-                                    ? 'Занесено в расход'
-                                    : r.status === 'approved' ? 'Согласовано' : 'Отклонено'}{' '}
+                                  Занесено{' '}
                                   {profiles[r.decided_by ?? '']?.full_name || ''}{' '}
                                   {formatDateTime(r.decided_at)}
                                 </p>
@@ -532,23 +521,16 @@ export default function PaymentsPageView() {
             </div>
 
             {/* Summary cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">За месяц (согласовано)</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Расходы за месяц</p>
                 <p className="mt-2 text-2xl font-bold text-gray-900">{formatCurrency(monthlyStats.grandTotal)}</p>
-                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} запросов</p>
+                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} расходов</p>
               </div>
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего ожидает</p>
-                <p className="mt-2 text-2xl font-bold text-amber-600">
-                  {formatCurrency(requests.filter((r) => r.status === 'pending').reduce((s, r) => s + Number(r.amount), 0))}
-                </p>
-                <p className="text-xs text-gray-400 mt-1">{requests.filter((r) => r.status === 'pending').length} запросов</p>
-              </div>
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего согласовано (все время)</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего расходов (все время)</p>
                 <p className="mt-2 text-2xl font-bold text-emerald-600">{formatCurrency(allTimeStats.total)}</p>
-                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} запросов</p>
+                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} расходов</p>
               </div>
             </div>
 
@@ -562,7 +544,7 @@ export default function PaymentsPageView() {
                   <thead className="bg-gray-50/50">
                     <tr>
                       <th className="px-6 py-3 text-left font-semibold text-gray-500">Отдел</th>
-                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Запросов</th>
+                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Расходов</th>
                       <th className="px-6 py-3 text-right font-semibold text-gray-500">Сумма</th>
                     </tr>
                   </thead>
