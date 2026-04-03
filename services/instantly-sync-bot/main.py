@@ -30,6 +30,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import Any
 
 try:
@@ -77,6 +78,8 @@ RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 LEADS_PAGE_LIMIT = 100
 LEADS_CONCURRENCY = 3
 LEADS_UPSERT_BATCH = 500
+MAX_LEADS_PAGES = 5000  # safety cap: 5000 pages × 100 = 500k leads max
+LEADS_HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_LEADS_HTTP_TIMEOUT_SEC", "60"))
 # Leads/list is heavier than catalog endpoints; allow more attempts for 502/connection blips.
 LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "5"))
 LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
@@ -550,27 +553,36 @@ async def _fetch_leads_page(
     raise last_err
 
 
-async def _fetch_all_leads_for_campaign(
+async def _iter_leads_pages(
     client: httpx.AsyncClient,
     campaign_id: str,
-) -> list[dict]:
-    """Paginate all leads for a single campaign."""
-    all_leads: list[dict] = []
+) -> AsyncIterator[list[dict]]:
+    """Yield one page of leads at a time — keeps memory flat for huge campaigns."""
     after: str | None = None
     pages = 0
+    seen_cursors: set[str] = set()
 
     while True:
+        cursor_key = after or "__first__"
+        if cursor_key in seen_cursors:
+            print(f"[leads-sync] WARNING: pagination loop at cursor {cursor_key!r}, stopping")
+            break
+        seen_cursors.add(cursor_key)
+
+        pages += 1
+        if pages > MAX_LEADS_PAGES:
+            print(f"[leads-sync] WARNING: reached page cap ({MAX_LEADS_PAGES}) for {campaign_id}")
+            break
+
         data = await _fetch_leads_page(client, campaign_id, after)
         items = data.get("items", []) if isinstance(data, dict) else []
         if items:
-            all_leads.extend(items)
+            yield items
+
         nsa = data.get("next_starting_after") if isinstance(data, dict) else None
         after = nsa if isinstance(nsa, str) and nsa else None
-        pages += 1
         if not after:
             break
-
-    return all_leads
 
 
 async def sync_client_leads() -> dict[str, int]:
@@ -602,61 +614,57 @@ async def sync_client_leads() -> dict[str, int]:
         campaigns_done = 0
         campaigns_errors = 0
 
-        _timeout = httpx.Timeout(HTTP_TIMEOUT)
+        _timeout = httpx.Timeout(LEADS_HTTP_TIMEOUT)
         _limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
         async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
             for campaign_id, user_ids in campaign_users.items():
                 try:
-                    leads = await _fetch_all_leads_for_campaign(http_client, campaign_id)
-
-                    if not leads:
-                        campaigns_done += 1
-                        await _update_leads_synced_at(conn, campaign_id, user_ids)
-                        continue
-
-                    print(
-                        f"[leads-sync] campaign {campaign_id} — {len(leads)} leads "
-                        f"for {len(user_ids)} user(s)"
-                    )
+                    campaign_leads = 0
                     now = datetime.now(timezone.utc)
 
-                    for uid in user_ids:
-                        rows = [
-                            (
-                                uid,
-                                campaign_id,
-                                l.get("email", ""),
-                                l.get("first_name"),
-                                l.get("last_name"),
-                                l.get("company_name"),
-                                l.get("website"),
-                                l.get("linkedin_url"),
-                                now,
-                            )
-                            for l in leads
-                            if l.get("email")
-                        ]
-                        for i in range(0, len(rows), LEADS_UPSERT_BATCH):
-                            batch = rows[i : i + LEADS_UPSERT_BATCH]
-                            await conn.executemany(
-                                """
-                                INSERT INTO public.client_campaign_leads
-                                    (client_user_id, campaign_id, email,
-                                     first_name, last_name, company_name,
-                                     website, linkedin_url, synced_at)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                                ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
-                                    first_name   = EXCLUDED.first_name,
-                                    last_name    = EXCLUDED.last_name,
-                                    company_name = EXCLUDED.company_name,
-                                    website      = EXCLUDED.website,
-                                    linkedin_url = EXCLUDED.linkedin_url,
-                                    synced_at    = EXCLUDED.synced_at
-                                """,
-                                batch,
-                            )
+                    async for page_items in _iter_leads_pages(http_client, campaign_id):
+                        for uid in user_ids:
+                            rows = [
+                                (
+                                    uid,
+                                    campaign_id,
+                                    l.get("email", ""),
+                                    l.get("first_name"),
+                                    l.get("last_name"),
+                                    l.get("company_name"),
+                                    l.get("website"),
+                                    l.get("linkedin_url"),
+                                    now,
+                                )
+                                for l in page_items
+                                if l.get("email")
+                            ]
+                            if rows:
+                                await conn.executemany(
+                                    """
+                                    INSERT INTO public.client_campaign_leads
+                                        (client_user_id, campaign_id, email,
+                                         first_name, last_name, company_name,
+                                         website, linkedin_url, synced_at)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                    ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
+                                        first_name   = EXCLUDED.first_name,
+                                        last_name    = EXCLUDED.last_name,
+                                        company_name = EXCLUDED.company_name,
+                                        website      = EXCLUDED.website,
+                                        linkedin_url = EXCLUDED.linkedin_url,
+                                        synced_at    = EXCLUDED.synced_at
+                                    """,
+                                    rows,
+                                )
+                        campaign_leads += len(page_items)
 
-                    total_leads += len(leads)
+                    if campaign_leads:
+                        print(
+                            f"[leads-sync] campaign {campaign_id} — {campaign_leads} leads "
+                            f"for {len(user_ids)} user(s)"
+                        )
+                    total_leads += campaign_leads
                     campaigns_done += 1
                     await _update_leads_synced_at(conn, campaign_id, user_ids)
 
