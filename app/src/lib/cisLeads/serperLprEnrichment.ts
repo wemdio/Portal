@@ -3,6 +3,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
 import { isLegalEntityName } from '@/lib/cisLeads/lprRole';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 const BATCH_LIMIT = 50;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -176,32 +177,31 @@ async function searchLprWithPerplexity(companyName: string, inn?: string | null)
 export async function runSerperLprEnrichment(jobId: string, userId: string): Promise<{ processed: number; contactsFound: number }> {
   if (!supabaseAdmin || !getLprKey()) return { processed: 0, contactsFound: 0 };
 
-  const { data: leads } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(new Set(
-    (leads ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean),
-  ));
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, contactsFound: 0 };
 
-  const { data: companiesData } = await supabaseAdmin
-    .from('companies')
-    .select('id, name, short_name, inn')
-    .in('id', companyIds)
-    .limit(BATCH_LIMIT);
+  const companiesData: Array<{ id: string; name: string; short_name: string | null; inn: string | null }> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (companiesData.length >= BATCH_LIMIT) break;
+    const { data } = await supabaseAdmin
+      .from('companies')
+      .select('id, name, short_name, inn')
+      .in('id', chunk)
+      .limit(BATCH_LIMIT - companiesData.length);
+    if (data) companiesData.push(...(data as typeof companiesData));
+  }
 
-  if (!companiesData?.length) return { processed: 0, contactsFound: 0 };
+  if (!companiesData.length) return { processed: 0, contactsFound: 0 };
 
-  const { data: existingContacts } = await supabaseAdmin
-    .from('company_contacts')
-    .select('company_id, channel_phone, channel_email')
-    .eq('user_id', userId)
-    .in('company_id', companyIds);
+  const existingContacts: Array<Record<string, unknown>> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    const { data } = await supabaseAdmin
+      .from('company_contacts')
+      .select('company_id, channel_phone, channel_email')
+      .eq('user_id', userId)
+      .in('company_id', chunk);
+    if (data) existingContacts.push(...data);
+  }
 
   const contactCountWithChannels = new Map<string, number>();
   const totalContactCount = new Map<string, number>();

@@ -41,8 +41,6 @@ interface ProfileMap {
    CONSTANTS
    ═══════════════════════════════════════════ */
 
-const APPROVER_EMAIL = 'grid4ina.an@gmail.com';
-
 const DEPARTMENTS: { value: string; label: string }[] = [
   { value: 'outreach', label: 'Аутрич' },
   { value: 'paid_traffic', label: 'Платный трафик' },
@@ -54,12 +52,6 @@ const DEPARTMENT_LABELS: Record<string, string> = Object.fromEntries(
   DEPARTMENTS.map((d) => [d.value, d.label]),
 );
 
-const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
-  pending: { label: 'Ожидает', bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
-  approved: { label: 'Согласовано', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-  rejected: { label: 'Отклонено', bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500' },
-};
-
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
@@ -68,6 +60,15 @@ const MONTH_NAMES = [
 /* ═══════════════════════════════════════════
    HELPERS
    ═══════════════════════════════════════════ */
+
+function ruPlural(n: number, forms: [string, string, string]): string {
+  const abs = Math.abs(n) % 100;
+  const lastDigit = abs % 10;
+  if (abs > 10 && abs < 20) return forms[2];
+  if (lastDigit > 1 && lastDigit < 5) return forms[1];
+  if (lastDigit === 1) return forms[0];
+  return forms[2];
+}
 
 function formatCurrency(val: number): string {
   return new Intl.NumberFormat('ru-RU', {
@@ -120,12 +121,8 @@ export default function PaymentsPageView() {
   const [profiles, setProfiles] = useState<ProfileMap>({});
   const [loading, setLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<'requests' | 'stats'>('requests');
-
-  type FormMode = 'request' | 'expense';
-  const [formMode, setFormMode] = useState<FormMode>('request');
 
   // Form state
   const [form, setForm] = useState({
@@ -136,8 +133,6 @@ export default function PaymentsPageView() {
     comment: '',
   });
 
-  const isApprover = userEmail?.toLowerCase() === APPROVER_EMAIL;
-
   /* ─── Auth ─── */
 
   useEffect(() => {
@@ -146,13 +141,6 @@ export default function PaymentsPageView() {
       if (!session?.user) return;
       setUserId(session.user.id);
 
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('email, full_name')
-        .eq('id', session.user.id)
-        .single();
-
-      if (profile?.email) setUserEmail(profile.email);
     }
     init();
   }, []);
@@ -227,14 +215,11 @@ export default function PaymentsPageView() {
         amount,
         project_id: form.project_id || null,
         comment: form.comment.trim() || null,
+        status: 'approved',
+        decided_by: userId,
+        decided_at: new Date().toISOString(),
+        decision_comment: 'Занесено в расход',
       };
-
-      if (formMode === 'expense') {
-        payload.status = 'approved';
-        payload.decided_by = userId;
-        payload.decided_at = new Date().toISOString();
-        payload.decision_comment = 'Занесено в расход';
-      }
 
       const { error } = await supabase.from('payment_requests').insert(payload);
       if (error) throw error;
@@ -246,26 +231,6 @@ export default function PaymentsPageView() {
       alert('Ошибка при отправке');
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  /* ─── Approve / Reject ─── */
-
-  const handleDecision = async (requestId: string, status: 'approved' | 'rejected') => {
-    if (!userId || !isApprover) return;
-    try {
-      const { error } = await supabase
-        .from('payment_requests')
-        .update({
-          status,
-          decided_by: userId,
-          decided_at: new Date().toISOString(),
-        })
-        .eq('id', requestId);
-      if (error) throw error;
-      await fetchRequests();
-    } catch (err) {
-      console.error('Error updating decision:', err);
     }
   };
 
@@ -315,6 +280,11 @@ export default function PaymentsPageView() {
     }));
   }, [requests, profiles, projects]);
 
+  const expenseRows = useMemo(
+    () => enrichedRequests.filter((r) => r.status === 'approved'),
+    [enrichedRequests],
+  );
+
   /* ─── Filter for stats tab ─── */
 
   const statsRequests = useMemo(
@@ -335,7 +305,7 @@ export default function PaymentsPageView() {
         <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-gray-900">Оплаты</h1>
-            <p className="mt-1 text-sm text-gray-500">Запрос и согласование доп. расходов</p>
+            <p className="mt-1 text-sm text-gray-500">Учёт дополнительных расходов</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -346,7 +316,7 @@ export default function PaymentsPageView() {
                   : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
               }`}
             >
-              Запросы
+              Расходы
             </button>
             <button
               onClick={() => setActiveTab('stats')}
@@ -368,68 +338,10 @@ export default function PaymentsPageView() {
             <div className="lg:col-span-1">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden sticky top-6">
                 <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">
-                    {formMode === 'request' ? 'Запрос на оплату' : 'Занести в расход'}
-                  </h2>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {formMode === 'request'
-                      ? 'Запрос отправится на согласование'
-                      : 'Добавится сразу в статистику без согласования'}
-                  </p>
+                  <h2 className="text-base font-bold text-gray-900">Занести в расход</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">Добавится сразу в статистику</p>
                 </div>
                 <div className="px-6 py-5 space-y-4">
-                  {/* Mode toggle */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500">
-                        Режим
-                      </span>
-                      <span className="text-[11px] text-gray-400">
-                        {formMode === 'request' ? 'С согласованием' : 'Сразу в статистику'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 rounded-2xl border border-gray-200 bg-gray-100/90 p-1.5 shadow-inner shadow-gray-200/70">
-                      <button
-                        type="button"
-                        aria-pressed={formMode === 'request'}
-                        onClick={() => setFormMode('request')}
-                        className={`group flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
-                          formMode === 'request'
-                            ? 'border-gray-200 bg-white text-gray-900 shadow-sm'
-                            : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200/80 hover:bg-white/70 hover:text-gray-800'
-                        }`}
-                      >
-                        <span
-                          className={`h-2 w-2 rounded-full transition-colors ${
-                            formMode === 'request'
-                              ? 'bg-sky-500'
-                              : 'bg-gray-400 group-hover:bg-gray-500'
-                          }`}
-                        />
-                        <span>Запрос на оплату</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-pressed={formMode === 'expense'}
-                        onClick={() => setFormMode('expense')}
-                        className={`group flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
-                          formMode === 'expense'
-                            ? 'border-gray-200 bg-white text-gray-900 shadow-sm'
-                            : 'border-transparent bg-transparent text-gray-600 hover:border-gray-200/80 hover:bg-white/70 hover:text-gray-800'
-                        }`}
-                      >
-                        <span
-                          className={`h-2 w-2 rounded-full transition-colors ${
-                            formMode === 'expense'
-                              ? 'bg-emerald-500'
-                              : 'bg-gray-400 group-hover:bg-gray-500'
-                          }`}
-                        />
-                        <span>Занести в расход</span>
-                      </button>
-                    </div>
-                  </div>
-
                   {/* Department */}
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-1.5">Отдел</label>
@@ -507,11 +419,7 @@ export default function PaymentsPageView() {
                     disabled={!formValid || submitting}
                     className="w-full py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
                   >
-                    {submitting
-                      ? 'Отправка...'
-                      : formMode === 'request'
-                        ? 'Отправить запрос'
-                        : 'Занести в расход'}
+                    {submitting ? 'Сохранение...' : 'Занести в расход'}
                   </button>
                 </div>
               </div>
@@ -521,28 +429,20 @@ export default function PaymentsPageView() {
             <div className="lg:col-span-2 space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-bold text-gray-900">
-                  Все запросы <span className="text-gray-400 font-normal text-sm">({enrichedRequests.length})</span>
+                  Все расходы <span className="text-gray-400 font-normal text-sm">({expenseRows.length})</span>
                 </h2>
-                {isApprover && (
-                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium border border-emerald-200">
-                    Вы согласуете
-                  </span>
-                )}
               </div>
 
               {loading ? (
                 <div className="text-center text-gray-400 py-16">Загрузка...</div>
-              ) : enrichedRequests.length === 0 ? (
+              ) : expenseRows.length === 0 ? (
                 <div className="text-center text-gray-400 py-16 bg-white rounded-2xl border border-gray-200">
-                  Нет запросов на оплату
+                  Нет записей о расходах
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {enrichedRequests.map((r) => {
-                    const isDirectExpense = r.status === 'approved' && r.decision_comment === 'Занесено в расход';
-                    const sc = isDirectExpense
-                      ? { label: 'Расход', bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' }
-                      : (STATUS_CONFIG[r.status] || STATUS_CONFIG.pending);
+                  {expenseRows.map((r) => {
+                    const sc = { label: 'Расход', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' };
                     return (
                       <div
                         key={r.id}
@@ -574,11 +474,9 @@ export default function PaymentsPageView() {
                               {r.comment && (
                                 <p className="mt-2 text-xs text-gray-500 leading-relaxed">{r.comment}</p>
                               )}
-                              {r.status !== 'pending' && r.decided_at && (
+                              {r.decided_at && (
                                 <p className="mt-1.5 text-xs text-gray-400">
-                                  {isDirectExpense
-                                    ? 'Занесено в расход'
-                                    : r.status === 'approved' ? 'Согласовано' : 'Отклонено'}{' '}
+                                  Занесено{' '}
                                   {profiles[r.decided_by ?? '']?.full_name || ''}{' '}
                                   {formatDateTime(r.decided_at)}
                                 </p>
@@ -586,22 +484,6 @@ export default function PaymentsPageView() {
                             </div>
                             <div className="text-right shrink-0">
                               <div className="text-lg font-bold text-gray-900">{formatCurrency(Number(r.amount))}</div>
-                              {r.status === 'pending' && isApprover && (
-                                <div className="flex items-center gap-1.5 mt-2">
-                                  <button
-                                    onClick={() => void handleDecision(r.id, 'approved')}
-                                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 text-white transition hover:bg-emerald-700"
-                                  >
-                                    Согласовать
-                                  </button>
-                                  <button
-                                    onClick={() => void handleDecision(r.id, 'rejected')}
-                                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-100 text-red-700 transition hover:bg-red-200"
-                                  >
-                                    Отклонить
-                                  </button>
-                                </div>
-                              )}
                             </div>
                           </div>
                         </div>
@@ -653,23 +535,16 @@ export default function PaymentsPageView() {
             </div>
 
             {/* Summary cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">За месяц (согласовано)</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Расходы за месяц</p>
                 <p className="mt-2 text-2xl font-bold text-gray-900">{formatCurrency(monthlyStats.grandTotal)}</p>
-                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} запросов</p>
+                <p className="text-xs text-gray-400 mt-1">{monthlyStats.count} {ruPlural(monthlyStats.count, ['расход', 'расхода', 'расходов'])}</p>
               </div>
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего ожидает</p>
-                <p className="mt-2 text-2xl font-bold text-amber-600">
-                  {formatCurrency(requests.filter((r) => r.status === 'pending').reduce((s, r) => s + Number(r.amount), 0))}
-                </p>
-                <p className="text-xs text-gray-400 mt-1">{requests.filter((r) => r.status === 'pending').length} запросов</p>
-              </div>
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего согласовано (все время)</p>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Всего расходов (все время)</p>
                 <p className="mt-2 text-2xl font-bold text-emerald-600">{formatCurrency(allTimeStats.total)}</p>
-                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} запросов</p>
+                <p className="text-xs text-gray-400 mt-1">{allTimeStats.count} {ruPlural(allTimeStats.count, ['расход', 'расхода', 'расходов'])}</p>
               </div>
             </div>
 
@@ -683,7 +558,7 @@ export default function PaymentsPageView() {
                   <thead className="bg-gray-50/50">
                     <tr>
                       <th className="px-6 py-3 text-left font-semibold text-gray-500">Отдел</th>
-                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Запросов</th>
+                      <th className="px-6 py-3 text-right font-semibold text-gray-500">Расходов</th>
                       <th className="px-6 py-3 text-right font-semibold text-gray-500">Сумма</th>
                     </tr>
                   </thead>

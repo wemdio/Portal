@@ -3,6 +3,7 @@ import 'server-only';
 import * as cheerio from 'cheerio';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { guessLprRoleFromPost } from '@/lib/cisLeads/lprRole';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
 import { sanitizeContactEmail } from '@/lib/cisLeads/contactEmailPolicy';
 
@@ -245,23 +246,20 @@ function contactNameKey(fullName: string): string {
 export async function runWebsiteTeamEnrichment(jobId: string, userId: string): Promise<{ processed: number; contactsFound: number }> {
   if (!supabaseAdmin) return { processed: 0, contactsFound: 0 };
 
-  const { data: leads } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(new Set((leads ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean)));
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, contactsFound: 0 };
 
-  const { data: companiesWithSite } = await supabaseAdmin
-    .from('companies')
-    .select('id, name, site')
-    .in('id', companyIds)
-    .not('site', 'is', null)
-    .limit(SITE_BATCH_LIMIT);
+  const companiesWithSite: Array<{ id: string; name: string; site: string | null }> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (companiesWithSite.length >= SITE_BATCH_LIMIT) break;
+    const { data } = await supabaseAdmin
+      .from('companies')
+      .select('id, name, site')
+      .in('id', chunk)
+      .not('site', 'is', null)
+      .limit(SITE_BATCH_LIMIT - companiesWithSite.length);
+    if (data) companiesWithSite.push(...(data as typeof companiesWithSite));
+  }
 
   const toProcess = (companiesWithSite ?? []) as Array<{ id: string; name: string; site: string | null }>;
   if (toProcess.length === 0) return { processed: 0, contactsFound: 0 };

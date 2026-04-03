@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getCompanyIdsForJob, chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 const BATCH_LIMIT = 40;
 const ROUTER_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -118,27 +119,22 @@ export async function runSiteDiscoveryEnrichment(
 ): Promise<{ processed: number; sitesFound: number }> {
   if (!supabaseAdmin || !getLprKey()) return { processed: 0, sitesFound: 0 };
 
-  const { data: leads } = await supabaseAdmin
-    .from('raw_leads')
-    .select('company_id')
-    .eq('import_job_id', jobId)
-    .eq('user_id', userId)
-    .not('company_id', 'is', null)
-    .limit(10000);
-
-  const companyIds = Array.from(new Set(
-    (leads ?? []).map((r) => String((r as { company_id?: unknown }).company_id ?? '')).filter(Boolean),
-  ));
+  const companyIds = await getCompanyIdsForJob(supabaseAdmin, jobId, userId);
   if (companyIds.length === 0) return { processed: 0, sitesFound: 0 };
 
-  const { data: companiesWithoutSite } = await supabaseAdmin
-    .from('companies')
-    .select('id, name, short_name, inn')
-    .in('id', companyIds)
-    .is('site', null)
-    .limit(BATCH_LIMIT * 2);
+  const companiesWithoutSite: Array<{ id: string; name: string; short_name: string | null; inn: string | null }> = [];
+  for (const chunk of chunkArray(companyIds, IN_CHUNK_SIZE)) {
+    if (companiesWithoutSite.length >= BATCH_LIMIT * 2) break;
+    const { data } = await supabaseAdmin
+      .from('companies')
+      .select('id, name, short_name, inn')
+      .in('id', chunk)
+      .is('site', null)
+      .limit(BATCH_LIMIT * 2 - companiesWithoutSite.length);
+    if (data) companiesWithoutSite.push(...(data as typeof companiesWithoutSite));
+  }
 
-  if (!companiesWithoutSite?.length) return { processed: 0, sitesFound: 0 };
+  if (!companiesWithoutSite.length) return { processed: 0, sitesFound: 0 };
 
   const companies = (companiesWithoutSite as Array<{ id: string; name: string; short_name: string | null; inn: string | null }>)
     .slice(0, BATCH_LIMIT);
