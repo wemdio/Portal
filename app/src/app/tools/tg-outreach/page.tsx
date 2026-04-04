@@ -23,6 +23,7 @@ import {
   Network,
   Upload,
   Ban,
+  RefreshCw,
 } from 'lucide-react';
 import type {
   OutreachCampaign,
@@ -1008,7 +1009,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const [tab, setTab] = useState<string>('settings');
   const [actionLoading, setActionLoading] = useState(false);
 
-  const doAction = async (action: 'start' | 'stop') => {
+  const doAction = async (action: 'start' | 'stop' | 'refetch') => {
     setActionLoading(true);
     const token = await getToken();
     await fetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST', headers: authHeaders(token) });
@@ -1046,6 +1047,14 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
               Остановить
+            </button>
+          )}
+          {campaign.status !== 'running' && (
+            <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading}
+              title="Перезагрузить пустые диалоги из Telegram"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Refetch
             </button>
           )}
           <button type="button" onClick={() => onDelete(campaign.id)}

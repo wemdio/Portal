@@ -237,7 +237,7 @@ interface HandleChatResult {
   triggerType: 'positive' | 'negative' | null;
 }
 
-async function handleChat(
+export async function handleChat(
   client: TelegramClient,
   account: OutreachAccount,
   dialog: Dialog,
@@ -329,9 +329,12 @@ async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Always persist fetched messages so they are visible in the UI,
+  // even if the bot decides not to reply below.
+  await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
+
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
     log('info', `${displayName}: отправка отключена вручную`);
-    await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
     return { replied: false, triggerType: null };
   }
 
@@ -638,4 +641,114 @@ export async function runCampaignLoop(
     await db.from('tg_outreach_campaigns').update({ status: 'stopped', updated_at: new Date().toISOString() }).eq('id', campaignId);
     log('info', 'Кампания остановлена');
   }
+}
+
+export async function refetchEmptyDialogs(
+  campaignId: string,
+  db: SupabaseClient,
+  traceContext?: TraceContext,
+) {
+  const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
+    console.log(`[tg-outreach-refetch][${campaignId.slice(0, 8)}][${level}] ${msg}`);
+    await writeLog(db, campaignId, level, msg, traceContext);
+  };
+
+  const log: LogFn = (level, msg) => { void logToDb(level, msg); };
+
+  const { data: campaign, error: cErr } = await db
+    .from('tg_outreach_campaigns')
+    .select('*')
+    .eq('id', campaignId)
+    .single();
+
+  if (cErr || !campaign) {
+    log('error', 'Кампания не найдена');
+    return;
+  }
+
+  const tg = campaign.telegram_settings as TelegramSettings;
+
+  const { data: emptyDialogs } = await db
+    .from('tg_outreach_dialogs')
+    .select('id, tg_user_id, tg_username, account_id, tg_is_bot')
+    .eq('campaign_id', campaignId)
+    .eq('messages', '[]')
+    .limit(500);
+
+  if (!emptyDialogs?.length) {
+    log('info', 'Нет диалогов с пустыми сообщениями — refetch не нужен');
+    return;
+  }
+
+  log('info', `Refetch: найдено ${emptyDialogs.length} диалогов с пустыми сообщениями`);
+
+  const accountIds = [...new Set(emptyDialogs.map(d => d.account_id as string))];
+
+  const { data: accounts } = await db
+    .from('tg_outreach_accounts')
+    .select('*')
+    .in('id', accountIds)
+    .eq('is_active', true);
+
+  if (!accounts?.length) {
+    log('error', 'Refetch: нет активных аккаунтов для подключения');
+    return;
+  }
+
+  const { data: proxies } = await db
+    .from('tg_outreach_proxies')
+    .select('*')
+    .eq('campaign_id', campaignId)
+    .eq('is_active', true);
+
+  const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
+  const clients = await buildClients(accounts as OutreachAccount[], proxies ?? [], log, downloadSessionFile);
+
+  if (clients.length === 0) {
+    log('error', 'Refetch: ни один аккаунт не подключился');
+    return;
+  }
+
+  const clientByAccountId = new Map(clients.map(c => [c.account.id, c.client]));
+  let fetched = 0;
+  let errors = 0;
+
+  for (const dialog of emptyDialogs) {
+    const client = clientByAccountId.get(dialog.account_id as string);
+    if (!client) continue;
+
+    const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+
+    try {
+      const entity = await client.getEntity(tgUserId);
+      const history = await client.getMessages(entity, { limit: tg.history_limit });
+
+      const chatMessages: DialogMessage[] = [];
+      for (const msg of history.reverse()) {
+        if (!msg.message) continue;
+        chatMessages.push({
+          role: (msg.out ?? false) ? 'assistant' : 'user',
+          content: msg.message,
+          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
+        });
+      }
+
+      if (chatMessages.length > 0) {
+        await upsertDialog(
+          db, campaignId, dialog.account_id as string,
+          tgUserId, tgUsername, chatMessages, undefined,
+          { tgIsBot: Boolean(dialog.tg_is_bot) },
+        );
+        fetched++;
+        log('info', `Refetch: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
+      }
+    } catch (err) {
+      errors++;
+      log('warning', `Refetch ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  await disconnectAll(clients);
+  log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${emptyDialogs.length} диалогов`);
 }

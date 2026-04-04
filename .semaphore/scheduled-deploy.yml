@@ -92,6 +92,32 @@ blocks:
               run_ssh "mkdir prod" \
                 "sudo -n mkdir -p /home/Portal/prod && sudo -n chown -R ${USER}:${USER} /home/Portal/prod"
 
+              run_ssh "backup prod files to S3" \
+                "cd /home/Portal/prod;
+                if [ ! -f .env ]; then echo '[backup] .env not found, skipping'; exit 0; fi;
+                SUPA_URL=\$(grep '^NEXT_PUBLIC_SUPABASE_URL=' .env | tail -1 | cut -d= -f2-);
+                SUPA_KEY=\$(grep '^SUPABASE_SERVICE_ROLE_KEY=' .env | tail -1 | cut -d= -f2-);
+                if [ -z \"\${SUPA_URL}\" ] || [ -z \"\${SUPA_KEY}\" ]; then echo '[backup] Supabase env vars missing, skipping'; exit 0; fi;
+                TS=\$(date -u +%Y%m%d_%H%M%S);
+                ok=0; fail=0;
+                for f in .env docker-compose.prod.yml drain-worker.sh 50x.html last_deploy_sha; do
+                  [ -f \"\$f\" ] || continue;
+                  HTTP_CODE=\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+                    -X POST \"\${SUPA_URL}/storage/v1/object/deploy-backups/\${TS}/\${f}\" \
+                    -H \"Authorization: Bearer \${SUPA_KEY}\" \
+                    -H 'Content-Type: application/octet-stream' \
+                    -H 'x-upsert: true' \
+                    --data-binary @\"\${f}\");
+                  if [ \"\${HTTP_CODE}\" = '200' ] || [ \"\${HTTP_CODE}\" = '201' ]; then
+                    echo \"[backup] \${f} -> deploy-backups/\${TS}/\${f} (HTTP \${HTTP_CODE})\";
+                    ok=\$((ok + 1));
+                  else
+                    echo \"[backup] FAILED \${f} (HTTP \${HTTP_CODE})\" >&2;
+                    fail=\$((fail + 1));
+                  fi;
+                done;
+                echo \"[backup] Done: \${ok} uploaded, \${fail} failed\""
+
               run_scp "copy compose files" \
                 docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
@@ -219,8 +245,18 @@ blocks:
                 maintenance_enabled=1;
                 echo '--- Step 3: drain worker ---';
                 sudo -n bash drain-worker.sh;
+                force_rm_svc() {
+                  local svc=\"\$1\";
+                  local cids=\$(sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q);
+                  if [ -z \"\${cids}\" ]; then return 0; fi;
+                  if echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null; then return 0; fi;
+                  echo \"[deploy] docker rm -f failed for \${svc}, trying SIGKILL...\" >&2;
+                  echo \"\${cids}\" | xargs -r sudo -n docker kill --signal=SIGKILL 2>/dev/null || true;
+                  sleep 3;
+                  echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
+                };
                 echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
-                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do force_rm_svc \"\$svc\"; done;
                 sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot 2>/dev/null || true;
                 wait_port_free 3000 15;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot;
@@ -233,7 +269,7 @@ blocks:
                 esac;
                 sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
                 echo '--- Step 5: restart workers ---';
-                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser; do sudo -n docker ps -a --filter \"label=com.docker.compose.service=\$svc\" -q | xargs -r sudo -n docker rm -f; done;
+                for svc in worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser; do force_rm_svc \"\$svc\"; done;
                 sudo -n docker rm -f portal-worker-hh portal-worker-search portal-worker-enrich portal-worker-yandexmaps portal-worker-emailvalidation portal-worker-tg-outreach portal-worker-aicaller portal-worker-sales-copilot portal-worker-tg-parser 2>/dev/null || true;
                 sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate worker-hh worker-search worker-enrich worker-yandexmaps worker-emailvalidation worker-tg-outreach worker-aicaller worker-sales-copilot worker-tg-parser;
                 echo '--- Step 6: disable maintenance mode (normal path) ---';
