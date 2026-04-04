@@ -1,5 +1,6 @@
 import type { Email } from './types';
 import * as instantly from './client';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -10,6 +11,8 @@ export interface QualificationResult {
   reason: string;
   confidence: number;
   needsReview: boolean;
+  objectionHandleable: boolean;
+  objectionDraft: string | null;
 }
 
 export interface ThreadContext {
@@ -129,20 +132,34 @@ export function isProposalMessage(text: string): boolean {
 
 // ─── AI Classification ──────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.
+function buildSystemPrompt(briefText?: string | null): string {
+  const briefSection = briefText
+    ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 4000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
+    : '';
 
-ЗАДАЧА: определить, является ли ответ квалифицированным лидом.
+  return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}
+
+ЗАДАЧА: определить категорию ответа.
+
+КАТЕГОРИИ:
+1. КВАЛИФИЦИРОВАННЫЙ ЛИД — клиент видел предложение И проявил интерес (уточняющие вопросы, запрос цен, предложение позвонить/встретиться, обсуждение условий)
+2. МОЖНО ОБРАБОТАТЬ ВОЗРАЖЕНИЕ — клиент видел предложение, но выразил сомнение, возражение или мягкий отказ, который можно обработать аргументами (например: "дорого", "не сейчас", "у нас уже есть подрядчик", "не уверен что нам это нужно"). НЕ прямой категоричный отказ.
+3. НЕ ЛИД — автоответ, отписка, прямой отказ, ответ на запрос контакта без ознакомления с предложением, нейтральный ответ
 
 КРИТЕРИИ ЛИДА (все должны совпасть):
 1. Клиент ВИДЕЛ наше развёрнутое предложение (не просто запрос контакта)
 2. Клиент проявил ИНТЕРЕС: уточняющие вопросы, запрос цен, предложение позвонить/встретиться, обсуждение условий
 
-НЕ является лидом:
+КРИТЕРИИ ВОЗРАЖЕНИЯ:
+- Клиент видел предложение (proposal_seen=true)
+- Ответ содержит возражение/сомнение, но НЕ категоричный отказ
+- Можно сформулировать аргумент на основе предложения${briefText ? ' и контекста брифа' : ''}
+
+НЕ является лидом и НЕ возражение:
 - Ответ на письмо-запрос контакта ответственного (даже если дали телефон/email)
 - Автоответ/отпуск
-- Отписка/отказ
+- Отписка/категоричный отказ ("нас это не интересует", "не пишите больше")
 - Пересылка контакта без ознакомления с предложением
-- Нейтральный ответ без интереса к предложению
 
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
@@ -151,8 +168,11 @@ const SYSTEM_PROMPT = `Ты — эксперт по квалификации л�
   "interest_signals": ["список конкретных сигналов интереса"],
   "reason": "краткое объяснение на русском, 1-2 предложения",
   "confidence": 0.0-1.0,
-  "needs_review": true/false
+  "needs_review": true/false,
+  "objection_handleable": true/false,
+  "objection_draft": "черновик ответа на возражение (только если objection_handleable=true, иначе null)"
 }`;
+}
 
 interface AIResponse {
   choices?: Array<{ message?: { content?: string } }>;
@@ -162,9 +182,26 @@ export interface ClassifyOptions {
   apiKey: string;
   model?: string;
   maxRetries?: number;
+  briefText?: string | null;
 }
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
+
+export async function fetchBriefByCampaign(campaignId: string): Promise<string | null> {
+  if (!supabaseInstantly) return null;
+
+  const { data } = await supabaseInstantly
+    .from('instantly_brief_campaigns')
+    .select('brief_id, instantly_briefs(brief_text)')
+    .eq('campaign_id', campaignId)
+    .limit(1)
+    .single();
+
+  if (!data) return null;
+
+  const briefs = data.instantly_briefs as unknown as { brief_text: string } | null;
+  return briefs?.brief_text ?? null;
+}
 
 function buildUserMessage(ctx: ThreadContext): string {
   const lastOutText = ctx.lastOutbound
@@ -211,6 +248,11 @@ function parseAIResult(content: string): QualificationResult {
         ? Math.max(0, Math.min(1, parsed.confidence))
         : 0.5,
     needsReview: Boolean(parsed.needs_review),
+    objectionHandleable: Boolean(parsed.objection_handleable),
+    objectionDraft:
+      typeof parsed.objection_draft === 'string' && parsed.objection_draft
+        ? parsed.objection_draft
+        : null,
   };
 }
 
@@ -222,8 +264,9 @@ export async function classifyWithAI(
   ctx: ThreadContext,
   options: ClassifyOptions,
 ): Promise<QualificationResult> {
-  const { apiKey, model = DEFAULT_MODEL, maxRetries = 2 } = options;
+  const { apiKey, model = DEFAULT_MODEL, maxRetries = 2, briefText } = options;
   const userMessage = buildUserMessage(ctx);
+  const systemPrompt = buildSystemPrompt(briefText);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let response: Response;
@@ -239,7 +282,7 @@ export async function classifyWithAI(
         body: JSON.stringify({
           model,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage },
           ],
           temperature: 0.1,
@@ -296,6 +339,8 @@ export async function qualifyReply(
       reason: 'Не удалось восстановить контекст переписки',
       confidence: 0,
       needsReview: true,
+      objectionHandleable: false,
+      objectionDraft: null,
       threadContext: null,
     };
   }
@@ -310,6 +355,8 @@ export async function qualifyReply(
       reason: 'Автоответ или отписка',
       confidence: 0.95,
       needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
       threadContext: ctx,
     };
   }
@@ -322,6 +369,8 @@ export async function qualifyReply(
       reason: 'Не найдено исходящее письмо перед ответом',
       confidence: 0.7,
       needsReview: true,
+      objectionHandleable: false,
+      objectionDraft: null,
       threadContext: ctx,
     };
   }
@@ -336,10 +385,17 @@ export async function qualifyReply(
       reason: 'Ответ на запрос контакта — клиент не видел предложение',
       confidence: 0.9,
       needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
       threadContext: ctx,
     };
   }
 
-  const aiResult = await classifyWithAI(ctx, aiOptions);
+  let briefText = aiOptions.briefText ?? null;
+  if (briefText === null || briefText === undefined) {
+    briefText = await fetchBriefByCampaign(campaignId);
+  }
+
+  const aiResult = await classifyWithAI(ctx, { ...aiOptions, briefText });
   return { ...aiResult, threadContext: ctx };
 }

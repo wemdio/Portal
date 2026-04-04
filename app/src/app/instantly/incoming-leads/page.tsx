@@ -5,7 +5,8 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   ChevronLeft, ChevronRight, Loader2, Search, CheckCircle2,
-  XCircle, AlertCircle, Eye, Mail, Sparkles, CircleDot,
+  XCircle, AlertCircle, Eye, Mail, Sparkles, CircleDot, MessageSquare, Copy,
+  Send, X, Check,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
@@ -22,7 +23,7 @@ type LeadQualification = {
   reply_preview: string | null;
   reply_body: string | null;
   last_outbound_preview: string | null;
-  status: 'lead' | 'not_lead' | 'needs_review' | 'error' | 'pending' | 'processing';
+  status: 'lead' | 'not_lead' | 'needs_review' | 'objection' | 'error' | 'pending' | 'processing';
   proposal_seen: boolean | null;
   interest_signals: string[] | null;
   ai_reason: string | null;
@@ -31,6 +32,8 @@ type LeadQualification = {
   created_at: string;
   read_at: string | null;
   read_by: string | null;
+  objection_handleable: boolean | null;
+  objection_draft: string | null;
 };
 
 type QualifiedLeadsResponse = {
@@ -41,17 +44,19 @@ type QualifiedLeadsResponse = {
 };
 
 const STATUS_CONFIG: Record<string, { label: string; icon: React.ElementType; color: string; bg: string; ring: string }> = {
-  lead:         { label: 'Лид',         icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-200' },
-  not_lead:     { label: 'Не лид',      icon: XCircle,      color: 'text-zinc-400',    bg: 'bg-zinc-50',    ring: 'ring-zinc-200' },
-  needs_review: { label: 'На проверку', icon: AlertCircle,  color: 'text-amber-600',   bg: 'bg-amber-50',   ring: 'ring-amber-200' },
-  error:        { label: 'Ошибка',      icon: XCircle,      color: 'text-red-500',     bg: 'bg-red-50',     ring: 'ring-red-200' },
-  pending:      { label: 'В очереди',   icon: Loader2,      color: 'text-blue-500',    bg: 'bg-blue-50',    ring: 'ring-blue-200' },
-  processing:   { label: 'Обработка',   icon: Loader2,      color: 'text-blue-500',    bg: 'bg-blue-50',    ring: 'ring-blue-200' },
+  lead:         { label: 'Лид',         icon: CheckCircle2,   color: 'text-emerald-600', bg: 'bg-emerald-50',  ring: 'ring-emerald-200' },
+  objection:    { label: 'Возражение',  icon: MessageSquare,  color: 'text-violet-600',  bg: 'bg-violet-50',   ring: 'ring-violet-200' },
+  not_lead:     { label: 'Не лид',      icon: XCircle,        color: 'text-zinc-400',    bg: 'bg-zinc-50',     ring: 'ring-zinc-200' },
+  needs_review: { label: 'На проверку', icon: AlertCircle,    color: 'text-amber-600',   bg: 'bg-amber-50',    ring: 'ring-amber-200' },
+  error:        { label: 'Ошибка',      icon: XCircle,        color: 'text-red-500',     bg: 'bg-red-50',      ring: 'ring-red-200' },
+  pending:      { label: 'В очереди',   icon: Loader2,        color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200' },
+  processing:   { label: 'Обработка',   icon: Loader2,        color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200' },
 };
 
 const STATUS_FILTERS = [
   { value: 'all', label: 'Все' },
   { value: 'lead', label: 'Лиды' },
+  { value: 'objection', label: 'Возражения' },
   { value: 'needs_review', label: 'На проверку' },
   { value: 'not_lead', label: 'Не лид' },
 ];
@@ -64,7 +69,10 @@ async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T>
     ...options,
     headers: { Authorization: `Bearer ${token}`, ...options?.headers },
   });
-  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body?.error ?? `Request failed: ${res.status}`);
+  }
   return (await res.json()) as T;
 }
 
@@ -102,6 +110,195 @@ function UnreadDot() {
   );
 }
 
+function ObjectionDraftBlock({ draft }: { draft: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(draft);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard may not be available */ }
+  };
+
+  return (
+    <div className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50 to-white p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <MessageSquare className="h-3.5 w-3.5 text-violet-500" />
+          <span className="text-xs font-semibold text-violet-700 tracking-wide uppercase">
+            Черновик ответа на возражение
+          </span>
+        </div>
+        <button
+          onClick={handleCopy}
+          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-violet-500 hover:bg-violet-100 transition-colors"
+        >
+          {copied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          {copied ? 'Скопировано' : 'Копировать'}
+        </button>
+      </div>
+      <p className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">{draft}</p>
+    </div>
+  );
+}
+
+type ForwardClient = {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  telegram_chats: { chat_id: number; chat_title: string | null }[];
+};
+
+function ForwardToClientDialog({
+  qualificationId,
+  campaignId,
+  onClose,
+  onForwarded,
+}: {
+  qualificationId: string;
+  campaignId: string;
+  onClose: () => void;
+  onForwarded: () => void;
+}) {
+  const [clients, setClients] = useState<ForwardClient[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [selectedClient, setSelectedClient] = useState<string>('');
+  const [selectedChat, setSelectedChat] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+
+  useEffect(() => {
+    fetchWithAuth<{ clients: ForwardClient[] }>(
+      `/api/instantly/forward-clients?campaign_id=${campaignId}`,
+    )
+      .then((res) => setClients(res.clients))
+      .catch((err) => setError(err instanceof Error ? err.message : 'Ошибка'))
+      .finally(() => setLoading(false));
+  }, [campaignId]);
+
+  const currentClient = clients.find((c) => c.id === selectedClient);
+
+  const handleForward = async () => {
+    if (!selectedClient) return;
+    setSending(true);
+    setError('');
+    try {
+      await fetchWithAuth('/api/instantly/qualified-leads/forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          qualification_id: qualificationId,
+          client_user_id: selectedClient,
+          telegram_chat_id: selectedChat,
+        }),
+      });
+      setSuccess(true);
+      setTimeout(() => { onForwarded(); onClose(); }, 1200);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка отправки');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 to-white p-4 animate-in fade-in slide-in-from-top-1 duration-200">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <Send className="h-3.5 w-3.5 text-blue-500" />
+          <span className="text-xs font-semibold text-blue-700 tracking-wide uppercase">
+            Передать клиенту
+          </span>
+        </div>
+        <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-4">
+          <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+        </div>
+      ) : success ? (
+        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium">
+          <CheckCircle2 className="h-4 w-4" />
+          Лид успешно передан клиенту
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
+
+          {clients.length === 0 ? (
+            <p className="text-xs text-zinc-400 py-2">
+              Нет клиентов с доступом к этой кампании. Назначьте доступ в админ-панели.
+            </p>
+          ) : (
+            <>
+              <div>
+                <label className="text-[11px] font-medium text-zinc-500 mb-1 block">Клиент</label>
+                <select
+                  value={selectedClient}
+                  onChange={(e) => {
+                    setSelectedClient(e.target.value);
+                    setSelectedChat(null);
+                  }}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                >
+                  <option value="">Выберите клиента...</option>
+                  {clients.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.full_name || c.email || c.id.slice(0, 8)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {currentClient && currentClient.telegram_chats.length > 0 && (
+                <div>
+                  <label className="text-[11px] font-medium text-zinc-500 mb-1 block">
+                    Telegram-чат (необязательно)
+                  </label>
+                  <select
+                    value={selectedChat ?? ''}
+                    onChange={(e) => setSelectedChat(e.target.value ? Number(e.target.value) : null)}
+                    className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                  >
+                    <option value="">Не отправлять в Telegram</option>
+                    {currentClient.telegram_chats.map((ch) => (
+                      <option key={ch.chat_id} value={ch.chat_id}>
+                        {ch.chat_title || `Chat ${ch.chat_id}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  onClick={onClose}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  onClick={handleForward}
+                  disabled={!selectedClient || sending}
+                  className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
+                >
+                  {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  Передать
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LeadRow({
   item,
   expanded,
@@ -113,8 +310,11 @@ function LeadRow({
   onToggle: () => void;
   isRead: boolean;
 }) {
+  const [showForward, setShowForward] = useState(false);
   const date = item.reply_timestamp ?? item.created_at;
   const isLead = item.status === 'lead';
+  const isObjection = item.status === 'objection';
+  const canForward = isLead || isObjection || item.status === 'needs_review';
 
   return (
     <div
@@ -198,6 +398,10 @@ function LeadRow({
             </div>
           )}
 
+          {item.objection_handleable && item.objection_draft && (
+            <ObjectionDraftBlock draft={item.objection_draft} />
+          )}
+
           {item.error_message && (
             <div className="rounded-xl border border-red-200 bg-red-50/50 p-4">
               <p className="text-xs font-semibold text-red-600 mb-1">Ошибка квалификации</p>
@@ -231,7 +435,25 @@ function LeadRow({
               <Mail className="h-3.5 w-3.5" />
               Перейти к письмам
             </Link>
+            {canForward && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowForward(!showForward); }}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-500 hover:text-blue-700 transition-colors"
+              >
+                <Send className="h-3.5 w-3.5" />
+                Передать клиенту
+              </button>
+            )}
           </div>
+
+          {showForward && (
+            <ForwardToClientDialog
+              qualificationId={item.id}
+              campaignId={item.campaign_id}
+              onClose={() => setShowForward(false)}
+              onForwarded={() => setShowForward(false)}
+            />
+          )}
         </div>
       )}
     </div>

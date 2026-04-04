@@ -3,8 +3,8 @@
 import { AGENT_TOOLS, WRITE_TOOLS, ALL_TOOLS, TOOL_NAMES, WRITE_TOOL_NAMES } from '@/lib/telegramAgent/tools';
 
 describe('telegramAgent/tools', () => {
-  it('defines 8 read tools', () => {
-    expect(AGENT_TOOLS).toHaveLength(8);
+  it('defines 10 read tools', () => {
+    expect(AGENT_TOOLS).toHaveLength(10);
   });
 
   it('defines 17 write tools', () => {
@@ -12,7 +12,7 @@ describe('telegramAgent/tools', () => {
   });
 
   it('ALL_TOOLS = read + write', () => {
-    expect(ALL_TOOLS).toHaveLength(25);
+    expect(ALL_TOOLS).toHaveLength(27);
   });
 
   it('all tools have type "function"', () => {
@@ -56,12 +56,14 @@ describe('telegramAgent/tools', () => {
 
   it.each([
     'query_database',
+    'query_instantly_database',
     'export_parser_results',
     'search_knowledge_base',
     'search_reglament',
     'web_search',
     'fetch_url',
     'think',
+    'get_campaign_sequences',
     'get_pipeline_status',
     'update_project_status',
     'update_project_fields',

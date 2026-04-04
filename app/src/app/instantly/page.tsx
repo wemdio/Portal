@@ -71,6 +71,7 @@ function StatCard({ label, value, icon: Icon, href, color, loading: isLoading }:
 
 const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: string; adminOnly?: boolean }[] = [
   { label: 'Входящие лиды', href: '/instantly/incoming-leads', icon: CheckCircle2, desc: 'AI-квалификация входящих ответов: кто видел предложение и проявил интерес' },
+  { label: 'Брифы клиентов', href: '/instantly/briefs', icon: FileText, desc: 'Загрузка брифов и привязка к кампаниям для обработки возражений' },
   { label: 'Кампании', href: '/instantly/campaigns', icon: Send, desc: 'Создание, настройка и управление кампаниями' },
   { label: 'Аккаунты', href: '/instantly/accounts', icon: Mail, desc: 'Email-аккаунты, прогрев, статусы' },
   { label: 'Lead списки', href: '/instantly/lead-lists', icon: ListChecks, desc: 'Списки лидов и импорт баз' },

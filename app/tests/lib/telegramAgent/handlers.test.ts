@@ -4,8 +4,14 @@ const mockRpc = jest.fn();
 const mockHybridSearch = jest.fn();
 const mockSerperSearch = jest.fn();
 
+const mockInstantlyRpc = jest.fn();
+
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { rpc: (...args: unknown[]) => mockRpc(...args), from: jest.fn() },
+}));
+
+jest.mock('@/lib/supabaseInstantly', () => ({
+  supabaseInstantly: { rpc: (...args: unknown[]) => mockInstantlyRpc(...args) },
 }));
 
 jest.mock('@/lib/knowledgeBase/contextRetriever', () => ({
@@ -14,6 +20,12 @@ jest.mock('@/lib/knowledgeBase/contextRetriever', () => ({
 
 jest.mock('@/lib/parsers/serperSearch', () => ({
   serperSearchDetailed: (...args: unknown[]) => mockSerperSearch(...args),
+}));
+
+const mockGetCampaign = jest.fn();
+
+jest.mock('@/lib/instantly/client', () => ({
+  getCampaign: (...args: unknown[]) => mockGetCampaign(...args),
 }));
 
 jest.mock('@/lib/telegramAgent/pipeline', () => ({
@@ -30,13 +42,15 @@ beforeEach(() => {
 describe('telegramAgent/handlers', () => {
   it('exports all read tool handlers', () => {
     expect(typeof toolHandlers.query_database).toBe('function');
+    expect(typeof toolHandlers.query_instantly_database).toBe('function');
+    expect(typeof toolHandlers.get_campaign_sequences).toBe('function');
     expect(typeof toolHandlers.search_knowledge_base).toBe('function');
     expect(typeof toolHandlers.search_reglament).toBe('function');
     expect(typeof toolHandlers.web_search).toBe('function');
     expect(typeof toolHandlers.fetch_url).toBe('function');
     expect(typeof toolHandlers.think).toBe('function');
     expect(typeof toolHandlers.get_pipeline_status).toBe('function');
-    expect(Object.keys(toolHandlers)).toHaveLength(7);
+    expect(Object.keys(toolHandlers)).toHaveLength(9);
   });
 
   describe('query_database', () => {
@@ -267,6 +281,68 @@ describe('telegramAgent/handlers', () => {
     it('rejects empty thought', async () => {
       const result = await toolHandlers.think({});
       expect(result).toContain('thought');
+    });
+  });
+
+  describe('query_instantly_database', () => {
+    it('rejects empty query', async () => {
+      const result = await toolHandlers.query_instantly_database({});
+      expect(result).toContain('SQL');
+    });
+
+    it('allows SELECT and calls Instantly RPC', async () => {
+      mockInstantlyRpc.mockResolvedValue({
+        data: [{ name: 'Campaign 1', reply_count: 5 }],
+        error: null,
+      });
+
+      const result = await toolHandlers.query_instantly_database({
+        sql: 'SELECT name, reply_count FROM instantly_campaign_catalog LIMIT 5',
+      });
+      expect(mockInstantlyRpc).toHaveBeenCalledWith('agent_query_readonly', {
+        query_text: 'SELECT name, reply_count FROM instantly_campaign_catalog LIMIT 5',
+      });
+      expect(result).toContain('Campaign 1');
+    });
+  });
+
+  describe('get_campaign_sequences', () => {
+    it('rejects empty campaign_id', async () => {
+      const result = await toolHandlers.get_campaign_sequences({});
+      expect(result).toContain('campaign_id');
+    });
+
+    it('returns formatted sequences', async () => {
+      mockGetCampaign.mockResolvedValue({
+        name: 'Test Campaign',
+        sequences: [{
+          steps: [
+            { subject: 'Hello {{first_name}}', body: '<p>First email body</p>', wait_days: 0 },
+            { subject: 'Follow up', body: '<p>Second email</p>', wait_days: 3, variants: [{ subject: 'Follow up', body: '<p>Second email</p>' }, { subject: 'Alt subject', body: '<p>Alt body</p>' }] },
+          ],
+        }],
+      });
+
+      const result = await toolHandlers.get_campaign_sequences({ campaign_id: 'abc-123' });
+      expect(mockGetCampaign).toHaveBeenCalledWith('abc-123');
+      expect(result).toContain('Test Campaign');
+      expect(result).toContain('Шагов: 2');
+      expect(result).toContain('Hello {{first_name}}');
+      expect(result).toContain('First email body');
+      expect(result).toContain('задержка 3д');
+      expect(result).toContain('A/B вариантов: 2');
+    });
+
+    it('handles campaign with no sequences', async () => {
+      mockGetCampaign.mockResolvedValue({ name: 'Empty Campaign', sequences: [] });
+      const result = await toolHandlers.get_campaign_sequences({ campaign_id: 'empty-1' });
+      expect(result).toContain('не содержит');
+    });
+
+    it('handles API errors gracefully', async () => {
+      mockGetCampaign.mockRejectedValue(new Error('Instantly API 404: not found'));
+      const result = await toolHandlers.get_campaign_sequences({ campaign_id: 'bad-id' });
+      expect(result).toContain('не найдена');
     });
   });
 

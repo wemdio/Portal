@@ -1,10 +1,11 @@
 import type { ToolHandler } from './types';
 import type { KbCategory } from '@/lib/knowledgeBase/types';
-import { queryDatabase } from './sqlQuery';
+import { queryDatabase, queryInstantlyDatabase } from './sqlQuery';
 import { getPipelineStatus, advanceAllPipelines } from './pipeline';
 import { hybridSearchChunks } from '@/lib/knowledgeBase/contextRetriever';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { serperSearchDetailed } from '@/lib/parsers/serperSearch';
+import { getCampaign } from '@/lib/instantly/client';
 
 const VALID_KB_CATEGORIES = new Set<KbCategory>([
   'product_info', 'cases', 'sales_chats', 'video_transcripts', 'client_chats', 'other',
@@ -165,6 +166,52 @@ const searchReglament: ToolHandler = async (params) => {
   return result;
 };
 
+function stripHtml(value?: string): string {
+  if (!value) return '';
+  return value
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
+
+const getCampaignSequences: ToolHandler = async (params) => {
+  const campaignId = (params.campaign_id as string | undefined)?.trim();
+  if (!campaignId) return 'Необходимо указать campaign_id.';
+
+  try {
+    const campaign = await getCampaign(campaignId);
+    const steps = (campaign.sequences ?? []).flatMap((s) => s.steps ?? []);
+
+    if (steps.length === 0) return `Кампания «${campaign.name}» не содержит email-цепочки.`;
+
+    const lines = steps.map((step, idx) => {
+      const subject = step.subject ?? step.variants?.[0]?.subject ?? '(без темы)';
+      const body = stripHtml(step.body ?? step.variants?.[0]?.body);
+      const wait = step.wait_days ?? (step.delay_unit === 'days' ? step.delay ?? null : null);
+      const variantCount = step.variants?.length ?? 0;
+
+      let line = `--- Шаг ${idx + 1}${wait ? ` (задержка ${wait}д)` : ''} ---\nТема: ${subject}`;
+      if (variantCount > 1) line += `\nA/B вариантов: ${variantCount}`;
+      if (body) line += `\n\n${body}`;
+      return line;
+    });
+
+    return `Кампания: ${campaign.name}\nШагов: ${steps.length}\n\n${lines.join('\n\n')}`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    if (msg.includes('503') || msg.includes('INSTANTLY_API_KEY')) return 'Instantly API не настроен (нет API ключа).';
+    if (msg.includes('404') || msg.includes('not found')) return `Кампания ${campaignId} не найдена.`;
+    return `Ошибка загрузки кампании: ${msg}`;
+  }
+};
+
 const think: ToolHandler = async (params) => {
   const thought = params.thought as string | undefined;
   if (!thought) return 'Запиши свои мысли в параметр thought.';
@@ -176,8 +223,16 @@ const getAgentPipelineStatus: ToolHandler = async (params) => {
   return getPipelineStatus(params.pipeline_id as string | undefined, params._userId as string | undefined);
 };
 
+const queryInstantlyDb: ToolHandler = async (params) => {
+  const sql = params.sql as string | undefined;
+  if (!sql) return 'Необходимо указать SQL-запрос.';
+  return queryInstantlyDatabase(sql);
+};
+
 export const toolHandlers: Record<string, ToolHandler> = {
   query_database: queryDb,
+  query_instantly_database: queryInstantlyDb,
+  get_campaign_sequences: getCampaignSequences,
   search_knowledge_base: searchKb,
   search_reglament: searchReglament,
   web_search: webSearch,
