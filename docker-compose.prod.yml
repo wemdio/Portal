@@ -49,7 +49,7 @@ services:
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
-      - NODE_OPTIONS=--max-old-space-size=16384
+      - NODE_OPTIONS=--max-old-space-size=3072
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -293,7 +293,7 @@ services:
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
       - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
-      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-1}
+      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-2}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]
       interval: 30s
@@ -313,7 +313,7 @@ services:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
     environment:
-      - YANDEXMAPS_CONCURRENCY=2
+      - YANDEXMAPS_CONCURRENCY=4
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
