@@ -34,6 +34,7 @@ type LeadQualification = {
   read_by: string | null;
   objection_handleable: boolean | null;
   objection_draft: string | null;
+  error_message: string | null;
 };
 
 type QualifiedLeadsResponse = {
@@ -405,7 +406,7 @@ function LeadRow({
           {item.error_message && (
             <div className="rounded-xl border border-red-200 bg-red-50/50 p-4">
               <p className="text-xs font-semibold text-red-600 mb-1">Ошибка квалификации</p>
-              <p className="text-sm text-red-700">{(item as LeadQualification & { error_message?: string }).error_message}</p>
+              <p className="text-sm text-red-700">{item.error_message}</p>
             </div>
           )}
 
