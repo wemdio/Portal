@@ -3,6 +3,14 @@
     {
       "path": "/api/reglament/cleanup-archived",
       "schedule": "0 0 * * 0"
+    },
+    {
+      "path": "/api/tools/bugor-outreach/collect",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/tools/nash-outreach/collect",
+      "schedule": "0 5 * * *"
     }
   ]
 }
