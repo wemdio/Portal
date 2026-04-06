@@ -1171,13 +1171,13 @@ input[type=number]::-webkit-outer-spin-button {
 
 /* ===== CLIENT PORTAL — Neumorphic Design System ===== */
 body:has(.client-portal) {
-  background: #E4DDD4 !important;
+  background: #F0EEEC !important;
 }
 
 .client-portal {
-  --cp-bg: #E4DDD4;
-  --cp-shadow-d: rgba(180, 173, 164, 0.45);
-  --cp-shadow-l: rgba(255, 248, 237, 0.5);
+  --cp-bg: #F0EEEC;
+  --cp-shadow-d: rgba(190, 186, 182, 0.45);
+  --cp-shadow-l: rgba(255, 255, 255, 0.65);
   --cp-accent: #4A6FA5;
   --cp-accent-h: #3D5A87;
   --cp-text: #3A3530;

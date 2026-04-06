@@ -40,6 +40,8 @@ export const ALL_TOOL_IDS = [
   'li-outreach',
   'sales-copilot',
   'knowledge-base',
+  'bugor-outreach',
+  'nash-outreach',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -199,6 +201,20 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/knowledge-base',
     accentColor: 'emerald',
   },
+  'bugor-outreach': {
+    id: 'bugor-outreach',
+    title: 'Наш бугор аутрич',
+    description: 'Ежедневный автосбор горячих лидов: раунды, найм SDR, YC-батчи, запуски.',
+    href: '/tools/bugor-outreach',
+    accentColor: 'blue',
+  },
+  'nash-outreach': {
+    id: 'nash-outreach',
+    title: 'Наш аутрич',
+    description: 'Автосбор российских B2B-лидов: HH.ru наём, VC.ru фандинг, запуски.',
+    href: '/tools/nash-outreach',
+    accentColor: 'blue',
+  },
 };
 
 export interface ToolGroup {
@@ -209,7 +225,7 @@ export interface ToolGroup {
 export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'sales-copilot', 'ai-caller', 'ai-caller-v2'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach'],
   },
   {
     label: 'Базы и данные',

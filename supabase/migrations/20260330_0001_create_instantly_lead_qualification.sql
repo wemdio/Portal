@@ -55,7 +55,9 @@ create table if not exists public.instantly_lead_qualifications (
   instantly_lead_id text,
   reply_timestamp timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  read_at timestamptz,
+  read_by uuid
 );
 
 create index if not exists idx_instantly_lead_qualifications_status

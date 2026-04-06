@@ -16,8 +16,11 @@ const nunito = Nunito({
 
 const clientNav = [
   { name: 'Кампании', href: '/client' },
+  { name: 'Лиды', href: '/client/leads' },
   { name: 'Базы', href: '/client/bases' },
   { name: 'Отчёты', href: '/client/reports' },
+  { name: 'Парсеры', href: '/client/parsers' },
+  { name: 'Запуск кампаний', href: '/client/launch' },
 ] as const;
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {

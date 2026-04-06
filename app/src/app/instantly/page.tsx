@@ -6,6 +6,7 @@ import type { Route } from 'next';
 import {
   Mail, Users, BarChart3, Send, Pause, FileText, ChevronRight,
   Loader2, AlertCircle, Activity, ListChecks, AlertTriangle, CheckCircle2,
+  Sparkles, Building2, ArrowRight,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { isAdmin } from '@/lib/roles';
@@ -71,6 +72,7 @@ function StatCard({ label, value, icon: Icon, href, color, loading: isLoading }:
 
 const NAV_LINKS: { label: string; href: string; icon: React.ElementType; desc: string; adminOnly?: boolean }[] = [
   { label: 'Входящие лиды', href: '/instantly/incoming-leads', icon: CheckCircle2, desc: 'AI-квалификация входящих ответов: кто видел предложение и проявил интерес' },
+  { label: 'Брифы клиентов', href: '/instantly/briefs', icon: FileText, desc: 'Загрузка брифов и привязка к кампаниям для обработки возражений' },
   { label: 'Кампании', href: '/instantly/campaigns', icon: Send, desc: 'Создание, настройка и управление кампаниями' },
   { label: 'Аккаунты', href: '/instantly/accounts', icon: Mail, desc: 'Email-аккаунты, прогрев, статусы' },
   { label: 'Lead списки', href: '/instantly/lead-lists', icon: ListChecks, desc: 'Списки лидов и импорт баз' },
@@ -151,6 +153,35 @@ export default function InstantlyDashboard() {
             <StatCard label="На паузе" value={stats?.pausedCampaigns ?? null} icon={Pause} href="/instantly/campaigns" color="bg-amber-50 text-amber-600" loading={statsLoading} />
             <StatCard label="Черновики" value={stats?.draftCampaigns ?? null} icon={FileText} color="bg-zinc-100 text-zinc-600" loading={statsLoading} />
             <StatCard label="Аккаунты" value={stats?.totalAccounts ?? null} icon={Mail} href="/instantly/accounts" color="bg-blue-50 text-blue-600" loading={statsLoading} />
+          </div>
+
+          <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Link
+              href={'/tools/bugor-outreach' as Route}
+              className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-blue-200"
+            >
+              <div className="rounded-lg bg-blue-50 p-3">
+                <Sparkles className="h-5 w-5 text-blue-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-zinc-900">Наш бугор аутрич</p>
+                <p className="text-xs text-zinc-500">Автосбор ENG-лидов: раунды, найм SDR, YC, запуски</p>
+              </div>
+              <ArrowRight className="h-4 w-4 text-zinc-300 group-hover:text-blue-500 transition-colors" />
+            </Link>
+            <Link
+              href={'/tools/nash-outreach' as Route}
+              className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-emerald-200"
+            >
+              <div className="rounded-lg bg-emerald-50 p-3">
+                <Building2 className="h-5 w-5 text-emerald-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-zinc-900">Наш аутрич</p>
+                <p className="text-xs text-zinc-500">Автосбор RU-лидов: HH.ru наём, VC.ru, фандинг</p>
+              </div>
+              <ArrowRight className="h-4 w-4 text-zinc-300 group-hover:text-emerald-500 transition-colors" />
+            </Link>
           </div>
 
           <div className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-2">

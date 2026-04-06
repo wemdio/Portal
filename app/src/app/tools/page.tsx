@@ -48,6 +48,8 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'tg-parser': Users,
   'sales-copilot': Bot,
   'knowledge-base': BookOpen,
+  'bugor-outreach': Sparkles,
+  'nash-outreach': Building2,
 };
 
 function ToolLinkCard({ toolId }: { toolId: ToolId }) {
