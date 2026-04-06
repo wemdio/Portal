@@ -6,7 +6,7 @@ Health check (every 5 min):
   - Database connectivity + connection count
   - All proxies (HH + Search)
   - S3 storage (Supabase Storage)
-  - Server ping (144.31.54.166)
+  - Server ping (139.60.162.12)
   → If any check fails, immediately sends alert to Telegram.
 
 Daily report (21:00 MSK):
@@ -54,7 +54,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
-SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "144.31.54.166")
+SERVER_IP = os.environ.get("HEALTH_SERVER_IP", "139.60.162.12")
 HEALTH_RETRY_ATTEMPTS = max(1, int(os.environ.get("HEALTH_RETRY_ATTEMPTS", "3")))
 HEALTH_RETRY_DELAY_SEC = max(0.0, float(os.environ.get("HEALTH_RETRY_DELAY_SEC", "1.0")))
 HEALTH_INTERVAL_SEC = int(os.environ.get("HEALTH_INTERVAL_SEC", "120"))
