@@ -263,7 +263,7 @@ export const launchSearchParser: WriteToolHandler = async (params, user) => {
   if (queries.length === 0 && !brief) return 'Нужно указать queries (поисковые запросы) или brief (описание ЦА).';
 
   const rawDepth = Number(params.search_depth);
-  const search_depth = Number.isFinite(rawDepth) ? Math.max(1, Math.min(10, Math.round(rawDepth))) : 5;
+  const search_depth = Number.isFinite(rawDepth) ? Math.max(1, Math.min(30, Math.round(rawDepth))) : 5;
 
   const config: Record<string, unknown> = { search_depth };
   if (brief) config.brief = brief;

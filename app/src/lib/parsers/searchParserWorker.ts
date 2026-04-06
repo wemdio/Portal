@@ -1,3 +1,33 @@
+/**
+ * Парсер поисковой выдачи — собирает сайты компаний из результатов Google/Bing/DuckDuckGo/Mojeek.
+ *
+ * ## Как работает
+ *
+ * 1. **Создание задачи.** Пользователь (UI / Telegram / API) создаёт `search_parser_jobs`
+ *    с набором поисковых запросов (или брифом, из которого запросы генерируются через LLM).
+ *    Параметр `search_depth` (1–30, по умолчанию 5) задаёт глубину — сколько страниц
+ *    результатов загружать на каждый запрос.
+ *
+ * 2. **Поиск.** Воркер (`worker/search.ts`) вызывает `runSearchParserJob`, который
+ *    обрабатывает запросы параллельно (QUERY_CONCURRENCY).
+ *    - **Serper API** (приоритет, если задан `SERPER_API_KEY`): загружает до `search_depth`
+ *      страниц по 10 результатов через Google SERP API. Без парсинга HTML — стабильно и быстро.
+ *    - **HTML-парсинг** (фолбэк): последовательно пробует Google → DuckDuckGo → Bing → Mojeek.
+ *      При блокировке одного провайдера переключается на следующий. Google использует
+ *      Playwright (если включён) или direct fetch + cheerio. Bing — до 8 страниц, DDG/Mojeek — одна.
+ *
+ * 3. **Фильтрация.** Результаты очищаются от соцсетей, агрегаторов, поисковиков и прочих
+ *    нецелевых доменов (BLOCKED_DOMAINS). Из оставшихся выделяются «лиды» — компании.
+ *
+ * 4. **Расширение источников.** Если результат — каталог/реестр (hh.ru, zakupki.gov.ru и т.п.),
+ *    парсер заходит внутрь и извлекает ссылки на компании (`sourceCompanyExtractor`).
+ *
+ * 5. **Обогащение.** Для каждого сайта-лида парсер пытается найти email-адреса
+ *    (`fetchWebsiteEmails`) и уточнённое название компании (brand_name).
+ *
+ * 6. **Сохранение.** Дедупликация по нормализованному домену (site), батч-вставка
+ *    в `search_results`. Прогресс обновляется в `search_parser_jobs`.
+ */
 
 import { SEARCH_CONFIG } from '@/lib/config';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -632,7 +662,7 @@ export async function runSearchParserJob(jobId: string) {
     const brief = typeof rawConfig.brief === 'string' ? rawConfig.brief.trim() : '';
     let queries = Array.isArray(rawConfig.queries) ? rawConfig.queries.map((q) => String(q).trim()).filter(Boolean) : [];
     const jobSerperPages = typeof rawConfig.search_depth === 'number' && Number.isFinite(rawConfig.search_depth)
-      ? Math.max(1, Math.min(10, Math.round(rawConfig.search_depth)))
+      ? Math.max(1, Math.min(30, Math.round(rawConfig.search_depth)))
       : SERPER_PAGES_PER_QUERY;
     let usedFallbackQueries = false;
 
