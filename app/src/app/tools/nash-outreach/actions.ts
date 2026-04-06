@@ -2,6 +2,7 @@
 
 import { headers } from 'next/headers';
 
+/** Server-side proxy that triggers the Nash Outreach collect pipeline using CRON_SECRET. */
 export async function triggerNashCollect(): Promise<{ ok: boolean; error?: string }> {
   try {
     const h = await headers();
