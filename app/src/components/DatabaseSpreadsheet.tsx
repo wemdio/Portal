@@ -189,6 +189,16 @@ type SiteAvailabilityState = {
   error: string | null;
 };
 
+type TrafficCheckState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isChecking: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+};
+
 type EmailSplitState = {
   isOpen: boolean;
   sourceCol: number;
@@ -1158,6 +1168,16 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const siteAvailabilityAbortRef = useRef<AbortController | null>(null);
+  const [trafficCheck, setTrafficCheck] = useState<TrafficCheckState>({
+    isOpen: false,
+    sourceCol: 0,
+    isChecking: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+  });
+  const trafficCheckAbortRef = useRef<AbortController | null>(null);
   const [dedupModal, setDedupModal] = useState<{ isOpen: boolean; mode: 'email' | 'company'; col: number }>({
     isOpen: false,
     mode: 'email',
@@ -5094,6 +5114,193 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  // ── Traffic Check (Трафик сайтов) ──────────────────────────────
+
+  const openTrafficCheckModal = () => {
+    setTrafficCheck({
+      isOpen: true,
+      sourceCol: 0,
+      isChecking: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      error: null,
+    });
+  };
+
+  const closeTrafficCheckModal = () => {
+    if (trafficCheckAbortRef.current) {
+      trafficCheckAbortRef.current.abort();
+      trafficCheckAbortRef.current = null;
+    }
+    setTrafficCheck((prev) => ({
+      ...prev,
+      isOpen: false,
+      isChecking: false,
+      error: null,
+    }));
+  };
+
+  const handleStartTrafficCheck = async () => {
+    if (!activeTab || trafficCheck.isChecking) return;
+    flushSave();
+
+    const rowsToProcess: { rowIndex: number; url: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const rawUrl = activeTab.data[i][trafficCheck.sourceCol]?.trim();
+      if (rawUrl) rowsToProcess.push({ rowIndex: i, url: rawUrl });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setTrafficCheck((prev) => ({ ...prev, error: 'Нет данных для проверки в выбранной колонке' }));
+      return;
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) {
+      setTrafficCheck((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    trafficCheckAbortRef.current = new AbortController();
+
+    setTrafficCheck((prev) => ({
+      ...prev,
+      isChecking: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+    }));
+
+    setUndoSnapshot('Трафик сайтов');
+
+    const monthlyColIndex = activeTab.data[0].length;
+    const dailyColIndex = monthlyColIndex + 1;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= dailyColIndex) nextRow.push('');
+      if (rowIndex === 0) {
+        nextRow[monthlyColIndex] = 'Monthly Visits';
+        nextRow[dailyColIndex] = 'Daily Visitors';
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    setHighlightedCol(monthlyColIndex);
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedCol(null), 2500);
+
+    if (tableWrapperRef.current) {
+      const wrapper = tableWrapperRef.current;
+      requestAnimationFrame(() => wrapper.scrollTo({ left: wrapper.scrollWidth, behavior: 'smooth' }));
+    }
+
+    try {
+      const sites = rowsToProcess.map((item) => ({ idx: item.rowIndex, url: item.url }));
+      const response = await fetch('/api/traffic-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ sites }),
+        signal: trafficCheckAbortRef.current?.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const parsed = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(parsed?.error || `Ошибка API (${response.status})`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const dataLine = line.replace(/^data: /, '').trim();
+          if (!dataLine) continue;
+
+          let event: {
+            type: string;
+            results?: { idx: number; domain: string; monthlyVisits: number | null; dailyVisitors: number | null; error: string | null }[];
+            processed?: number;
+            total?: number;
+            progress?: number;
+          };
+          try {
+            event = JSON.parse(dataLine);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'batch' && event.results) {
+            const resultMap = new Map<number, typeof event.results[0]>();
+            for (const r of event.results) resultMap.set(r.idx, r);
+
+            setTabs((prev) =>
+              prev.map((tab) => {
+                if (tab.id !== activeTabId) return tab;
+                const nextData = tab.data.map((row, idx) => {
+                  const result = resultMap.get(idx);
+                  if (!result) return row;
+                  const nextRow = [...row];
+                  while (nextRow.length <= dailyColIndex) nextRow.push('');
+                  nextRow[monthlyColIndex] = result.monthlyVisits != null
+                    ? String(result.monthlyVisits)
+                    : result.error ?? 'N/A';
+                  nextRow[dailyColIndex] = result.dailyVisitors != null
+                    ? String(result.dailyVisitors)
+                    : '';
+                  return nextRow;
+                });
+                return { ...tab, data: nextData };
+              }),
+            );
+
+            setTrafficCheck((prev) => ({
+              ...prev,
+              currentRow: event.processed ?? prev.currentRow,
+              progress: event.progress ?? prev.progress,
+            }));
+          }
+
+          if (event.type === 'done') {
+            setLastAction({
+              message: `Трафик сайтов: проверено ${event.processed ?? rowsToProcess.length} строк`,
+              time: Date.now(),
+            });
+            setTrafficCheck((prev) => ({ ...prev, isChecking: false, isOpen: false }));
+          }
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
+        setLastAction({ message: 'Проверка трафика отменена', time: Date.now() });
+        setTrafficCheck((prev) => ({ ...prev, isChecking: false, isOpen: false }));
+      } else {
+        setTrafficCheck((prev) => ({
+          ...prev,
+          isChecking: false,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+        }));
+      }
+    } finally {
+      trafficCheckAbortRef.current = null;
+    }
+  };
+
   // ── Email Split (Разделение почт) ──────────────────────────────
 
   const openEmailSplitModal = () => {
@@ -7315,6 +7522,25 @@ export function DatabaseSpreadsheet() {
         >
           Проверка сайтов
         </button>
+
+        {trafficCheck.isChecking ? (
+          <button
+            type="button"
+            onClick={closeTrafficCheckModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Трафик: {trafficCheck.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openTrafficCheckModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Трафик сайтов
+          </button>
+        )}
 
         {briefScoring.isScoring ? (
           <button
@@ -9611,6 +9837,130 @@ export function DatabaseSpreadsheet() {
                     <>
                       <span>🌐</span>
                       Проверить сайты
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Traffic Check Modal ─────────────────────────────── */}
+      {trafficCheck.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm font-bold text-lg">
+                  📊
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Трафик сайтов</h3>
+                  <p className="text-xs text-gray-500 font-medium">Оценка месячного трафика через HypeStat</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeTrafficCheckModal}
+                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Столбец с сайтами
+                </label>
+                <select
+                  value={trafficCheck.sourceCol}
+                  onChange={(e) =>
+                    setTrafficCheck((prev) => ({ ...prev, sourceCol: Number(e.target.value), error: null }))
+                  }
+                  disabled={trafficCheck.isChecking}
+                  className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-sm transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 focus:outline-none disabled:bg-gray-50 disabled:text-gray-400"
+                >
+                  {headerLabels.map((label, i) => (
+                    <option key={i} value={i}>
+                      {label || toColumnLabel(i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg bg-emerald-50 border border-emerald-100 p-3 text-xs text-emerald-900 space-y-1">
+                <p>
+                  Система проверит трафик каждого сайта и добавит колонки:{' '}
+                  <span className="font-semibold">Monthly Visits</span> и{' '}
+                  <span className="font-semibold">Daily Visitors</span>.
+                </p>
+                <p>
+                  Строк для обработки:{' '}
+                  <span className="font-semibold text-gray-900">
+                    {activeTab
+                      ? activeTab.data.slice(1).filter((row) => {
+                          const v = row[trafficCheck.sourceCol]?.trim();
+                          return v && v.length > 0;
+                        }).length
+                      : 0}
+                  </span>
+                </p>
+                <p className="text-emerald-700">
+                  Скорость: ~2 сек/домен (ограничение HypeStat). Дубли доменов проверяются один раз.
+                </p>
+              </div>
+
+              {trafficCheck.isChecking && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-600">
+                    <span>Проверка трафика...</span>
+                    <span>
+                      {trafficCheck.currentRow} / {trafficCheck.totalRows}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                      style={{ width: `${trafficCheck.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {trafficCheck.error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {trafficCheck.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <div className="text-xs text-gray-500">Макс: 500 доменов за раз</div>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={closeTrafficCheckModal}
+                  className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+                >
+                  {trafficCheck.isChecking ? 'Отменить' : 'Закрыть'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleStartTrafficCheck()}
+                  disabled={trafficCheck.isChecking}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-emerald-600/20 transition-all hover:bg-emerald-700 hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 disabled:bg-gray-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  {trafficCheck.isChecking ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      Проверка...
+                    </>
+                  ) : (
+                    <>
+                      <span>📊</span>
+                      Проверить трафик
                     </>
                   )}
                 </button>
