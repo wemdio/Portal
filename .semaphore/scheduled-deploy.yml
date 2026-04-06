@@ -210,6 +210,7 @@ blocks:
                   pull_attempt=$((pull_attempt + 1));
                 done;
                 echo '--- Step 1.1: preflight migration check on new portal image ---';
+                sudo -n docker network create portal_portal-network 2>/dev/null || true;
                 MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network portal_portal-network --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
                 MIGRATION_RC=\${MIGRATION_RC:-0};
                 if [ \"\${MIGRATION_RC}\" -ne 0 ]; then
