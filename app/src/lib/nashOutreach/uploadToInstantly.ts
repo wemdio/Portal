@@ -39,11 +39,9 @@ function buildLeadPayload(
       priority: lead.priority,
       niche: lead.niche,
       city: lead.city ?? '',
-      step1_subject: sequence[0]?.subject ?? '',
+      subject: sequence[0]?.subject ?? '',
       step1_body: sequence[0]?.body ?? '',
-      step2_subject: sequence[1]?.subject ?? '',
       step2_body: sequence[1]?.body ?? '',
-      step3_subject: sequence[2]?.subject ?? '',
       step3_body: sequence[2]?.body ?? '',
     },
   };
