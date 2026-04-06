@@ -62,6 +62,7 @@ function formatDate(iso: string) {
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   stopped: { label: 'Остановлена', cls: 'bg-gray-100 text-gray-600' },
   running: { label: 'Запущена', cls: 'bg-emerald-100 text-emerald-700' },
+  stopping: { label: 'Останавливается...', cls: 'bg-amber-100 text-amber-700 animate-pulse' },
   paused: { label: 'Пауза', cls: 'bg-amber-100 text-amber-700' },
   error: { label: 'Ошибка', cls: 'bg-rose-100 text-rose-700' },
 };
@@ -1008,11 +1009,47 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 }) {
   const [tab, setTab] = useState<string>('settings');
   const [actionLoading, setActionLoading] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const stoppingRef = useRef(false);
+
+  useEffect(() => {
+    if (!stopping) return;
+    const poll = setInterval(async () => {
+      const token = await getToken();
+      try {
+        const res = await fetch(`${API_BASE}/campaigns/${campaign.id}/status`, { headers: authHeaders(token) });
+        if (!res.ok) return;
+        const body = await res.json() as { status: string; is_running: boolean };
+        if (!body.is_running || body.status === 'stopped') {
+          setStopping(false);
+          stoppingRef.current = false;
+          onUpdate();
+        }
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => clearInterval(poll);
+  }, [stopping, campaign.id, onUpdate]);
 
   const doAction = async (action: 'start' | 'stop' | 'refetch') => {
     setActionLoading(true);
     const token = await getToken();
-    await fetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST', headers: authHeaders(token) });
+    const res = await fetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST', headers: authHeaders(token) });
+    if (action === 'stop') {
+      setStopping(true);
+      stoppingRef.current = true;
+    }
+    if (action === 'refetch') {
+      try {
+        const body = await res.json() as { empty_count?: number; message?: string; error?: string };
+        if (body.error) {
+          alert(`Ошибка: ${body.error}`);
+        } else if (body.empty_count === 0) {
+          alert('Нет диалогов с пустыми сообщениями');
+        } else {
+          alert(`Refetch запущен: ${body.empty_count} диалогов будут обновлены`);
+        }
+      } catch { /* ignore parse errors */ }
+    }
     setActionLoading(false);
     onUpdate();
   };
@@ -1026,7 +1063,8 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     onUpdate();
   };
 
-  const st = STATUS_LABELS[campaign.status] ?? STATUS_LABELS.stopped;
+  const displayStatus = stopping ? 'stopping' : campaign.status;
+  const st = STATUS_LABELS[displayStatus] ?? STATUS_LABELS.stopped;
 
   return (
     <div className="space-y-4">
@@ -1036,11 +1074,17 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
         </div>
         <div className="flex items-center gap-2">
-          {campaign.status !== 'running' ? (
+          {campaign.status !== 'running' && !stopping ? (
             <button type="button" onClick={() => void doAction('start')} disabled={actionLoading}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               Запустить
+            </button>
+          ) : stopping ? (
+            <button type="button" disabled
+              className="inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-5 py-2.5 text-xs font-semibold text-white opacity-80 cursor-not-allowed">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Останавливается...
             </button>
           ) : (
             <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
@@ -1049,7 +1093,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               Остановить
             </button>
           )}
-          {campaign.status !== 'running' && (
+          {campaign.status !== 'running' && !stopping && (
             <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading}
               title="Перезагрузить пустые диалоги из Telegram"
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
