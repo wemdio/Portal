@@ -6,6 +6,7 @@ import type { Route } from 'next';
 import {
   Mail, Users, BarChart3, Send, Pause, FileText, ChevronRight,
   Loader2, AlertCircle, Activity, ListChecks, AlertTriangle, CheckCircle2,
+  Sparkles, Building2, ArrowRight,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { isAdmin } from '@/lib/roles';
@@ -152,6 +153,35 @@ export default function InstantlyDashboard() {
             <StatCard label="На паузе" value={stats?.pausedCampaigns ?? null} icon={Pause} href="/instantly/campaigns" color="bg-amber-50 text-amber-600" loading={statsLoading} />
             <StatCard label="Черновики" value={stats?.draftCampaigns ?? null} icon={FileText} color="bg-zinc-100 text-zinc-600" loading={statsLoading} />
             <StatCard label="Аккаунты" value={stats?.totalAccounts ?? null} icon={Mail} href="/instantly/accounts" color="bg-blue-50 text-blue-600" loading={statsLoading} />
+          </div>
+
+          <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Link
+              href={'/tools/bugor-outreach' as Route}
+              className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-blue-200"
+            >
+              <div className="rounded-lg bg-blue-50 p-3">
+                <Sparkles className="h-5 w-5 text-blue-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-zinc-900">Наш бугор аутрич</p>
+                <p className="text-xs text-zinc-500">Автосбор ENG-лидов: раунды, найм SDR, YC, запуски</p>
+              </div>
+              <ArrowRight className="h-4 w-4 text-zinc-300 group-hover:text-blue-500 transition-colors" />
+            </Link>
+            <Link
+              href={'/tools/nash-outreach' as Route}
+              className="group flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-4 transition-all hover:shadow-md hover:border-emerald-200"
+            >
+              <div className="rounded-lg bg-emerald-50 p-3">
+                <Building2 className="h-5 w-5 text-emerald-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-zinc-900">Наш аутрич</p>
+                <p className="text-xs text-zinc-500">Автосбор RU-лидов: HH.ru наём, VC.ru, фандинг</p>
+              </div>
+              <ArrowRight className="h-4 w-4 text-zinc-300 group-hover:text-emerald-500 transition-colors" />
+            </Link>
           </div>
 
           <div className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
