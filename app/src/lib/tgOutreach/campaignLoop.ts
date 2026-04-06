@@ -45,6 +45,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs = 2000): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !shouldStop()) {
+    await sleep(Math.min(chunkMs, end - Date.now()));
+  }
+}
+
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -244,6 +251,7 @@ export async function handleChat(
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
+  shouldStop?: () => boolean,
 ): Promise<HandleChatResult> {
   const oai = campaign.openai_settings as OpenAISettings;
   const tg = campaign.telegram_settings as TelegramSettings;
@@ -286,7 +294,7 @@ export async function handleChat(
   }
 
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
-  await sleep(preReadDelay);
+  if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
   try {
     await client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 }));
@@ -360,7 +368,7 @@ export async function handleChat(
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
-  await sleep(readReplyDelay);
+  if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
 
   const sent = await client.sendMessage(entity, { message: replyText });
   log('info', `${displayName}: отправлен ответ (${replyText.length} симв.)`);
@@ -403,6 +411,7 @@ async function handleFollowUp(
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
+  shouldStop?: () => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -453,7 +462,8 @@ async function handleFollowUp(
       const reply = await openaiGenerate(oai, followUpMessages);
       if (!reply) continue;
 
-      await sleep(randomRange(tg.read_reply_delay_range) * 1000);
+      const followUpDelay = randomRange(tg.read_reply_delay_range) * 1000;
+      if (shouldStop) await interruptibleSleep(followUpDelay, shouldStop); else await sleep(followUpDelay);
       const entity = await client.getEntity(tgUserId);
       await client.sendMessage(entity, { message: reply });
 
@@ -586,7 +596,7 @@ export async function runCampaignLoop(
     while (!shouldStop()) {
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         log('info', 'Спящий период — пауза 60 сек');
-        await sleep(60_000);
+        await interruptibleSleep(60_000, shouldStop);
         continue;
       }
 
@@ -621,7 +631,7 @@ export async function runCampaignLoop(
             if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
             try {
-              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log);
+              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop);
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
 
@@ -642,8 +652,13 @@ export async function runCampaignLoop(
             }
           }
 
-          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log);
-          await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
+          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+
+          try {
+            await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
+          } catch (err) {
+            log('warning', `Backfill ошибка: ${err instanceof Error ? err.message : String(err)}`);
+          }
 
           const updatedSession = await getUpdatedSessionString(client);
           if (updatedSession && updatedSession !== account.session_data) {
@@ -664,18 +679,18 @@ export async function runCampaignLoop(
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} сек перед следующим аккаунтом`);
-        await sleep(accountDelay);
+        await interruptibleSleep(accountDelay, shouldStop);
       }
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
         const tlBackoff = 300_000;
         log('warning', `Все ${tlSchemaErrorCount} аккаунтов получили TL schema ошибку — пауза ${tlBackoff / 1000} сек. Обновите пакет 'telegram' (npm update telegram)`);
-        await sleep(tlBackoff);
+        await interruptibleSleep(tlBackoff, shouldStop);
       }
 
       const cycleDelay = 30_000;
       log('info', `Цикл завершён. Пауза ${cycleDelay / 1000} сек`);
-      await sleep(cycleDelay);
+      await interruptibleSleep(cycleDelay, shouldStop);
 
       const { data: fresh } = await db
         .from('tg_outreach_campaigns')

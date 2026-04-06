@@ -33,11 +33,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         if (error) return jsonError(error.message, 500);
       
-        await supabase
-          .from('tg_outreach_campaigns')
-          .update({ status: 'stopped', updated_at: new Date().toISOString() })
-          .eq('id', id);
-      
         return NextResponse.json(data, { status: 201 });
     },
   );
