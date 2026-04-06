@@ -76,9 +76,11 @@ HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 
 LEADS_PAGE_LIMIT = 100
-LEADS_CONCURRENCY = 3
+LEADS_CONCURRENCY = 5
 LEADS_UPSERT_BATCH = 500
 MAX_LEADS_PAGES = 5000  # safety cap: 5000 pages × 100 = 500k leads max
+LEADS_DB_POOL_MIN = 2
+LEADS_DB_POOL_MAX = LEADS_CONCURRENCY + 3  # 8; well under 95% of pgbouncer limit (57 of 60)
 LEADS_HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_LEADS_HTTP_TIMEOUT_SEC", "60"))
 # Leads/list is heavier than catalog endpoints; allow more attempts for 502/connection blips.
 LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "5"))
@@ -585,106 +587,6 @@ async def _iter_leads_pages(
             break
 
 
-async def sync_client_leads() -> dict[str, int]:
-    """
-    Sync leads from Instantly API into client_campaign_leads for all client users.
-    Reads access pairs from client_instantly_access, fetches leads once per campaign,
-    upserts for each user.  Campaigns are processed sequentially to stay within
-    the tight container memory budget.
-    """
-    conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
-    try:
-        access_rows = await conn.fetch(
-            "SELECT client_user_id, resource_id FROM public.client_instantly_access "
-            "WHERE resource_type = 'campaign'"
-        )
-        if not access_rows:
-            print("[leads-sync] no access rows — skipping")
-            return {"campaigns": 0, "leads": 0}
-
-        campaign_users: dict[str, list[str]] = {}
-        for row in access_rows:
-            cid = str(row["resource_id"])
-            uid = str(row["client_user_id"])
-            campaign_users.setdefault(cid, []).append(uid)
-
-        print(f"[leads-sync] {len(campaign_users)} campaigns for {len(access_rows)} access rows")
-
-        total_leads = 0
-        campaigns_done = 0
-        campaigns_errors = 0
-
-        _timeout = httpx.Timeout(LEADS_HTTP_TIMEOUT)
-        _limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
-        async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
-            for campaign_id, user_ids in campaign_users.items():
-                try:
-                    campaign_leads = 0
-                    now = datetime.now(timezone.utc)
-
-                    async for page_items in _iter_leads_pages(http_client, campaign_id):
-                        for uid in user_ids:
-                            rows = [
-                                (
-                                    uid,
-                                    campaign_id,
-                                    l.get("email", ""),
-                                    l.get("first_name"),
-                                    l.get("last_name"),
-                                    l.get("company_name"),
-                                    l.get("website"),
-                                    l.get("linkedin_url"),
-                                    now,
-                                )
-                                for l in page_items
-                                if l.get("email")
-                            ]
-                            if rows:
-                                await conn.executemany(
-                                    """
-                                    INSERT INTO public.client_campaign_leads
-                                        (client_user_id, campaign_id, email,
-                                         first_name, last_name, company_name,
-                                         website, linkedin_url, synced_at)
-                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                                    ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
-                                        first_name   = EXCLUDED.first_name,
-                                        last_name    = EXCLUDED.last_name,
-                                        company_name = EXCLUDED.company_name,
-                                        website      = EXCLUDED.website,
-                                        linkedin_url = EXCLUDED.linkedin_url,
-                                        synced_at    = EXCLUDED.synced_at
-                                    """,
-                                    rows,
-                                )
-                        campaign_leads += len(page_items)
-
-                    if campaign_leads:
-                        print(
-                            f"[leads-sync] campaign {campaign_id} — {campaign_leads} leads "
-                            f"for {len(user_ids)} user(s)"
-                        )
-                    total_leads += campaign_leads
-                    campaigns_done += 1
-                    await _update_leads_synced_at(conn, campaign_id, user_ids)
-
-                except Exception as e:
-                    print(
-                        f"[leads-sync] ERROR campaign {campaign_id}: "
-                        f"{_format_leads_sync_error(e)}"
-                    )
-                    campaigns_done += 1
-                    campaigns_errors += 1
-
-        print(
-            f"[leads-sync] done: {campaigns_done} campaigns, "
-            f"{total_leads} leads, {campaigns_errors} errors"
-        )
-        return {"campaigns": campaigns_done, "leads": total_leads, "campaigns_failed": campaigns_errors}
-    finally:
-        await conn.close()
-
-
 async def _update_leads_synced_at(conn, campaign_id: str, user_ids: list[str]) -> None:
     now = datetime.now(timezone.utc)
     await conn.execute(
@@ -695,6 +597,155 @@ async def _update_leads_synced_at(conn, campaign_id: str, user_ids: list[str]) -
         campaign_id,
         user_ids,
     )
+
+
+async def _sync_single_campaign(
+    pool: asyncpg.Pool,
+    http_client: httpx.AsyncClient,
+    campaign_id: str,
+    user_ids: list[str],
+    progress: dict[str, int],
+) -> tuple[int, int]:
+    """Sync leads for one campaign. Returns (leads_count, error_count)."""
+    try:
+        campaign_leads = 0
+        now = datetime.now(timezone.utc)
+
+        async with pool.acquire() as conn:
+            async for page_items in _iter_leads_pages(http_client, campaign_id):
+                for uid in user_ids:
+                    rows = [
+                        (
+                            uid,
+                            campaign_id,
+                            l.get("email", ""),
+                            l.get("first_name"),
+                            l.get("last_name"),
+                            l.get("company_name"),
+                            l.get("website"),
+                            l.get("linkedin_url"),
+                            now,
+                        )
+                        for l in page_items
+                        if l.get("email")
+                    ]
+                    if rows:
+                        await conn.executemany(
+                            """
+                            INSERT INTO public.client_campaign_leads
+                                (client_user_id, campaign_id, email,
+                                 first_name, last_name, company_name,
+                                 website, linkedin_url, synced_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
+                                first_name   = EXCLUDED.first_name,
+                                last_name    = EXCLUDED.last_name,
+                                company_name = EXCLUDED.company_name,
+                                website      = EXCLUDED.website,
+                                linkedin_url = EXCLUDED.linkedin_url,
+                                synced_at    = EXCLUDED.synced_at
+                            """,
+                            rows,
+                        )
+                campaign_leads += len(page_items)
+
+            await _update_leads_synced_at(conn, campaign_id, user_ids)
+
+        if campaign_leads:
+            print(
+                f"[leads-sync] campaign {campaign_id} — {campaign_leads} leads "
+                f"for {len(user_ids)} user(s)"
+            )
+        return campaign_leads, 0
+
+    except Exception as e:
+        print(
+            f"[leads-sync] ERROR campaign {campaign_id}: "
+            f"{_format_leads_sync_error(e)}"
+        )
+        return 0, 1
+    finally:
+        progress["done"] += 1
+        done, total = progress["done"], progress["total"]
+        if done % 5 == 0 or done == total:
+            print(f"[leads-sync] progress: {done}/{total} campaigns completed")
+
+
+async def sync_client_leads() -> dict[str, int]:
+    """
+    Sync leads from Instantly API into client_campaign_leads for all client users.
+    Campaigns are processed in parallel (up to LEADS_CONCURRENCY at a time)
+    using a DB connection pool and shared HTTP client.
+
+    Resource budget (2xXeon E5-2670 / 64GB):
+      DB pool: max 8 conns  ← well under 95% of pgbouncer limit (57 of 60)
+      HTTP:    max 9 conns  ← 5 active + 4 keepalive buffer
+      Memory:  ~5 × 100 leads × ~2KB ≈ 1MB peak — negligible
+    """
+    pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=LEADS_DB_POOL_MIN,
+        max_size=LEADS_DB_POOL_MAX,
+        **_CONNECT_KWARGS,
+    )
+    try:
+        async with pool.acquire() as conn:
+            access_rows = await conn.fetch(
+                "SELECT client_user_id, resource_id FROM public.client_instantly_access "
+                "WHERE resource_type = 'campaign'"
+            )
+
+        if not access_rows:
+            print("[leads-sync] no access rows — skipping")
+            return {"campaigns": 0, "leads": 0}
+
+        campaign_users: dict[str, list[str]] = {}
+        for row in access_rows:
+            cid = str(row["resource_id"])
+            uid = str(row["client_user_id"])
+            campaign_users.setdefault(cid, []).append(uid)
+
+        print(
+            f"[leads-sync] {len(campaign_users)} campaigns for "
+            f"{len(access_rows)} access rows (concurrency={LEADS_CONCURRENCY})"
+        )
+
+        semaphore = asyncio.Semaphore(LEADS_CONCURRENCY)
+        progress: dict[str, int] = {"done": 0, "total": len(campaign_users)}
+
+        _timeout = httpx.Timeout(LEADS_HTTP_TIMEOUT)
+        _limits = httpx.Limits(
+            max_connections=LEADS_CONCURRENCY + 4,
+            max_keepalive_connections=LEADS_CONCURRENCY + 4,
+        )
+
+        async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
+
+            async def _bounded(cid: str, uids: list[str]) -> tuple[int, int]:
+                async with semaphore:
+                    return await _sync_single_campaign(
+                        pool, http_client, cid, uids, progress,
+                    )
+
+            results = await asyncio.gather(
+                *[_bounded(cid, uids) for cid, uids in campaign_users.items()],
+            )
+
+        total_leads = 0
+        campaigns_errors = 0
+        for leads, errors in results:
+            total_leads += leads
+            campaigns_errors += errors
+
+        campaigns_done = len(results)
+        print(
+            f"[leads-sync] done: {campaigns_done} campaigns, "
+            f"{total_leads} leads, {campaigns_errors} errors"
+        )
+        return {"campaigns": campaigns_done, "leads": total_leads, "campaigns_failed": campaigns_errors}
+
+    finally:
+        await pool.close()
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
