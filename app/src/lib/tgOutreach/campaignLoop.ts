@@ -466,6 +466,56 @@ async function handleFollowUp(
   }
 }
 
+async function backfillEmptyDialogs(
+  client: TelegramClient,
+  account: OutreachAccount,
+  campaign: OutreachCampaign,
+  db: SupabaseClient,
+  log: LogFn,
+) {
+  const tg = campaign.telegram_settings as TelegramSettings;
+
+  const { data: dialogs } = await db
+    .from('tg_outreach_dialogs')
+    .select('id, tg_user_id, tg_username, tg_is_bot, messages')
+    .eq('campaign_id', campaign.id)
+    .eq('account_id', account.id)
+    .limit(50);
+
+  const empty = (dialogs ?? []).filter(
+    d => !d.messages || (Array.isArray(d.messages) && (d.messages as unknown[]).length === 0),
+  );
+  if (empty.length === 0) return;
+
+  log('info', `Backfill: ${empty.length} диалогов с пустыми сообщениями`);
+
+  for (const dialog of empty) {
+    const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+    try {
+      const entity = await client.getEntity(tgUserId);
+      const history = await client.getMessages(entity, { limit: tg.history_limit });
+
+      const chatMessages: DialogMessage[] = [];
+      for (const msg of history.reverse()) {
+        if (!msg.message) continue;
+        chatMessages.push({
+          role: (msg.out ?? false) ? 'assistant' : 'user',
+          content: msg.message,
+          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
+        });
+      }
+
+      if (chatMessages.length > 0) {
+        await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot: Boolean(dialog.tg_is_bot) });
+        log('info', `Backfill: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
+      }
+    } catch (err) {
+      log('warning', `Backfill ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 export type TraceContext = { requestId: string };
 
 export async function runCampaignLoop(
@@ -593,6 +643,7 @@ export async function runCampaignLoop(
           }
 
           await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log);
+          await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
 
           const updatedSession = await getUpdatedSessionString(client);
           if (updatedSession && updatedSession !== account.session_data) {
@@ -668,14 +719,17 @@ export async function refetchEmptyDialogs(
 
   const tg = campaign.telegram_settings as TelegramSettings;
 
-  const { data: emptyDialogs } = await db
+  const { data: allDialogs } = await db
     .from('tg_outreach_dialogs')
-    .select('id, tg_user_id, tg_username, account_id, tg_is_bot')
+    .select('id, tg_user_id, tg_username, account_id, tg_is_bot, messages')
     .eq('campaign_id', campaignId)
-    .eq('messages', '[]')
     .limit(500);
 
-  if (!emptyDialogs?.length) {
+  const emptyDialogs = (allDialogs ?? []).filter(
+    d => !d.messages || (Array.isArray(d.messages) && (d.messages as unknown[]).length === 0),
+  );
+
+  if (emptyDialogs.length === 0) {
     log('info', 'Нет диалогов с пустыми сообщениями — refetch не нужен');
     return;
   }

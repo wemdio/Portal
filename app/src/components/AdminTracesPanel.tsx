@@ -544,8 +544,33 @@ type RealtimeSpanPayload = {
   status: string;
 };
 
-function useActiveTaskCount() {
-  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+type ActiveTask = { id: string; name: string; message: string | null; started_at: string };
+
+const TASK_NAME_RU: Record<string, string> = {
+  'tg-outreach.campaign.run': 'TG-рассылка',
+  'database.brief_scoring': 'Скоринг по брифу',
+  'database.email_validation': 'Валидация email-адресов',
+  'database.email_scraping': 'Поиск email-адресов',
+  'database.website_enrichment': 'Обогащение по сайтам',
+  'database.site_availability': 'Проверка доступности сайтов',
+  'yandexmaps.collect_links': 'Яндекс.Карты: сбор ссылок',
+  'yandexmaps.parse_orgs': 'Яндекс.Карты: парсинг организаций',
+  'search.execute': 'Поисковый парсинг',
+  'hh.execute': 'Парсинг HeadHunter',
+  'audio_transcribe.process': 'Расшифровка аудио/видео',
+  'email_sequence.generate_chain': 'Генерация цепочки писем',
+  'email_sequence.analyze_segment': 'Анализ сегмента',
+  'email_sequence.generate_segments': 'Генерация сегментов',
+};
+
+function resolveTaskDisplayName(task: ActiveTask): string {
+  if (task.message) return task.message;
+  if (TASK_NAME_RU[task.name]) return TASK_NAME_RU[task.name];
+  return task.name;
+}
+
+function useActiveTasks() {
+  const [tasks, setTasks] = useState<Map<string, ActiveTask>>(new Map());
   const [initialised, setInitialised] = useState(false);
   const mountedRef = useRef(true);
 
@@ -555,12 +580,15 @@ function useActiveTaskCount() {
     async function fetchInitial() {
       const { data } = await supabase
         .from('trace_spans')
-        .select('id')
+        .select('id, name, message, started_at')
         .is('parent_span_id', null)
-        .eq('status', 'running');
+        .eq('status', 'running')
+        .order('started_at', { ascending: false });
 
       if (mountedRef.current) {
-        setRunningIds(new Set((data ?? []).map((r) => r.id)));
+        const map = new Map<string, ActiveTask>();
+        for (const r of data ?? []) map.set(r.id, { id: r.id, name: r.name, message: r.message, started_at: r.started_at });
+        setTasks(map);
         setInitialised(true);
       }
     }
@@ -572,10 +600,19 @@ function useActiveTaskCount() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'trace_spans' },
         (payload) => {
-          const row = payload.new as RealtimeSpanPayload;
+          const row = payload.new as RealtimeSpanPayload & { name?: string; message?: string | null; started_at?: string };
           if (row.parent_span_id !== null) return;
           if (row.status === 'running') {
-            setRunningIds((prev) => new Set(prev).add(row.id));
+            setTasks((prev) => {
+              const next = new Map(prev);
+              next.set(row.id, {
+                id: row.id,
+                name: row.name ?? row.id,
+                message: row.message ?? null,
+                started_at: row.started_at ?? new Date().toISOString(),
+              });
+              return next;
+            });
           }
         },
       )
@@ -583,12 +620,17 @@ function useActiveTaskCount() {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'trace_spans' },
         (payload) => {
-          const row = payload.new as RealtimeSpanPayload;
+          const row = payload.new as RealtimeSpanPayload & { name?: string; message?: string | null; started_at?: string };
           if (row.parent_span_id !== null) return;
-          setRunningIds((prev) => {
-            const next = new Set(prev);
+          setTasks((prev) => {
+            const next = new Map(prev);
             if (row.status === 'running') {
-              next.add(row.id);
+              next.set(row.id, {
+                id: row.id,
+                name: row.name ?? row.id,
+                message: row.message ?? null,
+                started_at: row.started_at ?? new Date().toISOString(),
+              });
             } else {
               next.delete(row.id);
             }
@@ -604,36 +646,60 @@ function useActiveTaskCount() {
     };
   }, []);
 
-  return { count: runningIds.size, initialised };
+  const sorted = useMemo(
+    () => Array.from(tasks.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)),
+    [tasks],
+  );
+
+  return { tasks: sorted, count: tasks.size, initialised };
 }
 
 function ActiveTasksBadge() {
-  const { count, initialised } = useActiveTaskCount();
+  const { tasks, count, initialised } = useActiveTasks();
 
   return (
-    <div className="mb-4 flex items-center gap-3 rounded-xl border border-gray-200 bg-white px-5 py-3.5 shadow-sm">
-      <div className="flex items-center gap-2.5">
-        {count > 0 ? (
-          <span className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
-          </span>
+    <div className="mb-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-3.5">
+        <div className="flex items-center gap-2.5">
+          {count > 0 ? (
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
+            </span>
+          ) : (
+            <span className="h-3 w-3 rounded-full bg-gray-300" />
+          )}
+          <span className="text-sm font-medium text-gray-600">Активные задачи</span>
+        </div>
+
+        {!initialised ? (
+          <div className="h-8 w-10 animate-pulse rounded bg-gray-100" />
         ) : (
-          <span className="h-3 w-3 rounded-full bg-gray-300" />
+          <span
+            className={`text-2xl font-bold tabular-nums transition-all duration-300 ${
+              count > 0 ? 'text-blue-600' : 'text-gray-400'
+            }`}
+          >
+            {count}
+          </span>
         )}
-        <span className="text-sm font-medium text-gray-600">Активные задачи</span>
       </div>
 
-      {!initialised ? (
-        <div className="h-8 w-10 animate-pulse rounded bg-gray-100" />
-      ) : (
-        <span
-          className={`text-3xl font-bold tabular-nums transition-all duration-300 ${
-            count > 0 ? 'text-blue-600' : 'text-gray-400'
-          }`}
-        >
-          {count}
-        </span>
+      {initialised && tasks.length > 0 && (
+        <div className="border-t border-gray-100 divide-y divide-gray-100">
+          {tasks.map((task) => (
+            <div key={task.id} className="flex items-center gap-3 px-5 py-2.5">
+              <span className="relative flex h-2 w-2 flex-shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+              </span>
+              <span className="text-sm font-medium text-gray-800 truncate">{resolveTaskDisplayName(task)}</span>
+              <span className="ml-auto text-xs text-gray-400 flex-shrink-0 tabular-nums">
+                {formatTimestamp(task.started_at)}
+              </span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
