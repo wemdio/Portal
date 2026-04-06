@@ -88,7 +88,10 @@ export default function NashOutreachPage() {
   const handleCollect = useCallback(async () => {
     setCollecting(true);
     try {
-      await fetch('/api/tools/nash-outreach/collect', { method: 'POST' });
+      await fetch('/api/tools/nash-outreach/collect', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ''}` },
+      });
       await fetchLeads();
     } finally {
       setCollecting(false);
