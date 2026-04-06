@@ -21,6 +21,12 @@ async function requireAdmin(req: NextRequest) {
   return { user, profile };
 }
 
+interface RegruAccount {
+  name: string;
+  username: string;
+  password: string;
+}
+
 export interface RegruDomain {
   dname: string;
   service_id: string;
@@ -28,18 +34,27 @@ export interface RegruDomain {
   creation_date: string;
   expiration_date: string;
   subtype: string;
+  account: string;
 }
 
-async function fetchRegruDomains(): Promise<RegruDomain[]> {
-  const username = process.env.REGRU_USERNAME;
-  const password = process.env.REGRU_PASSWORD;
-  if (!username || !password) {
-    throw new Error('REGRU_USERNAME / REGRU_PASSWORD not configured');
-  }
+function getAccounts(): RegruAccount[] {
+  const accounts: RegruAccount[] = [];
 
+  const u1 = process.env.REGRU_USERNAME;
+  const p1 = process.env.REGRU_PASSWORD;
+  if (u1 && p1) accounts.push({ name: u1, username: u1, password: p1 });
+
+  const u2 = process.env.REGRU_USERNAME_2;
+  const p2 = process.env.REGRU_PASSWORD_2;
+  if (u2 && p2) accounts.push({ name: u2, username: u2, password: p2 });
+
+  return accounts;
+}
+
+async function fetchDomainsForAccount(account: RegruAccount): Promise<RegruDomain[]> {
   const params = new URLSearchParams({
-    username,
-    password,
+    username: account.username,
+    password: account.password,
     input_format: 'json',
     input_data: JSON.stringify({ servtype: 'domain' }),
     output_content_type: 'plain',
@@ -52,41 +67,56 @@ async function fetchRegruDomains(): Promise<RegruDomain[]> {
   });
 
   if (!res.ok) {
-    throw new Error(`Reg.ru API responded with ${res.status}`);
+    throw new Error(`Reg.ru API (${account.name}): HTTP ${res.status}`);
   }
 
   const data = await res.json() as {
     result: string;
     error_code?: string;
     error_text?: string;
-    answer?: { services?: RegruDomain[] };
+    answer?: { services?: Omit<RegruDomain, 'account'>[] };
   };
 
   if (data.result !== 'success') {
-    throw new Error(data.error_text ?? data.error_code ?? 'Reg.ru API error');
+    throw new Error(`Reg.ru (${account.name}): ${data.error_text ?? data.error_code ?? 'API error'}`);
   }
 
-  return data.answer?.services ?? [];
+  return (data.answer?.services ?? []).map((d) => ({ ...d, account: account.name }));
 }
 
 /**
  * GET /api/admin/domains
- * Fetch all domains from Reg.ru with expiration info. Admin only.
+ * Fetch all domains from all configured Reg.ru accounts. Admin only.
  */
 export async function GET(req: NextRequest) {
   const auth = await requireAdmin(req);
   if ('error' in auth) return auth.error;
 
-  try {
-    const domains = await fetchRegruDomains();
-
-    const sorted = domains
-      .filter((d) => d.state !== 'D')
-      .sort((a, b) => new Date(a.expiration_date).getTime() - new Date(b.expiration_date).getTime());
-
-    return NextResponse.json({ domains: sorted });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return jsonError(message, 502);
+  const accounts = getAccounts();
+  if (accounts.length === 0) {
+    return jsonError('No Reg.ru accounts configured. Set REGRU_ACCOUNTS or REGRU_USERNAME/REGRU_PASSWORD.', 500);
   }
+
+  const results = await Promise.allSettled(accounts.map(fetchDomainsForAccount));
+
+  const domains: RegruDomain[] = [];
+  const errors: string[] = [];
+
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      domains.push(...r.value);
+    } else {
+      errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
+    }
+  }
+
+  const sorted = domains
+    .filter((d) => d.state !== 'D')
+    .sort((a, b) => new Date(a.expiration_date).getTime() - new Date(b.expiration_date).getTime());
+
+  return NextResponse.json({
+    domains: sorted,
+    accounts: accounts.map((a) => a.name),
+    ...(errors.length > 0 ? { errors } : {}),
+  });
 }
