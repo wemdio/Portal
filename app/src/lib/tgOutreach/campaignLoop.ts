@@ -709,10 +709,20 @@ export async function runCampaignLoop(
   }
 }
 
+export type RefetchProgress = {
+  total: number;
+  done: number;
+  fetched: number;
+  errors: number;
+  last_username: string | null;
+  last_messages: number;
+};
+
 export async function refetchEmptyDialogs(
   campaignId: string,
   db: SupabaseClient,
   traceContext?: TraceContext,
+  onProgress?: (p: RefetchProgress) => void | Promise<void>,
 ) {
   const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
     console.log(`[tg-outreach-refetch][${campaignId.slice(0, 8)}][${level}] ${msg}`);
@@ -781,10 +791,19 @@ export async function refetchEmptyDialogs(
   const clientByAccountId = new Map(clients.map(c => [c.account.id, c.client]));
   let fetched = 0;
   let errors = 0;
+  let done = 0;
+  const total = emptyDialogs.length;
+
+  const reportProgress = async (username: string | null, msgCount: number) => {
+    done++;
+    if (onProgress) {
+      await onProgress({ total, done, fetched, errors, last_username: username, last_messages: msgCount });
+    }
+  };
 
   for (const dialog of emptyDialogs) {
     const client = clientByAccountId.get(dialog.account_id as string);
-    if (!client) continue;
+    if (!client) { await reportProgress(dialog.tg_username as string | null, 0); continue; }
 
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
@@ -812,12 +831,14 @@ export async function refetchEmptyDialogs(
         fetched++;
         log('info', `Refetch: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
       }
+      await reportProgress(tgUsername, chatMessages.length);
     } catch (err) {
       errors++;
       log('warning', `Refetch ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+      await reportProgress(tgUsername, 0);
     }
   }
 
   await disconnectAll(clients);
-  log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${emptyDialogs.length} диалогов`);
+  log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${total} диалогов`);
 }

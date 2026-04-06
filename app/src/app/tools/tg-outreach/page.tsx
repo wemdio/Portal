@@ -1011,6 +1011,12 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
   const stoppingRef = useRef(false);
+  const [refetchJobId, setRefetchJobId] = useState<string | null>(null);
+  const [refetchProgress, setRefetchProgress] = useState<{
+    total: number; done: number; fetched: number; errors: number;
+    last_username: string | null; last_messages: number;
+    status: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!stopping) return;
@@ -1030,6 +1036,38 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     return () => clearInterval(poll);
   }, [stopping, campaign.id, onUpdate]);
 
+  useEffect(() => {
+    if (!refetchJobId) return;
+    const poll = setInterval(async () => {
+      const token = await getToken();
+      try {
+        const res = await fetch(`${API_BASE}/jobs/${refetchJobId}`, { headers: authHeaders(token) });
+        if (!res.ok) return;
+        const job = await res.json() as {
+          status: string;
+          progress?: { total: number; done: number; fetched: number; errors: number; last_username: string | null; last_messages: number } | null;
+        };
+        setRefetchProgress({
+          total: job.progress?.total ?? 0,
+          done: job.progress?.done ?? 0,
+          fetched: job.progress?.fetched ?? 0,
+          errors: job.progress?.errors ?? 0,
+          last_username: job.progress?.last_username ?? null,
+          last_messages: job.progress?.last_messages ?? 0,
+          status: job.status,
+        });
+        if (job.status === 'completed' || job.status === 'failed') {
+          setTimeout(() => {
+            setRefetchJobId(null);
+            setRefetchProgress(null);
+            onUpdate();
+          }, 3000);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [refetchJobId, onUpdate]);
+
   const doAction = async (action: 'start' | 'stop' | 'refetch') => {
     setActionLoading(true);
     const token = await getToken();
@@ -1040,13 +1078,14 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     }
     if (action === 'refetch') {
       try {
-        const body = await res.json() as { empty_count?: number; message?: string; error?: string };
+        const body = await res.json() as { id?: string; empty_count?: number; message?: string; error?: string };
         if (body.error) {
           alert(`Ошибка: ${body.error}`);
         } else if (body.empty_count === 0) {
           alert('Нет диалогов с пустыми сообщениями');
-        } else {
-          alert(`Refetch запущен: ${body.empty_count} диалогов будут обновлены`);
+        } else if (body.id) {
+          setRefetchJobId(body.id);
+          setRefetchProgress({ total: body.empty_count ?? 0, done: 0, fetched: 0, errors: 0, last_username: null, last_messages: 0, status: 'pending' });
         }
       } catch { /* ignore parse errors */ }
     }
@@ -1094,10 +1133,10 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
             </button>
           )}
           {campaign.status !== 'running' && !stopping && (
-            <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading}
+            <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading || !!refetchJobId}
               title="Перезагрузить пустые диалоги из Telegram"
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              {actionLoading || refetchJobId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               Refetch
             </button>
           )}
@@ -1107,6 +1146,45 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           </button>
         </div>
       </div>
+
+      {refetchProgress && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs font-medium text-indigo-800">
+            <span className="flex items-center gap-2">
+              {refetchProgress.status === 'completed' ? (
+                <span className="text-emerald-600">✓ Refetch завершён</span>
+              ) : refetchProgress.status === 'failed' ? (
+                <span className="text-rose-600">✗ Refetch ошибка</span>
+              ) : (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка диалогов...</>
+              )}
+            </span>
+            <span>{refetchProgress.done} / {refetchProgress.total}</span>
+          </div>
+          <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${
+                refetchProgress.status === 'completed' ? 'bg-emerald-500' :
+                refetchProgress.status === 'failed' ? 'bg-rose-500' : 'bg-indigo-500'
+              }`}
+              style={{ width: `${refetchProgress.total > 0 ? (refetchProgress.done / refetchProgress.total) * 100 : 0}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-indigo-600">
+            <span>
+              {refetchProgress.last_username && refetchProgress.last_messages > 0
+                ? `@${refetchProgress.last_username} — ${refetchProgress.last_messages} сообщ.`
+                : refetchProgress.last_username
+                  ? `@${refetchProgress.last_username} — пусто`
+                  : 'Ожидание...'}
+            </span>
+            <span>
+              {refetchProgress.fetched > 0 && <span className="text-emerald-600 mr-2">+{refetchProgress.fetched} загружено</span>}
+              {refetchProgress.errors > 0 && <span className="text-rose-500">{refetchProgress.errors} ошибок</span>}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {TABS.map(t => {

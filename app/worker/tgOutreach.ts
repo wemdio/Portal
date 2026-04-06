@@ -133,7 +133,9 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   log('info', `Refetch messages for campaign ${campaignId}`);
 
   try {
-    await refetchEmptyDialogs(campaignId, db);
+    await refetchEmptyDialogs(campaignId, db, undefined, async (p) => {
+      await db.from('tg_outreach_jobs').update({ progress: p }).eq('id', job.id);
+    });
     await db.from('tg_outreach_jobs').update({
       status: 'completed',
       finished_at: new Date().toISOString(),
