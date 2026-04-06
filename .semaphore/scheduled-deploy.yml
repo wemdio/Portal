@@ -193,6 +193,11 @@ blocks:
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
                 export DOCKER_CLIENT_TIMEOUT=300;
                 export COMPOSE_HTTP_TIMEOUT=300;
+                NETLABEL=\$(sudo -n docker network inspect portal_portal-network --format '{{index .Labels \"com.docker.compose.network\"}}' 2>/dev/null || true);
+                if [ -n \"\${NETLABEL+set}\" ] && [ \"\${NETLABEL}\" != 'portal-network' ]; then
+                  echo '[scheduled] removing orphaned portal_portal-network (bad labels)';
+                  sudo -n docker network rm portal_portal-network 2>/dev/null || true;
+                fi;
                 pull_attempt=1;
                 pull_max=5;
                 while [ \"\${pull_attempt}\" -le \"\${pull_max}\" ]; do
