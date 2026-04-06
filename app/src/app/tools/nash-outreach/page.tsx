@@ -19,7 +19,9 @@ import {
   Zap,
 } from 'lucide-react';
 import type { NashLead } from '@/lib/nashOutreach/types';
+import { triggerNashCollect } from './actions';
 
+/** Returns today's date as an ISO string (YYYY-MM-DD). */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -52,10 +54,12 @@ const SIGNAL_LABELS: Record<string, string> = {
   Content_Active: 'Контент',
 };
 
+/** Dashboard page for the Nash (RU) outreach pipeline — shows leads, stats and filters. */
 export default function NashOutreachPage() {
   const [leads, setLeads] = useState<NashLead[]>([]);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
+  const [collectError, setCollectError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [filterDate, setFilterDate] = useState(todayISO());
@@ -87,12 +91,16 @@ export default function NashOutreachPage() {
 
   const handleCollect = useCallback(async () => {
     setCollecting(true);
+    setCollectError(null);
     try {
-      await fetch('/api/tools/nash-outreach/collect', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ''}` },
-      });
-      await fetchLeads();
+      const result = await triggerNashCollect();
+      if (result.ok) {
+        await fetchLeads();
+      } else {
+        setCollectError(result.error ?? 'Сбор не удался');
+      }
+    } catch {
+      setCollectError('Ошибка сети');
     } finally {
       setCollecting(false);
     }
@@ -146,6 +154,12 @@ export default function NashOutreachPage() {
         <StatCard label="В Instantly" value={stats.inInstantly} color="bg-green-50 text-green-700" />
         <StatCard label="Из HH.ru" value={stats.fromHH} color="bg-cyan-50 text-cyan-700" />
       </div>
+
+      {collectError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+          {collectError}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <input
@@ -229,6 +243,7 @@ export default function NashOutreachPage() {
   );
 }
 
+/** Compact metric card used in the stats grid. */
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className={`rounded-xl px-4 py-3 ${color}`}>
@@ -238,6 +253,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   );
 }
 
+/** Badge showing the current pipeline stage of a lead (email found → sequence → Instantly). */
 function PipelineStatus({ lead }: { lead: NashLead }) {
   if (lead.instantly_uploaded) {
     return (
@@ -267,6 +283,7 @@ function PipelineStatus({ lead }: { lead: NashLead }) {
   );
 }
 
+/** Expandable table row displaying a single Nash outreach lead. */
 function LeadRow({ lead, expanded, onToggle }: { lead: NashLead; expanded: boolean; onToggle: () => void }) {
   const PriorityIcon = PRIORITY_ICON[lead.priority] ?? Thermometer;
 
@@ -383,6 +400,7 @@ function LeadRow({ lead, expanded, onToggle }: { lead: NashLead; expanded: boole
   );
 }
 
+/** Label + value pair rendered inside the expanded lead row. */
 function DetailField({ label, value, link }: { label: string; value: string | null | undefined; link?: boolean }) {
   if (!value) return null;
   return (

@@ -231,9 +231,28 @@ function parseAIResult(content: string): QualificationResult {
   try {
     parsed = JSON.parse(trimmed) as Record<string, unknown>;
   } catch {
-    const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('AI вернул некорректный JSON');
-    parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = codeBlock ? codeBlock[1].trim() : trimmed;
+
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error('[LeadQualifier] Cannot parse AI response:', trimmed.slice(0, 500));
+        return {
+          isLead: false,
+          proposalSeen: false,
+          interestSignals: [],
+          reason: `AI вернул некорректный JSON: ${trimmed.slice(0, 150)}`,
+          confidence: 0,
+          needsReview: true,
+          objectionHandleable: false,
+          objectionDraft: null,
+        };
+      }
+      parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    }
   }
 
   return {
@@ -303,6 +322,11 @@ export async function classifyWithAI(
     if (response.ok) {
       const data = (await response.json()) as AIResponse;
       const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+      if (!content && attempt < maxRetries) {
+        console.warn('[LeadQualifier] Empty AI response, retrying...');
+        await sleep(1500 * Math.pow(2, attempt));
+        continue;
+      }
       return parseAIResult(content);
     }
 

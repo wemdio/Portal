@@ -7,9 +7,6 @@ export default function ClientLaunchPage() {
         <p className="text-sm sm:text-base font-semibold" style={{ color: 'var(--cp-text)' }}>
           Обратитесь к вашему менеджеру, чтобы получить доступ
         </p>
-        <p className="mt-2 text-xs sm:text-sm" style={{ color: 'var(--cp-text-l)' }}>
-          parsers@polzaagency.ru
-        </p>
       </div>
     </div>
   );

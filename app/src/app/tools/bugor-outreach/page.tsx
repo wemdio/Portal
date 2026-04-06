@@ -19,11 +19,13 @@ import {
   Zap,
 } from 'lucide-react';
 import type { BugorLead } from '@/lib/bugorOutreach/types';
+import { triggerBugorCollect } from './actions';
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/** Returns today's date as an ISO string (YYYY-MM-DD). */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -62,10 +64,12 @@ const SIGNAL_LABELS: Record<string, string> = {
 /* component                                                           */
 /* ------------------------------------------------------------------ */
 
+/** Dashboard page for the Bugor (ENG) outreach pipeline — shows leads, stats and filters. */
 export default function BugorOutreachPage() {
   const [leads, setLeads] = useState<BugorLead[]>([]);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
+  const [collectError, setCollectError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [filterDate, setFilterDate] = useState(todayISO());
@@ -101,12 +105,16 @@ export default function BugorOutreachPage() {
 
   const handleCollect = useCallback(async () => {
     setCollecting(true);
+    setCollectError(null);
     try {
-      await fetch('/api/tools/bugor-outreach/collect', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ''}` },
-      });
-      await fetchLeads();
+      const result = await triggerBugorCollect();
+      if (result.ok) {
+        await fetchLeads();
+      } else {
+        setCollectError(result.error ?? 'Сбор не удался');
+      }
+    } catch {
+      setCollectError('Ошибка сети');
     } finally {
       setCollecting(false);
     }
@@ -189,6 +197,12 @@ export default function BugorOutreachPage() {
         <StatCard label="US" value={stats.usCount} color="bg-sky-50 text-sky-700" />
         <StatCard label="EU" value={stats.euCount} color="bg-indigo-50 text-indigo-700" />
       </div>
+
+      {collectError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+          {collectError}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
@@ -282,6 +296,7 @@ export default function BugorOutreachPage() {
 /* sub-components                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Compact metric card used in the stats grid. */
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className={`rounded-xl px-4 py-3 ${color}`}>
@@ -291,6 +306,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   );
 }
 
+/** Badge showing the current pipeline stage of a lead (email found → sequence → Instantly). */
 function PipelineStatus({ lead }: { lead: BugorLead }) {
   if (lead.instantly_uploaded) {
     return (
@@ -328,6 +344,7 @@ function PipelineStatus({ lead }: { lead: BugorLead }) {
   );
 }
 
+/** Expandable table row displaying a single Bugor outreach lead. */
 function LeadRow({
   lead,
   expanded,
@@ -465,6 +482,7 @@ function LeadRow({
   );
 }
 
+/** Label + value pair rendered inside the expanded lead row. */
 function DetailField({
   label,
   value,
