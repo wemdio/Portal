@@ -19,7 +19,8 @@ function checkAuth(req: Request): boolean {
   return token === CRON_SECRET;
 }
 
-async function runCollection(): Promise<NextResponse> {
+/** Executes the full Bugor outreach pipeline (collect → enrich → dedup → insert → find emails → validate). */
+export async function runCollection(): Promise<NextResponse> {
   if (!supabaseAdmin) {
     return NextResponse.json(
       { error: 'Server misconfigured: missing Supabase service role' },
