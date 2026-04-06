@@ -24,13 +24,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!campaign) return jsonError('Кампания не найдена', 404);
       if (campaign.status === 'running') return jsonError('Нельзя refetch пока кампания запущена', 409);
 
-      const { data: emptyCount } = await supabase
+      const { data: dialogs, error: dErr } = await supabase
         .from('tg_outreach_dialogs')
-        .select('id', { count: 'exact', head: true })
-        .eq('campaign_id', id)
-        .eq('messages', '[]');
+        .select('id, messages')
+        .eq('campaign_id', id);
 
-      if (!emptyCount) {
+      if (dErr) return jsonError(dErr.message, 500);
+
+      const emptyCount = (dialogs ?? []).filter(
+        d => !d.messages || (Array.isArray(d.messages) && d.messages.length === 0),
+      ).length;
+
+      if (emptyCount === 0) {
         return NextResponse.json({ message: 'Нет диалогов с пустыми сообщениями', empty_count: 0 });
       }
 
@@ -42,7 +47,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       if (error) return jsonError(error.message, 500);
 
-      return NextResponse.json(data, { status: 201 });
+      return NextResponse.json({ ...data, empty_count: emptyCount }, { status: 201 });
     },
   );
 }

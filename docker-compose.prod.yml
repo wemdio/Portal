@@ -1,4 +1,6 @@
-# Лимиты memory — потолки; сумма ~28G под 32G RAM (запас ОС/Docker). cpus — потолок на контейнер.
+# Лимиты memory+cpus — потолки; суммы ≤90-95 % от 32 vCPU / 64 GB RAM.
+# Сервер: 2×Xeon E5-2670 (16C/32T) / 64 GB / 1 TB HDD SFF / HW RAID / 2×PSU.
+# CPU: 29.65 / 32 = 93 %; RAM: 60 672 / 65 536 = 93 %. Остаток — ОС и Docker daemon.
 services:
   portal:
     image: ${DOCKER_USERNAME}/portal:prod
@@ -47,8 +49,8 @@ services:
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
-      - NODE_OPTIONS=--max-old-space-size=8192
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
+      - NODE_OPTIONS=--max-old-space-size=3072
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -58,8 +60,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 11264M
-          cpus: '7'
+          memory: 26624M
+          cpus: '11'
     restart: unless-stopped
     networks:
       - portal-network
@@ -85,8 +87,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
-          cpus: '1.0'
+          memory: 3072M
+          cpus: '1.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -112,8 +114,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
-          cpus: '1.0'
+          memory: 3072M
+          cpus: '1.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -135,8 +137,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.75'
+          memory: 1536M
+          cpus: '1'
     restart: unless-stopped
     networks:
       - portal-network
@@ -161,8 +163,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.75'
+          memory: 1536M
+          cpus: '1'
     restart: unless-stopped
     networks:
       - portal-network
@@ -183,8 +185,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.75'
+          memory: 1536M
+          cpus: '1'
     restart: unless-stopped
     networks:
       - portal-network
@@ -205,8 +207,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.75'
+          memory: 1536M
+          cpus: '1'
     restart: unless-stopped
     networks:
       - portal-network
@@ -229,8 +231,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 1024M
+          cpus: '0.75'
     restart: unless-stopped
     networks:
       - portal-network
@@ -254,8 +256,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.25'
+          memory: 768M
+          cpus: '0.5'
     restart: unless-stopped
     networks:
       - portal-network
@@ -278,8 +280,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
-          cpus: '1.0'
+          memory: 3072M
+          cpus: '2'
     restart: unless-stopped
     networks:
       - portal-network
@@ -319,7 +321,7 @@ services:
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
       - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
-      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-1}
+      - MAX_CONCURRENT=${TRANSCRIBE_MAX_CONCURRENT:-2}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8070/health')"]
       interval: 30s
@@ -329,8 +331,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
-          cpus: '1.0'
+          memory: 4096M
+          cpus: '3'
     restart: unless-stopped
     networks:
       - portal-network
@@ -339,7 +341,7 @@ services:
     image: ${DOCKER_USERNAME}/portal-yandexmaps:prod
     container_name: portal-yandexmaps
     environment:
-      - YANDEXMAPS_CONCURRENCY=2
+      - YANDEXMAPS_CONCURRENCY=4
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -349,8 +351,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4608M
-          cpus: '2.0'
+          memory: 8192M
+          cpus: '3'
     restart: unless-stopped
     ports:
       - "8010:8000"
@@ -369,7 +371,7 @@ services:
       - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
       - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
       - HEALTH_PORTAL_URL=${HEALTH_PORTAL_URL:-https://polza-portal.ru}
-      - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-144.31.54.166}
+      - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-139.60.162.12}
       - PROXY_URLS=${PROXY_URLS}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
@@ -379,8 +381,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.25'
+          memory: 512M
+          cpus: '0.3'
     restart: unless-stopped
     networks:
       - portal-network
@@ -402,7 +404,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 1536M
           cpus: '0.5'
     restart: unless-stopped
     networks:
@@ -433,8 +435,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.25'
+          memory: 512M
+          cpus: '0.3'
     restart: unless-stopped
     networks:
       - portal-network
@@ -459,7 +461,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: 768M
           cpus: '0.5'
     restart: unless-stopped
     networks:
@@ -471,7 +473,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: 768M
           cpus: '0.5'
     restart: unless-stopped
     networks:
@@ -497,8 +499,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.25'
+          memory: 512M
+          cpus: '0.3'
     restart: unless-stopped
     networks:
       - portal-network

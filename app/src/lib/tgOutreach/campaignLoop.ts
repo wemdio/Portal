@@ -45,6 +45,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs = 2000): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !shouldStop()) {
+    await sleep(Math.min(chunkMs, end - Date.now()));
+  }
+}
+
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -244,6 +251,7 @@ export async function handleChat(
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
+  shouldStop?: () => boolean,
 ): Promise<HandleChatResult> {
   const oai = campaign.openai_settings as OpenAISettings;
   const tg = campaign.telegram_settings as TelegramSettings;
@@ -286,7 +294,7 @@ export async function handleChat(
   }
 
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
-  await sleep(preReadDelay);
+  if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
   try {
     await client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 }));
@@ -360,7 +368,7 @@ export async function handleChat(
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
-  await sleep(readReplyDelay);
+  if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
 
   const sent = await client.sendMessage(entity, { message: replyText });
   log('info', `${displayName}: отправлен ответ (${replyText.length} симв.)`);
@@ -403,6 +411,7 @@ async function handleFollowUp(
   campaign: OutreachCampaign,
   db: SupabaseClient,
   log: LogFn,
+  shouldStop?: () => boolean,
 ) {
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
@@ -453,7 +462,8 @@ async function handleFollowUp(
       const reply = await openaiGenerate(oai, followUpMessages);
       if (!reply) continue;
 
-      await sleep(randomRange(tg.read_reply_delay_range) * 1000);
+      const followUpDelay = randomRange(tg.read_reply_delay_range) * 1000;
+      if (shouldStop) await interruptibleSleep(followUpDelay, shouldStop); else await sleep(followUpDelay);
       const entity = await client.getEntity(tgUserId);
       await client.sendMessage(entity, { message: reply });
 
@@ -462,6 +472,56 @@ async function handleFollowUp(
       log('info', `Follow-up: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
     } catch (err) {
       log('warning', `Follow-up ошибка ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+async function backfillEmptyDialogs(
+  client: TelegramClient,
+  account: OutreachAccount,
+  campaign: OutreachCampaign,
+  db: SupabaseClient,
+  log: LogFn,
+) {
+  const tg = campaign.telegram_settings as TelegramSettings;
+
+  const { data: dialogs } = await db
+    .from('tg_outreach_dialogs')
+    .select('id, tg_user_id, tg_username, tg_is_bot, messages')
+    .eq('campaign_id', campaign.id)
+    .eq('account_id', account.id)
+    .limit(50);
+
+  const empty = (dialogs ?? []).filter(
+    d => !d.messages || (Array.isArray(d.messages) && (d.messages as unknown[]).length === 0),
+  );
+  if (empty.length === 0) return;
+
+  log('info', `Backfill: ${empty.length} диалогов с пустыми сообщениями`);
+
+  for (const dialog of empty) {
+    const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+    try {
+      const entity = await client.getEntity(tgUserId);
+      const history = await client.getMessages(entity, { limit: tg.history_limit });
+
+      const chatMessages: DialogMessage[] = [];
+      for (const msg of history.reverse()) {
+        if (!msg.message) continue;
+        chatMessages.push({
+          role: (msg.out ?? false) ? 'assistant' : 'user',
+          content: msg.message,
+          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
+        });
+      }
+
+      if (chatMessages.length > 0) {
+        await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot: Boolean(dialog.tg_is_bot) });
+        log('info', `Backfill: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
+      }
+    } catch (err) {
+      log('warning', `Backfill ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -536,7 +596,7 @@ export async function runCampaignLoop(
     while (!shouldStop()) {
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         log('info', 'Спящий период — пауза 60 сек');
-        await sleep(60_000);
+        await interruptibleSleep(60_000, shouldStop);
         continue;
       }
 
@@ -571,7 +631,7 @@ export async function runCampaignLoop(
             if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
             try {
-              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log);
+              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop);
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
 
@@ -592,7 +652,13 @@ export async function runCampaignLoop(
             }
           }
 
-          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log);
+          await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+
+          try {
+            await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
+          } catch (err) {
+            log('warning', `Backfill ошибка: ${err instanceof Error ? err.message : String(err)}`);
+          }
 
           const updatedSession = await getUpdatedSessionString(client);
           if (updatedSession && updatedSession !== account.session_data) {
@@ -613,18 +679,18 @@ export async function runCampaignLoop(
 
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} сек перед следующим аккаунтом`);
-        await sleep(accountDelay);
+        await interruptibleSleep(accountDelay, shouldStop);
       }
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
         const tlBackoff = 300_000;
         log('warning', `Все ${tlSchemaErrorCount} аккаунтов получили TL schema ошибку — пауза ${tlBackoff / 1000} сек. Обновите пакет 'telegram' (npm update telegram)`);
-        await sleep(tlBackoff);
+        await interruptibleSleep(tlBackoff, shouldStop);
       }
 
       const cycleDelay = 30_000;
       log('info', `Цикл завершён. Пауза ${cycleDelay / 1000} сек`);
-      await sleep(cycleDelay);
+      await interruptibleSleep(cycleDelay, shouldStop);
 
       const { data: fresh } = await db
         .from('tg_outreach_campaigns')
@@ -643,10 +709,20 @@ export async function runCampaignLoop(
   }
 }
 
+export type RefetchProgress = {
+  total: number;
+  done: number;
+  fetched: number;
+  errors: number;
+  last_username: string | null;
+  last_messages: number;
+};
+
 export async function refetchEmptyDialogs(
   campaignId: string,
   db: SupabaseClient,
   traceContext?: TraceContext,
+  onProgress?: (p: RefetchProgress) => void | Promise<void>,
 ) {
   const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
     console.log(`[tg-outreach-refetch][${campaignId.slice(0, 8)}][${level}] ${msg}`);
@@ -668,14 +744,17 @@ export async function refetchEmptyDialogs(
 
   const tg = campaign.telegram_settings as TelegramSettings;
 
-  const { data: emptyDialogs } = await db
+  const { data: allDialogs } = await db
     .from('tg_outreach_dialogs')
-    .select('id, tg_user_id, tg_username, account_id, tg_is_bot')
+    .select('id, tg_user_id, tg_username, account_id, tg_is_bot, messages')
     .eq('campaign_id', campaignId)
-    .eq('messages', '[]')
     .limit(500);
 
-  if (!emptyDialogs?.length) {
+  const emptyDialogs = (allDialogs ?? []).filter(
+    d => !d.messages || (Array.isArray(d.messages) && (d.messages as unknown[]).length === 0),
+  );
+
+  if (emptyDialogs.length === 0) {
     log('info', 'Нет диалогов с пустыми сообщениями — refetch не нужен');
     return;
   }
@@ -712,10 +791,19 @@ export async function refetchEmptyDialogs(
   const clientByAccountId = new Map(clients.map(c => [c.account.id, c.client]));
   let fetched = 0;
   let errors = 0;
+  let done = 0;
+  const total = emptyDialogs.length;
+
+  const reportProgress = async (username: string | null, msgCount: number) => {
+    done++;
+    if (onProgress) {
+      await onProgress({ total, done, fetched, errors, last_username: username, last_messages: msgCount });
+    }
+  };
 
   for (const dialog of emptyDialogs) {
     const client = clientByAccountId.get(dialog.account_id as string);
-    if (!client) continue;
+    if (!client) { await reportProgress(dialog.tg_username as string | null, 0); continue; }
 
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
@@ -743,12 +831,14 @@ export async function refetchEmptyDialogs(
         fetched++;
         log('info', `Refetch: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
       }
+      await reportProgress(tgUsername, chatMessages.length);
     } catch (err) {
       errors++;
       log('warning', `Refetch ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+      await reportProgress(tgUsername, 0);
     }
   }
 
   await disconnectAll(clients);
-  log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${emptyDialogs.length} диалогов`);
+  log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${total} диалогов`);
 }
