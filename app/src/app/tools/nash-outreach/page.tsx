@@ -21,6 +21,7 @@ import {
 import type { NashLead } from '@/lib/nashOutreach/types';
 import { triggerNashCollect } from './actions';
 
+/** Returns today's date as an ISO string (YYYY-MM-DD). */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -53,6 +54,7 @@ const SIGNAL_LABELS: Record<string, string> = {
   Content_Active: 'Контент',
 };
 
+/** Dashboard page for the Nash (RU) outreach pipeline — shows leads, stats and filters. */
 export default function NashOutreachPage() {
   const [leads, setLeads] = useState<NashLead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -241,6 +243,7 @@ export default function NashOutreachPage() {
   );
 }
 
+/** Compact metric card used in the stats grid. */
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className={`rounded-xl px-4 py-3 ${color}`}>
@@ -250,6 +253,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   );
 }
 
+/** Badge showing the current pipeline stage of a lead (email found → sequence → Instantly). */
 function PipelineStatus({ lead }: { lead: NashLead }) {
   if (lead.instantly_uploaded) {
     return (
@@ -279,6 +283,7 @@ function PipelineStatus({ lead }: { lead: NashLead }) {
   );
 }
 
+/** Expandable table row displaying a single Nash outreach lead. */
 function LeadRow({ lead, expanded, onToggle }: { lead: NashLead; expanded: boolean; onToggle: () => void }) {
   const PriorityIcon = PRIORITY_ICON[lead.priority] ?? Thermometer;
 
@@ -395,6 +400,7 @@ function LeadRow({ lead, expanded, onToggle }: { lead: NashLead; expanded: boole
   );
 }
 
+/** Label + value pair rendered inside the expanded lead row. */
 function DetailField({ label, value, link }: { label: string; value: string | null | undefined; link?: boolean }) {
   if (!value) return null;
   return (

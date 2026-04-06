@@ -25,6 +25,7 @@ import { triggerBugorCollect } from './actions';
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/** Returns today's date as an ISO string (YYYY-MM-DD). */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -63,6 +64,7 @@ const SIGNAL_LABELS: Record<string, string> = {
 /* component                                                           */
 /* ------------------------------------------------------------------ */
 
+/** Dashboard page for the Bugor (ENG) outreach pipeline — shows leads, stats and filters. */
 export default function BugorOutreachPage() {
   const [leads, setLeads] = useState<BugorLead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -294,6 +296,7 @@ export default function BugorOutreachPage() {
 /* sub-components                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Compact metric card used in the stats grid. */
 function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className={`rounded-xl px-4 py-3 ${color}`}>
@@ -303,6 +306,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   );
 }
 
+/** Badge showing the current pipeline stage of a lead (email found → sequence → Instantly). */
 function PipelineStatus({ lead }: { lead: BugorLead }) {
   if (lead.instantly_uploaded) {
     return (
@@ -340,6 +344,7 @@ function PipelineStatus({ lead }: { lead: BugorLead }) {
   );
 }
 
+/** Expandable table row displaying a single Bugor outreach lead. */
 function LeadRow({
   lead,
   expanded,
@@ -477,6 +482,7 @@ function LeadRow({
   );
 }
 
+/** Label + value pair rendered inside the expanded lead row. */
 function DetailField({
   label,
   value,
