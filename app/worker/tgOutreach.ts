@@ -134,14 +134,19 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
 
   try {
     await refetchEmptyDialogs(campaignId, db);
+    await db.from('tg_outreach_jobs').update({
+      status: 'completed',
+      finished_at: new Date().toISOString(),
+    }).eq('id', job.id);
   } catch (err) {
-    log('error', `Refetch failed for ${campaignId}: ${err instanceof Error ? err.message : String(err)}`);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log('error', `Refetch failed for ${campaignId}: ${errMsg}`);
+    await db.from('tg_outreach_jobs').update({
+      status: 'failed',
+      error_message: errMsg,
+      finished_at: new Date().toISOString(),
+    }).eq('id', job.id);
   }
-
-  await db.from('tg_outreach_jobs').update({
-    status: 'completed',
-    finished_at: new Date().toISOString(),
-  }).eq('id', job.id);
 }
 
 async function pollOnce(): Promise<boolean> {
