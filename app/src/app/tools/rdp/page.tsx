@@ -11,6 +11,7 @@ import {
   User,
   Maximize,
   Minimize,
+  AlarmClock,
 } from 'lucide-react';
 
 async function getToken() {
@@ -59,6 +60,15 @@ function formatDuration(startIso: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Inactivity timeout constants
+// ---------------------------------------------------------------------------
+
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+const INACTIVITY_WARNING_MS = 25 * 60 * 1000;
+const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000;
+const IDLE_CHECK_MS = 10_000;
+
+// ---------------------------------------------------------------------------
 // RDP Viewer (Guacamole)
 // ---------------------------------------------------------------------------
 
@@ -81,6 +91,10 @@ function RdpViewer({
   const baseScaleRef = useRef(1.0);
   const currentScaleRef = useRef(1.0);
   const remoteScaleRef = useRef(remoteScale);
+
+  const lastActivityRef = useRef(Date.now());
+  const lastHeartbeatRef = useRef(0);
+  const [idleMinutesLeft, setIdleMinutesLeft] = useState<number | null>(null);
 
   useEffect(() => {
     const handler = () => setIsFullscreen(!!document.fullscreenElement);
@@ -195,8 +209,7 @@ function RdpViewer({
           state: { x: number; y: number; left: boolean; middle: boolean; right: boolean; up: boolean; down: boolean };
         };
         mouse.onEach(['mousedown', 'mousemove', 'mouseup'], (e: GuacMouseState) => {
-          // e.state.x/y are in CSS pixels relative to the scaled bounds element.
-          // Divide by the current display scale to get guacamole logical coordinates.
+          lastActivityRef.current = Date.now();
           const s = currentScaleRef.current || 1;
           const state = new Guacamole.Mouse.State(
             e.state.x / s,
@@ -214,6 +227,7 @@ function RdpViewer({
         const BLOCKED_KEYSYMS = new Set([0xFFC8, 0xFFC9]);
         keyboard.onkeydown = (keysym: number) => {
           if (BLOCKED_KEYSYMS.has(keysym)) return;
+          lastActivityRef.current = Date.now();
           client.sendKeyEvent(1, keysym);
         };
         keyboard.onkeyup = (keysym: number) => {
@@ -313,6 +327,44 @@ function RdpViewer({
   }, []);
 
 
+  // ---- Inactivity check + heartbeat ----
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const idle = Date.now() - lastActivityRef.current;
+
+      if (idle >= INACTIVITY_TIMEOUT_MS) {
+        onDisconnect();
+        return;
+      }
+
+      if (idle >= INACTIVITY_WARNING_MS) {
+        const left = Math.ceil((INACTIVITY_TIMEOUT_MS - idle) / 60_000);
+        setIdleMinutesLeft(left);
+      } else {
+        setIdleMinutesLeft(null);
+      }
+
+      const sinceBeat = Date.now() - lastHeartbeatRef.current;
+      if (idle < HEARTBEAT_INTERVAL_MS && sinceBeat >= HEARTBEAT_INTERVAL_MS) {
+        lastHeartbeatRef.current = Date.now();
+        api('/sessions', { method: 'PATCH' }).catch(() => {});
+      }
+    }, IDLE_CHECK_MS);
+
+    // Initial heartbeat on mount
+    lastHeartbeatRef.current = Date.now();
+    api('/sessions', { method: 'PATCH' }).catch(() => {});
+
+    return () => clearInterval(interval);
+  }, [onDisconnect]);
+
+  const resetIdleTimer = useCallback(() => {
+    lastActivityRef.current = Date.now();
+    setIdleMinutesLeft(null);
+    lastHeartbeatRef.current = Date.now();
+    api('/sessions', { method: 'PATCH' }).catch(() => {});
+  }, []);
+
   return (
     <div ref={wrapperRef} className="flex flex-col flex-1 min-h-0 w-full">
       <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-1.5 shrink-0">
@@ -353,6 +405,22 @@ function RdpViewer({
           </button>
         </div>
       </div>
+      {idleMinutesLeft !== null && (
+        <div className="flex items-center justify-between gap-3 bg-amber-50 border-b border-amber-200 px-4 py-2 shrink-0">
+          <div className="flex items-center gap-2 text-sm text-amber-800">
+            <AlarmClock className="h-4 w-4 shrink-0" />
+            <span>
+              Отключение через {idleMinutesLeft} мин из-за бездействия
+            </span>
+          </div>
+          <button
+            onClick={resetIdleTimer}
+            className="shrink-0 rounded-lg bg-amber-200 px-3 py-1 text-sm font-medium text-amber-900 hover:bg-amber-300 transition"
+          >
+            Я здесь
+          </button>
+        </div>
+      )}
       <div
         ref={containerRef}
         className="bg-black overflow-hidden w-full flex-1 min-h-0 flex items-center justify-center"
