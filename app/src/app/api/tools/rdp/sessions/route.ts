@@ -54,6 +54,31 @@ export async function POST(req: NextRequest) {
   );
 }
 
+export async function PATCH(req: NextRequest) {
+  return withToolTrace(
+    { request: req, operation: 'tools.rdp.sessions.heartbeat' },
+    async () => {
+      const user = await getUser(req);
+      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const now = new Date().toISOString();
+      const { data: session } = await admin
+        .from('rdp_sessions')
+        .update({ last_activity_at: now })
+        .eq('user_id', user.id)
+        .eq('status', 'active')
+        .select('id')
+        .maybeSingle();
+
+      if (!session) {
+        return NextResponse.json({ error: 'Нет активной сессии' }, { status: 404 });
+      }
+
+      return NextResponse.json({ ok: true });
+    },
+  );
+}
+
 export async function DELETE(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.rdp.sessions.delete' },
