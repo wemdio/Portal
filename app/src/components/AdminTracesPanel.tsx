@@ -544,7 +544,14 @@ type RealtimeSpanPayload = {
   status: string;
 };
 
-type ActiveTask = { id: string; name: string; message: string | null; started_at: string };
+type ActiveTask = {
+  id: string;
+  name: string;
+  message: string | null;
+  started_at: string;
+  input: Record<string, unknown>;
+  user_id: string | null;
+};
 
 const TASK_NAME_RU: Record<string, string> = {
   'tg-outreach.campaign.run': 'TG-рассылка',
@@ -569,27 +576,97 @@ function resolveTaskDisplayName(task: ActiveTask): string {
   return task.name;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Task source resolution                                                    */
+/* -------------------------------------------------------------------------- */
+
+type TaskSource = { label: string; badgeClass: string };
+
+const TOOL_DETAIL_RU: Record<string, string> = {
+  'tg-transcribe': 'TG Расшифровка',
+  'tg-parser': 'TG Парсер',
+  'tg-outreach': 'TG Аутрич',
+  'li-outreach': 'LinkedIn Аутрич',
+  'cis-leads': 'CIS Лиды',
+  'email-sequence': 'Email-цепочки',
+  'audio-transcribe': 'Расшифровка',
+  'habr-career': 'Хабр Карьера',
+  'rdp': 'RDP',
+  'dfyb': 'DFYB',
+  'auto-report': 'Авто-отчёт',
+};
+
+function resolveTaskSource(name: string): TaskSource {
+  if (name.startsWith('tools.')) {
+    const tool = name.split('.')[1] ?? '';
+    const isWebhook = name.includes('.webhook.');
+    const detail = TOOL_DETAIL_RU[tool] ?? tool;
+    return isWebhook
+      ? { label: `Вебхук: ${detail}`, badgeClass: 'bg-violet-100 text-violet-700' }
+      : { label: `API: ${detail}`, badgeClass: 'bg-indigo-100 text-indigo-700' };
+  }
+  if (name.startsWith('tg-outreach.')) return { label: 'Воркер: TG Аутрич', badgeClass: 'bg-green-100 text-green-700' };
+  if (name.startsWith('hh.')) return { label: 'Парсер: HeadHunter', badgeClass: 'bg-orange-100 text-orange-700' };
+  if (name.startsWith('yandexmaps.')) return { label: 'Парсер: Яндекс.Карты', badgeClass: 'bg-orange-100 text-orange-700' };
+  if (name.startsWith('search.')) return { label: 'Парсер: Поисковый', badgeClass: 'bg-orange-100 text-orange-700' };
+  if (name === 'database.brief_scoring') return { label: 'Воркер: Скоринг', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (name === 'database.email_validation') return { label: 'Воркер: Email-валидация', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (name === 'database.email_scraping') return { label: 'Воркер: Email-поиск', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (name === 'database.website_enrichment') return { label: 'Воркер: Обогащение сайтов', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (name === 'database.site_availability') return { label: 'Воркер: Проверка сайтов', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (name.startsWith('audio_transcribe.')) return { label: 'API: Расшифровка', badgeClass: 'bg-indigo-100 text-indigo-700' };
+  if (name.startsWith('email_sequence.')) return { label: 'API: Email-цепочки', badgeClass: 'bg-indigo-100 text-indigo-700' };
+  return { label: name.split('.')[0], badgeClass: 'bg-gray-100 text-gray-600' };
+}
+
 function useActiveTasks() {
   const [tasks, setTasks] = useState<Map<string, ActiveTask>>(new Map());
+  const [profiles, setProfiles] = useState<Map<string, string>>(new Map());
   const [initialised, setInitialised] = useState(false);
   const mountedRef = useRef(true);
+  const fetchedProfileIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     mountedRef.current = true;
 
+    async function fetchProfilesForIds(userIds: string[]) {
+      const toFetch = userIds.filter(id => id && !fetchedProfileIdsRef.current.has(id));
+      if (toFetch.length === 0) return;
+      for (const id of toFetch) fetchedProfileIdsRef.current.add(id);
+      const { data } = await supabase.from('profiles').select('id, full_name').in('id', toFetch);
+      if (!data || !mountedRef.current) return;
+      setProfiles(prev => {
+        const next = new Map(prev);
+        for (const p of data) if (p.full_name) next.set(p.id, p.full_name);
+        return next;
+      });
+    }
+
     async function fetchInitial() {
       const { data } = await supabase
         .from('trace_spans')
-        .select('id, name, message, started_at')
+        .select('id, name, message, started_at, input, user_id')
         .is('parent_span_id', null)
         .eq('status', 'running')
         .order('started_at', { ascending: false });
 
       if (mountedRef.current) {
         const map = new Map<string, ActiveTask>();
-        for (const r of data ?? []) map.set(r.id, { id: r.id, name: r.name, message: r.message, started_at: r.started_at });
+        const userIds: string[] = [];
+        for (const r of data ?? []) {
+          map.set(r.id, {
+            id: r.id,
+            name: r.name,
+            message: r.message,
+            started_at: r.started_at,
+            input: r.input ?? {},
+            user_id: r.user_id ?? null,
+          });
+          if (r.user_id) userIds.push(r.user_id);
+        }
         setTasks(map);
         setInitialised(true);
+        void fetchProfilesForIds(userIds);
       }
     }
     void fetchInitial();
@@ -600,7 +677,10 @@ function useActiveTasks() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'trace_spans' },
         (payload) => {
-          const row = payload.new as RealtimeSpanPayload & { name?: string; message?: string | null; started_at?: string };
+          const row = payload.new as RealtimeSpanPayload & {
+            name?: string; message?: string | null; started_at?: string;
+            input?: Record<string, unknown>; user_id?: string | null;
+          };
           if (row.parent_span_id !== null) return;
           if (row.status === 'running') {
             setTasks((prev) => {
@@ -610,9 +690,12 @@ function useActiveTasks() {
                 name: row.name ?? row.id,
                 message: row.message ?? null,
                 started_at: row.started_at ?? new Date().toISOString(),
+                input: row.input ?? {},
+                user_id: row.user_id ?? null,
               });
               return next;
             });
+            if (row.user_id) void fetchProfilesForIds([row.user_id]);
           }
         },
       )
@@ -620,7 +703,10 @@ function useActiveTasks() {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'trace_spans' },
         (payload) => {
-          const row = payload.new as RealtimeSpanPayload & { name?: string; message?: string | null; started_at?: string };
+          const row = payload.new as RealtimeSpanPayload & {
+            name?: string; message?: string | null; started_at?: string;
+            input?: Record<string, unknown>; user_id?: string | null;
+          };
           if (row.parent_span_id !== null) return;
           setTasks((prev) => {
             const next = new Map(prev);
@@ -630,12 +716,15 @@ function useActiveTasks() {
                 name: row.name ?? row.id,
                 message: row.message ?? null,
                 started_at: row.started_at ?? new Date().toISOString(),
+                input: row.input ?? {},
+                user_id: row.user_id ?? null,
               });
             } else {
               next.delete(row.id);
             }
             return next;
           });
+          if (row.user_id) void fetchProfilesForIds([row.user_id]);
         },
       )
       .subscribe();
@@ -651,11 +740,11 @@ function useActiveTasks() {
     [tasks],
   );
 
-  return { tasks: sorted, count: tasks.size, initialised };
+  return { tasks: sorted, count: tasks.size, initialised, profiles };
 }
 
 function ActiveTasksBadge() {
-  const { tasks, count, initialised } = useActiveTasks();
+  const { tasks, count, initialised, profiles } = useActiveTasks();
 
   return (
     <div className="mb-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
@@ -687,18 +776,36 @@ function ActiveTasksBadge() {
 
       {initialised && tasks.length > 0 && (
         <div className="border-t border-gray-100 divide-y divide-gray-100">
-          {tasks.map((task) => (
-            <div key={task.id} className="flex items-center gap-3 px-5 py-2.5">
-              <span className="relative flex h-2 w-2 flex-shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-              </span>
-              <span className="text-sm font-medium text-gray-800 truncate">{resolveTaskDisplayName(task)}</span>
-              <span className="ml-auto text-xs text-gray-400 flex-shrink-0 tabular-nums">
-                {formatTimestamp(task.started_at)}
-              </span>
-            </div>
-          ))}
+          {tasks.map((task) => {
+            const source = resolveTaskSource(task.name);
+            const userName = task.user_id ? profiles.get(task.user_id) : null;
+            return (
+              <div key={task.id} className="flex items-start gap-3 px-5 py-2.5">
+                <span className="relative flex h-2 w-2 flex-shrink-0 mt-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-medium text-gray-800 truncate block">
+                    {resolveTaskDisplayName(task)}
+                  </span>
+                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${source.badgeClass}`}>
+                      {source.label}
+                    </span>
+                    {userName && (
+                      <span className="text-[11px] text-gray-400 truncate max-w-[180px]" title={userName}>
+                        {userName}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <span className="text-xs text-gray-400 flex-shrink-0 tabular-nums mt-0.5">
+                  {formatTimestamp(task.started_at)}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

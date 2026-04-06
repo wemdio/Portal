@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
     }
 
     const rawDepth = Number(payload?.search_depth);
-    const search_depth = Number.isFinite(rawDepth) ? Math.max(1, Math.min(10, Math.round(rawDepth))) : 5;
+    const search_depth = Number.isFinite(rawDepth) ? Math.max(1, Math.min(30, Math.round(rawDepth))) : 5;
 
     const config = {
       ...(brief ? { brief } : {}),

@@ -11,7 +11,7 @@ export type SearchParserStartPayload = {
   queries_text?: string;
   /** Текст для отображения в истории (то, что ввёл пользователь). */
   user_query?: string;
-  /** Глубина поиска: сколько страниц Google парсить на каждый запрос (1–10, по умолчанию 5). */
+  /** Глубина поиска: сколько страниц Google парсить на каждый запрос (1–30, по умолчанию 5). */
   search_depth?: number;
 };
 
@@ -254,12 +254,12 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <input
               type="range"
               min={1}
-              max={10}
+              max={30}
               value={searchDepth}
               onChange={(e) => setSearchDepth(Number(e.target.value))}
               className="flex-1 h-2 accent-blue-600"
             />
-            <span className="text-sm font-mono font-semibold text-gray-900 w-6 text-center tabular-nums">{searchDepth}</span>
+            <span className="text-sm font-mono font-semibold text-gray-900 w-8 text-center tabular-nums">{searchDepth}</span>
           </div>
           <p className="text-xs text-gray-500 mt-1">
             По умолчанию: 5. Чем больше — тем глубже поиск, но дольше выполнение.
