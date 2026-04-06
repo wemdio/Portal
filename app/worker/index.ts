@@ -15,6 +15,12 @@ import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
 import { runEmailValidationJob } from '@/lib/emailValidation/emailValidationWorker';
+import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
+import { runNashSmtpValidation } from '@/lib/nashOutreach/smtpValidationWorker';
+import { collectRawSignals } from '@/lib/nashOutreach/collectLeads';
+import { enrichRawSignals } from '@/lib/nashOutreach/enrichLeads';
+import { findEmailsForLeads } from '@/lib/bugorOutreach/findEmails';
+import { validateLeadEmails } from '@/lib/bugorOutreach/validateEmails';
 import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
@@ -415,6 +421,26 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
+  try {
+    const bugorCount = await runBugorSmtpValidation();
+    if (bugorCount > 0) {
+      log('info', `Bugor SMTP validation processed ${bugorCount} lead(s)`);
+      return true;
+    }
+  } catch (err) {
+    log('warn', 'Bugor SMTP validation failed', err);
+  }
+
+  try {
+    const nashCount = await runNashSmtpValidation();
+    if (nashCount > 0) {
+      log('info', `Nash SMTP validation processed ${nashCount} lead(s)`);
+      return true;
+    }
+  } catch (err) {
+    log('warn', 'Nash SMTP validation failed', err);
+  }
+
   const leadImportJobId = await claimLeadImportJob();
   if (leadImportJobId) {
     log('info', `Running lead import job ${leadImportJobId}`);
@@ -596,6 +622,143 @@ async function periodicSyncLoop(): Promise<void> {
   }
 }
 
+// --------------------------------------------------------------------------
+// Scheduled Nash Outreach collection (daily at 07:00 Moscow time = 04:00 UTC)
+// --------------------------------------------------------------------------
+
+const NASH_COLLECT_HOUR_UTC = Number(process.env.NASH_COLLECT_HOUR_UTC ?? '4');
+
+function getNextRunMs(hourUtc: number): number {
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCHours(hourUtc, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
+async function runNashCollect(): Promise<void> {
+  if (!supabaseAdmin) return;
+  log('info', 'Nash Outreach scheduled collection starting...');
+
+  try {
+    const rawItems = await collectRawSignals();
+    log('info', `Nash collect: ${rawItems.length} raw items`);
+    if (rawItems.length === 0) return;
+
+    const enriched = await enrichRawSignals(rawItems);
+    log('info', `Nash collect: ${enriched.length} enriched leads`);
+    if (enriched.length === 0) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: existing } = await supabaseAdmin
+      .from('nash_outreach_leads')
+      .select('company_name, website')
+      .gte('batch_date', new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10));
+
+    const existingKeys = new Set(
+      (existing ?? []).map((r: { company_name?: string; website?: string }) =>
+        `${(r.company_name ?? '').toLowerCase()}|${(r.website ?? '').toLowerCase()}`),
+    );
+
+    const toInsert = enriched.filter((lead) => {
+      const key = `${lead.company_name.toLowerCase()}|${(lead.website ?? '').toLowerCase()}`;
+      if (existingKeys.has(key)) return false;
+      existingKeys.add(key);
+      return true;
+    });
+
+    if (toInsert.length === 0) {
+      log('info', 'Nash collect: all leads were duplicates');
+      return;
+    }
+
+    const rows = toInsert.map((lead) => ({
+      batch_date: today,
+      company_name: lead.company_name,
+      website: lead.website,
+      city: lead.city,
+      employee_count: lead.employee_count,
+      description: lead.description,
+      niche: lead.niche,
+      signal_type: lead.signal_type,
+      signal_detail: lead.signal_detail,
+      intent_score: lead.intent_score,
+      priority: lead.priority,
+      outreach_angle: lead.outreach_angle,
+      source_url: lead.source_url,
+      hh_employer_id: lead.hh_employer_id,
+      hh_vacancy_name: lead.hh_vacancy_name,
+      raw_data: { source: lead.source_url },
+    }));
+
+    const { data: insertedRows, error: insertError } = await supabaseAdmin
+      .from('nash_outreach_leads')
+      .insert(rows)
+      .select('id, company_name, website, source_url, emails_found');
+
+    if (insertError) {
+      log('error', `Nash collect insert error: ${insertError.message}`);
+      return;
+    }
+
+    const leads = insertedRows ?? [];
+    log('info', `Nash collect: inserted ${leads.length} leads`);
+
+    const emailResults = await findEmailsForLeads(
+      leads.map((l: { id: string; company_name: string; website?: string | null; source_url?: string | null }) => ({
+        id: l.id, company_name: l.company_name, website: l.website ?? null,
+        founder_name: null, source_url: l.source_url ?? null,
+      })),
+    );
+
+    let emailsFound = 0;
+    for (const er of emailResults) {
+      if (er.emails.length > 0) {
+        emailsFound++;
+        await supabaseAdmin.from('nash_outreach_leads')
+          .update({ emails_found: er.emails, smtp_tier: er.tier }).eq('id', er.id);
+      } else {
+        await supabaseAdmin.from('nash_outreach_leads')
+          .update({ smtp_status: 'skipped' }).eq('id', er.id);
+      }
+    }
+
+    const leadsWithEmails = emailResults.filter((er) => er.emails.length > 0);
+    if (leadsWithEmails.length > 0) {
+      const validationResults = await validateLeadEmails(
+        leadsWithEmails.map((er) => ({ id: er.id, emails: er.emails })),
+      );
+      let validated = 0;
+      for (const vr of validationResults) {
+        if (vr.validated.length > 0) {
+          validated++;
+          await supabaseAdmin.from('nash_outreach_leads')
+            .update({ emails_validated: vr.validated, smtp_status: 'pending' }).eq('id', vr.id);
+        } else {
+          await supabaseAdmin.from('nash_outreach_leads')
+            .update({ smtp_status: 'skipped' }).eq('id', vr.id);
+        }
+      }
+      log('info', `Nash collect: emails found=${emailsFound}, MX validated=${validated}`);
+    }
+
+    log('info', 'Nash collect complete (SMTP + sequences + upload handled by worker poll loop)');
+  } catch (err) {
+    log('error', 'Nash collect failed', err);
+  }
+}
+
+async function nashCollectScheduler(): Promise<void> {
+  while (!shuttingDown) {
+    const waitMs = getNextRunMs(NASH_COLLECT_HOUR_UTC);
+    const nextRun = new Date(Date.now() + waitMs).toISOString();
+    log('info', `Nash collect: next run at ${nextRun} (in ${Math.round(waitMs / 60_000)} min)`);
+    await sleep(waitMs);
+    if (shuttingDown) break;
+    await runNashCollect();
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Portal worker (pid=${process.pid})`);
 
@@ -612,6 +775,9 @@ async function main(): Promise<void> {
 
   // Start periodic sync loop in the background (does not block job processing).
   void periodicSyncLoop();
+
+  // Start Nash Outreach daily collection scheduler (default 04:00 UTC = 07:00 MSK).
+  void nashCollectScheduler();
 
   await pollLoop();
 }

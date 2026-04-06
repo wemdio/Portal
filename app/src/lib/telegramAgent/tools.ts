@@ -108,6 +108,34 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'query_instantly_database',
+      description: 'Выполнить SQL SELECT-запрос к базе Instantly (email-кампании, аналитика, квалификация лидов). Отдельная БД — используй ВМЕСТО query_database для всего что связано с Instantly. Схема Instantly описана в системном промпте.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sql: { type: 'string', description: 'SQL SELECT запрос к Instantly DB' },
+        },
+        required: ['sql'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_campaign_sequences',
+      description: 'Получить цепочку писем (email sequence) кампании Instantly по ID. Возвращает шаги: тема, текст, задержка, A/B варианты. Используй для анализа писем, сравнения кампаний, поиска паттернов.',
+      parameters: {
+        type: 'object',
+        properties: {
+          campaign_id: { type: 'string', description: 'UUID кампании Instantly (обязательно)' },
+        },
+        required: ['campaign_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_pipeline_status',
       description: 'Получить статус пайплайна(ов). Без параметров — показать последние пайплайны текущего пользователя.',
       parameters: {

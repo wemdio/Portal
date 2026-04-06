@@ -167,6 +167,7 @@ async function qualifyOneReply(
   let status: string;
   if (result.needsReview) status = 'needs_review';
   else if (result.isLead) status = 'lead';
+  else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
 
   await db.from('instantly_lead_qualifications').insert({
@@ -189,10 +190,12 @@ async function qualifyOneReply(
     instantly_email_id: reply.id,
     instantly_lead_id: null,
     reply_timestamp: reply.timestamp_email ?? null,
+    objection_handleable: result.objectionHandleable,
+    objection_draft: result.objectionDraft,
   });
 
   workerLog(
     'info',
-    `Classified ${leadEmail} in campaign ${campaignId}: ${status} (confidence: ${result.confidence.toFixed(2)})`,
+    `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})`,
   );
 }

@@ -5,6 +5,30 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 export const dynamic = 'force-dynamic';
 
+export const PATCH = withAuth(async (req, user) => {
+  if (!supabaseInstantly) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
+  const body = await req.json() as { ids?: string[] };
+  const ids = body.ids;
+  if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    return NextResponse.json({ error: 'ids required' }, { status: 400 });
+  }
+
+  const { error } = await supabaseInstantly
+    .from('instantly_lead_qualifications')
+    .update({ read_at: new Date().toISOString(), read_by: user.id })
+    .in('id', ids)
+    .is('read_at', null);
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+});
+
 export const GET = withAuth(async (req) => {
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });

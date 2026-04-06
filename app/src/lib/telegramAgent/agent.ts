@@ -15,7 +15,7 @@ import { logError, logAudit } from '@/lib/loggerServer';
 import { transcribeVoiceMessage } from './voice';
 
 const MAX_TOOL_ITERATIONS = 10;
-const PROCESS_TIMEOUT_MS = 110_000;
+const PROCESS_TIMEOUT_MS = 300_000;
 
 const PROGRESS_MESSAGES: Record<number, string> = {
   3: '🔍 Анализирую данные...',
@@ -145,23 +145,24 @@ async function executeToolCalls(
 }
 
 export async function processMessage(chatId: number, user: AgentUser, text: string): Promise<void> {
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error('PROCESS_TIMEOUT')), PROCESS_TIMEOUT_MS),
-  );
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), PROCESS_TIMEOUT_MS);
 
   try {
-    await Promise.race([runAgentLoop(chatId, user, text), timeout]);
+    await runAgentLoop(chatId, user, text, ac.signal);
   } catch (err) {
-    if (err instanceof Error && err.message === 'PROCESS_TIMEOUT') {
+    if (ac.signal.aborted) {
       await logAudit('telegram-agent.loop', 'outcome=timeout', {});
       await sendMessage(chatId, '⏱ Запрос занял слишком много времени. Попробуйте сформулировать проще или разбить на части.').catch(() => {});
     } else {
       throw err;
     }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function runAgentLoop(chatId: number, user: AgentUser, text: string): Promise<void> {
+async function runAgentLoop(chatId: number, user: AgentUser, text: string, signal: AbortSignal): Promise<void> {
   await sendChatAction(chatId);
 
   const history = getHistory(chatId);
@@ -173,8 +174,12 @@ async function runAgentLoop(chatId: number, user: AgentUser, text: string): Prom
 
   let iterations = 0;
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i += 1) {
+    if (signal.aborted) throw new Error('PROCESS_TIMEOUT');
+
     iterations = i + 1;
     const response = await callLlm(messages, ALL_TOOLS);
+
+    if (signal.aborted) throw new Error('PROCESS_TIMEOUT');
 
     if (response.toolCalls.length > 0) {
       const assistantMsg: ConversationMessage = {
