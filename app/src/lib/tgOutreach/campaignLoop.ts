@@ -289,10 +289,6 @@ export async function handleChat(
     Boolean(tg.auto_allow_new_dialogs),
   );
 
-  if (await isProcessed(db, campaign.id, tgUserId)) {
-    return { replied: false, triggerType: null };
-  }
-
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
@@ -441,7 +437,6 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (await isProcessed(db, campaign.id, tgUserId)) continue;
     if (isBot && tg.ignore_bot_usernames) continue;
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
 
