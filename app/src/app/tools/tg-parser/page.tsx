@@ -140,10 +140,11 @@ export default function TgParserPage() {
       if (!res.ok) return;
       const { items } = (await res.json()) as { items: TgParserJobApiRow[] };
       const rows = items ?? [];
-      setParseJobs(rows.map(tgParserApiRowToUi));
+      const uiRows = rows.map(tgParserApiRowToUi);
+      setParseJobs(uiRows);
       runningAccountKeysRef.current.clear();
-      for (const row of rows) {
-        if (row.status === 'pending' || row.status === 'running') {
+      for (const row of uiRows) {
+        if (row.status === 'running') {
           const key = row.isTarget ? '__target__' : jobAccountKey(row.accountId);
           runningAccountKeysRef.current.add(key);
         }
