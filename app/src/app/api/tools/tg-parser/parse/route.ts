@@ -35,6 +35,7 @@ export async function POST(req: NextRequest) {
         filter_recently?: boolean;
         max_offline_days?: number | null;
         account_id?: string;
+        is_target?: boolean;
       };
       try {
         body = (await req.json()) as typeof body;
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest) {
       const filter_online = Boolean(body?.filter_online);
       const filter_recently = Boolean(body?.filter_recently);
       const max_offline_days = body?.max_offline_days != null ? Number(body.max_offline_days) : null;
+      const is_target = Boolean(body?.is_target);
 
       if (links.length === 0) {
         return jsonError('links must be a non-empty array of Telegram chat/channel links', 400);
@@ -57,7 +59,21 @@ export async function POST(req: NextRequest) {
 
       const accountId = typeof body?.account_id === 'string' ? body.account_id.trim() : '';
 
-      if (accountId) {
+      if (is_target) {
+        const { count, error: cErr } = await supabaseAdmin
+          .from('tg_parser_jobs')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+          .in('status', ['pending', 'running'])
+          .eq('config->>is_target', 'true');
+        if (cErr) return jsonError(cErr.message, 500);
+        if (count && count > 0) {
+          return jsonError(
+            'Уже есть активная задача целевого парсинга. Дождитесь завершения.',
+            409,
+          );
+        }
+      } else if (accountId) {
         const { count, error: cErr } = await supabaseAdmin
           .from('tg_parser_jobs')
           .select('*', { count: 'exact', head: true })
@@ -88,7 +104,9 @@ export async function POST(req: NextRequest) {
       }
 
       let accountLabel = 'Без аккаунта (переменные окружения)';
-      if (accountId) {
+      if (is_target) {
+        accountLabel = 'Секретный аккаунт (целевой парсинг)';
+      } else if (accountId) {
         const { data: accRow } = await supabaseAdmin
           .from('tg_parser_accounts')
           .select('name, phone, api_id, session_data, is_active')
@@ -114,6 +132,7 @@ export async function POST(req: NextRequest) {
         filter_online,
         filter_recently,
         max_offline_days,
+        is_target,
         account_label: accountLabel,
         links_summary: linksSummary,
       };

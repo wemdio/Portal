@@ -77,15 +77,6 @@ function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolea
   return false;
 }
 
-async function isProcessed(db: SupabaseClient, campaignId: string, tgUserId: number): Promise<boolean> {
-  const { count } = await db
-    .from('tg_outreach_processed')
-    .select('id', { count: 'exact', head: true })
-    .eq('campaign_id', campaignId)
-    .eq('tg_user_id', tgUserId);
-  return (count ?? 0) > 0;
-}
-
 async function markProcessed(db: SupabaseClient, campaignId: string, tgUserId: number, tgUsername: string | null) {
   await db.from('tg_outreach_processed').upsert(
     { campaign_id: campaignId, tg_user_id: tgUserId, tg_username: tgUsername },
