@@ -4,7 +4,7 @@ import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
-const _MAX_CONCURRENCY = 5;
+const _MAX_CONCURRENCY = Number(process.env.TG_OUTREACH_MAX_CONCURRENCY ?? '5');
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
@@ -152,6 +152,14 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
 }
 
 async function pollOnce(): Promise<boolean> {
+  if (runningCampaigns.size >= _MAX_CONCURRENCY) {
+    log(
+      'info',
+      `Max concurrent campaigns reached (${runningCampaigns.size}/${_MAX_CONCURRENCY}), waiting for free slot`,
+    );
+    return false;
+  }
+
   const job = await claimJob();
   if (!job) return false;
 

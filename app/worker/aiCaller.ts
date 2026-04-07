@@ -3,6 +3,7 @@ import { runCampaignLoop, resetStuckContacts } from '@/lib/ai-caller/campaignLoo
 
 const WORKER_ID = `ai-caller-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
+const MAX_CONCURRENCY = Number(process.env.AI_CALLER_MAX_CONCURRENCY ?? '3');
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
@@ -96,6 +97,14 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
 }
 
 async function pollOnce(): Promise<boolean> {
+  if (runningCampaigns.size >= MAX_CONCURRENCY) {
+    log(
+      'info',
+      `Max concurrent AI-caller campaigns reached (${runningCampaigns.size}/${MAX_CONCURRENCY}), waiting for free slot`,
+    );
+    return false;
+  }
+
   const job = await claimJob();
   if (!job) return false;
 
