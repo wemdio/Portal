@@ -289,7 +289,23 @@ function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
+  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   const limit = 30;
+
+  const fetchAccounts = useCallback(async () => {
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}/accounts?campaign_id=${campaignId}`, { headers: authHeaders(token) });
+    if (res.ok) {
+      const d = await res.json() as { items: OutreachAccount[] };
+      setAccounts(d.items);
+    }
+  }, [campaignId]);
+
+  const accountNameMap = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of accounts) map.set(a.id, a.session_name);
+    return map;
+  }, [accounts]);
 
   const fetchDialogs = useCallback(async () => {
     setLoading(true);
@@ -308,7 +324,7 @@ function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
     setLoading(false);
   }, [campaignId, offset, filterStatus, filterCanSend, filterAudience]);
 
-  useEffect(() => { queueMicrotask(() => { void fetchDialogs(); }); }, [fetchDialogs]);
+  useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
   const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
     const token = await getToken();
@@ -472,11 +488,16 @@ function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
                       <button type="button" onClick={() => void deleteDialog(d.id)} className="ml-auto p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
                     <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
-                      {d.messages.map((m, i) => (
-                        <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
-                          <span className="font-semibold">{m.role === 'user' ? 'Собеседник' : 'GPT'}:</span> {m.content}
-                        </div>
-                      ))}
+                      {d.messages.map((m, i) => {
+                        const senderName = m.role === 'user'
+                          ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
+                          : accountNameMap.get(d.account_id) ?? 'Бот';
+                        return (
+                          <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
+                            <span className="font-semibold">{senderName}:</span> {m.content}
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="flex gap-2">
                       <input value={sendText} onChange={e => setSendText(e.target.value)} placeholder="Написать сообщение..."
