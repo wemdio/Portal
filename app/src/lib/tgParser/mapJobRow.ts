@@ -60,6 +60,6 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
     error: row.error_message ?? undefined,
     warning,
     startedAt: new Date(row.started_at ?? row.created_at).getTime(),
-    isTarget: (cfg as any).is_target,
+    isTarget: (cfg as Record<string, unknown>).is_target as boolean | undefined,
   };
 }

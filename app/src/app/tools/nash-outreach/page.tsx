@@ -2,8 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ArrowDownToLine,
-  Building2,
   Check,
   ChevronDown,
   ChevronRight,

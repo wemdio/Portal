@@ -394,6 +394,7 @@ export default function TgParserPage() {
     filterOnline,
     filterRecently,
     maxOfflineDays,
+    activeTab,
     loadParseJobs,
   ]);
 
