@@ -39,6 +39,9 @@ services:
       - INSTANTLY_API_KEY=${INSTANTLY_API_KEY}
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-local}
       - TRANSCRIPTION_WORKER_URL=http://transcribe-worker:8070
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     restart: unless-stopped
     networks:
       - portal-network
@@ -66,6 +69,9 @@ services:
       - YANDEXMAPS_SERVICE_URL=http://yandexmaps:8000
       - YANDEXMAPS_PROXY_ENCRYPTION_KEY=${YANDEXMAPS_PROXY_ENCRYPTION_KEY}
       - WORKER_POLL_INTERVAL_MS=3000
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     depends_on:
       - yandexmaps
     restart: unless-stopped

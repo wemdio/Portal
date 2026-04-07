@@ -31,6 +31,7 @@ export type ParseJobUi = {
   error?: string;
   warning?: string;
   startedAt: number;
+  isTarget?: boolean;
 };
 
 /** Совместимо с прежним именем в UI страницы tg-parser */
@@ -59,5 +60,6 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
     error: row.error_message ?? undefined,
     warning,
     startedAt: new Date(row.started_at ?? row.created_at).getTime(),
+    isTarget: (cfg as any).is_target,
   };
 }

@@ -15,6 +15,7 @@ export type TgParserJobConfig = {
   filter_online?: boolean;
   filter_recently?: boolean;
   max_offline_days?: number | null;
+  is_target?: boolean;
   account_label?: string;
   links_summary?: string;
 };
@@ -55,7 +56,26 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   let account: TgParserAccount | undefined;
   let max_contacts: number | null = null;
   const accountId = typeof job.account_id === 'string' ? job.account_id.trim() : '';
-  if (accountId) {
+
+  if (cfg.is_target) {
+    if (!process.env.TG_TARGET_API_ID || !process.env.TG_TARGET_SESSION) {
+      await db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: 'Целевой аккаунт не настроен на сервере',
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId);
+      return;
+    }
+    account = {
+      api_id: Number(process.env.TG_TARGET_API_ID),
+      api_hash: process.env.TG_TARGET_API_HASH || '',
+      session_data: process.env.TG_TARGET_SESSION,
+    };
+    max_contacts = clampTgParserMaxContactsPerRun(50000); // Higher limit for target parsing
+  } else if (accountId) {
     const { data: row } = await db
       .from('tg_parser_accounts')
       .select('api_id, api_hash, session_data, proxy_url, max_contacts_per_run')

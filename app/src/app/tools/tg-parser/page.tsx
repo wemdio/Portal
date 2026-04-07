@@ -88,6 +88,7 @@ export default function TgParserPage() {
   const runningAccountKeysRef = useRef<Set<string>>(new Set());
   const [exportingJobId, setExportingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'main' | 'target'>('main');
 
   // --- Accounts state ---
   const [accounts, setAccounts] = useState<TgAccount[]>([]);
@@ -143,7 +144,8 @@ export default function TgParserPage() {
       runningAccountKeysRef.current.clear();
       for (const row of rows) {
         if (row.status === 'pending' || row.status === 'running') {
-          runningAccountKeysRef.current.add(jobAccountKey(row.account_id ?? ''));
+          const key = row.isTarget ? '__target__' : jobAccountKey(row.accountId);
+          runningAccountKeysRef.current.add(key);
         }
       }
     } catch {
@@ -324,10 +326,13 @@ export default function TgParserPage() {
       return;
     }
 
-    const key = jobAccountKey(accountId);
+    const isTarget = activeTab === 'target';
+    const key = isTarget ? '__target__' : jobAccountKey(accountId);
     if (runningAccountKeysRef.current.has(key)) {
       setError(
-        'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
+        isTarget
+          ? 'Целевой парсинг уже запущен. Дождитесь завершения.'
+          : 'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
       );
       return;
     }
@@ -352,8 +357,9 @@ export default function TgParserPage() {
         filter_online: filterOnline,
         filter_recently: filterRecently,
         max_offline_days: maxOfflineDays ? Number(maxOfflineDays) : null,
+        is_target: isTarget,
       };
-      if (accountId.trim()) body.account_id = accountId.trim();
+      if (!isTarget && accountId.trim()) body.account_id = accountId.trim();
 
       const res = await fetch('/api/tools/tg-parser/parse', {
         method: 'POST',
@@ -408,7 +414,8 @@ export default function TgParserPage() {
       setParseJobs((prev) => {
         const j = prev.find((x) => x.id === id);
         if (j?.status === 'running') {
-          runningAccountKeysRef.current.delete(jobAccountKey(j.accountId));
+          const key = j.isTarget || j.accountLabel === 'Секретный аккаунт (целевой парсинг)' ? '__target__' : jobAccountKey(j.accountId);
+          runningAccountKeysRef.current.delete(key);
         }
         return prev.filter((x) => x.id !== id);
       });
@@ -472,8 +479,33 @@ export default function TgParserPage() {
         </p>
       </div>
 
-      {/* Accounts section */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-6">
+      <div className="flex space-x-2 border-b border-gray-200">
+        <button
+          onClick={() => setActiveTab('main')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'main'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          Обычный парсинг
+        </button>
+        <button
+          onClick={() => setActiveTab('target')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'target'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          Целевой парсинг
+        </button>
+      </div>
+
+      {activeTab === 'main' && (
+      <>
+        {/* Accounts section */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
             <User className="h-4 w-4" aria-hidden />
@@ -765,10 +797,22 @@ export default function TgParserPage() {
             )}
         </div>
       </div>
+      </>
+      )}
 
       {/* Parse form */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 space-y-4">
-        {accounts.length > 0 && (
+        {activeTab === 'target' && (
+          <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+            <h3 className="text-sm font-semibold text-blue-900 mb-1">Секретный аккаунт (целевой парсинг)</h3>
+            <p className="text-sm text-blue-800">
+              Это более углубленный и крутой парсер, который использует специальный аккаунт с повышенными лимитами.
+              Он позволяет обходить стандартные ограничения Telegram и собирать больше уникальных контактов.
+            </p>
+          </div>
+        )}
+
+        {activeTab === 'main' && accounts.length > 0 && (
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="tg-account" className="text-sm text-gray-600 whitespace-nowrap">
               Аккаунт:
