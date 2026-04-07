@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { Info } from 'lucide-react';
 import type { HHSearchConfig } from '@/types';
 import { Play, Loader2 } from 'lucide-react';
 
@@ -160,6 +161,7 @@ export function HHParserForm({ onStart, busy }: Props) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [perPage, setPerPage] = useState('50');
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
 
   const manualConfig: HHSearchConfig = useMemo(() => {
     const salary_from = salaryFrom.trim() ? Number(salaryFrom) : undefined;
@@ -195,18 +197,28 @@ export function HHParserForm({ onStart, busy }: Props) {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">HH.ru парсер</h2>
-          <p className="text-sm text-gray-500 mt-1">Запуск поиска вакансий через официальный API HH.ru</p>
+          <p className="text-sm text-gray-500 mt-1">Запуск поиска вакансий через официальный API HH.ru.</p>
         </div>
-        {mode === 'manual' ? (
+        <div className="flex flex-col items-end gap-2">
+          {mode === 'manual' ? (
+            <button
+              onClick={() => (activeConfig ? onStart(activeConfig) : undefined)}
+              disabled={busy || !canStart}
+              className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
+              Запустить
+            </button>
+          ) : null}
           <button
-            onClick={() => (activeConfig ? onStart(activeConfig) : undefined)}
-            disabled={busy || !canStart}
-            className="inline-flex items-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            type="button"
+            onClick={() => setShowHowItWorks(true)}
+            className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
           >
-            {busy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Play className="h-4 w-4 mr-2" />}
-            Запустить
+            <Info className="h-3.5 w-3.5 mr-1" />
+            <span>Как работает парсер</span>
           </button>
-        ) : null}
+        </div>
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -384,6 +396,52 @@ export function HHParserForm({ onStart, busy }: Props) {
             </div>
           </div>
         </>
+      )}
+
+      {showHowItWorks && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Как работает HH.ru парсер</h3>
+            </div>
+            <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
+              <p>
+                Парсер ходит в <span className="font-semibold">официальный API HH.ru</span> по заданным параметрам поиска
+                и собирает вакансии вместе c данными о компаниях (employers).
+              </p>
+              <p>
+                Есть два режима запуска:
+                <span className="font-semibold"> по ссылке HH</span> (всю конфигурацию берём из URL поиска) или
+                <span className="font-semibold"> ручной ввод</span> (вы задаёте текст, регионы, зарплату и даты).
+              </p>
+              <p>
+                Для каждой вакансии инструмент подтягивает компанию, фильтрует дубликаты и строит результирующую базу:
+                название компании, ссылка на страницу, город, метки из поиска и др.
+              </p>
+              <p>
+                Чтобы получить <span className="font-semibold">релевантную выборку</span>:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                <li>в запросе используйте конкретные роли и стек (например, «SDR b2b sales», а не просто «менеджер»);</li>
+                <li>ограничивайте регионы (area) и период дат — так меньше шума и старых вакансий;</li>
+                <li>не ставьте слишком большой per_page без необходимости — объём лучше добрать несколькими запусками.</li>
+              </ul>
+              <p className="text-xs text-gray-500 pt-1">
+                Если парсер ругается на ссылку — убедитесь, что это страница /search/vacancy на hh.ru и параметры передаются
+                в query-строке.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setShowHowItWorks(false)}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Понятно
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
