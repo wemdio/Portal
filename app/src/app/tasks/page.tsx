@@ -300,6 +300,8 @@ export default function TasksPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'tasks' | 'hypotheses'>('tasks');
   const [view, setView] = useState<'specialists' | 'projects' | 'board'>('specialists');
+  const [specialistSearch, setSpecialistSearch] = useState('');
+  const [projectSearch, setProjectSearch] = useState('');
   // Set initial view: force board on /board page, or read ?view= param on /tasks
   useEffect(() => {
     if (isBoardPage) { setView('board'); return; }
@@ -618,8 +620,13 @@ export default function TasksPage() {
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
     });
-    return Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length);
-  }, [currentTasks]);
+    let result = Array.from(map.entries());
+    if (specialistSearch.trim()) {
+      const q = specialistSearch.toLowerCase();
+      result = result.filter(([name]) => name.toLowerCase().includes(q));
+    }
+    return result.sort((a, b) => b[1].length - a[1].length);
+  }, [currentTasks, specialistSearch]);
 
   const tasksByProject = useMemo(() => {
     const map = new Map<string | null, { projectName: string; tasks: EnrichedTask[] }>();
@@ -628,8 +635,13 @@ export default function TasksPage() {
       if (!map.has(key)) map.set(key, { projectName: t.projectName, tasks: [] });
       map.get(key)!.tasks.push(t);
     });
-    return Array.from(map.values()).filter((e) => e.tasks.length > 0);
-  }, [currentTasks]);
+    let result = Array.from(map.values()).filter((e) => e.tasks.length > 0);
+    if (projectSearch.trim()) {
+      const q = projectSearch.toLowerCase();
+      result = result.filter((e) => e.projectName.toLowerCase().includes(q));
+    }
+    return result;
+  }, [currentTasks, projectSearch]);
 
   const specialistOptions = useMemo(() => {
     if (allProfiles.length > 0) return allProfiles;
@@ -1330,6 +1342,48 @@ export default function TasksPage() {
             >
               по проектам
             </button>
+          </div>
+        )}
+        {view === 'specialists' && !isBoardPage && (
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Поиск по сотруднику..."
+              value={specialistSearch}
+              onChange={(e) => setSpecialistSearch(e.target.value)}
+              className="w-48 rounded-full border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:ring-1 focus:ring-slate-400/20"
+            />
+            {specialistSearch && (
+              <button
+                type="button"
+                onClick={() => setSpecialistSearch('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        )}
+        {view === 'projects' && !isBoardPage && (
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Поиск по проекту..."
+              value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)}
+              className="w-48 rounded-full border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:ring-1 focus:ring-slate-400/20"
+            />
+            {projectSearch && (
+              <button
+                type="button"
+                onClick={() => setProjectSearch('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
           </div>
         )}
       </div>
