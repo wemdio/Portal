@@ -989,10 +989,12 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_sync_and_report()),
+        _run_sync_and_report,
         "interval",
         seconds=effective_interval_sec,
         id="instantly_sync",
+        coalesce=True,
+        max_instances=1,
     )
     scheduler.start()
 

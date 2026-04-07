@@ -503,7 +503,8 @@ async function backfillEmptyDialogs(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     try {
-      const entity = await client.getEntity(tgUserId);
+      const peerLookup = tgUsername ?? tgUserId;
+      const entity = await client.getEntity(peerLookup);
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
       const chatMessages: DialogMessage[] = [];
@@ -809,7 +810,8 @@ export async function refetchEmptyDialogs(
     const tgUsername = dialog.tg_username as string | null;
 
     try {
-      const entity = await client.getEntity(tgUserId);
+      const peerLookup = tgUsername ?? tgUserId;
+      const entity = await client.getEntity(peerLookup);
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
       const chatMessages: DialogMessage[] = [];
