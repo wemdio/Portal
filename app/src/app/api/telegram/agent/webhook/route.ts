@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { handleAgentMessage, handleCallbackQuery } from '@/lib/telegramAgent/agent';
 import { logError } from '@/lib/loggerServer';
@@ -37,7 +37,9 @@ export async function POST(req: NextRequest) {
 
   if (msg?.from?.id && (msg.text || msg.voice)) {
     if (!isDuplicate(msg.chat.id, msg.message_id)) {
-      await handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
+      after(async () => {
+        await handleAgentMessage(msg).catch((err) => logError('telegram-agent.webhook.error', err));
+      });
     }
   }
 
@@ -46,7 +48,9 @@ export async function POST(req: NextRequest) {
     | undefined;
 
   if (cbq) {
-    await handleCallbackQuery(cbq).catch((err) => logError('telegram-agent.callback.webhook.error', err));
+    after(async () => {
+      await handleCallbackQuery(cbq).catch((err) => logError('telegram-agent.callback.webhook.error', err));
+    });
   }
 
   return NextResponse.json({ ok: true });

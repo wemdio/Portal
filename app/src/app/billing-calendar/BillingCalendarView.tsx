@@ -200,6 +200,30 @@ export default function BillingCalendarView() {
     notes: '',
   });
 
+  // Project search state
+  const [projectSearch, setProjectSearch] = useState('');
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
+  const projectDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!projectDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (projectDropdownRef.current && !projectDropdownRef.current.contains(e.target as Node)) {
+        setProjectDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [projectDropdownOpen]);
+
+  const filteredProjects = useMemo(() => {
+    if (!projectSearch.trim()) return projects;
+    const q = projectSearch.toLowerCase();
+    return projects.filter((p) =>
+      `${p.client} — ${p.name}`.toLowerCase().includes(q),
+    );
+  }, [projects, projectSearch]);
+
   // Decision form state
   const [decisionForm, setDecisionForm] = useState({
     decision: '' as 'keep' | 'cancel' | '',
@@ -330,6 +354,8 @@ export default function BillingCalendarView() {
   function openCreateModal(date?: string) {
     setModalMode('create');
     setEditingItem(null);
+    setProjectSearch('');
+    setProjectDropdownOpen(false);
     setForm({
       project_id: '',
       project_name: '',
@@ -347,6 +373,8 @@ export default function BillingCalendarView() {
   function openPayTodayModal() {
     setModalMode('pay_today');
     setEditingItem(null);
+    setProjectSearch('');
+    setProjectDropdownOpen(false);
     setForm({
       project_id: '',
       project_name: '',
@@ -364,6 +392,8 @@ export default function BillingCalendarView() {
   function openEditModal(item: EmailSubscription) {
     setModalMode('edit');
     setEditingItem(item);
+    setProjectSearch('');
+    setProjectDropdownOpen(false);
     setForm({
       project_id: item.project_id || '',
       project_name: item.project_name,
@@ -1022,21 +1052,76 @@ export default function BillingCalendarView() {
                     </div>
                   )}
 
-                  {/* Project Select */}
-                  <div>
+                  {/* Project Select with Search */}
+                  <div ref={projectDropdownRef} className="relative">
                     <label className="block text-sm font-medium text-gray-700 mb-1">Проект</label>
-                    <select
-                      value={form.project_id}
-                      onChange={(e) => handleProjectSelect(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+                    <div
+                      className={`flex items-center w-full border rounded-lg bg-white transition-colors ${
+                        projectDropdownOpen ? 'border-blue-500 ring-2 ring-blue-500' : 'border-gray-200'
+                      }`}
                     >
-                      <option value="">Выберите проект...</option>
-                      {projects.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.client} — {p.name}
-                        </option>
-                      ))}
-                    </select>
+                      <input
+                        type="text"
+                        value={projectDropdownOpen ? projectSearch : form.project_name || ''}
+                        onChange={(e) => {
+                          setProjectSearch(e.target.value);
+                          if (!projectDropdownOpen) setProjectDropdownOpen(true);
+                        }}
+                        onFocus={() => {
+                          setProjectSearch('');
+                          setProjectDropdownOpen(true);
+                        }}
+                        placeholder="Поиск проекта..."
+                        className="flex-1 px-3 py-2 text-sm outline-none bg-transparent rounded-lg"
+                      />
+                      {form.project_id && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setForm((prev) => ({ ...prev, project_id: '', project_name: '' }));
+                            setProjectSearch('');
+                          }}
+                          className="px-2 text-gray-400 hover:text-gray-600"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setProjectDropdownOpen((v) => !v)}
+                        className="px-2 text-gray-400 hover:text-gray-600"
+                      >
+                        <svg className={`w-4 h-4 transition-transform ${projectDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                    </div>
+                    {projectDropdownOpen && (
+                      <div className="absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                        {filteredProjects.length === 0 ? (
+                          <div className="px-3 py-3 text-sm text-gray-400 text-center">Ничего не найдено</div>
+                        ) : (
+                          filteredProjects.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                handleProjectSelect(p.id);
+                                setProjectSearch('');
+                                setProjectDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${
+                                form.project_id === p.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'
+                              }`}
+                            >
+                              {p.client} — {p.name}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Project Name (editable, fallback) */}

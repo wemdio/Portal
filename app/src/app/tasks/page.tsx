@@ -1,7 +1,8 @@
 /* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Search, X, ChevronDown, Trash2 } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import {
   DndContext,
@@ -24,6 +25,7 @@ import { useUser } from '@/lib/UserProvider';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
+const DELETE_DROP_ZONE = '__delete_zone__';
 
 type ProfileOption = {
   id: string;
@@ -95,6 +97,138 @@ type EnrichedTask = Task & {
   isLegacy?: boolean;
 };
 
+function ProjectCombobox({
+  projects,
+  value,
+  onChange,
+}: {
+  projects: Project[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  const selectedName = value
+    ? (projects.find((p) => p.id === value)?.client || projects.find((p) => p.id === value)?.name || 'Без названия')
+    : 'Без проекта';
+
+  const allOptions = useMemo(
+    () => [{ id: '', label: 'Без проекта' }, ...projects.map((p) => ({ id: p.id, label: p.client || p.name || 'Без названия' }))],
+    [projects],
+  );
+
+  const filtered = query
+    ? allOptions.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
+    : allOptions;
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setQuery('');
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    if (open && listRef.current) {
+      const el = listRef.current.children[highlightIdx] as HTMLElement | undefined;
+      el?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightIdx, open]);
+
+  function select(id: string) {
+    onChange(id);
+    setQuery('');
+    setOpen(false);
+    inputRef.current?.blur();
+  }
+
+  function handleKeyDown(e: ReactKeyboardEvent) {
+    if (!open && e.key !== 'Escape') { setOpen(true); return; }
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightIdx((i) => Math.min(i + 1, filtered.length - 1));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightIdx((i) => Math.max(i - 1, 0));
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (filtered[highlightIdx]) select(filtered[highlightIdx].id);
+        break;
+      case 'Escape':
+        setOpen(false);
+        setQuery('');
+        inputRef.current?.blur();
+        break;
+    }
+  }
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+        <input
+          ref={inputRef}
+          type="text"
+          value={open ? query : selectedName}
+          placeholder="Поиск проекта…"
+          onChange={(e) => { setQuery(e.target.value); setHighlightIdx(0); if (!open) setOpen(true); }}
+          onFocus={() => { setOpen(true); setQuery(''); setHighlightIdx(0); }}
+          onKeyDown={handleKeyDown}
+          className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-9 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+        />
+        {!open && (
+          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+        )}
+        {open && query && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { setQuery(''); inputRef.current?.focus(); }}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {open && (
+        <ul
+          ref={listRef}
+          className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+        >
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-slate-400">Ничего не найдено</li>
+          ) : (
+            filtered.map((o, idx) => (
+              <li
+                key={o.id || '__none__'}
+                onMouseDown={() => select(o.id)}
+                onMouseEnter={() => setHighlightIdx(idx)}
+                className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                  idx === highlightIdx ? 'bg-slate-100 text-slate-900' : 'text-slate-700 hover:bg-slate-50'
+                } ${o.id === value ? 'font-medium' : ''}`}
+              >
+                {o.label}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function DroppableColumn({
   columnId,
   children,
@@ -134,6 +268,25 @@ function DraggableColumnHeader({ column, children }: { column: TaskBoardColumn; 
       className={`flex min-w-0 flex-1 items-center gap-1 ${isDragging ? 'opacity-50' : ''} cursor-grab active:cursor-grabbing`}
     >
       {children}
+    </div>
+  );
+}
+
+function DeleteDropZone() {
+  const { setNodeRef, isOver } = useDroppable({ id: DELETE_DROP_ZONE });
+  return (
+    <div
+      ref={setNodeRef}
+      className={`mt-4 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed py-4 transition-all ${
+        isOver
+          ? 'border-red-400 bg-red-50 text-red-600 scale-[1.02]'
+          : 'border-gray-300 bg-gray-50/60 text-gray-400'
+      }`}
+    >
+      <Trash2 className={`h-5 w-5 ${isOver ? 'text-red-500' : 'text-gray-400'}`} />
+      <span className={`text-sm font-medium ${isOver ? 'text-red-600' : 'text-gray-400'}`}>
+        {isOver ? 'Отпустите, чтобы удалить' : 'Перетащите сюда для удаления'}
+      </span>
     </div>
   );
 }
@@ -183,6 +336,7 @@ export default function TasksPage() {
   const [newTaskColumnId, setNewTaskColumnId] = useState<string | null>(null);
   const [showAddTaskModal, setShowAddTaskModal] = useState(false);
   const [newDescription, setNewDescription] = useState('');
+  const [newDeadline, setNewDeadline] = useState('');
   const [newImageUrl, setNewImageUrl] = useState('');
   const [editingDescriptionValue, setEditingDescriptionValue] = useState('');
   const [editingImageUrlValue, setEditingImageUrlValue] = useState('');
@@ -263,6 +417,7 @@ export default function TasksPage() {
           // non-critical — fall back to system default
         }
       }
+
       setBoardPreferenceLoaded(true);
     } catch (error) {
       void logError('tasks.fetch.failed', error);
@@ -582,13 +737,24 @@ export default function TasksPage() {
         return;
       }
 
+      if (over.id === DELETE_DROP_ZONE) {
+        void deleteTask(activeId);
+        return;
+      }
+
       const columnIds = selectedBoardColumns.map((c) => c.id);
       if (columnIds.includes(over.id as string)) {
         void updateTaskColumn(activeId, over.id as string);
       }
     },
-    [selectedBoardId, selectedBoardColumns, updateTaskColumn, reorderColumnsInDb]
+    [selectedBoardId, selectedBoardColumns, updateTaskColumn, reorderColumnsInDb, deleteTask]
   );
+
+  const defaultSpecialists = useMemo(() => {
+    if (!currentUserName) return [];
+    const match = allProfiles.find((p) => p.fullName === currentUserName || p.value === currentUserName);
+    return match ? [match.value] : [];
+  }, [currentUserName, allProfiles]);
 
   function getNewTaskSpecialist(): string {
     return newSpecialists.join(', ').trim();
@@ -607,6 +773,7 @@ export default function TasksPage() {
         status: 'pending',
         description: newDescription.trim() || null,
         image_url: newImageUrl.trim() || null,
+        deadline: newDeadline ? new Date(newDeadline).toISOString() : null,
       };
       if (isBoardTask) {
         payload.board_id = selectedBoardId!;
@@ -622,6 +789,7 @@ export default function TasksPage() {
       setNewProjectId('');
       setNewSpecialists([]);
       setNewDescription('');
+      setNewDeadline('');
       setNewImageUrl('');
       setShowAddForm(false);
       setNewTaskColumnId(null);
@@ -725,6 +893,28 @@ export default function TasksPage() {
     }
   }
 
+  async function handleDeleteColumn(columnId: string) {
+    try {
+      const tasksInColumn = dbTasks.filter((t) => t.column_id === columnId);
+      if (tasksInColumn.length > 0) {
+        await Promise.all(
+          tasksInColumn.map((t) =>
+            supabase.from('tasks').update({ column_id: null }).eq('id', t.id)
+          )
+        );
+        setDbTasks((prev) =>
+          prev.map((t) => (t.column_id === columnId ? { ...t, column_id: null } : t))
+        );
+      }
+      const { error } = await supabase.from('task_board_columns').delete().eq('id', columnId);
+      if (error) throw error;
+      setColumns((prev) => prev.filter((c) => c.id !== columnId));
+      setEditingColumnId(null);
+    } catch (error) {
+      void logError('tasks.column.delete.failed', error);
+    }
+  }
+
   const sortedBoards = useMemo(
     () => [...boards].sort((a, b) => a.position - b.position),
     [boards]
@@ -740,7 +930,7 @@ export default function TasksPage() {
       <div key={task.id} className={`rounded-lg border p-3 transition-colors ${task.status === 'done' ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
-            <p className="text-xs text-gray-500">{task.projectName}</p>
+            <p className="text-xs text-gray-500">{view === 'projects' ? task.specialistName : task.projectName}</p>
             <p className={`break-words text-sm font-medium mt-0.5 ${task.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
               {task.title}
             </p>
@@ -768,24 +958,28 @@ export default function TasksPage() {
         {!task.isLegacy && (
           <div className="flex items-center gap-2 mt-1.5">
             {task.deadline && task.status !== 'done' ? (() => {
-              const today = new Date(); today.setHours(0,0,0,0);
-              const dl = new Date(task.deadline + 'T00:00:00');
-              const diff = Math.floor((dl.getTime() - today.getTime()) / (1000*60*60*24));
-              const fmt = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-              const cls = diff < 0 ? 'text-red-600 bg-red-50' : diff === 0 ? 'text-amber-700 bg-amber-50' : diff <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
-              const suffix = diff < 0 ? ' (просрочено)' : diff === 0 ? ' (сегодня)' : '';
+              const now = new Date();
+              const dl = new Date(task.deadline);
+              const diffMs = dl.getTime() - now.getTime();
+              const diffDays = Math.floor(diffMs / (1000*60*60*24));
+              const dateFmt = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+              const timeFmt = dl.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+              const hasTime = !/^[\d-]+$/.test(task.deadline) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+              const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+              const cls = diffMs < 0 ? 'text-red-600 bg-red-50' : diffDays === 0 ? 'text-amber-700 bg-amber-50' : diffDays <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
+              const suffix = diffMs < 0 ? ' (просрочено)' : diffDays === 0 ? ' (сегодня)' : '';
               return (
                 <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
                   <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                  {fmt}{suffix}
+                  {label}{suffix}
                 </span>
               );
             })() : null}
             <span className="relative inline-flex items-center">
               <input
-                type="date"
-                value={task.deadline ?? ''}
-                onChange={(e) => void updateTaskDeadline(task.id, e.target.value || null)}
+                type="datetime-local"
+                value={task.deadline ? (() => { const d = new Date(task.deadline); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })() : ''}
+                onChange={(e) => void updateTaskDeadline(task.id, e.target.value ? new Date(e.target.value).toISOString() : null)}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 style={{ colorScheme: 'light' }}
               />
@@ -875,7 +1069,12 @@ export default function TasksPage() {
         {userIsLead && view !== 'board' && (
           <button
             type="button"
-            onClick={() => setShowAddForm((v) => !v)}
+            onClick={() => {
+              setShowAddForm((v) => {
+                if (!v) setNewSpecialists(defaultSpecialists);
+                return !v;
+              });
+            }}
             className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
           >
             + Добавить задачу
@@ -889,16 +1088,7 @@ export default function TasksPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
               <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
-              <select
-                value={newProjectId}
-                onChange={(e) => setNewProjectId(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-              >
-                <option value="">Без проекта</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
-                ))}
-              </select>
+              <ProjectCombobox projects={projects} value={newProjectId} onChange={setNewProjectId} />
             </div>
             <div>
               <label className="mb-1.5 block text-xs font-medium text-slate-500">Задача *</label>
@@ -951,16 +1141,27 @@ export default function TasksPage() {
             </div>
           </div>
           <div className="space-y-3">
-            <div>
-              <span className="mb-1.5 block text-xs font-medium text-slate-500">Описание</span>
-              <textarea
-                value={newDescription}
-                onChange={(e) => setNewDescription(e.target.value)}
-                onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
-                placeholder="Текст описания задачи..."
-                rows={2}
-                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-              />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <span className="mb-1.5 block text-xs font-medium text-slate-500">Описание</span>
+                <textarea
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
+                  placeholder="Текст описания задачи..."
+                  rows={2}
+                  className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1.5 block text-xs font-medium text-slate-500">Дедлайн</span>
+                <input
+                  type="datetime-local"
+                  value={newDeadline}
+                  onChange={(e) => setNewDeadline(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
             </div>
             <div>
               <span className="mb-1.5 block text-xs font-medium text-slate-500">Картинка</span>
@@ -1071,7 +1272,7 @@ export default function TasksPage() {
             </button>
             <button
               type="button"
-              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewImageUrl(''); }}
+              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewDeadline(''); setNewImageUrl(''); }}
               className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
             >
               Отмена
@@ -1336,6 +1537,18 @@ export default function TasksPage() {
                             >
                               Отмена
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (window.confirm(`Удалить колонку «${col.title}»? Задачи из неё останутся на доске без колонки.`)) {
+                                  void handleDeleteColumn(col.id);
+                                }
+                              }}
+                              className="ml-auto rounded border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
+                              title="Удалить колонку"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
                           </div>
                         </div>
                       ) : userIsLead ? (
@@ -1360,8 +1573,9 @@ export default function TasksPage() {
                               setNewTaskColumnId(col.id);
                               setNewTitle('');
                               setNewProjectId('');
-                              setNewSpecialists([]);
+                              setNewSpecialists(defaultSpecialists);
                               setNewDescription('');
+                              setNewDeadline('');
                               setNewImageUrl('');
                               setAssigneeFilterModal('');
                               setShowAddTaskModal(true);
@@ -1427,6 +1641,9 @@ export default function TasksPage() {
               </div></div>
             )}
           </div>
+          {activeTaskId && (
+            <DeleteDropZone />
+          )}
           <DragOverlay>
             {activeColumn ? (
               <div className="rounded-xl border-2 border-blue-400 bg-white px-3 py-2 shadow-lg">
@@ -1464,6 +1681,7 @@ export default function TasksPage() {
             setNewProjectId('');
             setNewSpecialists([]);
             setNewDescription('');
+            setNewDeadline('');
             setNewImageUrl('');
             setAssigneeFilterModal('');
           }}
@@ -1490,6 +1708,7 @@ export default function TasksPage() {
                   setNewProjectId('');
                   setNewSpecialists([]);
                   setNewDescription('');
+                  setNewDeadline('');
                   setNewImageUrl('');
                   setAssigneeFilterModal('');
                 }}
@@ -1593,6 +1812,15 @@ export default function TasksPage() {
                   placeholder="Текст описания задачи..."
                   rows={2}
                   className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[11px] font-medium text-slate-500">Дедлайн</span>
+                <input
+                  type="datetime-local"
+                  value={newDeadline}
+                  onChange={(e) => setNewDeadline(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
                 />
               </div>
               <div>
@@ -1714,6 +1942,7 @@ export default function TasksPage() {
                     setNewProjectId('');
                     setNewSpecialists([]);
                     setNewDescription('');
+                    setNewDeadline('');
                     setNewImageUrl('');
                     setAssigneeFilterModal('');
                   }}
@@ -1759,16 +1988,7 @@ export default function TasksPage() {
                   {isModalInEditMode ? (
                     <div>
                       <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
-                      <select
-                        value={editingProjectId}
-                        onChange={(e) => setEditingProjectId(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50/80 py-2.5 pl-3 pr-9 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-                      >
-                        <option value="">Без проекта</option>
-                        {projects.map((p) => (
-                          <option key={p.id} value={p.id}>{p.client || p.name || 'Без названия'}</option>
-                        ))}
-                      </select>
+                      <ProjectCombobox projects={projects} value={editingProjectId} onChange={setEditingProjectId} />
                     </div>
                   ) : (
                     <>

@@ -103,6 +103,13 @@ agent_pipelines(id uuid, user_id, chat_id bigint, name, status, current_step_ind
 payment_requests(id uuid, user_id, department, description, amount numeric, project_id, status, created_at)
 email_subscriptions(id uuid, project_id, project_name, email_provider, email_count int, billing_amount numeric, status, created_at)
 
+-- Email-цепочки (генератор писем)
+email_sequence_runs(id uuid, user_id uuid, status text, brief jsonb, segments jsonb, created_at, updated_at, error_message)
+  -- status: draft|running|completed|failed. brief: описание ЦА/продукта для генерации.
+email_sequence_segments(id uuid, run_id uuid, segment_index int, segment_text, segment_research, pains_and_solutions, tasks_and_solutions, social_proof, cases_lpr, created_at)
+email_sequence_letters(id uuid, run_id uuid, segment_index int, letter_index int, content text, created_at)
+  -- letter_index 1-4: порядок письма в цепочке. content: текст письма.
+
 -- TG Outreach
 tg_outreach_campaigns(id uuid, user_id, name, status, created_at)
 tg_outreach_dialogs(id uuid, campaign_id, account_id, tg_username, status, messages jsonb, last_message_at)
@@ -125,6 +132,17 @@ kb_compiled_brief(id text, brief, token_count int, updated_at)
 -- Регламенты
 reglament_documents(id uuid, slug, title, status text, content jsonb, summary, order_index int, created_at, updated_at, published_at)
 
+INSTANTLY (ОТДЕЛЬНАЯ БД — используй query_instantly_database, НЕ query_database):
+
+instantly_campaign_catalog(id uuid, name, status int, timestamp_created, timestamp_updated, synced_at, emails_sent_count int, open_count int, reply_count int, new_leads_contacted_count int, bounced_count int, unsubscribed_count int, leads_count int, analytics_synced_at)
+instantly_webhook_events(id uuid, event_type, campaign_id, lead_email, thread_id, email_id, payload jsonb, processed bool, created_at)
+instantly_lead_qualifications(id uuid, webhook_event_id uuid, campaign_id, campaign_name, lead_email, lead_name, company_name, thread_id, reply_subject, reply_preview, reply_body, last_outbound_preview, last_outbound_ue_type int, status text, proposal_seen bool, interest_signals text[], ai_reason, ai_confidence real, instantly_email_id, instantly_lead_id, reply_timestamp, created_at, updated_at)
+  -- status: pending|processing|lead|not_lead|needs_review|error
+instantly_lead_imports(id uuid, project_id uuid, campaign_id, campaign_name, lead_list_id, lead_list_name, leads_count int, imported_by uuid, tab_name, created_at)
+user_instantly_campaign_preferences(id uuid, user_id uuid, campaign_id, created_at)
+client_instantly_access(id uuid, client_user_id uuid, resource_type text, resource_id, created_by uuid, leads_synced_at, created_at)
+client_campaign_leads(id uuid, client_user_id uuid, campaign_id, email, first_name, last_name, company_name, website, linkedin_url, synced_at)
+
 TIPS ДЛЯ SQL:
 - Для задач текущего пользователя: WHERE user_id = '${user.userId}'
 - Для последних записей: ORDER BY created_at DESC LIMIT N
@@ -134,6 +152,9 @@ TIPS ДЛЯ SQL:
 - jsonb поля: config->>'text', steps->0->>'type'
 - Для поиска по базе знаний компании используй search_knowledge_base (гибридный поиск: текст + семантика). SQL по kb_* таблицам — для аналитики (количество документов и т.п.).
 - Для регламентов используй search_reglament (текст документов). SQL по reglament_documents — для аналитики (количество, даты).
+- Для Instantly (кампании, аналитика, лиды, квалификация): используй query_instantly_database. Это ОТДЕЛЬНАЯ база. Пример: SELECT name, emails_sent_count, reply_count, open_count FROM instantly_campaign_catalog ORDER BY timestamp_updated DESC LIMIT 10
+- Для текстов email-цепочек Instantly кампаний: используй get_campaign_sequences(campaign_id). Возвращает шаги, темы, тексты писем, A/B варианты. Сначала найди campaign_id через query_instantly_database, затем запроси цепочку. Используй для анализа паттернов, сравнения кампаний.
+- Для email-цепочек: query_database. Письма в email_sequence_letters (content), сегменты в email_sequence_segments. JOIN по run_id. Пример: SELECT l.content, s.segment_text FROM email_sequence_letters l JOIN email_sequence_segments s ON s.run_id = l.run_id AND s.segment_index = l.segment_index WHERE l.run_id = '...' ORDER BY l.segment_index, l.letter_index
 
 MULTI-STEP REASONING (до 10 итераций инструментов за один запрос):
 - Для сложных аналитических задач СНАЧАЛА вызови think, чтобы составить план: какие данные нужны, какие запросы выполнить, в каком порядке.

@@ -1,4 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const FORBIDDEN_KW =
   /\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|execute|call|do|set|reset|listen|notify|prepare|deallocate)\b/i;
@@ -26,15 +28,13 @@ function validateQuery(sql: string): string | null {
   return null;
 }
 
-export async function queryDatabase(sql: string): Promise<string> {
-  if (!supabaseAdmin) return 'Supabase admin not configured.';
-
+async function execReadonly(client: SupabaseClient, sql: string): Promise<string> {
   const trimmed = sql.trim();
   const validationError = validateQuery(trimmed);
   if (validationError) return `Query rejected: ${validationError}`;
 
   try {
-    const { data, error } = await supabaseAdmin.rpc('agent_query_readonly', {
+    const { data, error } = await client.rpc('agent_query_readonly', {
       query_text: trimmed,
     });
 
@@ -52,4 +52,14 @@ export async function queryDatabase(sql: string): Promise<string> {
   } catch (err) {
     return `Error: ${err instanceof Error ? err.message : 'Unknown'}`;
   }
+}
+
+export async function queryDatabase(sql: string): Promise<string> {
+  if (!supabaseAdmin) return 'Supabase admin not configured.';
+  return execReadonly(supabaseAdmin, sql);
+}
+
+export async function queryInstantlyDatabase(sql: string): Promise<string> {
+  if (!supabaseInstantly) return 'Instantly DB not configured.';
+  return execReadonly(supabaseInstantly, sql);
 }

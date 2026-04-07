@@ -40,6 +40,9 @@ switch (kind) {
   case 'tgparser':
     run('./tgParser');
     break;
+  case 'instantlyleads':
+    run('./instantlyLeads');
+    break;
   case 'all':
   default:
     run('./index');
