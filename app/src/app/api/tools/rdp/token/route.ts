@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import crypto from 'crypto';
 import { withToolTrace } from '@/lib/toolTrace';
+import { closeStaleRdpSessions } from '@/lib/rdpSessionInactivity';
 
 const admin = supabaseAdmin!;
 
@@ -37,6 +38,8 @@ export async function POST(req: NextRequest) {
       
         const user = await getUser(req);
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+        await closeStaleRdpSessions(admin);
       
         if (!RDP_WS_SECRET) {
           return NextResponse.json({ error: 'RDP not configured' }, { status: 503 });

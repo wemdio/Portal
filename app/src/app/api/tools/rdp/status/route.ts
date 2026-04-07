@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import { withToolTrace } from '@/lib/toolTrace';
+import { closeStaleRdpSessions } from '@/lib/rdpSessionInactivity';
 
 const admin = supabaseAdmin!;
 
@@ -25,6 +26,8 @@ export async function GET(req: NextRequest) {
       
         const user = await getUser(req);
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+        await closeStaleRdpSessions(admin);
       
         const userRole = await getUserRole(user.id);
       
