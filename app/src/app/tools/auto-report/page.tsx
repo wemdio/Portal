@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
-import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History, RefreshCw, Database } from 'lucide-react';
+import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History, RefreshCw } from 'lucide-react';
 import type * as XLSXTypes from 'xlsx';
 import type ExcelJSTypes from 'exceljs';
 import { supabase } from '@/lib/supabaseClient';
@@ -1459,16 +1459,6 @@ export default function AutoReportPage() {
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${campaignsLoading ? 'animate-spin' : ''}`} />
                 Обновить список
-              </button>
-              <button
-                type="button"
-                onClick={() => void loadCampaigns({ direct: true })}
-                disabled={campaignsLoading}
-                className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:pointer-events-none"
-                title="Загрузить каталог кампаний напрямую из Instantly API (в обход БД)"
-              >
-                <Database className="h-3.5 w-3.5" />
-                Напрямую из Instantly
               </button>
               {campaignsMeta ? (
                 <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-1 text-xs text-gray-600">
