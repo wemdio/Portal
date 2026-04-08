@@ -64,10 +64,11 @@ export async function GET(_req: NextRequest) {
             if (at && bt && at !== bt) return bt.localeCompare(at);
             return (b.name ?? '').localeCompare(a.name ?? '', 'ru');
           });
+          const source = forceInstantly ? 'instantly_direct' : 'instantly_fallback';
           return NextResponse.json({
             campaigns: sorted,
             meta: {
-              source: (forceInstantly ? 'instantly_direct' : 'instantly_fallback') as const,
+              source,
               lastSyncedAt: null,
               stale: false,
               backgroundSync: false,
