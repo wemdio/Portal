@@ -1,12 +1,13 @@
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
+import { commonDictionary, dict, type Locale } from '@/lib/i18n';
 
 const SITE_LABEL = 'Portal';
 
 /** Sections reachable from the shell but not as a single `navItems.href` prefix. */
-const EXTRA_SECTION_PREFIXES: { prefix: string; title: string }[] = [
-  { prefix: '/projects', title: 'Проекты' },
-  { prefix: '/settings', title: 'Настройки' },
-  { prefix: '/reglament-legacy', title: 'Регламент' },
+const EXTRA_SECTION_PREFIXES: { prefix: string; titleRu: string; titleEn: string }[] = [
+  { prefix: '/projects', titleRu: 'Проекты', titleEn: 'Projects' },
+  { prefix: '/settings', titleRu: 'Настройки', titleEn: 'Settings' },
+  { prefix: '/reglament-legacy', titleRu: 'Регламент', titleEn: 'Regulation' },
 ];
 
 function normalizePathnameForNav(pathname: string): string {
@@ -20,25 +21,25 @@ function normalizePathnameForNav(pathname: string): string {
   return pathname;
 }
 
-function getClientPortalSectionTitle(pathname: string): string {
-  if (pathname === '/client' || pathname.startsWith('/client/campaigns')) return 'Кампании';
-  if (pathname.startsWith('/client/bases')) return 'Базы';
-  if (pathname.startsWith('/client/reports')) return 'Отчёты';
+function getClientPortalSectionTitle(pathname: string, locale: Locale): string {
+  if (pathname === '/client' || pathname.startsWith('/client/campaigns')) return locale === 'en' ? 'Campaigns' : 'Кампании';
+  if (pathname.startsWith('/client/bases')) return locale === 'en' ? 'Databases' : 'Базы';
+  if (pathname.startsWith('/client/reports')) return locale === 'en' ? 'Reports' : 'Отчёты';
   return SITE_LABEL;
 }
 
 /**
  * Human-readable section title for the browser tab (aligned with main nav labels).
  */
-export function getPortalPageSectionTitle(pathname: string | null): string {
+export function getPortalPageSectionTitle(pathname: string | null, locale: Locale = 'ru'): string {
   if (!pathname) return SITE_LABEL;
 
   if (pathname.startsWith('/client')) {
-    return getClientPortalSectionTitle(pathname);
+    return getClientPortalSectionTitle(pathname, locale);
   }
-  if (pathname === '/login') return 'Вход';
-  if (pathname === '/maintenance') return 'Обновление портала';
-  if (pathname.startsWith('/review/')) return 'Просмотр базы';
+  if (pathname === '/login') return dict(commonDictionary.login, locale);
+  if (pathname === '/maintenance') return dict(commonDictionary.maintenance, locale);
+  if (pathname.startsWith('/review/')) return dict(commonDictionary.reviewBase, locale);
 
   const norm = normalizePathnameForNav(pathname);
 
@@ -50,7 +51,7 @@ export function getPortalPageSectionTitle(pathname: string | null): string {
       if (norm === '/') {
         if (bestLen < 1) {
           bestLen = 1;
-          bestTitle = item.name;
+          bestTitle = locale === 'en' ? item.nameEn : item.name;
         }
       }
       continue;
@@ -58,16 +59,16 @@ export function getPortalPageSectionTitle(pathname: string | null): string {
     if (norm === item.href || norm.startsWith(`${item.href}/`)) {
       if (item.href.length > bestLen) {
         bestLen = item.href.length;
-        bestTitle = item.name;
+        bestTitle = locale === 'en' ? item.nameEn : item.name;
       }
     }
   }
 
-  for (const { prefix, title } of EXTRA_SECTION_PREFIXES) {
+  for (const { prefix, titleRu, titleEn } of EXTRA_SECTION_PREFIXES) {
     if (norm === prefix || norm.startsWith(`${prefix}/`)) {
       if (prefix.length > bestLen) {
         bestLen = prefix.length;
-        bestTitle = title;
+        bestTitle = locale === 'en' ? titleEn : titleRu;
       }
     }
   }

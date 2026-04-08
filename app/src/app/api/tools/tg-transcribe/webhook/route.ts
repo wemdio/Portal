@@ -1,13 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { withToolTrace } from '@/lib/toolTrace';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   TG_TOKEN,
-  ensureTgApiReady,
   type TgMessage,
   extractVideoInfo,
-  processVideoMessage,
-  saveErrorRecord,
   upsertBotChat,
 } from '@/lib/tgTranscribe';
 
@@ -17,13 +15,10 @@ export async function POST(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.tg-transcribe.webhook.post' },
     async () => {
-      
         if (!TG_TOKEN) {
           return NextResponse.json({ ok: true });
         }
-      
-        await ensureTgApiReady();
-      
+
         let update: Record<string, unknown>;
         try {
           update = await req.json();
@@ -42,13 +37,23 @@ export async function POST(req: NextRequest) {
         if (!videoInfo) {
           return NextResponse.json({ ok: true });
         }
-      
-        try {
-          await processVideoMessage(msg, videoInfo);
-        } catch (err) {
-          await saveErrorRecord(msg, videoInfo, err);
+
+        if (supabaseAdmin) {
+          await supabaseAdmin
+            .from('tg_transcribe_jobs')
+            .upsert(
+              {
+                tg_chat_id: msg.chat.id,
+                tg_message_id: msg.message_id,
+                topic_id: msg.message_thread_id ?? null,
+                status: 'pending',
+                payload: { msg, videoInfo },
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'tg_chat_id,tg_message_id', ignoreDuplicates: true },
+            );
         }
-      
+
         return NextResponse.json({ ok: true });
     },
   );

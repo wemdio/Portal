@@ -92,6 +92,8 @@ if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
     "tg_outreach_jobs"
     "ai_caller_jobs"
     "tg_parser_jobs"
+    "tg_scan_jobs"
+    "tg_transcribe_jobs"
   )
 
   for table in "${tracked_tables[@]}"; do
@@ -240,6 +242,7 @@ containers=(
   "portal-worker-emailvalidation"
   "portal-worker-tg-outreach"
   "portal-worker-aicaller"
+  "portal-worker-tg-transcribe"
 )
 
 echo "[drain] Stopping worker containers (timeout 15s each)..."

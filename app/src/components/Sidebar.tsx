@@ -4,9 +4,11 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
-import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
+import { getRoleLabel, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
+import { commonDictionary, dict } from '@/lib/i18n';
+import { LanguageToggle } from '@/components/LanguageToggle';
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -34,6 +36,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     navTabVisibility,
     visibleTools,
     badges,
+    locale,
     handleAvatarError,
     handleSignOut,
   } = useUser();
@@ -73,14 +76,14 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           isTma ? 'tma-surface border-[color:var(--tma-border)]' : 'border-zinc-100'
         }`}
       >
-        <span className={`text-xs font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>Portal</span>
+        <span className={`text-xs font-bold tracking-tight ${isTma ? 'tma-text' : ''}`}>{dict(commonDictionary.portal, locale)}</span>
         {isTma && (
           <button
             type="button"
             onClick={() => onMobileClose?.()}
             className="md:hidden ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
             style={{ color: 'var(--tma-fg)' }}
-            aria-label="Закрыть меню"
+            aria-label={dict(commonDictionary.closeMenu, locale)}
           >
             ✕
           </button>
@@ -104,7 +107,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
           return (
             <Link
-              key={item.name}
+              key={item.id}
               href={item.href as Route}
               prefetch={false}
               onClick={() => onMobileClose?.()}
@@ -117,7 +120,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
                 }
               `}
             >
-              {item.name}
+              {locale === 'en' ? item.nameEn : item.name}
               {badgeCount > 0 && (
                 <span className="ml-auto inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[9px] font-bold text-white bg-red-500 rounded-full">
                   {badgeCount}
@@ -140,7 +143,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           className={`mb-2 flex items-center gap-2 rounded-lg px-1.5 py-1.5 transition ${
             isTma ? 'hover:bg-[color:var(--tma-surface-2)]' : 'hover:bg-zinc-50'
           }`}
-          aria-label="Открыть профиль"
+          aria-label={dict(commonDictionary.openProfile, locale)}
         >
           {userAvatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -165,20 +168,23 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               className={`text-[11px] font-medium truncate leading-tight ${isTma ? 'tma-text' : 'text-zinc-900'}`}
               title={userFullName || userEmail || ''}
             >
-              {userFullName || userEmail?.split('@')[0] || 'User'}
+              {userFullName || userEmail?.split('@')[0] || dict(commonDictionary.userFallback, locale)}
             </p>
             <p className={`text-[10px] mt-0.5 truncate leading-tight ${isTma ? 'tma-muted' : 'text-zinc-500'}`}>
-              {userRole ? ROLE_LABELS[userRole] : '...'}
+              {userRole ? getRoleLabel(userRole, locale) : dict(commonDictionary.unknownRole, locale)}
             </p>
           </div>
         </Link>
+        <div className="mb-2">
+          <LanguageToggle className="w-full justify-center" />
+        </div>
         {isTma && (
           <div
             className="mb-3 rounded-xl border p-2"
             style={{ borderColor: 'var(--tma-border)', backgroundColor: 'var(--tma-surface-2)' }}
           >
             <p className="px-1 text-[11px] font-semibold uppercase tracking-wide tma-muted">
-              Тема интерфейса
+              {locale === 'en' ? 'Interface theme' : 'Тема интерфейса'}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1">
               <button
@@ -188,7 +194,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
                   tmaTheme === 'dark' ? 'tma-chip-active' : 'tma-chip'
                 }`}
               >
-                Тёмная
+                {locale === 'en' ? 'Dark' : 'Тёмная'}
               </button>
               <button
                 type="button"
@@ -197,7 +203,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
                   tmaTheme === 'light' ? 'tma-chip-active' : 'tma-chip'
                 }`}
               >
-                Светлая
+                {locale === 'en' ? 'Light' : 'Светлая'}
               </button>
             </div>
           </div>
@@ -210,7 +216,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
               : 'text-zinc-500 hover:bg-zinc-50 hover:text-red-600'
           }`}
         >
-          Выйти
+          {dict(commonDictionary.signOut, locale)}
         </button>
       </div>
     </>
@@ -232,12 +238,12 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
           >
             <div className="flex h-full flex-col">
               <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 shrink-0">
-                <span className="text-base font-bold text-zinc-900">Portal</span>
+                <span className="text-base font-bold text-zinc-900">{dict(commonDictionary.portal, locale)}</span>
                 <button
                   type="button"
                   onClick={() => onMobileClose?.()}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100"
-                  aria-label="Закрыть меню"
+                  aria-label={dict(commonDictionary.closeMenu, locale)}
                 >
                   ✕
                 </button>

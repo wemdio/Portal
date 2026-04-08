@@ -79,3 +79,69 @@ export async function DELETE(
     },
   );
 }
+
+export async function PATCH(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  return withToolTrace(
+    { request: req, operation: 'tools.tg-parser.jobs.id.patch' },
+    async () => {
+      const token = getBearerToken(req.headers.get('authorization'));
+      if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const supabase = createAuthedSupabaseClient(token);
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const { id } = await ctx.params;
+      if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
+
+      let body: { action?: string };
+      try {
+        body = (await req.json()) as { action?: string };
+      } catch {
+        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+      }
+
+      if (body.action !== 'stop') {
+        return NextResponse.json({ error: 'Unsupported action' }, { status: 400 });
+      }
+
+      const { data: row } = await supabase
+        .from('tg_parser_jobs')
+        .select('id, status')
+        .eq('id', id)
+        .maybeSingle();
+      if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+      if (row.status !== 'pending' && row.status !== 'running') {
+        return NextResponse.json(
+          { error: 'Можно остановить только задачу в очереди или выполняющуюся' },
+          { status: 409 },
+        );
+      }
+
+      const { data: updated, error } = await supabase
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          error_message: 'Остановлено вручную',
+          stop_reason: 'manual_stop',
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', id)
+        .in('status', ['pending', 'running'])
+        .select('id, status, stop_reason, error_message, completed_at')
+        .maybeSingle();
+
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (!updated) {
+        return NextResponse.json({ error: 'Задача уже завершилась' }, { status: 409 });
+      }
+      return NextResponse.json({ ok: true, job: updated });
+    },
+  );
+}

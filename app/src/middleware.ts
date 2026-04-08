@@ -1,8 +1,10 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from '@/lib/i18n'
 
 const ROLE_COOKIE = 'x-portal-role'
 const ROLE_COOKIE_MAX_AGE = 30 * 60
+const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 function encodeRoleCache(userId: string, role: string): string {
   return `${userId}:${role}`
@@ -141,19 +143,29 @@ export async function middleware(request: NextRequest) {
     }
 
     let userRole: string | null = null
+    let userLocale = DEFAULT_LOCALE
 
     if (session) {
       const raw = request.cookies.get(ROLE_COOKIE)?.value ?? ''
       const cached = raw ? decodeRoleCache(raw, session.user.id) : null
+      const cachedLocale = normalizeLocale(request.cookies.get(LOCALE_COOKIE)?.value)
+      userLocale = cachedLocale
       if (cached) {
         userRole = cached
+        const { data: localeProfile } = await supabase
+          .from('profiles')
+          .select('locale')
+          .eq('id', session.user.id)
+          .single()
+        userLocale = normalizeLocale(localeProfile?.locale)
       } else {
         const { data: profile } = await supabase
           .from('profiles')
-          .select('role')
+          .select('role, locale')
           .eq('id', session.user.id)
           .single()
         userRole = profile?.role ?? null
+        userLocale = normalizeLocale(profile?.locale)
         if (userRole) {
           response.cookies.set({
             name: ROLE_COOKIE,
@@ -165,6 +177,23 @@ export async function middleware(request: NextRequest) {
           })
         }
       }
+      response.cookies.set({
+        name: LOCALE_COOKIE,
+        value: userLocale,
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: LOCALE_COOKIE_MAX_AGE,
+      })
+    } else {
+      response.cookies.set({
+        name: LOCALE_COOKIE,
+        value: DEFAULT_LOCALE,
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: LOCALE_COOKIE_MAX_AGE,
+      })
     }
 
     if (session && pathname === '/login') {

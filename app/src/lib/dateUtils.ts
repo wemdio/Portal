@@ -1,3 +1,5 @@
+import { toIntlLocale, type Locale } from '@/lib/i18n';
+
 const toStartOfDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
 
 export const parseFlexibleDate = (value: string | null | undefined): Date | null => {
@@ -21,9 +23,9 @@ export const parseFlexibleDate = (value: string | null | undefined): Date | null
   return Number.isNaN(fallback.getTime()) ? null : fallback;
 };
 
-export const formatDateLabel = (date: Date | null): string => {
+export const formatDateLabel = (date: Date | null, locale: Locale = 'ru'): string => {
   if (!date) return '-';
-  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' });
+  return date.toLocaleDateString(toIntlLocale(locale), { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
 export const isSameMonth = (date: Date, reference: Date) =>

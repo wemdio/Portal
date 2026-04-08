@@ -292,6 +292,35 @@ services:
     networks:
       - portal-network
 
+  worker-tg-transcribe:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-tg-transcribe
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - TG_TRANSCRIBE_BOT_TOKEN=${TG_TRANSCRIBE_BOT_TOKEN}
+      - TG_LOCAL_API_URL=http://telegram-bot-api:8081
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=tgtranscribe
+    depends_on:
+      - telegram-bot-api
+      - transcribe-worker
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-instantly-leads:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-instantly-leads
