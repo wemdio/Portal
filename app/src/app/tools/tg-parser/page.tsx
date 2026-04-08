@@ -806,9 +806,9 @@ export default function TgParserPage() {
       <div className="rounded-2xl border border-gray-200 bg-white p-6 space-y-4">
         {activeTab === 'target' && (
           <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
-            <h3 className="text-sm font-semibold text-blue-900 mb-1">Секретный аккаунт (целевой парсинг)</h3>
+            <h3 className="text-sm font-semibold text-blue-900 mb-1">Целевой парсинг</h3>
             <p className="text-sm text-blue-800">
-              Это более углубленный и крутой парсер, который использует специальный аккаунт с повышенными лимитами.
+              Это более углубленный парсер, который использует специальный аккаунт.
               Он позволяет обходить стандартные ограничения Telegram и собирать больше уникальных контактов.
             </p>
           </div>
