@@ -7,6 +7,8 @@ import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
 import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
+import { LanguageToggle } from '@/components/LanguageToggle';
+import { commonDictionary, dict } from '@/lib/i18n';
 
 export function TmaHeader() {
   const pathname = usePathname();
@@ -16,6 +18,7 @@ export function TmaHeader() {
     userEmail,
     userFullName,
     userAvatarUrl,
+    locale,
     handleAvatarError,
     handleSignOut,
   } = useUser();
@@ -53,13 +56,14 @@ export function TmaHeader() {
             Portal
           </p>
           <h1 className="tma-text truncate text-lg font-semibold">
-            {activeItem?.name ?? 'Portal'}
+            {activeItem ? (locale === 'en' ? activeItem.nameEn : activeItem.name) : dict(commonDictionary.portal, locale)}
           </h1>
         </div>
+        <LanguageToggle compact />
         <Link
           href={'/profile' as Route}
           className="flex items-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition tma-chip"
-          aria-label="Открыть профиль"
+          aria-label={dict(commonDictionary.openProfile, locale)}
         >
           {userAvatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -77,7 +81,7 @@ export function TmaHeader() {
               {(userName ?? 'U').slice(0, 1).toUpperCase()}
             </span>
           )}
-          <span className="max-w-[10ch] truncate">{userName ?? 'Профиль'}</span>
+          <span className="max-w-[10ch] truncate">{userName ?? (locale === 'en' ? 'Profile' : 'Профиль')}</span>
         </Link>
       </div>
       <div className="px-4 pb-3">
@@ -89,7 +93,7 @@ export function TmaHeader() {
               : pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
               <Link
-                key={item.name}
+                key={item.id}
                 href={item.href as Route}
                 className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition ${
                   isGuide
@@ -97,7 +101,7 @@ export function TmaHeader() {
                     : (isActive ? 'tma-chip-active' : 'tma-chip')
                 }`}
               >
-                {item.name}
+                {locale === 'en' ? item.nameEn : item.name}
               </Link>
             );
           })}
@@ -106,7 +110,7 @@ export function TmaHeader() {
             onClick={onSignOut}
             className="whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition tma-chip-danger"
           >
-            Выйти
+            {dict(commonDictionary.signOut, locale)}
           </button>
         </div>
       </div>

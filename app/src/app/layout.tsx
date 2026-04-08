@@ -1,8 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import { cookies } from "next/headers";
 import "./globals.css";
 import { LayoutShell } from "@/components/LayoutShell";
 import { TelegramWebAppProvider } from "@/components/TelegramWebAppProvider";
+import { LOCALE_COOKIE, normalizeLocale } from "@/lib/i18n";
 
 const inter = Inter({ subsets: ["latin"] });
 const earlyTmaThemeScript = `(function(){try{var root=document.documentElement;var ua=navigator.userAgent||"";var hasTelegramUa=/Telegram/i.test(ua);var hasWebApp=!!(window.Telegram&&window.Telegram.WebApp);var isTmaContext=hasTelegramUa||hasWebApp||root.dataset.tma==="1";if(!isTmaContext){return;}root.classList.add("tma");root.dataset.tma="1";var isMobileViewport=window.matchMedia("(max-width: 900px)").matches;if(!isMobileViewport){root.classList.remove("tma-mobile");return;}root.classList.add("tma-mobile");var saved=localStorage.getItem("tma_theme");var theme=(saved==="light"||saved==="dark")?saved:"dark";root.dataset.tmaTheme=theme;}catch(_err){}})();`;
@@ -23,8 +25,10 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const locale = normalizeLocale(cookies().get(LOCALE_COOKIE)?.value);
+
   return (
-    <html lang="ru" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{
@@ -34,7 +38,7 @@ export default function RootLayout({
       </head>
       <body className={inter.className}>
         <TelegramWebAppProvider />
-        <LayoutShell>{children}</LayoutShell>
+        <LayoutShell initialLocale={locale}>{children}</LayoutShell>
       </body>
     </html>
   );

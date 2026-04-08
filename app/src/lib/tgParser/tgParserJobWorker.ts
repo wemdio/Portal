@@ -69,7 +69,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         error_message: msg,
         completed_at: new Date().toISOString(),
       })
-      .eq('id', jobId);
+      .eq('id', jobId)
+      .eq('status', 'running');
     await trace?.fail(new Error(msg), { stage: 'validate_links' });
     return;
   }
@@ -88,7 +89,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           error_message: msg,
           completed_at: new Date().toISOString(),
         })
-        .eq('id', jobId);
+        .eq('id', jobId)
+        .eq('status', 'running');
       await trace?.fail(new Error(msg), { stage: 'target_account_check' });
       return;
     }
@@ -114,7 +116,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           error_message: msg,
           completed_at: new Date().toISOString(),
         })
-        .eq('id', jobId);
+        .eq('id', jobId)
+        .eq('status', 'running');
       await trace?.fail(new Error(msg), { stage: 'account_check' });
       return;
     }
@@ -150,7 +153,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           error_message: result.error,
           completed_at: new Date().toISOString(),
         })
-        .eq('id', jobId);
+        .eq('id', jobId)
+        .eq('status', 'running');
       await trace?.fail(new Error(result.error), { stage: 'parse', status: 'error' });
       return;
     }
@@ -165,7 +169,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           error_message: result.error ?? null,
           completed_at: new Date().toISOString(),
         })
-        .eq('id', jobId);
+        .eq('id', jobId)
+        .eq('status', 'running');
       await trace?.end({
         stage: 'parse',
         status: 'partial',
@@ -185,7 +190,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         error_message: null,
         completed_at: new Date().toISOString(),
       })
-      .eq('id', jobId);
+      .eq('id', jobId)
+      .eq('status', 'running');
     await trace?.end({
       stage: 'parse',
       status: 'done',
@@ -201,7 +207,8 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         error_message: msg,
         completed_at: new Date().toISOString(),
       })
-      .eq('id', jobId);
+      .eq('id', jobId)
+      .eq('status', 'running');
     await trace?.fail(err, { stage: 'exception' });
   }
 }

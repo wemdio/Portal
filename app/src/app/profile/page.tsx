@@ -7,12 +7,16 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ROLE_LABELS, isClient } from '@/lib/roles';
 import type { UserRole } from '@/types';
+import { useUser } from '@/lib/UserProvider';
+import { LanguageToggle } from '@/components/LanguageToggle';
+import { commonDictionary, dict } from '@/lib/i18n';
 
 type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
   avatar_url: string | null;
+  locale: 'ru' | 'en' | null;
   role: string | null;
 };
 
@@ -86,6 +90,7 @@ async function processAvatarFile(
 
 export default function ProfilePage() {
   const isTma = useIsTma();
+  const { locale } = useUser();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -202,7 +207,7 @@ export default function ProfilePage() {
 
         const { data, error } = await supabase
           .from('profiles')
-          .select('id, email, full_name, avatar_url, role')
+          .select('id, email, full_name, avatar_url, locale, role')
           .eq('id', u.id)
           .single();
 
@@ -363,7 +368,7 @@ export default function ProfilePage() {
           email: nextEmail || null,
         })
         .eq('id', userId)
-        .select('id, email, full_name, avatar_url, role')
+        .select('id, email, full_name, avatar_url, locale, role')
         .single();
 
       if (profileErr) throw profileErr;
@@ -480,7 +485,7 @@ export default function ProfilePage() {
         .from('profiles')
         .update({ avatar_url: publicUrl })
         .eq('id', userId)
-        .select('id, email, full_name, avatar_url, role')
+        .select('id, email, full_name, avatar_url, locale, role')
         .single();
 
       if (profileErr) throw profileErr;
@@ -579,6 +584,12 @@ export default function ProfilePage() {
           <p className="mt-1 text-xs text-gray-500">Имя и email для отображения в портале</p>
         </div>
         <div className="p-5 space-y-4">
+          <div>
+            <label className="mb-2 block text-sm font-medium text-gray-700">
+              {dict(commonDictionary.language, locale)}
+            </label>
+            <LanguageToggle />
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Имя</label>
             <input

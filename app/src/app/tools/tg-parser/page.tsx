@@ -14,6 +14,7 @@ import {
   KeyRound,
   CheckCircle2,
   Upload,
+  Square,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
@@ -88,6 +89,7 @@ export default function TgParserPage() {
   const [parseJobs, setParseJobs] = useState<ParseJob[]>([]);
   const runningAccountKeysRef = useRef<Set<string>>(new Set());
   const [exportingJobId, setExportingJobId] = useState<string | null>(null);
+  const [stoppingJobId, setStoppingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'main' | 'target'>('main');
 
@@ -426,6 +428,36 @@ export default function TgParserPage() {
       });
     },
     [],
+  );
+
+  const stopParseJob = useCallback(
+    async (id: string) => {
+      const token = await getAccessToken();
+      if (!token) return;
+      setStoppingJobId(id);
+      setError(null);
+      try {
+        const res = await fetch(`/api/tools/tg-parser/jobs/${id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ action: 'stop' }),
+        });
+        const data = (await res.json()) as { error?: string };
+        if (!res.ok) {
+          setError(data?.error ?? `Ошибка: ${res.status}`);
+          return;
+        }
+        await loadParseJobs();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Ошибка остановки задачи');
+      } finally {
+        setStoppingJobId(null);
+      }
+    },
+    [loadParseJobs],
   );
 
   const exportJobCsv = useCallback(async (job: ParseJob) => {
@@ -1053,6 +1085,22 @@ export default function TgParserPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {job.status === 'running' && (
+                    <button
+                      type="button"
+                      onClick={() => void stopParseJob(job.id)}
+                      disabled={stoppingJobId === job.id}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      title="Остановить задачу"
+                    >
+                      {stoppingJobId === job.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Square className="h-4 w-4" />
+                      )}
+                      Остановить
+                    </button>
+                  )}
                   {job.status === 'done' && job.users.length > 0 && (
                     <>
                       <button

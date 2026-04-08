@@ -1,5 +1,7 @@
 export type NavItem = {
+  id: string;
   name: string;
+  nameEn: string;
   href: string;
   adminOnly?: boolean;
   billingCalendarOnly?: boolean;
@@ -15,18 +17,18 @@ export const NAV_PATH_ALIASES: Record<string, string[]> = {
 };
 
 export const navItems: NavItem[] = [
-  { name: 'Гайд', href: '/guide' },
-  { name: 'Проекты', href: '/' },
-  { name: 'Аналитика проектов', href: '/analytics/projects' },
-  { name: 'Задачи', href: '/tasks' },
-  { name: 'Доска', href: '/board', navTabId: 'nav-tasks-board' },
-  { name: 'Команда', href: '/team' },
-  { name: 'Финансы', href: '/finance' },
-  { name: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
-  { name: 'Инструменты', href: '/tools' },
-  { name: 'Оплаты', href: '/payments' },
-  { name: 'Календарь почт', href: '/billing-calendar', billingCalendarOnly: true },
-  { name: 'Регламент', href: '/reglament' },
-  { name: 'Админ', href: '/admin', adminOnly: true },
-  { name: 'Профиль', href: '/profile' },
+  { id: 'guide', name: 'Гайд', nameEn: 'Guide', href: '/guide' },
+  { id: 'projects', name: 'Проекты', nameEn: 'Projects', href: '/' },
+  { id: 'projects-analytics', name: 'Аналитика проектов', nameEn: 'Project analytics', href: '/analytics/projects' },
+  { id: 'tasks', name: 'Задачи', nameEn: 'Tasks', href: '/tasks' },
+  { id: 'board', name: 'Доска', nameEn: 'Board', href: '/board', navTabId: 'nav-tasks-board' },
+  { id: 'team', name: 'Команда', nameEn: 'Team', href: '/team' },
+  { id: 'finance', name: 'Финансы', nameEn: 'Finance', href: '/finance' },
+  { id: 'instantly', name: 'Instantly', nameEn: 'Instantly', href: '/instantly', requiresTool: 'instantly' },
+  { id: 'tools', name: 'Инструменты', nameEn: 'Tools', href: '/tools' },
+  { id: 'payments', name: 'Оплаты', nameEn: 'Payments', href: '/payments' },
+  { id: 'billing-calendar', name: 'Календарь почт', nameEn: 'Mailbox calendar', href: '/billing-calendar', billingCalendarOnly: true },
+  { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
+  { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
+  { id: 'profile', name: 'Профиль', nameEn: 'Profile', href: '/profile' },
 ];

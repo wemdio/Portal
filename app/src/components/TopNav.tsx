@@ -5,7 +5,9 @@ import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
-import { ROLE_LABELS, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
+import { getRoleLabel, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
+import { LanguageToggle } from '@/components/LanguageToggle';
+import { commonDictionary, dict } from '@/lib/i18n';
 
 export function TopNav() {
   const pathname = usePathname();
@@ -18,6 +20,7 @@ export function TopNav() {
     navTabVisibility,
     visibleTools,
     badges,
+    locale,
     handleAvatarError,
     handleSignOut,
   } = useUser();
@@ -37,7 +40,7 @@ export function TopNav() {
     <header className="sticky top-0 z-40 w-full shrink-0 border-b border-zinc-200/80 bg-white/90 backdrop-blur-md">
       <div className="flex items-center gap-4 px-4 h-11">
         <Link prefetch={false} href={'/' as Route} className="text-sm font-bold text-zinc-900 tracking-tight flex-shrink-0 mr-2">
-          Portal
+          {dict(commonDictionary.portal, locale)}
         </Link>
 
         <nav className="flex-1 flex items-center gap-0.5 overflow-x-auto scrollbar-none pb-1">
@@ -52,7 +55,7 @@ export function TopNav() {
             const badgeCount = item.badgeId ? (badges[item.badgeId] ?? 0) : 0;
             return (
               <Link
-                key={item.name}
+                key={item.id}
                 href={item.href as Route}
                 prefetch={false}
                 className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-medium transition-all duration-150 ${
@@ -61,7 +64,7 @@ export function TopNav() {
                     : (isActive ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800')
                 }`}
               >
-                {item.name}
+                {locale === 'en' ? item.nameEn : item.name}
                 {badgeCount > 0 && (
                   <span className={`inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 text-[9px] font-bold rounded-full ${
                     isActive ? 'bg-white/20 text-white' : 'bg-red-500 text-white'
@@ -75,6 +78,7 @@ export function TopNav() {
         </nav>
 
         <div className="flex items-center gap-2 flex-shrink-0">
+          <LanguageToggle />
           <Link
             href={'/profile' as Route}
             prefetch={false}
@@ -95,10 +99,10 @@ export function TopNav() {
             )}
             <div className="hidden lg:block min-w-0">
               <p className="text-[11px] font-medium text-zinc-800 truncate leading-tight max-w-[100px]">
-                {userFullName || userEmail?.split('@')[0] || 'User'}
+                {userFullName || userEmail?.split('@')[0] || dict(commonDictionary.userFallback, locale)}
               </p>
               <p className="text-[10px] text-zinc-400 truncate leading-tight">
-                {userRole ? ROLE_LABELS[userRole] : ''}
+                {userRole ? getRoleLabel(userRole, locale) : ''}
               </p>
             </div>
           </Link>
@@ -110,7 +114,8 @@ export function TopNav() {
               router.refresh();
             }}
             className="text-[11px] text-zinc-400 hover:text-red-500 px-2 py-1 rounded-md hover:bg-zinc-50 transition-colors"
-            title="Выйти"
+            title={dict(commonDictionary.signOut, locale)}
+            aria-label={dict(commonDictionary.signOut, locale)}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 14H3.333A1.333 1.333 0 012 12.667V3.333A1.333 1.333 0 013.333 2H6M10.667 11.333L14 8l-3.333-3.333M14 8H6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </button>
