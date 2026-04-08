@@ -109,7 +109,7 @@ def _get_model():
         t0 = time.monotonic()
         _model = WhisperModel(
             WHISPER_MODEL,
-            device="cpu",
+            device=os.getenv("WHISPER_DEVICE", "auto"),
             compute_type=WHISPER_COMPUTE_TYPE,
             cpu_threads=int(os.getenv("CPU_THREADS", "0")) or os.cpu_count() or 4,
         )
