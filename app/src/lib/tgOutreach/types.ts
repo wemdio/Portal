@@ -71,6 +71,7 @@ export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
 export type LogLevel = 'info' | 'warning' | 'error';
 
 export interface OpenAISettings {
+  llm_model?: string;
   system_prompt: string;
   project_name: string;
   trigger_phrases_positive: string;
@@ -191,6 +192,7 @@ export interface OutreachLog {
 }
 
 export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
+  llm_model: 'openai/gpt-5-mini',
   system_prompt: '',
   project_name: '',
   trigger_phrases_positive: '',
