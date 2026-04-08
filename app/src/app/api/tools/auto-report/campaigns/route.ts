@@ -22,6 +22,8 @@ export async function GET(_req: NextRequest) {
   return withToolTrace(
     { request: _req, operation: 'tools.auto-report.campaigns.get' },
     async () => {
+        const sourceParam = _req.nextUrl.searchParams.get('source');
+        const forceInstantly = sourceParam === 'instantly';
 
         const token = getBearerToken(_req.headers.get('authorization'));
         if (!token) return jsonError('Необходима авторизация', 401);
@@ -37,7 +39,7 @@ export async function GET(_req: NextRequest) {
         }
 
         try {
-          if (supabaseAdmin) {
+          if (supabaseAdmin && !forceInstantly) {
             const { campaigns, lastSyncedAt } = await readInstantlyCampaignCatalog();
             const stale = isCatalogStale(lastSyncedAt);
 
@@ -65,7 +67,7 @@ export async function GET(_req: NextRequest) {
           return NextResponse.json({
             campaigns: sorted,
             meta: {
-              source: 'instantly_fallback' as const,
+              source: (forceInstantly ? 'instantly_direct' : 'instantly_fallback') as const,
               lastSyncedAt: null,
               stale: false,
               backgroundSync: false,
