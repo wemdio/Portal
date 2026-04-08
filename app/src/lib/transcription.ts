@@ -22,7 +22,7 @@ const TRANSCRIPTION_PROVIDER: TranscriptionProvider =
 const TRANSCRIPTION_WORKER_URL =
   process.env.TRANSCRIPTION_WORKER_URL || 'http://transcribe-worker:8070';
 
-const LOCAL_TRANSCRIBE_TIMEOUT_MS = 10 * 60 * 1000;
+const LOCAL_TRANSCRIBE_TIMEOUT_MS = 180 * 60 * 1000;
 
 type LocalProgressStage = 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
 

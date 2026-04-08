@@ -84,7 +84,7 @@ services:
       dockerfile: Dockerfile
     container_name: portal-transcribe-worker
     environment:
-      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
       - WHISPER_BEAM_SIZE=${WHISPER_BEAM_SIZE:-1}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
