@@ -123,6 +123,45 @@ async function getClient(account?: TgParserAccount): Promise<TelegramClient> {
   return client;
 }
 
+function normalizeTelegramLink(rawLink: string): string {
+  const trimmed = String(rawLink).trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^t\.me\//i.test(trimmed) || /^telegram\.me\//i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
+}
+
+function getChatIdFromInternalMessageLink(link: string): string | null {
+  const m = link.match(/^https?:\/\/(?:t\.me|telegram\.me)\/c\/(\d+)(?:\/\d+)?(?:\?.*)?$/i);
+  return m?.[1] ?? null;
+}
+
+function extractPublicChatRefFromMessageLink(link: string): string | null {
+  const m = link.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z0-9_]{5,})(?:\/\d+)(?:\?.*)?$/i);
+  return m?.[1] ?? null;
+}
+
+async function resolveEntityByLink(client: TelegramClient, rawLink: string): Promise<Api.TypeEntityLike> {
+  const link = normalizeTelegramLink(rawLink);
+  const internalChatId = getChatIdFromInternalMessageLink(link);
+  if (internalChatId) {
+    const peerId = Number(`-100${internalChatId}`);
+    try {
+      return await client.getEntity(peerId);
+    } catch {
+      // In some sessions GramJS has no local entity cache yet, so warm it up first.
+      await client.getDialogs({ limit: 200 });
+      return await client.getEntity(peerId);
+    }
+  }
+
+  const publicRef = extractPublicChatRefFromMessageLink(link);
+  if (publicRef) return client.getEntity(publicRef);
+  return client.getEntity(link);
+}
+
 async function userToParsed(
   client: TelegramClient,
   user: Api.User,
@@ -192,7 +231,7 @@ async function parseChatMessages(
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
 ): Promise<void> {
-  const entity = await client.getEntity(link);
+  const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
   const usersMap = new Map<number, { user: Api.User; messages: string[] }>();
 
@@ -226,7 +265,7 @@ async function parseChatMembers(
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
 ): Promise<void> {
-  const entity = await client.getEntity(link);
+  const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
   let count = 0;
   try {
@@ -254,7 +293,7 @@ async function parsePostComments(
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
 ): Promise<void> {
-  const entity = await client.getEntity(link);
+  const entity = await resolveEntityByLink(client, link);
   const ch = entity as Api.Channel;
   if (!ch || ch.className !== 'Channel' || !ch.broadcast) return;
   const title = ch.title ?? ch.username ?? String(ch.id);
