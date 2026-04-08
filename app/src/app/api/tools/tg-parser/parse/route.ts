@@ -30,6 +30,7 @@ export async function POST(req: NextRequest) {
         parse_chat_messages?: boolean;
         parse_chat_members?: boolean;
         parse_post_comments?: boolean;
+        enrich_profile?: boolean;
         message_limit?: number;
         filter_online?: boolean;
         filter_recently?: boolean;
@@ -47,6 +48,7 @@ export async function POST(req: NextRequest) {
       const parse_chat_messages = body?.parse_chat_messages ?? true;
       const parse_chat_members = body?.parse_chat_members ?? true;
       const parse_post_comments = body?.parse_post_comments ?? true;
+      const enrich_profile = Boolean(body?.enrich_profile);
       const message_limit = Math.min(5000, Math.max(10, Number(body?.message_limit) || 100));
       const filter_online = Boolean(body?.filter_online);
       const filter_recently = Boolean(body?.filter_recently);
@@ -128,6 +130,7 @@ export async function POST(req: NextRequest) {
         parse_chat_messages,
         parse_chat_members,
         parse_post_comments,
+        enrich_profile,
         message_limit,
         filter_online,
         filter_recently,

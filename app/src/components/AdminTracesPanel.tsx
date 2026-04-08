@@ -568,6 +568,7 @@ const TASK_NAME_RU: Record<string, string> = {
   'email_sequence.generate_chain': 'Генерация цепочки писем',
   'email_sequence.analyze_segment': 'Анализ сегмента',
   'email_sequence.generate_segments': 'Генерация сегментов',
+  'tg-parser.job.run': 'TG Парсер: сбор контактов',
 };
 
 function resolveTaskDisplayName(task: ActiveTask): string {
@@ -609,6 +610,7 @@ function resolveTaskSource(name: string): TaskSource {
   if (name.startsWith('hh.')) return { label: 'Парсер: HeadHunter', badgeClass: 'bg-orange-100 text-orange-700' };
   if (name.startsWith('yandexmaps.')) return { label: 'Парсер: Яндекс.Карты', badgeClass: 'bg-orange-100 text-orange-700' };
   if (name.startsWith('search.')) return { label: 'Парсер: Поисковый', badgeClass: 'bg-orange-100 text-orange-700' };
+  if (name.startsWith('tg-parser.')) return { label: 'Воркер: TG Парсер', badgeClass: 'bg-green-100 text-green-700' };
   if (name === 'database.brief_scoring') return { label: 'Воркер: Скоринг', badgeClass: 'bg-teal-100 text-teal-700' };
   if (name === 'database.email_validation') return { label: 'Воркер: Email-валидация', badgeClass: 'bg-teal-100 text-teal-700' };
   if (name === 'database.email_scraping') return { label: 'Воркер: Email-поиск', badgeClass: 'bg-teal-100 text-teal-700' };

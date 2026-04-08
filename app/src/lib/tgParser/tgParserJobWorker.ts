@@ -2,6 +2,7 @@
  * Фоновое выполнение задач tg_parser_jobs (отдельный Docker worker).
  */
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { startTrace } from '@/lib/tracer';
 import { parseTgUsers } from '@/lib/tgParser/parser';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
 import type { TgParserAccount } from '@/lib/tgParser/types';
@@ -11,6 +12,7 @@ export type TgParserJobConfig = {
   parse_chat_messages?: boolean;
   parse_chat_members?: boolean;
   parse_post_comments?: boolean;
+  enrich_profile?: boolean;
   message_limit?: number;
   filter_online?: boolean;
   filter_recently?: boolean;
@@ -29,7 +31,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
 
   const { data: job, error: loadErr } = await db
     .from('tg_parser_jobs')
-    .select('id, status, config, account_id')
+    .select('id, status, config, account_id, user_id')
     .eq('id', jobId)
     .single();
 
@@ -40,16 +42,35 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   if (job.status !== 'running') return;
 
   const cfg = job.config as TgParserJobConfig;
+  const trace = await startTrace({
+    name: 'tg-parser.job.run',
+    message: cfg.account_label ?? 'TG Parser job',
+    userId: job.user_id ?? null,
+    jobId,
+    input: {
+      job_id: jobId,
+      links_count: Array.isArray(cfg.links) ? cfg.links.length : 0,
+      parse_chat_messages: cfg.parse_chat_messages ?? true,
+      parse_chat_members: cfg.parse_chat_members ?? true,
+      parse_post_comments: cfg.parse_post_comments ?? true,
+      enrich_profile: Boolean(cfg.enrich_profile),
+      message_limit: Math.min(5000, Math.max(10, Number(cfg.message_limit) || 100)),
+      is_target: Boolean(cfg.is_target),
+      account_label: cfg.account_label ?? null,
+    },
+  });
   const links = Array.isArray(cfg.links) ? cfg.links.filter((l): l is string => typeof l === 'string') : [];
   if (links.length === 0) {
+    const msg = 'Пустой список ссылок';
     await db
       .from('tg_parser_jobs')
       .update({
         status: 'error',
-        error_message: 'Пустой список ссылок',
+        error_message: msg,
         completed_at: new Date().toISOString(),
       })
       .eq('id', jobId);
+    await trace?.fail(new Error(msg), { stage: 'validate_links' });
     return;
   }
 
@@ -59,14 +80,16 @@ export async function runTgParserJob(jobId: string): Promise<void> {
 
   if (cfg.is_target) {
     if (!process.env.TG_TARGET_API_ID || !process.env.TG_TARGET_SESSION) {
+      const msg = 'Целевой аккаунт не настроен на сервере';
       await db
         .from('tg_parser_jobs')
         .update({
           status: 'error',
-          error_message: 'Целевой аккаунт не настроен на сервере',
+          error_message: msg,
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId);
+      await trace?.fail(new Error(msg), { stage: 'target_account_check' });
       return;
     }
     account = {
@@ -83,14 +106,16 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       .eq('is_active', true)
       .single();
     if (!row?.session_data) {
+      const msg = 'Аккаунт не найден или неактивен';
       await db
         .from('tg_parser_jobs')
         .update({
           status: 'error',
-          error_message: 'Аккаунт не найден или неактивен',
+          error_message: msg,
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId);
+      await trace?.fail(new Error(msg), { stage: 'account_check' });
       return;
     }
     account = {
@@ -108,6 +133,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       parse_chat_messages: cfg.parse_chat_messages ?? true,
       parse_chat_members: cfg.parse_chat_members ?? true,
       parse_post_comments: cfg.parse_post_comments ?? true,
+      enrich_profile: Boolean(cfg.enrich_profile),
       message_limit: Math.min(5000, Math.max(10, Number(cfg.message_limit) || 100)),
       filter_online: Boolean(cfg.filter_online),
       filter_recently: Boolean(cfg.filter_recently),
@@ -125,6 +151,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId);
+      await trace?.fail(new Error(result.error), { stage: 'parse', status: 'error' });
       return;
     }
 
@@ -139,6 +166,13 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId);
+      await trace?.end({
+        stage: 'parse',
+        status: 'partial',
+        users_count: result.users.length,
+        stop_reason: result.stop_reason,
+        error: result.error ?? null,
+      });
       return;
     }
 
@@ -152,6 +186,11 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         completed_at: new Date().toISOString(),
       })
       .eq('id', jobId);
+    await trace?.end({
+      stage: 'parse',
+      status: 'done',
+      users_count: result.users.length,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[tg-parser-job] run failed', err);
@@ -163,5 +202,6 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         completed_at: new Date().toISOString(),
       })
       .eq('id', jobId);
+    await trace?.fail(err, { stage: 'exception' });
   }
 }

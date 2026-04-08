@@ -168,7 +168,8 @@ async function userToParsed(
   sourceLink: string,
   sourceName: string,
   sourceType: ParseSource,
-  messages: string[]
+  messages: string[],
+  enrichProfile: boolean,
 ): Promise<ParsedUser> {
   const { status, lastSeen } = getOnlineStatus(user.status);
   const firstName = user.firstName || '';
@@ -176,25 +177,27 @@ async function userToParsed(
   const fullName = [firstName, lastName].filter(Boolean).join(' ') || 'Без имени';
   let bio = '';
   let personalChannel = '';
-  try {
-    const inputUser = await client.getInputEntity(user);
-    const result = await client.invoke(
-      new Api.users.GetFullUser({ id: inputUser })
-    ) as { fullUser?: { about?: string; personalChannelId?: bigint } };
-    if (result?.fullUser?.about) bio = result.fullUser.about;
-    const chId = result?.fullUser?.personalChannelId;
-    if (chId) {
-      try {
-        const ch = await client.getEntity(Number(chId));
-        const chUser = ch as Api.User;
-        if (chUser?.username) personalChannel = `https://t.me/${chUser.username}`;
-        else personalChannel = `ID: ${chId}`;
-      } catch {
-        personalChannel = `ID: ${chId}`;
+  if (enrichProfile) {
+    try {
+      const inputUser = await client.getInputEntity(user);
+      const result = await client.invoke(
+        new Api.users.GetFullUser({ id: inputUser })
+      ) as { fullUser?: { about?: string; personalChannelId?: bigint } };
+      if (result?.fullUser?.about) bio = result.fullUser.about;
+      const chId = result?.fullUser?.personalChannelId;
+      if (chId) {
+        try {
+          const ch = await client.getEntity(Number(chId));
+          const chUser = ch as Api.User;
+          if (chUser?.username) personalChannel = `https://t.me/${chUser.username}`;
+          else personalChannel = `ID: ${chId}`;
+        } catch {
+          personalChannel = `ID: ${chId}`;
+        }
       }
+    } catch {
+      // Ignore profile enrichment errors: contact collection should continue.
     }
-  } catch {
-    // ignore full user fetch errors
   }
 
   const displayId = user.username ? `@${user.username}` : String(user.id);
@@ -230,6 +233,7 @@ async function parseChatMessages(
   link: string,
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
+  enrichProfile: boolean,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
@@ -253,7 +257,7 @@ async function parseChatMessages(
   for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
-    const parsed = await userToParsed(client, user, link, title, 'chat_messages', messages);
+    const parsed = await userToParsed(client, user, link, title, 'chat_messages', messages, enrichProfile);
     if (!(await mergeUser(parsed))) return;
     await new Promise((r) => setTimeout(r, 100)); // rate limit
   }
@@ -264,6 +268,7 @@ async function parseChatMembers(
   link: string,
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
+  enrichProfile: boolean,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const title = (entity as Api.Channel).title ?? (entity as Api.User).username ?? String((entity as Api.User).id);
@@ -274,7 +279,7 @@ async function parseChatMembers(
       if (!u || u.className !== 'User' || u.bot) continue;
       const { status, lastSeen } = getOnlineStatus(u.status);
       if (!filterByOnline(status, lastSeen, opts)) continue;
-      const parsed = await userToParsed(client, u, link, title, 'chat_members', []);
+      const parsed = await userToParsed(client, u, link, title, 'chat_members', [], enrichProfile);
       if (!(await mergeUser(parsed))) return;
       count++;
       if (count % 50 === 0) await new Promise((r) => setTimeout(r, 100));
@@ -292,6 +297,7 @@ async function parsePostComments(
   link: string,
   opts: ParseOptions,
   mergeUser: (u: ParsedUser) => Promise<boolean>,
+  enrichProfile: boolean,
 ): Promise<void> {
   const entity = await resolveEntityByLink(client, link);
   const ch = entity as Api.Channel;
@@ -322,7 +328,7 @@ async function parsePostComments(
   for (const [, { user, messages }] of usersMap) {
     const { status, lastSeen } = getOnlineStatus(user.status);
     if (!filterByOnline(status, lastSeen, opts)) continue;
-    const parsed = await userToParsed(client, user, link, title, 'post_comments', messages);
+    const parsed = await userToParsed(client, user, link, title, 'post_comments', messages, enrichProfile);
     if (!(await mergeUser(parsed))) return;
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -357,6 +363,8 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
   }
 
   const client = await getClient(opts.account);
+  const enrichProfile =
+    opts.enrich_profile ?? String(process.env.TG_PARSER_ENRICH_PROFILE ?? '').trim().toLowerCase() === 'true';
   const allUsers = new Map<number, ParsedUser>();
   const stopRef: { reason: ParseStopReason | null } = { reason: null };
   const mergeUser = buildMergeUser(opts, allUsers, stopRef);
@@ -368,15 +376,15 @@ export async function parseTgUsers(opts: ParseOptions): Promise<ParseResult> {
       if (!trimmed) continue;
 
       if (opts.parse_chat_messages) {
-        await parseChatMessages(client, trimmed, opts, mergeUser);
+        await parseChatMessages(client, trimmed, opts, mergeUser, enrichProfile);
         if (stopRef.reason) break;
       }
       if (opts.parse_chat_members) {
-        await parseChatMembers(client, trimmed, opts, mergeUser);
+        await parseChatMembers(client, trimmed, opts, mergeUser, enrichProfile);
         if (stopRef.reason) break;
       }
       if (opts.parse_post_comments) {
-        await parsePostComments(client, trimmed, opts, mergeUser);
+        await parsePostComments(client, trimmed, opts, mergeUser, enrichProfile);
         if (stopRef.reason) break;
       }
     }

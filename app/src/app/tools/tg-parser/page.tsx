@@ -79,6 +79,7 @@ export default function TgParserPage() {
   const [parseMessages, setParseMessages] = useState(true);
   const [parseMembers, setParseMembers] = useState(true);
   const [parseComments, setParseComments] = useState(true);
+  const [enrichProfile, setEnrichProfile] = useState(false);
   const [messageLimit, setMessageLimit] = useState(100);
   const [filterOnline, setFilterOnline] = useState(false);
   const [filterRecently, setFilterRecently] = useState(false);
@@ -354,6 +355,7 @@ export default function TgParserPage() {
         parse_chat_messages: parseMessages,
         parse_chat_members: parseMembers,
         parse_post_comments: parseComments,
+        enrich_profile: enrichProfile,
         message_limit: messageLimit,
         filter_online: filterOnline,
         filter_recently: filterRecently,
@@ -391,6 +393,7 @@ export default function TgParserPage() {
     parseMessages,
     parseMembers,
     parseComments,
+    enrichProfile,
     messageLimit,
     filterOnline,
     filterRecently,
@@ -896,6 +899,24 @@ export default function TgParserPage() {
           </div>
           <p className="text-xs text-gray-500 mt-1">
             Сообщения — собирает авторов сообщений из чатов. Участники — список членов группы/канала. Комментарии — авторы комментариев под постами каналов.
+          </p>
+        </div>
+
+        <div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="enrich-profile"
+              checked={enrichProfile}
+              onChange={(e) => setEnrichProfile(e.target.checked)}
+            />
+            <label htmlFor="enrich-profile" className="text-sm text-gray-700">
+              Собирать расширенный профиль (медленно)
+            </label>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            С галочкой: дополнительно собирает «Биография» и «Личный канал» (медленнее, чаще лимиты Telegram).
+            {' '}Без галочки: собирает ID/username, имя, онлайн-статус, сообщения, тип/ссылку/название источника — быстрее и стабильнее.
           </p>
         </div>
 
