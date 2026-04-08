@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
+  ArrowRight,
   Check,
   ChevronDown,
   ChevronRight,
+  Clock,
   ExternalLink,
   Flame,
   Loader2,
@@ -13,7 +16,9 @@ import {
   MapPin,
   RefreshCw,
   Send,
+  ShieldCheck,
   Thermometer,
+  XCircle,
   Zap,
 } from 'lucide-react';
 import type { NashLead } from '@/lib/nashOutreach/types';
@@ -116,6 +121,30 @@ export default function NashOutreachPage() {
     return { total, redHot, hot, warm, withEmails, withSequence, inInstantly, fromHH };
   }, [leads]);
 
+  const pipeline = useMemo(() => {
+    const noEmail = leads.filter((l) => !l.emails_found?.length && !l.emails_validated?.length).length;
+    const pendingSmtp = leads.filter((l) => l.smtp_status === 'pending').length;
+    const smtpValid = leads.filter((l) => l.smtp_status === 'valid' || l.smtp_status === 'catch_all').length;
+    const smtpFailed = leads.filter((l) => l.smtp_status === 'invalid' || l.smtp_status === 'unknown').length;
+    const skipped = leads.filter((l) => l.smtp_status === 'skipped').length;
+    const withSequence = leads.filter((l) => l.email_sequence && l.email_sequence.length >= 3 && !l.instantly_uploaded).length;
+    const inInstantly = leads.filter((l) => l.instantly_uploaded).length;
+
+    const lastProcessed = leads
+      .filter((l) => l.smtp_status !== 'pending' && l.smtp_status !== 'skipped')
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+
+    let workerStatus: 'active' | 'waiting' | 'idle' = 'idle';
+    if (pendingSmtp > 0 && lastProcessed) {
+      const diffMin = (Date.now() - new Date(lastProcessed.created_at).getTime()) / 60_000;
+      workerStatus = diffMin < 30 ? 'active' : 'waiting';
+    } else if (pendingSmtp > 0) {
+      workerStatus = 'waiting';
+    }
+
+    return { noEmail, pendingSmtp, smtpValid, smtpFailed, skipped, withSequence, inInstantly, workerStatus };
+  }, [leads]);
+
   const signalTypes = useMemo(() => {
     const set = new Set(leads.map((l) => l.signal_type));
     return Array.from(set).sort();
@@ -152,6 +181,8 @@ export default function NashOutreachPage() {
         <StatCard label="В Instantly" value={stats.inInstantly} color="bg-green-50 text-green-700" />
         <StatCard label="Из HH.ru" value={stats.fromHH} color="bg-cyan-50 text-cyan-700" />
       </div>
+
+      {leads.length > 0 && <PipelineTracker pipeline={pipeline} total={leads.length} />}
 
       {collectError && (
         <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
@@ -251,7 +282,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
   );
 }
 
-/** Badge showing the current pipeline stage of a lead (email found → sequence → Instantly). */
+/** Badge showing the current pipeline stage of a lead. */
 function PipelineStatus({ lead }: { lead: NashLead }) {
   if (lead.instantly_uploaded) {
     return (
@@ -260,10 +291,31 @@ function PipelineStatus({ lead }: { lead: NashLead }) {
       </span>
     );
   }
-  if (lead.email_sequence?.length) {
+  if (lead.email_sequence && lead.email_sequence.length >= 3) {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700">
         <Mail className="h-3 w-3" /> Цепочка готова
+      </span>
+    );
+  }
+  if (lead.smtp_status === 'valid' || lead.smtp_status === 'catch_all') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+        <ShieldCheck className="h-3 w-3" /> SMTP ок
+      </span>
+    );
+  }
+  if (lead.smtp_status === 'pending' && lead.emails_validated?.length > 0) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+        <Clock className="h-3 w-3" /> Ждёт SMTP
+      </span>
+    );
+  }
+  if (lead.smtp_status === 'invalid' || lead.smtp_status === 'unknown') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-600">
+        <XCircle className="h-3 w-3" /> SMTP не прошёл
       </span>
     );
   }
@@ -278,6 +330,71 @@ function PipelineStatus({ lead }: { lead: NashLead }) {
     <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
       Нет email
     </span>
+  );
+}
+
+/** Visual pipeline progress tracker showing lead counts at each stage. */
+function PipelineTracker({ pipeline, total }: {
+  pipeline: {
+    noEmail: number; pendingSmtp: number; smtpValid: number; smtpFailed: number;
+    skipped: number; withSequence: number; inInstantly: number; workerStatus: 'active' | 'waiting' | 'idle';
+  };
+  total: number;
+}) {
+  const steps = [
+    { label: 'Нет email', count: pipeline.noEmail, color: 'bg-gray-200', text: 'text-gray-600' },
+    { label: 'Ждёт SMTP', count: pipeline.pendingSmtp, color: 'bg-amber-200', text: 'text-amber-700' },
+    { label: 'SMTP ок', count: pipeline.smtpValid, color: 'bg-emerald-200', text: 'text-emerald-700' },
+    { label: 'Цепочка', count: pipeline.withSequence, color: 'bg-violet-200', text: 'text-violet-700' },
+    { label: 'В Instantly', count: pipeline.inInstantly, color: 'bg-green-300', text: 'text-green-800' },
+  ];
+
+  const workerLabels: Record<string, { label: string; color: string; dot: string }> = {
+    active:  { label: 'Worker обрабатывает', color: 'text-green-700', dot: 'bg-green-500 animate-pulse' },
+    waiting: { label: 'Worker не отвечает', color: 'text-amber-700', dot: 'bg-amber-500' },
+    idle:    { label: 'Нечего обрабатывать', color: 'text-gray-500', dot: 'bg-gray-400' },
+  };
+  const ws = workerLabels[pipeline.workerStatus];
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-700">Статус пайплайна</h3>
+        <div className={`flex items-center gap-1.5 text-xs font-medium ${ws.color}`}>
+          <span className={`h-2 w-2 rounded-full ${ws.dot}`} />
+          {ws.label}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1">
+        {steps.map((step, i) => (
+          <div key={step.label} className="flex items-center gap-1" style={{ flex: Math.max(step.count, 0.5) }}>
+            <div className={`rounded-lg px-2 py-1.5 ${step.color} w-full text-center`}>
+              <div className={`text-lg font-bold ${step.text}`}>{step.count}</div>
+              <div className={`text-[10px] font-medium ${step.text} opacity-70 leading-tight`}>{step.label}</div>
+            </div>
+            {i < steps.length - 1 && (
+              <ArrowRight className="h-3.5 w-3.5 text-gray-300 flex-shrink-0" />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {(pipeline.smtpFailed > 0 || pipeline.skipped > 0) && (
+        <div className="flex items-center gap-3 text-xs text-gray-500">
+          {pipeline.smtpFailed > 0 && (
+            <span className="inline-flex items-center gap-1 text-red-500">
+              <XCircle className="h-3 w-3" /> SMTP не прошёл: {pipeline.smtpFailed}
+            </span>
+          )}
+          {pipeline.skipped > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3" /> Пропущено (нет email): {pipeline.skipped}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
