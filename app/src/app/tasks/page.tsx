@@ -1078,7 +1078,7 @@ export default function TasksPage() {
             </p>
           )}
         </div>
-        {userIsLead && view !== 'board' && (
+        {view !== 'board' && (
           <button
             type="button"
             onClick={() => {
@@ -1094,7 +1094,7 @@ export default function TasksPage() {
         )}
       </div>
 
-      {showAddForm && userIsLead && (
+      {showAddForm && (
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/30 space-y-4">
           <h3 className="text-base font-semibold text-slate-800">Новая задача</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1605,21 +1605,25 @@ export default function TasksPage() {
                             </button>
                           </div>
                         </div>
-                      ) : userIsLead ? (
+                      ) : (
                         <DraggableColumnHeader column={col}>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditingColumnId(col.id);
-                              setEditingColumnTitle(col.title);
-                              setEditingColumnStatus((col.status as string) || '');
-                            }}
-                            className="min-w-0 flex-1 text-left text-sm font-semibold text-gray-900 truncate hover:text-blue-600"
-                            title="Изменить колонку"
-                          >
-                            {col.title}
-                          </button>
+                          {userIsLead ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingColumnId(col.id);
+                                setEditingColumnTitle(col.title);
+                                setEditingColumnStatus((col.status as string) || '');
+                              }}
+                              className="min-w-0 flex-1 text-left text-sm font-semibold text-gray-900 truncate hover:text-blue-600"
+                              title="Изменить колонку"
+                            >
+                              {col.title}
+                            </button>
+                          ) : (
+                            <h3 className="min-w-0 flex-1 text-sm font-semibold text-gray-900 truncate">{col.title}</h3>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1639,8 +1643,6 @@ export default function TasksPage() {
                             + Задача
                           </button>
                         </DraggableColumnHeader>
-                      ) : (
-                        <h3 className="min-w-0 flex-1 text-sm font-semibold text-gray-900 truncate">{col.title}</h3>
                       )}
                     </div>
                     <div className="flex flex-1 flex-col gap-2 overflow-y-auto">
@@ -2200,7 +2202,7 @@ export default function TasksPage() {
                 )}
               </div>
 
-              {userIsLead && (
+              <div>
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100">
                   <div className="flex flex-wrap items-center gap-2">
                     {isModalInEditMode ? (
@@ -2276,7 +2278,7 @@ export default function TasksPage() {
                     </button>
                   )}
                 </div>
-              )}
+              </div>
             </div>
           </div>
         </div>

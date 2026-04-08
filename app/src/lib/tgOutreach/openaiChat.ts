@@ -1,6 +1,6 @@
 import type { OpenAISettings, DialogMessage } from './types';
 
-const OPENROUTER_MODEL = 'openai/gpt-4o-mini';
+const DEFAULT_MODEL = 'openai/gpt-4o-mini';
 
 interface OpenAIChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -34,8 +34,10 @@ export async function openaiGenerate(
     messages.push({ role: msg.role, content: msg.content });
   }
 
+  const model = settings.llm_model || DEFAULT_MODEL;
+
   const body = {
-    model: OPENROUTER_MODEL,
+    model,
     messages,
     max_tokens: 1024,
   };

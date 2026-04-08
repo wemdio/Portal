@@ -114,6 +114,19 @@ function SettingsTab({ campaign, onSave }: {
         <h3 className="text-sm font-semibold text-gray-800">OpenRouter</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-gray-700">Модель</label>
+            <select
+              value={openai.llm_model || 'openai/gpt-5-mini'}
+              onChange={e => setOAI('llm_model', e.target.value)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value="openai/gpt-5-mini">openai/gpt-5-mini</option>
+              <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+              <option value="google/gemini-3-flash-preview">google/gemini-3-flash-preview</option>
+              <option value="vertex/gemini-3-flash-preview">vertex/gemini-3-flash-preview</option>
+            </select>
+          </div>
         </div>
         <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -227,6 +240,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   const [loading, setLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const isAutoScroll = useRef(true);
 
   const fetchLogs = useCallback(async () => {
     const token = await getToken();
@@ -245,8 +259,17 @@ function LogsTab({ campaignId }: { campaignId: string }) {
     return () => clearInterval(interval);
   }, [fetchLogs]);
 
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    // Если мы в пределах 50px от низа, включаем автоскролл
+    isAutoScroll.current = scrollHeight - scrollTop - clientHeight < 50;
+  }, []);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (isAutoScroll.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [logs]);
 
   const levelColor = (l: string) => {
@@ -258,7 +281,11 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   };
 
   return (
-    <div ref={containerRef} className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto">
+    <div 
+      ref={containerRef} 
+      onScroll={handleScroll}
+      className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[500px] overflow-auto"
+    >
       {loading && <p className="text-gray-500">Загрузка логов...</p>}
       {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию.</p>}
       {logs.map(log => (
