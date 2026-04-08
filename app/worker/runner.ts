@@ -46,6 +46,9 @@ switch (kind) {
   case 'instantlyleads':
     run('./instantlyLeads');
     break;
+  case 'outreach':
+    run('./outreach');
+    break;
   case 'all':
   default:
     run('./index');
