@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
         if (supabaseAdmin) {
           await supabaseAdmin
             .from('tg_transcribe_jobs')
-            .insert(
+            .upsert(
               {
                 tg_chat_id: msg.chat.id,
                 tg_message_id: msg.message_id,
