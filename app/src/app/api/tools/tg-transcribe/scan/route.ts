@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runTgScanJob, markStaleJobs } from '@/lib/tgScanWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -76,9 +75,6 @@ export async function POST(req: NextRequest) {
           return jsonError(error?.message || 'Не удалось создать задачу', 500);
         }
 
-        // Fire-and-forget
-        runTgScanJob(job.id).catch((err) => console.error('[tg-scan] Worker error:', err));
-
         return NextResponse.json({ job });
     },
   );
@@ -94,9 +90,6 @@ export async function GET(req: NextRequest) {
     async () => {
         const user = await getUser(req);
         if (!user) return jsonError('Необходима авторизация', 401);
-
-        // Clean up stale jobs (throttled internally, won't hit DB on every poll)
-        void markStaleJobs();
 
         // Return any active job first
         const { data: active } = await admin

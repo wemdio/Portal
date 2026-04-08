@@ -6,6 +6,7 @@ import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
+import { DEFAULT_LOCALE, type Locale, normalizeLocale } from '@/lib/i18n';
 
 interface UserContextValue {
   userId: string | null;
@@ -16,8 +17,11 @@ interface UserContextValue {
   navTabVisibility: Record<string, boolean>;
   visibleTools: string[] | null;
   badges: Record<string, number>;
+  locale: Locale;
+  localeSaving: boolean;
   handleAvatarError: () => void;
   handleSignOut: () => Promise<void>;
+  setLocale: (nextLocale: Locale) => Promise<void>;
 }
 
 const UserContext = createContext<UserContextValue | null>(null);
@@ -28,7 +32,13 @@ export function useUser(): UserContextValue {
   return ctx;
 }
 
-export function UserProvider({ children }: { children: ReactNode }) {
+export function UserProvider({
+  children,
+  initialLocale = DEFAULT_LOCALE,
+}: {
+  children: ReactNode;
+  initialLocale?: Locale;
+}) {
   const [userId, setUserId] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -38,6 +48,8 @@ export function UserProvider({ children }: { children: ReactNode }) {
   const [navTabVisibility, setNavTabVisibility] = useState<Record<string, boolean>>({});
   const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
   const [badges, setBadges] = useState<Record<string, number>>({});
+  const [locale, setLocaleState] = useState<Locale>(normalizeLocale(initialLocale));
+  const [localeSaving, setLocaleSaving] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -53,6 +65,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         setNavTabVisibility({});
         setVisibleTools(null);
         setBadges({});
+        setLocaleState(normalizeLocale(initialLocale));
         return;
       }
 
@@ -63,13 +76,14 @@ export function UserProvider({ children }: { children: ReactNode }) {
         const [profile, navRows] = await Promise.all([
           supabase
             .from('profiles')
-            .select('role, full_name, avatar_url')
+            .select('role, full_name, avatar_url, locale')
             .eq('id', session.user.id)
             .single()
             .then(({ data }) => ({
               role: (data?.role as UserRole | null) ?? null,
               full_name: typeof data?.full_name === 'string' ? data.full_name : null,
               avatar_url: typeof data?.avatar_url === 'string' ? data.avatar_url : null,
+              locale: normalizeLocale(data?.locale),
             })),
           supabase
             .from('user_tool_visibility')
@@ -83,6 +97,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         setUserRole(profile.role);
         setUserFullName(profile.full_name);
         setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
+        setLocaleState(profile.locale);
 
         const vis: Record<string, boolean> = {};
         for (const id of ALL_NAV_TAB_IDS) {
@@ -101,6 +116,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
         setNavTabVisibility({});
         setVisibleTools(null);
         setBadges({});
+        setLocaleState(normalizeLocale(initialLocale));
       }
     };
 
@@ -112,7 +128,11 @@ export function UserProvider({ children }: { children: ReactNode }) {
       isMounted = false;
       subscription?.unsubscribe();
     };
-  }, []);
+  }, [initialLocale]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   useEffect(() => {
     if (!userEmail) return;
@@ -175,6 +195,29 @@ export function UserProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signOut();
   }, []);
 
+  const setLocale = useCallback(async (nextLocale: Locale) => {
+    const normalized = normalizeLocale(nextLocale);
+    setLocaleState(normalized);
+    setLocaleSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      await fetch('/api/user/locale', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ locale: normalized }),
+      });
+    } catch (error) {
+      console.error('[UserProvider] Failed to persist locale:', error);
+    } finally {
+      setLocaleSaving(false);
+    }
+  }, []);
+
   const value = useMemo<UserContextValue>(() => ({
     userId,
     userRole,
@@ -184,9 +227,12 @@ export function UserProvider({ children }: { children: ReactNode }) {
     navTabVisibility,
     visibleTools,
     badges,
+    locale,
+    localeSaving,
     handleAvatarError,
     handleSignOut,
-  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, handleAvatarError, handleSignOut]);
+    setLocale,
+  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, locale, localeSaving, handleAvatarError, handleSignOut, setLocale]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

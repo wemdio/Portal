@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
@@ -8,6 +8,7 @@ import { Nunito } from 'next/font/google';
 import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
+import { commonDictionary, dict, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const nunito = Nunito({
   subsets: ['latin', 'cyrillic'],
@@ -15,21 +16,56 @@ const nunito = Nunito({
 });
 
 const clientNav = [
-  { name: 'Кампании', href: '/client' },
-  { name: 'Лиды', href: '/client/leads' },
-  { name: 'Базы', href: '/client/bases' },
-  { name: 'Отчёты', href: '/client/reports' },
-  { name: 'Парсеры', href: '/client/parsers' },
-  { name: 'Запуск кампаний', href: '/client/launch' },
+  { name: 'Кампании', nameEn: 'Campaigns', href: '/client' },
+  { name: 'Лиды', nameEn: 'Leads', href: '/client/leads' },
+  { name: 'Базы', nameEn: 'Databases', href: '/client/bases' },
+  { name: 'Отчёты', nameEn: 'Reports', href: '/client/reports' },
+  { name: 'Парсеры', nameEn: 'Parsers', href: '/client/parsers' },
+  { name: 'Запуск кампаний', nameEn: 'Launch campaigns', href: '/client/launch' },
 ] as const;
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [locale, setLocale] = useState<Locale>('ru');
 
   useEffect(() => {
-    document.title = getPortalPageSectionTitle(pathname);
-  }, [pathname]);
+    let cancelled = false;
+    void (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      const res = await fetch('/api/user/locale', { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok || cancelled) return;
+      const body = (await res.json()) as { locale?: Locale };
+      const nextLocale = normalizeLocale(body.locale);
+      setLocale(nextLocale);
+      document.documentElement.lang = nextLocale;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    document.title = getPortalPageSectionTitle(pathname, locale);
+  }, [locale, pathname]);
+
+  const persistLocale = async (nextLocale: Locale) => {
+    setLocale(nextLocale);
+    document.documentElement.lang = nextLocale;
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+    if (!token) return;
+    await fetch('/api/user/locale', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ locale: nextLocale }),
+    });
+  };
 
   const isActive = (href: string) =>
     href === '/client'
@@ -58,11 +94,27 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                   className={`neu-pill px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-[13px] font-semibold whitespace-nowrap ${active ? 'active' : ''}`}
                   style={!active ? { color: 'var(--cp-text-m)' } : undefined}
                 >
-                  {item.name}
+                  {locale === 'en' ? item.nameEn : item.name}
                 </Link>
               );
             })}
           </nav>
+          <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1">
+            <button
+              type="button"
+              onClick={() => void persistLocale('ru')}
+              className={`rounded-full px-2 py-1 text-[11px] font-semibold ${locale === 'ru' ? 'active' : ''}`}
+            >
+              RU
+            </button>
+            <button
+              type="button"
+              onClick={() => void persistLocale('en')}
+              className={`rounded-full px-2 py-1 text-[11px] font-semibold ${locale === 'en' ? 'active' : ''}`}
+            >
+              EN
+            </button>
+          </div>
 
           <button
             type="button"
@@ -74,7 +126,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             className="neu-pill px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-[13px] font-semibold shrink-0"
             style={{ color: 'var(--cp-text-l)' }}
           >
-            Выйти
+            {dict(commonDictionary.signOut, locale)}
           </button>
         </div>
       </header>
