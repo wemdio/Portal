@@ -36,6 +36,8 @@ export interface ParseOptions {
   parse_chat_messages: boolean;
   parse_chat_members: boolean;
   parse_post_comments: boolean;
+  /** Включает медленное обогащение профиля через users.GetFullUser (био, личный канал). */
+  enrich_profile?: boolean;
   message_limit: number;
   filter_online: boolean;
   filter_recently: boolean;

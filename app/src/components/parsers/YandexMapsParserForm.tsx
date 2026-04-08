@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState, type FormEvent } from 'react';
+import { Info } from 'lucide-react';
 import { CITIES, RUBRICS, generateSearchUrls } from '@/lib/parsers/yandexMapsData';
 
 type ProxyForm = {
@@ -109,6 +110,7 @@ export function YandexMapsParserForm(props: {
   const [selectedCities, setSelectedCities] = useState<string[]>([]);
   const [selectedRubrics, setSelectedRubrics] = useState<string[]>([]);
   const [customKeyword, setCustomKeyword] = useState('');
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
 
   const allCities = useMemo(
     () => Object.values(CITIES).flat().map((city) => city.trim()).filter(Boolean),
@@ -177,14 +179,26 @@ export function YandexMapsParserForm(props: {
       {/* URL Search Section */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between gap-4">
             <div>
               <h3 className="text-base font-semibold text-gray-900">URL поиска</h3>
-              <p className="text-sm text-gray-500 mt-1">Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их.</p>
+              <p className="text-sm text-gray-500 mt-1">
+                Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.
+              </p>
             </div>
-            <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
-              {searchUrls.length} URL
-            </span>
+            <div className="flex flex-col items-end gap-1">
+              <span className="inline-flex items-center rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-700/10">
+                {searchUrls.length} URL
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowHowItWorks(true)}
+                className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
+              >
+                <Info className="h-3.5 w-3.5 mr-1" />
+                <span>Как работает парсер</span>
+              </button>
+            </div>
           </div>
         </div>
         
@@ -264,7 +278,6 @@ export function YandexMapsParserForm(props: {
       </div>
 
       {/* Settings Section */}
-
       <div className="flex items-center justify-between pt-4">
         <div className="text-sm text-gray-500">
           {totalUrlCount > MAX_SEARCH_URLS ? (
@@ -283,6 +296,52 @@ export function YandexMapsParserForm(props: {
           {props.busy ? 'Запуск...' : 'Запустить парсинг'}
         </button>
       </div>
+
+      {showHowItWorks && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Как работает парсер Яндекс.Карт</h3>
+            </div>
+            <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
+              <p>
+                Парсер берёт <span className="font-semibold">список поисковых URL</span> Яндекс.Карт и по каждому урлу
+                проходит выдачу организаций.
+              </p>
+              <p>
+                URL можно <span className="font-semibold">вставить руками</span> или
+                сгенерировать через блок «Генератор ссылок» по комбинации&nbsp;
+                <span className="font-semibold">город × рубрика/ключевое слово</span>.
+              </p>
+              <p>
+                Для каждой найденной организации инструмент пытается вытащить карточку компании: название, адрес, сайт
+                и контактные данные. Если одна и та же компания встретилась в нескольких урлах, она будет
+                <span className="font-semibold">объединена</span> по домену и названию.
+              </p>
+              <p>
+                Чтобы получить <span className="font-semibold">качественную выдачу</span>:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                <li>используйте осмысленные сочетания городов и рубрик (не выбирайте сразу все города без необходимости);</li>
+                <li>ограничивайте число URL — лишний мусор только замедляет парсинг и даёт больше дублей;</li>
+                <li>после выгрузки проверьте дубли и отсейте нерелевантные рубрики.</li>
+              </ul>
+              <p className="text-xs text-gray-500 pt-1">
+                Чем больше URL и городов, тем дольше будет идти парсинг. Если задача большая — запускайте её партиями.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setShowHowItWorks(false)}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Понятно
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </form>
   );
 }

@@ -10,10 +10,17 @@ import { TmaHeader } from './TmaHeader';
 import { UserProvider } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
+import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const MD_BREAKPOINT = 768;
 
-export function LayoutShell({ children }: { children: React.ReactNode }) {
+export function LayoutShell({
+  children,
+  initialLocale,
+}: {
+  children: React.ReactNode;
+  initialLocale: Locale;
+}) {
   const pathname = usePathname();
   const isSpreadsheetPage = pathname === '/tools/databases';
   const isRdpPage = pathname === '/tools/rdp';
@@ -22,6 +29,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   const isTma = useIsTma();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
+  const locale = normalizeLocale(initialLocale);
 
   useEffect(() => {
     const mql = window.matchMedia(`(max-width: ${MD_BREAKPOINT - 1}px)`);
@@ -83,8 +91,8 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
+    <UserProvider initialLocale={locale}>
     <PortalDocumentTitle />
-    <UserProvider>
     <PortalLoadingProvider>
     <div
       className={shellClassName}
@@ -103,11 +111,11 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
                     type="button"
                     onClick={() => setMobileMenuOpen(true)}
                     className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100"
-                    aria-label="Открыть меню"
+                    aria-label={dict(commonDictionary.openMenu, locale)}
                   >
                     <Menu className="h-5 w-5" />
                   </button>
-                  <span className="ml-3 text-sm font-semibold text-zinc-900">Portal</span>
+                  <span className="ml-3 text-sm font-semibold text-zinc-900">{dict(commonDictionary.portal, locale)}</span>
                 </header>
                 <Sidebar
                   collapsed={false}

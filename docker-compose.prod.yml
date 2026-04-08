@@ -51,6 +51,9 @@ services:
       - MAINTENANCE_BYPASS_TOKEN=${MAINTENANCE_BYPASS_TOKEN}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-8}
       - NODE_OPTIONS=--max-old-space-size=3072
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -274,6 +277,9 @@ services:
       - TG_LOCAL_API_URL=http://telegram-bot-api:8081
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgparser
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     depends_on:
       - telegram-bot-api
     stop_grace_period: 30m
@@ -282,6 +288,35 @@ services:
         limits:
           memory: 3072M
           cpus: '2'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  worker-tg-transcribe:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-tg-transcribe
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - TG_TRANSCRIBE_BOT_TOKEN=${TG_TRANSCRIBE_BOT_TOKEN}
+      - TG_LOCAL_API_URL=http://telegram-bot-api:8081
+      - TG_TARGET_API_ID=${TG_TARGET_API_ID}
+      - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
+      - TG_TARGET_SESSION=${TG_TARGET_SESSION}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=tgtranscribe
+    depends_on:
+      - telegram-bot-api
+      - transcribe-worker
+    stop_grace_period: 30m
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '1'
     restart: unless-stopped
     networks:
       - portal-network
@@ -401,6 +436,9 @@ services:
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       - INSTANTLY_SYNC_BOT_CHAT_ID=${INSTANTLY_SYNC_BOT_CHAT_ID}
       - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+      - INSTANTLY_LEADS_CONCURRENCY=${INSTANTLY_LEADS_CONCURRENCY}
+      - INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC=${INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC}
+      - INSTANTLY_SYNC_INTERVAL_SEC=${INSTANTLY_SYNC_INTERVAL_SEC}
     deploy:
       resources:
         limits:

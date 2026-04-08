@@ -200,14 +200,17 @@ type ItemPopoverProps = {
 };
 
 function formatDeadlineLabel(deadline: string): { text: string; color: string } {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dl = new Date(deadline + 'T00:00:00');
-  const diff = Math.floor((dl.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-  const formatted = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-  if (diff < 0) return { text: `${formatted} (просрочено)`, color: 'text-red-600 bg-red-50' };
-  if (diff === 0) return { text: `${formatted} (сегодня)`, color: 'text-amber-700 bg-amber-50' };
-  if (diff <= 2) return { text: formatted, color: 'text-amber-600 bg-amber-50' };
+  const now = new Date();
+  const dl = new Date(deadline);
+  const diffMs = dl.getTime() - now.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const dateFmt = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  const timeFmt = dl.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const hasTime = !/^[\d-]+$/.test(deadline) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+  const formatted = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+  if (diffMs < 0) return { text: `${formatted} (просрочено)`, color: 'text-red-600 bg-red-50' };
+  if (diffDays === 0) return { text: `${formatted} (сегодня)`, color: 'text-amber-700 bg-amber-50' };
+  if (diffDays <= 2) return { text: formatted, color: 'text-amber-600 bg-amber-50' };
   return { text: formatted, color: 'text-zinc-500 bg-zinc-100' };
 }
 
@@ -250,9 +253,9 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
                   {canEdit && onDeadlineChange && !isDone && (
                     <span className="relative inline-flex items-center opacity-0 group-hover:opacity-100 transition-colors">
                       <input
-                        type="date"
-                        value={item.deadline ?? ''}
-                        onChange={(e) => onDeadlineChange(item.id, e.target.value || null)}
+                        type="datetime-local"
+                        value={item.deadline ? (() => { const d = new Date(item.deadline); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })() : ''}
+                        onChange={(e) => onDeadlineChange(item.id, e.target.value ? new Date(e.target.value).toISOString() : null)}
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                         style={{ colorScheme: 'light' }}
                       />

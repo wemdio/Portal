@@ -75,19 +75,22 @@ NAME_MAX_LEN = 2000
 HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 
-LEADS_PAGE_LIMIT = 100
-LEADS_CONCURRENCY = 5
+LEADS_PAGE_LIMIT = int(os.environ.get("INSTANTLY_LEADS_PAGE_LIMIT", "100"))
+LEADS_CONCURRENCY = int(os.environ.get("INSTANTLY_LEADS_CONCURRENCY", "3"))
 LEADS_UPSERT_BATCH = 500
-MAX_LEADS_PAGES = 5000  # safety cap: 5000 pages × 100 = 500k leads max
+MAX_LEADS_PAGES = 5000
 LEADS_DB_POOL_MIN = 2
-LEADS_DB_POOL_MAX = LEADS_CONCURRENCY + 3  # 8; well under 95% of pgbouncer limit (57 of 60)
+LEADS_DB_POOL_MAX = LEADS_CONCURRENCY + 3
 LEADS_HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_LEADS_HTTP_TIMEOUT_SEC", "60"))
-# Leads/list is heavier than catalog endpoints; allow more attempts for 502/connection blips.
 LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "5"))
 LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
 LEADS_RETRY_5XX_MULTIPLIER: float = float(
     os.environ.get("INSTANTLY_LEADS_RETRY_5XX_MULTIPLIER", "1.5")
 )
+LEADS_INTER_PAGE_DELAY_SEC: float = float(
+    os.environ.get("INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC", "0.2")
+)
+LEADS_FLUSH_THRESHOLD = int(os.environ.get("INSTANTLY_LEADS_FLUSH_THRESHOLD", "5000"))
 
 _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
 
@@ -586,6 +589,9 @@ async def _iter_leads_pages(
         if not after:
             break
 
+        if LEADS_INTER_PAGE_DELAY_SEC > 0:
+            await asyncio.sleep(LEADS_INTER_PAGE_DELAY_SEC)
+
 
 async def _update_leads_synced_at(conn, campaign_id: str, user_ids: list[str]) -> None:
     now = datetime.now(timezone.utc)
@@ -599,6 +605,47 @@ async def _update_leads_synced_at(conn, campaign_id: str, user_ids: list[str]) -
     )
 
 
+_LEADS_UPSERT_SQL = """
+    INSERT INTO public.client_campaign_leads
+        (client_user_id, campaign_id, email,
+         first_name, last_name, company_name,
+         website, linkedin_url, synced_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
+        first_name   = EXCLUDED.first_name,
+        last_name    = EXCLUDED.last_name,
+        company_name = EXCLUDED.company_name,
+        website      = EXCLUDED.website,
+        linkedin_url = EXCLUDED.linkedin_url,
+        synced_at    = EXCLUDED.synced_at
+"""
+
+
+async def _flush_leads_buffer(
+    pool: asyncpg.Pool,
+    campaign_id: str,
+    user_ids: list[str],
+    buffer: list[dict],
+    now: datetime,
+) -> None:
+    """Write buffered leads to DB in sub-batches, releasing connection promptly."""
+    async with pool.acquire() as conn:
+        for uid in user_ids:
+            rows = [
+                (
+                    uid, campaign_id, l.get("email", ""),
+                    l.get("first_name"), l.get("last_name"),
+                    l.get("company_name"), l.get("website"),
+                    l.get("linkedin_url"), now,
+                )
+                for l in buffer if l.get("email")
+            ]
+            for i in range(0, len(rows), LEADS_UPSERT_BATCH):
+                await conn.executemany(
+                    _LEADS_UPSERT_SQL, rows[i : i + LEADS_UPSERT_BATCH],
+                )
+
+
 async def _sync_single_campaign(
     pool: asyncpg.Pool,
     http_client: httpx.AsyncClient,
@@ -610,45 +657,24 @@ async def _sync_single_campaign(
     try:
         campaign_leads = 0
         now = datetime.now(timezone.utc)
+        buffer: list[dict] = []
+
+        async for page_items in _iter_leads_pages(http_client, campaign_id):
+            buffer.extend(page_items)
+            campaign_leads += len(page_items)
+
+            if len(buffer) >= LEADS_FLUSH_THRESHOLD:
+                await _flush_leads_buffer(pool, campaign_id, user_ids, buffer, now)
+                print(
+                    f"[leads-sync] campaign {campaign_id} — "
+                    f"flushed {campaign_leads} leads so far"
+                )
+                buffer = []
+
+        if buffer:
+            await _flush_leads_buffer(pool, campaign_id, user_ids, buffer, now)
 
         async with pool.acquire() as conn:
-            async for page_items in _iter_leads_pages(http_client, campaign_id):
-                for uid in user_ids:
-                    rows = [
-                        (
-                            uid,
-                            campaign_id,
-                            l.get("email", ""),
-                            l.get("first_name"),
-                            l.get("last_name"),
-                            l.get("company_name"),
-                            l.get("website"),
-                            l.get("linkedin_url"),
-                            now,
-                        )
-                        for l in page_items
-                        if l.get("email")
-                    ]
-                    if rows:
-                        await conn.executemany(
-                            """
-                            INSERT INTO public.client_campaign_leads
-                                (client_user_id, campaign_id, email,
-                                 first_name, last_name, company_name,
-                                 website, linkedin_url, synced_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                            ON CONFLICT (client_user_id, campaign_id, email) DO UPDATE SET
-                                first_name   = EXCLUDED.first_name,
-                                last_name    = EXCLUDED.last_name,
-                                company_name = EXCLUDED.company_name,
-                                website      = EXCLUDED.website,
-                                linkedin_url = EXCLUDED.linkedin_url,
-                                synced_at    = EXCLUDED.synced_at
-                            """,
-                            rows,
-                        )
-                campaign_leads += len(page_items)
-
             await _update_leads_synced_at(conn, campaign_id, user_ids)
 
         if campaign_leads:
@@ -677,10 +703,14 @@ async def sync_client_leads() -> dict[str, int]:
     Campaigns are processed in parallel (up to LEADS_CONCURRENCY at a time)
     using a DB connection pool and shared HTTP client.
 
+    Leads are fetched in pages of LEADS_PAGE_LIMIT, buffered up to
+    LEADS_FLUSH_THRESHOLD, then flushed to DB in sub-batches of
+    LEADS_UPSERT_BATCH.  DB connections are held only during flushes.
+
     Resource budget (2xXeon E5-2670 / 64GB):
-      DB pool: max 8 conns  ← well under 95% of pgbouncer limit (57 of 60)
-      HTTP:    max 9 conns  ← 5 active + 4 keepalive buffer
-      Memory:  ~5 × 100 leads × ~2KB ≈ 1MB peak — negligible
+      DB pool: max 6 conns  ← well under 95% of pgbouncer limit (57 of 60)
+      HTTP:    max 7 conns  ← 3 active + 4 keepalive buffer
+      Memory:  ~3 × 5000 leads × ~2KB ≈ 30MB peak — acceptable
     """
     pool = await asyncpg.create_pool(
         DATABASE_URL,
@@ -959,10 +989,12 @@ async def main() -> None:
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        lambda: asyncio.create_task(_run_sync_and_report()),
+        _run_sync_and_report,
         "interval",
         seconds=effective_interval_sec,
         id="instantly_sync",
+        coalesce=True,
+        max_instances=1,
     )
     scheduler.start()
 

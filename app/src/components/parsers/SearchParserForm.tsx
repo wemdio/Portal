@@ -11,7 +11,7 @@ export type SearchParserStartPayload = {
   queries_text?: string;
   /** Текст для отображения в истории (то, что ввёл пользователь). */
   user_query?: string;
-  /** Глубина поиска: сколько страниц Google парсить на каждый запрос (1–10, по умолчанию 5). */
+  /** Глубина поиска: сколько страниц Google парсить на каждый запрос (1–30, по умолчанию 5). */
   search_depth?: number;
 };
 
@@ -30,6 +30,7 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [searchDepth, setSearchDepth] = useState(5);
   const [error, setError] = useState<string | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const getAccessToken = async () => {
@@ -144,11 +145,23 @@ export function SearchParserForm({ onStart, busy }: Props) {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900">Поиск Google/Yandex</h2>
-        <p className="text-sm text-gray-500 mt-1">
-          Сгенерируйте запросы по брифу или вставьте свой список (один запрос на строку), затем запустите парсинг.
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Поиск Google/Yandex</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Сгенерируйте запросы по брифу или вставьте свой список (один запрос на строку), затем запустите парсинг.
+          </p>
+        </div>
+        <div className="shrink-0 text-right max-w-xs text-[11px] leading-4 text-gray-500">
+          <button
+            type="button"
+            onClick={() => setShowHowItWorks(true)}
+            className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
+          >
+            <span className="mr-1">★</span>
+            <span>Как работает парсер</span>
+          </button>
+        </div>
       </div>
 
       <div className="space-y-4">
@@ -254,12 +267,12 @@ export function SearchParserForm({ onStart, busy }: Props) {
             <input
               type="range"
               min={1}
-              max={10}
+              max={30}
               value={searchDepth}
               onChange={(e) => setSearchDepth(Number(e.target.value))}
               className="flex-1 h-2 accent-blue-600"
             />
-            <span className="text-sm font-mono font-semibold text-gray-900 w-6 text-center tabular-nums">{searchDepth}</span>
+            <span className="text-sm font-mono font-semibold text-gray-900 w-8 text-center tabular-nums">{searchDepth}</span>
           </div>
           <p className="text-xs text-gray-500 mt-1">
             По умолчанию: 5. Чем больше — тем глубже поиск, но дольше выполнение.
@@ -286,6 +299,54 @@ export function SearchParserForm({ onStart, busy }: Props) {
           </button>
         </div>
       </div>
+
+      {showHowItWorks && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Как работает парсер поисковой выдачи</h3>
+            </div>
+            <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
+              <p>
+                Парсер берёт <span className="font-semibold">список запросов</span> и для каждого запроса
+                проходит несколько страниц выдачи Google/Yandex — это&nbsp;
+                <span className="font-semibold">глубина поиска</span>.
+              </p>
+              <p>
+                Внутри каждой страницы он находит сайты потенциальных компаний, фильтрует мусор
+                (каталоги, статьи, обзоры) и пытается выделить именно <span className="font-semibold">компанию</span>:
+                название, сайт, описание.
+              </p>
+              <p>
+                Поэтому итоговое число компаний примерно равно:&nbsp;
+                <span className="font-semibold">количество запросов × глубина поиска</span>.
+                Если вы сделали 3 запроса и глубина 5, то парсится всего ~15 страниц выдачи — это нормально,
+                что получается до нескольких десятков компаний.
+              </p>
+              <p>
+                Чтобы получить <span className="font-semibold">больше выдачи</span>:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                <li>добавьте больше запросов (вариации формулировок, другие ключевые слова);</li>
+                <li>увеличьте глубину поиска (ползунок) — больше страниц Google на каждый запрос;</li>
+                <li>избегайте слишком общих запросов вроде «маркетинговое агентство» без уточнений.</li>
+              </ul>
+              <p className="text-xs text-gray-500 pt-1">
+                Больше глубина = больше результатов, но дольше время парсинга.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setShowHowItWorks(false)}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Понятно
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

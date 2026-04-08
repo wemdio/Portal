@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import * as instantly from '@/lib/instantly/client';
 import { sendLeadNotification } from '@/lib/instantly/leadNotifier';
 import type { LeadNotificationData } from '@/lib/instantly/leadNotifier';

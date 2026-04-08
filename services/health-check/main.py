@@ -875,33 +875,6 @@ async def _fetch_heartbeat_db_data() -> dict:
                 )
                 _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
 
-                stats_table: str | None = None
-                for candidate in ("pg_stat_statements", "extensions.pg_stat_statements"):
-                    try:
-                        await conn.fetchval(f"SELECT 1 FROM {candidate} LIMIT 1")
-                        stats_table = candidate
-                        break
-                    except Exception:
-                        continue
-
-                if stats_table:
-                    data["slow_queries"] = await conn.fetch(
-                        f"SELECT query AS q, "
-                        f"round(max_exec_time::numeric / 1000, 2) AS max_s, "
-                        f"calls::bigint AS calls "
-                        f"FROM {stats_table} "
-                        f"WHERE queryid IS NOT NULL "
-                        f"ORDER BY max_exec_time DESC LIMIT 5"
-                    )
-                    data["popular_queries"] = await conn.fetch(
-                        f"SELECT query AS q, "
-                        f"calls::bigint AS calls, "
-                        f"round(mean_exec_time::numeric, 2) AS avg_ms "
-                        f"FROM {stats_table} "
-                        f"WHERE queryid IS NOT NULL "
-                        f"ORDER BY calls DESC LIMIT 5"
-                    )
-
                 data["db_users"] = await conn.fetch(
                     "SELECT usename, count(*)::int AS n "
                     "FROM pg_stat_activity WHERE datname = current_database() "
@@ -1065,41 +1038,17 @@ def _format_active_jobs(data: dict) -> str | None:
     return "\n".join(lines)
 
 
-def _format_performance_stats(data: dict) -> str | None:
-    """Format performance stats from pre-fetched data (pure formatting, no DB)."""
+def _format_db_users(data: dict) -> str | None:
+    """Format DB user connection breakdown from pre-fetched data."""
     if not data.get("ok"):
         return None
-
-    sections: list[str] = []
-
-    slow = data.get("slow_queries")
-    if slow:
-        lines = ["🐌 <b>Долгие запросы</b> (max время):"]
-        for i, r in enumerate(slow, 1):
-            q = _sanitize_query(r["q"])
-            calls_fmt = f"{r['calls']:,}".replace(",", " ")
-            lines.append(f"  {i}. <code>{q}</code>")
-            lines.append(f"     max {r['max_s']}s · {calls_fmt} вызовов")
-        sections.append("\n".join(lines))
-
-    popular = data.get("popular_queries")
-    if popular:
-        lines = ["🔥 <b>Популярные запросы</b> (вызовы):"]
-        for i, r in enumerate(popular, 1):
-            q = _sanitize_query(r["q"])
-            calls_fmt = f"{r['calls']:,}".replace(",", " ")
-            lines.append(f"  {i}. <code>{q}</code>")
-            lines.append(f"     {calls_fmt} вызовов · avg {r['avg_ms']}ms")
-        sections.append("\n".join(lines))
-
     users = data.get("db_users")
-    if users:
-        lines = ["👥 <b>Пользователи БД</b> (подключения):"]
-        for r in users:
-            lines.append(f"  • {r['usename']}: {r['n']}")
-        sections.append("\n".join(lines))
-
-    return "\n\n".join(sections) if sections else None
+    if not users:
+        return None
+    lines = ["👥 <b>Пользователи БД</b> (подключения):"]
+    for r in users:
+        lines.append(f"  • {r['usename']}: {r['n']}")
+    return "\n".join(lines)
 
 
 async def _ping_site(count: int = 5) -> str:
@@ -1185,17 +1134,9 @@ async def _ping_proxies(count: int = 3) -> str:
     return "\n".join(lines)
 
 
-def _sanitize_query(q: str | None, limit: int = 300) -> str:
-    """Clean and HTML-escape a SQL snippet for Telegram."""
-    text = " ".join((q or "").split())
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    if len(text) > limit:
-        text = text[: limit - 3] + "..."
-    return text
-
 
 async def send_heartbeat():
-    """Periodic heartbeat: chart + caption + performance stats."""
+    """Periodic heartbeat: chart + caption + jobs + db users + proxies (single message)."""
     global HEARTBEAT_STARTED
     if not HEARTBEAT_STARTED:
         HEARTBEAT_STARTED = True
@@ -1203,33 +1144,31 @@ async def send_heartbeat():
         return
 
     db_data = await _fetch_heartbeat_db_data()
-    ping_text = await _ping_site()
-
-    chart = _render_heartbeat_chart()
-    if chart:
-        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
-        caption += f"\n\n{ping_text}"
-        ok = await send_telegram_photo(chart, caption=caption)
-        if not ok:
-            text = _format_heartbeat_caption(db_data, include_sparklines=True)
-            text += f"\n\n{ping_text}"
-            await send_telegram(text)
-    else:
-        text = _format_heartbeat_caption(db_data, include_sparklines=True)
-        text += f"\n\n{ping_text}"
-        await send_telegram(text)
+    ping_text, proxy_text = await asyncio.gather(_ping_site(), _ping_proxies())
 
     extra_parts: list[str] = []
     jobs_text = _format_active_jobs(db_data)
     if jobs_text:
         extra_parts.append(jobs_text)
-    perf = _format_performance_stats(db_data)
-    if perf:
-        extra_parts.append(perf)
-    proxy_text = await _ping_proxies()
+    users_text = _format_db_users(db_data)
+    if users_text:
+        extra_parts.append(users_text)
     extra_parts.append(proxy_text)
-    if extra_parts:
-        await send_telegram("\n\n".join(extra_parts))
+    extra_block = "\n\n".join(extra_parts)
+
+    chart = _render_heartbeat_chart()
+    if chart:
+        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
+        caption += f"\n\n{ping_text}\n\n{extra_block}"
+        ok = await send_telegram_photo(chart, caption=caption)
+        if not ok:
+            text = _format_heartbeat_caption(db_data, include_sparklines=True)
+            text += f"\n\n{ping_text}\n\n{extra_block}"
+            await send_telegram(text)
+    else:
+        text = _format_heartbeat_caption(db_data, include_sparklines=True)
+        text += f"\n\n{ping_text}\n\n{extra_block}"
+        await send_telegram(text)
 
 
 async def run_supabase_keepalive() -> None:

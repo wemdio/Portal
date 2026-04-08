@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
+import { closeStaleRdpSessions } from '@/lib/rdpSessionInactivity';
 
 const admin = supabaseAdmin!;
 
@@ -18,6 +19,8 @@ export async function POST(req: NextRequest) {
       
         const user = await getUser(req);
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+        await closeStaleRdpSessions(admin);
       
         const { data: activeSession } = await admin
           .from('rdp_sessions')
@@ -61,6 +64,8 @@ export async function PATCH(req: NextRequest) {
       const user = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+      await closeStaleRdpSessions(admin);
+
       const now = new Date().toISOString();
       const { data: session } = await admin
         .from('rdp_sessions')
@@ -86,6 +91,8 @@ export async function DELETE(req: NextRequest) {
       
         const user = await getUser(req);
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+        await closeStaleRdpSessions(admin);
       
         const { data: session } = await admin
           .from('rdp_sessions')

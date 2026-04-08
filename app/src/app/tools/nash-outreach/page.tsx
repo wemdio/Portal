@@ -3,9 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowDownToLine,
   ArrowRight,
-  Building2,
   Check,
   ChevronDown,
   ChevronRight,

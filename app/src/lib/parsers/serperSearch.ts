@@ -103,7 +103,7 @@ export async function serperSearchMultiPage(
   lastPage: number;
   debug: SerperSearchDebug;
 }> {
-  const totalPages = Math.max(1, Math.min(10, opts?.pages ?? 1));
+  const totalPages = Math.max(1, Math.min(30, opts?.pages ?? 1));
   const delayMs = opts?.delayMs ?? 300;
 
   const allResults: SearchResultItem[] = [];

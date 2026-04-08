@@ -77,15 +77,6 @@ function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolea
   return false;
 }
 
-async function isProcessed(db: SupabaseClient, campaignId: string, tgUserId: number): Promise<boolean> {
-  const { count } = await db
-    .from('tg_outreach_processed')
-    .select('id', { count: 'exact', head: true })
-    .eq('campaign_id', campaignId)
-    .eq('tg_user_id', tgUserId);
-  return (count ?? 0) > 0;
-}
-
 async function markProcessed(db: SupabaseClient, campaignId: string, tgUserId: number, tgUsername: string | null) {
   await db.from('tg_outreach_processed').upsert(
     { campaign_id: campaignId, tg_user_id: tgUserId, tg_username: tgUsername },
@@ -289,10 +280,6 @@ export async function handleChat(
     Boolean(tg.auto_allow_new_dialogs),
   );
 
-  if (await isProcessed(db, campaign.id, tgUserId)) {
-    return { replied: false, triggerType: null };
-  }
-
   const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
@@ -441,7 +428,6 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (await isProcessed(db, campaign.id, tgUserId)) continue;
     if (isBot && tg.ignore_bot_usernames) continue;
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
 
@@ -503,7 +489,8 @@ async function backfillEmptyDialogs(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     try {
-      const entity = await client.getEntity(tgUserId);
+      const peerLookup = tgUsername ?? tgUserId;
+      const entity = await client.getEntity(peerLookup);
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
       const chatMessages: DialogMessage[] = [];
@@ -809,7 +796,8 @@ export async function refetchEmptyDialogs(
     const tgUsername = dialog.tg_username as string | null;
 
     try {
-      const entity = await client.getEntity(tgUserId);
+      const peerLookup = tgUsername ?? tgUserId;
+      const entity = await client.getEntity(peerLookup);
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
       const chatMessages: DialogMessage[] = [];

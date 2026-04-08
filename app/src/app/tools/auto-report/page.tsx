@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from 'react';
-import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History } from 'lucide-react';
+import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History, RefreshCw } from 'lucide-react';
 import type * as XLSXTypes from 'xlsx';
 import type ExcelJSTypes from 'exceljs';
 import { supabase } from '@/lib/supabaseClient';
@@ -19,7 +19,7 @@ interface InstantlyCampaignItem {
 }
 
 interface CampaignsListMeta {
-  source: 'database' | 'instantly_fallback';
+  source: 'database' | 'instantly_fallback' | 'instantly_direct';
   lastSyncedAt: string | null;
   stale: boolean;
   backgroundSync: boolean;
@@ -1128,12 +1128,14 @@ export default function AutoReportPage() {
   const [campaignsLoading, setCampaignsLoading] = useState(false);
   const [campaignsFetched, setCampaignsFetched] = useState(false);
   const [catalogSyncPending, setCatalogSyncPending] = useState(false);
+  const [campaignsMeta, setCampaignsMeta] = useState<CampaignsListMeta | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
   const catalogSyncWaitAttemptsRef = useRef(0);
 
-  const loadCampaigns = useCallback(async (opts?: { silent?: boolean }) => {
+  const loadCampaigns = useCallback(async (opts?: { silent?: boolean; direct?: boolean }) => {
     const silent = opts?.silent === true;
+    const direct = opts?.direct === true;
     if (!silent) {
       setCampaignsLoading(true);
     }
@@ -1145,7 +1147,8 @@ export default function AutoReportPage() {
         if (!silent) setCampaignsLoading(false);
         return;
       }
-      const res = await fetch('/api/tools/auto-report/campaigns', {
+      const sourceSuffix = direct ? '?source=instantly' : '';
+      const res = await fetch(`/api/tools/auto-report/campaigns${sourceSuffix}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -1168,6 +1171,7 @@ export default function AutoReportPage() {
         return (b.name ?? '').localeCompare(a.name ?? '', 'ru');
       });
       setCampaignsList(sorted);
+      setCampaignsMeta(data.meta ?? null);
       setSelectedIds(new Set());
       setCampaignsFetched(true);
 
@@ -1446,6 +1450,26 @@ export default function AutoReportPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void loadCampaigns()}
+                disabled={campaignsLoading}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:pointer-events-none"
+                title="Обновить список кампаний (по умолчанию из БД-каталога)"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${campaignsLoading ? 'animate-spin' : ''}`} />
+                Обновить список
+              </button>
+              {campaignsMeta ? (
+                <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-1 text-xs text-gray-600">
+                  Источник:{' '}
+                  {campaignsMeta.source === 'database'
+                    ? 'БД'
+                    : campaignsMeta.source === 'instantly_direct'
+                      ? 'Instantly (напрямую)'
+                      : 'Instantly (fallback)'}
+                </span>
+              ) : null}
               {campaignsLoading && campaignsList.length === 0 ? (
                 <span className="inline-flex items-center gap-2 text-sm text-gray-500">
                   <Loader2 className="h-4 w-4 animate-spin" />

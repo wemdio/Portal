@@ -1,5 +1,6 @@
 import { UserRole } from '@/types';
 import { supabase } from './supabaseClient';
+import type { Locale } from '@/lib/i18n';
 
 export const ROLE_LABELS: Record<UserRole, string> = {
   technician: 'Технарь',
@@ -11,6 +12,21 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   lead: 'Лид',
   client: 'Клиент',
 };
+
+export const ROLE_LABELS_EN: Record<UserRole, string> = {
+  technician: 'Technician',
+  manager: 'Manager',
+  director: 'Director',
+  admin: 'Admin',
+  sales: 'Sales',
+  marketer: 'Marketer',
+  lead: 'Lead',
+  client: 'Client',
+};
+
+export function getRoleLabel(role: UserRole, locale: Locale): string {
+  return locale === 'en' ? ROLE_LABELS_EN[role] : ROLE_LABELS[role];
+}
 
 export const ALL_ROLES: UserRole[] = ['technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead', 'client'];
 

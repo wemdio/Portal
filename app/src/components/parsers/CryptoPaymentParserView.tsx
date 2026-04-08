@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2, Play } from 'lucide-react';
+import { Loader2, Download, FileSpreadsheet, CirclePause, Trash2, Play, Info } from 'lucide-react';
 
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabaseClient';
@@ -182,6 +182,7 @@ export function CryptoPaymentParserView() {
   const [jobs, setJobs] = useState<JobEntry[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
   const displayMatches = activeJob?.matches ?? [];
@@ -359,10 +360,22 @@ export function CryptoPaymentParserView() {
     <div className="space-y-6">
       {/* Upload & Controls */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
-        <h3 className="text-lg font-semibold text-gray-900">Проверка сайтов на crypto-платежки</h3>
-        <p className="text-sm text-gray-500">
-          Загрузите Excel с компаниями. Проверяются все строки файла, колонка сайта определяется автоматически.
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">Проверка сайтов на crypto-платежки</h3>
+            <p className="text-sm text-gray-500">
+              Загрузите Excel с компаниями. Проверяются все строки файла, колонка сайта определяется автоматически.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowHowItWorks(true)}
+            className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 border border-amber-200 hover:bg-amber-100 hover:border-amber-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-1"
+          >
+            <Info className="h-3.5 w-3.5 mr-1" />
+            <span>Как работает парсер</span>
+          </button>
+        </div>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <input
@@ -552,6 +565,51 @@ export function CryptoPaymentParserView() {
           </div>
         </div>
       </div>
+
+      {showHowItWorks && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Как работает crypto payment парсер</h3>
+            </div>
+            <div className="px-6 py-4 space-y-3 text-sm text-gray-700">
+              <p>
+                Инструмент берёт <span className="font-semibold">список компаний с сайтами</span> из загруженного Excel
+                и для каждого сайта проверяет, используются ли на нём крипто-платёжки (Onramper, NOWPayments и др.).
+              </p>
+              <p>
+                Колонка с сайтом определяется <span className="font-semibold">автоматически</span> по заголовкам и формату
+                ссылок, поэтому достаточно, чтобы в файле была хотя бы одна колонка с URL.
+              </p>
+              <p>
+                Для каждой компании, где найдена crypto-платёжка, в результат пишется:
+                название компании, домен и название платёжной системы.
+              </p>
+              <p>
+                Чтобы получить <span className="font-semibold">корректный результат</span>:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-sm text-gray-700">
+                <li>проверьте, что в файле нет лишних строк-заголовков внутри таблицы;</li>
+                <li>старайтесь использовать «чистые» домены без мусорных символов (пробелы, текст вокруг ссылки);</li>
+                <li>если сайт дублируется в нескольких строках, инструмент автоматически сведёт их в один домен.</li>
+              </ul>
+              <p className="text-xs text-gray-500 pt-1">
+                Большие файлы обрабатываются дольше. Если нужно проверить десятки тысяч сайтов — делите файл на несколько
+                запусков, чтобы проще было контролировать прогресс и перезапуски.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-gray-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setShowHowItWorks(false)}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Понятно
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

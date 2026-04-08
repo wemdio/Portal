@@ -14,6 +14,7 @@ import {
   KeyRound,
   CheckCircle2,
   Upload,
+  Square,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
@@ -79,6 +80,7 @@ export default function TgParserPage() {
   const [parseMessages, setParseMessages] = useState(true);
   const [parseMembers, setParseMembers] = useState(true);
   const [parseComments, setParseComments] = useState(true);
+  const [enrichProfile, setEnrichProfile] = useState(false);
   const [messageLimit, setMessageLimit] = useState(100);
   const [filterOnline, setFilterOnline] = useState(false);
   const [filterRecently, setFilterRecently] = useState(false);
@@ -87,7 +89,9 @@ export default function TgParserPage() {
   const [parseJobs, setParseJobs] = useState<ParseJob[]>([]);
   const runningAccountKeysRef = useRef<Set<string>>(new Set());
   const [exportingJobId, setExportingJobId] = useState<string | null>(null);
+  const [stoppingJobId, setStoppingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'main' | 'target'>('main');
 
   // --- Accounts state ---
   const [accounts, setAccounts] = useState<TgAccount[]>([]);
@@ -139,11 +143,13 @@ export default function TgParserPage() {
       if (!res.ok) return;
       const { items } = (await res.json()) as { items: TgParserJobApiRow[] };
       const rows = items ?? [];
-      setParseJobs(rows.map(tgParserApiRowToUi));
+      const uiRows = rows.map(tgParserApiRowToUi);
+      setParseJobs(uiRows);
       runningAccountKeysRef.current.clear();
-      for (const row of rows) {
-        if (row.status === 'pending' || row.status === 'running') {
-          runningAccountKeysRef.current.add(jobAccountKey(row.account_id ?? ''));
+      for (const row of uiRows) {
+        if (row.status === 'running') {
+          const key = row.isTarget ? '__target__' : jobAccountKey(row.accountId);
+          runningAccountKeysRef.current.add(key);
         }
       }
     } catch {
@@ -324,10 +330,13 @@ export default function TgParserPage() {
       return;
     }
 
-    const key = jobAccountKey(accountId);
+    const isTarget = activeTab === 'target';
+    const key = isTarget ? '__target__' : jobAccountKey(accountId);
     if (runningAccountKeysRef.current.has(key)) {
       setError(
-        'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
+        isTarget
+          ? 'Целевой парсинг уже запущен. Дождитесь завершения.'
+          : 'Этот аккаунт уже участвует в запущенном парсинге. Дождитесь завершения или выберите другой аккаунт.',
       );
       return;
     }
@@ -348,12 +357,14 @@ export default function TgParserPage() {
         parse_chat_messages: parseMessages,
         parse_chat_members: parseMembers,
         parse_post_comments: parseComments,
+        enrich_profile: enrichProfile,
         message_limit: messageLimit,
         filter_online: filterOnline,
         filter_recently: filterRecently,
         max_offline_days: maxOfflineDays ? Number(maxOfflineDays) : null,
+        is_target: isTarget,
       };
-      if (accountId.trim()) body.account_id = accountId.trim();
+      if (!isTarget && accountId.trim()) body.account_id = accountId.trim();
 
       const res = await fetch('/api/tools/tg-parser/parse', {
         method: 'POST',
@@ -384,10 +395,12 @@ export default function TgParserPage() {
     parseMessages,
     parseMembers,
     parseComments,
+    enrichProfile,
     messageLimit,
     filterOnline,
     filterRecently,
     maxOfflineDays,
+    activeTab,
     loadParseJobs,
   ]);
 
@@ -408,12 +421,43 @@ export default function TgParserPage() {
       setParseJobs((prev) => {
         const j = prev.find((x) => x.id === id);
         if (j?.status === 'running') {
-          runningAccountKeysRef.current.delete(jobAccountKey(j.accountId));
+          const key = j.isTarget || j.accountLabel === 'Секретный аккаунт (целевой парсинг)' ? '__target__' : jobAccountKey(j.accountId);
+          runningAccountKeysRef.current.delete(key);
         }
         return prev.filter((x) => x.id !== id);
       });
     },
     [],
+  );
+
+  const stopParseJob = useCallback(
+    async (id: string) => {
+      const token = await getAccessToken();
+      if (!token) return;
+      setStoppingJobId(id);
+      setError(null);
+      try {
+        const res = await fetch(`/api/tools/tg-parser/jobs/${id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ action: 'stop' }),
+        });
+        const data = (await res.json()) as { error?: string };
+        if (!res.ok) {
+          setError(data?.error ?? `Ошибка: ${res.status}`);
+          return;
+        }
+        await loadParseJobs();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Ошибка остановки задачи');
+      } finally {
+        setStoppingJobId(null);
+      }
+    },
+    [loadParseJobs],
   );
 
   const exportJobCsv = useCallback(async (job: ParseJob) => {
@@ -472,8 +516,33 @@ export default function TgParserPage() {
         </p>
       </div>
 
-      {/* Accounts section */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-6">
+      <div className="flex space-x-2 border-b border-gray-200">
+        <button
+          onClick={() => setActiveTab('main')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'main'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          Обычный парсинг
+        </button>
+        <button
+          onClick={() => setActiveTab('target')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'target'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          Целевой парсинг
+        </button>
+      </div>
+
+      {activeTab === 'main' && (
+      <>
+        {/* Accounts section */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
             <User className="h-4 w-4" aria-hidden />
@@ -765,10 +834,22 @@ export default function TgParserPage() {
             )}
         </div>
       </div>
+      </>
+      )}
 
       {/* Parse form */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 space-y-4">
-        {accounts.length > 0 && (
+        {activeTab === 'target' && (
+          <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+            <h3 className="text-sm font-semibold text-blue-900 mb-1">Целевой парсинг</h3>
+            <p className="text-sm text-blue-800">
+              Это более углубленный парсер, который использует специальный аккаунт.
+              Он позволяет обходить стандартные ограничения Telegram и собирать больше уникальных контактов.
+            </p>
+          </div>
+        )}
+
+        {activeTab === 'main' && accounts.length > 0 && (
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="tg-account" className="text-sm text-gray-600 whitespace-nowrap">
               Аккаунт:
@@ -850,6 +931,24 @@ export default function TgParserPage() {
           </div>
           <p className="text-xs text-gray-500 mt-1">
             Сообщения — собирает авторов сообщений из чатов. Участники — список членов группы/канала. Комментарии — авторы комментариев под постами каналов.
+          </p>
+        </div>
+
+        <div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="enrich-profile"
+              checked={enrichProfile}
+              onChange={(e) => setEnrichProfile(e.target.checked)}
+            />
+            <label htmlFor="enrich-profile" className="text-sm text-gray-700">
+              Собирать расширенный профиль (медленно)
+            </label>
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            С галочкой: дополнительно собирает «Биография» и «Личный канал» (медленнее, чаще лимиты Telegram).
+            {' '}Без галочки: собирает ID/username, имя, онлайн-статус, сообщения, тип/ссылку/название источника — быстрее и стабильнее.
           </p>
         </div>
 
@@ -986,6 +1085,22 @@ export default function TgParserPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {job.status === 'running' && (
+                    <button
+                      type="button"
+                      onClick={() => void stopParseJob(job.id)}
+                      disabled={stoppingJobId === job.id}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      title="Остановить задачу"
+                    >
+                      {stoppingJobId === job.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Square className="h-4 w-4" />
+                      )}
+                      Остановить
+                    </button>
+                  )}
                   {job.status === 'done' && job.users.length > 0 && (
                     <>
                       <button

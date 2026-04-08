@@ -1,4 +1,5 @@
 import { UserProfile } from '@/types';
+import { toIntlLocale, type Locale } from '@/lib/i18n';
 
 type AssigneeProfile = Pick<UserProfile, 'email' | 'full_name'>;
 
@@ -13,7 +14,7 @@ export function getAssigneeDisplayName(profile: AssigneeProfile): string {
   return localPart || email;
 }
 
-export function buildAssigneeOptions(profiles: AssigneeProfile[]): string[] {
+export function buildAssigneeOptions(profiles: AssigneeProfile[], locale: Locale = 'ru'): string[] {
   const unique = new Set<string>();
 
   for (const profile of profiles) {
@@ -21,7 +22,7 @@ export function buildAssigneeOptions(profiles: AssigneeProfile[]): string[] {
     if (name) unique.add(name);
   }
 
-  return Array.from(unique).sort((a, b) => a.localeCompare(b, 'ru-RU'));
+  return Array.from(unique).sort((a, b) => a.localeCompare(b, toIntlLocale(locale)));
 }
 
 /**

@@ -1,5 +1,8 @@
 'use client'
 
+import { useMemo } from 'react';
+import { normalizeLocale } from '@/lib/i18n';
+
 export default function GlobalError({
   error,
   reset,
@@ -7,8 +10,13 @@ export default function GlobalError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  const locale = useMemo(() => {
+    if (typeof document === 'undefined') return 'ru';
+    return normalizeLocale(document.documentElement.lang);
+  }, []);
+
   return (
-    <html lang="en">
+    <html lang={locale}>
       <body style={{ margin: 0, fontFamily: 'Arial, Helvetica, sans-serif' }}>
         <div
           style={{
@@ -33,10 +41,12 @@ export default function GlobalError({
           >
             <div style={{ fontSize: 48, marginBottom: 16 }}>&#9888;</div>
             <h1 style={{ fontSize: 20, fontWeight: 600, color: '#18181b', margin: '0 0 8px' }}>
-              Что-то пошло не так
+              {locale === 'en' ? 'Something went wrong' : 'Что-то пошло не так'}
             </h1>
             <p style={{ fontSize: 14, color: '#71717a', margin: '0 0 24px', lineHeight: 1.5 }}>
-              Произошла непредвиденная ошибка. Попробуйте обновить страницу.
+              {locale === 'en'
+                ? 'An unexpected error occurred. Please try refreshing the page.'
+                : 'Произошла непредвиденная ошибка. Попробуйте обновить страницу.'}
             </p>
             {error.digest && (
               <p style={{ fontSize: 12, color: '#a1a1aa', margin: '0 0 16px', fontFamily: 'monospace' }}>
@@ -56,7 +66,7 @@ export default function GlobalError({
                 cursor: 'pointer',
               }}
             >
-              Попробовать снова
+              {locale === 'en' ? 'Try again' : 'Попробовать снова'}
             </button>
           </div>
         </div>

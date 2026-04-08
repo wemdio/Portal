@@ -2,7 +2,7 @@
  * Worker runner for Docker: selects a specific worker kind.
  *
  * Usage:
- *  WORKER_KIND=hh|search|enrich|yandexmaps|tgparser|all (default: all)
+ *  WORKER_KIND=hh|search|enrich|yandexmaps|tgparser|tgtranscribe|all (default: all)
  */
 
 const kind = String(process.env.WORKER_KIND ?? 'all').trim().toLowerCase();
@@ -39,6 +39,9 @@ switch (kind) {
     break;
   case 'tgparser':
     run('./tgParser');
+    break;
+  case 'tgtranscribe':
+    run('./tgTranscribe');
     break;
   case 'instantlyleads':
     run('./instantlyLeads');
