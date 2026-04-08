@@ -14,6 +14,7 @@ export const maxDuration = 60;
  */
 export async function GET(req: NextRequest) {
   const shouldRun = req.nextUrl.searchParams.get('run') === 'true';
+  const quickMode = req.nextUrl.searchParams.get('quick') === 'true';
   const steps: { step: string; result: unknown }[] = [];
 
   const hasLeadKey = !!process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
@@ -28,6 +29,8 @@ export async function GET(req: NextRequest) {
       OPENROUTER_BRIEF_API_KEY: hasBriefKey ? `set (${process.env.OPENROUTER_BRIEF_API_KEY!.slice(0, 8)}...)` : 'NOT SET',
       INSTANTLY_LEAD_QUAL_MODEL: model,
       effective_key: hasLeadKey ? 'LEAD key' : hasBriefKey ? 'BRIEF key (fallback)' : 'NONE',
+      INSTANTLY_API_KEY: process.env.INSTANTLY_API_KEY ? 'set' : (process.env.INSTANTLY_PORTAL_API_KEY ? 'set (PORTAL)' : 'NOT SET'),
+      TELEGRAM_ATMOS_BOT_TOKEN: process.env.TELEGRAM_ATMOS_BOT_TOKEN ? 'set' : 'NOT SET',
     },
   });
 
@@ -57,11 +60,39 @@ export async function GET(req: NextRequest) {
       : { count: prefs?.length ?? 0, campaigns: prefs },
   });
 
-  const campaignIds = [...new Set((prefs ?? []).map((r: { campaign_id: string }) => r.campaign_id))];
-  if (campaignIds.length === 0) {
+  const allCampaignIds = [...new Set((prefs ?? []).map((r: { campaign_id: string }) => r.campaign_id))];
+
+  // Always show existing qualifications from DB
+  const { data: existingQuals, error: existErr, count: totalQuals } = await db
+    .from('instantly_lead_qualifications')
+    .select('id, instantly_email_id, status, lead_email, campaign_id, error_message, ai_reason, ai_confidence, created_at', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  steps.push({
+    step: '4. DB qualifications',
+    result: existErr
+      ? { error: existErr.message }
+      : { total_in_db: totalQuals, latest_20: existingQuals },
+  });
+
+  if (allCampaignIds.length === 0) {
     steps.push({ step: 'STOP', result: 'No subscribed campaigns' });
     return NextResponse.json({ steps });
   }
+
+  if (quickMode) {
+    steps.push({ step: 'DONE', result: 'Quick mode — skipped Instantly API calls. Use without ?quick=true to also check Instantly API.' });
+    return NextResponse.json({ steps });
+  }
+
+  const maxCampaigns = Math.min(parseInt(req.nextUrl.searchParams.get('max') ?? '5', 10), 30);
+  const campaignIds = allCampaignIds.slice(0, maxCampaigns);
+
+  steps.push({
+    step: '5. Campaigns scope',
+    result: { total_subscribed: allCampaignIds.length, checking: campaignIds.length, hint: 'Use ?max=N to check more' },
+  });
 
   // Fetch reply emails from Instantly
   type EmailWithCampaign = Email & { _cid: string };
@@ -73,7 +104,7 @@ export async function GET(req: NextRequest) {
       const emails = res.items ?? [];
       const replies = emails.filter((e) => (e.ue_type ?? 1) === 2);
       steps.push({
-        step: `4. Instantly campaign ${cid}`,
+        step: `6. Instantly campaign ${cid}`,
         result: {
           total: emails.length,
           replies: replies.length,
@@ -85,7 +116,7 @@ export async function GET(req: NextRequest) {
       }
     } catch (err) {
       steps.push({
-        step: `4. Instantly campaign ${cid}`,
+        step: `6. Instantly campaign ${cid}`,
         result: { error: err instanceof Error ? err.message : String(err) },
       });
     }
@@ -109,7 +140,7 @@ export async function GET(req: NextRequest) {
   const newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
 
   steps.push({
-    step: '5. Deduplication',
+    step: '7. Deduplication',
     result: {
       total_replies: replyEmails.length,
       already_processed: existingIds.size,
@@ -124,18 +155,6 @@ export async function GET(req: NextRequest) {
 
   if (!shouldRun) {
     steps.push({ step: 'INFO', result: `${newReplies.length} replies ready. Add ?run=true to qualify them.` });
-
-    const { data: existingQuals, error: existErr } = await db
-      .from('instantly_lead_qualifications')
-      .select('id, instantly_email_id, status, lead_email, error_message, ai_reason, ai_confidence, created_at')
-      .order('created_at', { ascending: false })
-      .limit(10);
-
-    steps.push({
-      step: '6. Existing qualifications (latest 10)',
-      result: existErr ? { error: existErr.message } : existingQuals,
-    });
-
     return NextResponse.json({ steps });
   }
 
@@ -146,7 +165,7 @@ export async function GET(req: NextRequest) {
     const campaignId = reply.campaign_id ?? reply._cid;
 
     if (!campaignId || !leadEmail) {
-      steps.push({ step: `6. Qualify ${reply.id}`, result: 'SKIP — no campaignId or email' });
+      steps.push({ step: `8. Qualify ${reply.id}`, result: 'SKIP — no campaignId or email' });
       continue;
     }
 
@@ -187,7 +206,7 @@ export async function GET(req: NextRequest) {
       });
 
       steps.push({
-        step: `6. Qualified ${leadEmail}`,
+        step: `8. Qualified ${leadEmail}`,
         result: insertErr
           ? { status, confidence: result.confidence, db_error: insertErr.message }
           : { status, confidence: result.confidence, reason: result.reason },
@@ -195,7 +214,7 @@ export async function GET(req: NextRequest) {
       if (!insertErr) processed++;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      steps.push({ step: `6. FAILED ${leadEmail}`, result: errMsg });
+      steps.push({ step: `8. FAILED ${leadEmail}`, result: errMsg });
 
       try {
         await db.from('instantly_lead_qualifications').insert({
@@ -210,6 +229,6 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  steps.push({ step: '7. Summary', result: { processed, total_new: newReplies.length } });
+  steps.push({ step: '9. Summary', result: { processed, total_new: newReplies.length } });
   return NextResponse.json({ steps });
 }

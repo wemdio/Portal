@@ -42,6 +42,7 @@ export const ALL_TOOL_IDS = [
   'knowledge-base',
   'bugor-outreach',
   'nash-outreach',
+  'reputation-finder',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -215,6 +216,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/nash-outreach',
     accentColor: 'blue',
   },
+  'reputation-finder': {
+    id: 'reputation-finder',
+    title: 'Reputation Finder',
+    description: 'Поиск компаний с плохой репутацией: низкие рейтинги, негативная выдача, без SERM.',
+    href: '/tools/reputation-finder',
+    accentColor: 'blue',
+    badge: 'Beta',
+    badgeVariant: 'amber',
+  },
 };
 
 export interface ToolGroup {
@@ -233,7 +243,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   },
   {
     label: 'Парсеры и поиск лидов',
-    toolIds: ['parsers', 'habr-career', 'tg-parser', 'cis-lead-finder'],
+    toolIds: ['parsers', 'habr-career', 'tg-parser', 'cis-lead-finder', 'reputation-finder'],
   },
   {
     label: 'Утилиты',
