@@ -20,12 +20,13 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const locale = normalizeLocale(cookies().get(LOCALE_COOKIE)?.value);
+  const cookieStore = await cookies();
+  const locale = normalizeLocale(cookieStore.get(LOCALE_COOKIE)?.value);
 
   return (
     <html lang={locale} suppressHydrationWarning>
