@@ -28,6 +28,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
 import { RdpToolCard } from './RdpToolCard';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
+import { useUser } from '@/lib/UserProvider';
 
 const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'done-for-you': Sparkles,
@@ -54,10 +55,13 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'reputation-finder': ShieldAlert,
 };
 
-function ToolLinkCard({ toolId }: { toolId: ToolId }) {
+function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: 'ru' | 'en' }) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
   const hasBadge = Boolean(config.badge);
+  const title = locale === 'en' ? (config.title_en ?? config.title) : config.title;
+  const description = locale === 'en' ? (config.description_en ?? config.description) : config.description;
+  const badge = locale === 'en' ? (config.badge_en ?? config.badge) : config.badge;
 
   if (config.disabled) {
     const badgeClass = config.badgeVariant === 'emerald'
@@ -68,20 +72,20 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
-              <p className="text-base font-semibold text-gray-400">{config.title}</p>
+              <p className="text-base font-semibold text-gray-400">{title}</p>
               {config.badge && (
                 <span
                   className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
                 >
-                  {config.badge}
+                  {badge}
                 </span>
               )}
             </div>
-            <p className="text-sm text-gray-400">{config.description}</p>
+            <p className="text-sm text-gray-400">{description}</p>
           </div>
           <Icon className="h-8 w-8 shrink-0 text-gray-300" />
         </div>
-        <div className="mt-4 text-sm font-medium text-gray-400">Недоступно</div>
+        <div className="mt-4 text-sm font-medium text-gray-400">{locale === 'en' ? 'Unavailable' : 'Недоступно'}</div>
       </div>
     );
   }
@@ -104,25 +108,26 @@ function ToolLinkCard({ toolId }: { toolId: ToolId }) {
       <div className="flex items-start justify-between gap-4">
         <div className={toolId === 'auto-report' ? 'min-w-0' : undefined}>
           <div className="flex items-center gap-2">
-            <p className="text-base font-semibold text-gray-900">{config.title}</p>
+            <p className="text-base font-semibold text-gray-900">{title}</p>
             {config.badge && (
               <span
                 className={`px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded ${badgeClass}`}
               >
-                {config.badge}
+                {badge}
               </span>
             )}
           </div>
-          <p className="text-sm text-gray-500">{config.description}</p>
+          <p className="text-sm text-gray-500">{description}</p>
         </div>
         <Icon className={`h-8 w-8 shrink-0 transition-colors ${iconClass}`} />
       </div>
-      <div className={`mt-4 text-sm font-medium ${linkClass}`}>Открыть →</div>
+      <div className={`mt-4 text-sm font-medium ${linkClass}`}>{locale === 'en' ? 'Open →' : 'Открыть →'}</div>
     </Link>
   );
 }
 
 export default function ToolsPage() {
+  const { locale } = useUser();
   const [toolIds, setToolIds] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -164,9 +169,11 @@ export default function ToolsPage() {
   return (
     <div className="space-y-6 text-left max-w-full">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Инструменты</h1>
+        <h1 className="text-2xl font-bold text-gray-900">{locale === 'en' ? 'Tools' : 'Инструменты'}</h1>
         <p className="text-sm text-gray-500">
-          Набор утилит для работы с данными и процессами.
+          {locale === 'en'
+            ? 'A set of utilities for data and process workflows.'
+            : 'Набор утилит для работы с данными и процессами.'}
         </p>
       </div>
 
@@ -186,9 +193,9 @@ export default function ToolsPage() {
         </div>
       ) : visibleGroups.length === 0 ? (
         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-10 text-center">
-          <p className="text-gray-600">Доступных инструментов пока нет.</p>
+          <p className="text-gray-600">{locale === 'en' ? 'No tools are available yet.' : 'Доступных инструментов пока нет.'}</p>
           <p className="text-sm text-gray-500 mt-1">
-            Пожалуйста, обратитесь к администратору.
+            {locale === 'en' ? 'Please contact your administrator.' : 'Пожалуйста, обратитесь к администратору.'}
           </p>
         </div>
       ) : (
@@ -197,7 +204,7 @@ export default function ToolsPage() {
             <section key={group.label}>
               <div className="flex items-center gap-3 mb-4">
                 <div className="h-px flex-1 bg-gray-200" />
-                <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-400 shrink-0">{group.label}</h2>
+                <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-400 shrink-0">{locale === 'en' ? (group.label_en ?? group.label) : group.label}</h2>
                 <div className="h-px flex-1 bg-gray-200" />
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 items-stretch">
@@ -207,7 +214,7 @@ export default function ToolsPage() {
                       <RdpToolCard />
                     </div>
                   ) : (
-                    <ToolLinkCard key={toolId} toolId={toolId} />
+                    <ToolLinkCard key={toolId} toolId={toolId} locale={locale} />
                   )
                 )}
               </div>

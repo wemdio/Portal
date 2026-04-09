@@ -691,7 +691,12 @@ export async function runCampaignLoop(
     }
   } finally {
     await disconnectAll(clients);
-    await db.from('tg_outreach_campaigns').update({ status: 'stopped', updated_at: new Date().toISOString() }).eq('id', campaignId);
+    // Only set 'stopped' if campaign is NOT 'paused' (drain-worker.sh sets 'paused' before deploy
+    // and we must preserve it so resumeRunningCampaigns() can pick it up on the new worker).
+    await db.from('tg_outreach_campaigns')
+      .update({ status: 'stopped', updated_at: new Date().toISOString() })
+      .eq('id', campaignId)
+      .neq('status', 'paused');
     log('info', 'Кампания остановлена');
   }
 }

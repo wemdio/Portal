@@ -52,8 +52,13 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
 
   if (runningCampaigns.has(campaignId)) {
-    log('warn', `Campaign ${campaignId} already running, skipping start`);
-    await db.from('ai_caller_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+    if (shouldStop()) {
+      log('info', `Campaign ${campaignId} already running and worker is shutting down — re-queueing job for next worker`);
+      await db.from('ai_caller_jobs').update({ status: 'pending', started_at: null }).eq('id', job.id);
+    } else {
+      log('warn', `Campaign ${campaignId} already running, skipping start`);
+      await db.from('ai_caller_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+    }
     return;
   }
 
@@ -142,11 +147,11 @@ async function resumeRunningCampaigns() {
   const { data: running } = await db
     .from('ai_campaigns')
     .select('id')
-    .eq('status', 'running');
+    .in('status', ['running', 'paused']);
 
   if (!running?.length) return;
 
-  log('info', `Found ${running.length} campaigns with status=running, scheduling start jobs`);
+  log('info', `Found ${running.length} campaigns with status running/paused, scheduling start jobs`);
   for (const campaign of running) {
     await resetStuckContacts(db, campaign.id, log);
 
@@ -167,6 +172,11 @@ async function resumeRunningCampaigns() {
       log('info', `Queued auto-resume start job for campaign ${campaign.id}`);
     }
   }
+
+  await db
+    .from('ai_campaigns')
+    .update({ status: 'running', updated_at: new Date().toISOString() })
+    .eq('status', 'paused');
 }
 
 async function main() {

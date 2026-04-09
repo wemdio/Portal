@@ -3,6 +3,7 @@ import { formatParseStopMessage } from '@/lib/tgParser/parseMessages';
 
 export type TgParserJobApiRow = {
   id: string;
+  user_id: string;
   created_at: string;
   status: string;
   config: {
@@ -22,6 +23,7 @@ export type ParseJobStatus = 'running' | 'done' | 'error';
 
 export type ParseJobUi = {
   id: string;
+  userId: string;
   accountId: string;
   accountLabel: string;
   linkCount: number;
@@ -51,6 +53,7 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
 
   return {
     id: row.id,
+    userId: row.user_id,
     accountId: row.account_id ?? '',
     accountLabel: cfg.account_label ?? '—',
     linkCount: links.length,
