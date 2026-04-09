@@ -12,6 +12,51 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
+export async function GET(req: NextRequest) {
+  try {
+    const token = getBearerToken(req.headers.get('authorization'));
+    if (!token) return jsonError('Unauthorized', 401);
+    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+
+    const supabase = createAuthedSupabaseClient(token);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return jsonError('Unauthorized', 401);
+
+    const { data: jobs } = await supabaseAdmin
+      .from('website_enrichment_jobs')
+      .select('id, status, extraction_type, total, processed, created_at')
+      .eq('user_id', user.id)
+      .in('status', ['pending', 'running'])
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const activeJob = (jobs ?? [])[0] as {
+      id: string; status: string; extraction_type: string;
+      total: number; processed: number;
+    } | undefined;
+
+    if (!activeJob) {
+      return NextResponse.json({ active_job: null });
+    }
+
+    const progress = activeJob.total > 0
+      ? Math.round((activeJob.processed / activeJob.total) * 100)
+      : 0;
+
+    return NextResponse.json({
+      active_job: {
+        id: activeJob.id,
+        extraction_type: activeJob.extraction_type,
+        total: activeJob.total,
+        processed: activeJob.processed,
+        progress,
+      },
+    });
+  } catch (err) {
+    return jsonError(err instanceof Error ? err.message : 'Internal error', 500);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const token = getBearerToken(req.headers.get('authorization'));
