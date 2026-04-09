@@ -3625,7 +3625,8 @@ export function DatabaseSpreadsheet() {
     let lastProgressAt = 0;
     let lastObservedProgressAt = Date.now();
     let lastObservedProcessed = 0;
-    let consecutivePollingErrors = 0;
+    let firstPollErrorAt: number | null = null;
+    let pollBackoffMs = 2000;
     let currentToken = token;
 
     const flushUpdates = () => {
@@ -3725,21 +3726,21 @@ export function DatabaseSpreadsheet() {
         }
 
         if (!res.ok) {
-          consecutivePollingErrors += 1;
-          let responseError = `Ошибка API (${res.status})`;
-          try {
-            const errorData = await parseJsonResponse<{ error?: string }>(res, 'website_enrichment.poll.error');
-            if (errorData.error) responseError = errorData.error;
-          } catch {
-            // ignore parse error
-          }
-          if (consecutivePollingErrors >= ENRICHMENT_MAX_CONSECUTIVE_FAILURES) {
+          if (!firstPollErrorAt) firstPollErrorAt = Date.now();
+          if (Date.now() - firstPollErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+            let responseError = `Ошибка API (${res.status})`;
+            try {
+              const errorData = await parseJsonResponse<{ error?: string }>(res, 'website_enrichment.poll.error');
+              if (errorData.error) responseError = errorData.error;
+            } catch { /* ignore */ }
             throw new Error(`Обогащение остановлено: ${responseError}`);
           }
-          await sleep(1000);
+          await sleep(pollBackoffMs);
+          pollBackoffMs = Math.min(pollBackoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
           continue;
         }
-        consecutivePollingErrors = 0;
+        firstPollErrorAt = null;
+        pollBackoffMs = 2000;
 
         const data = await parseJsonResponse<{
           job?: {
@@ -4340,7 +4341,8 @@ export function DatabaseSpreadsheet() {
     let pollDelayMs = BRIEF_SCORING_POLL_INTERVAL_MS;
     let processedCount = 0;
     let errorCount = 0;
-    let consecutivePollingErrors = 0;
+    let firstPollErrorAt: number | null = null;
+    let pollBackoffMs = 2000;
     let currentToken = token;
     const pendingUpdates = new Map<number, { score: string; reason: string }>();
 
@@ -4392,21 +4394,21 @@ export function DatabaseSpreadsheet() {
         }
 
         if (!res.ok) {
-          consecutivePollingErrors += 1;
-          let responseError = `Ошибка API (${res.status})`;
-          try {
-            const errorData = await parseJsonResponse<{ error?: string }>(res, 'brief_scoring.poll.error');
-            if (errorData.error) responseError = errorData.error;
-          } catch {
-            // ignore parse error
-          }
-          if (consecutivePollingErrors >= BRIEF_SCORING_MAX_CONSECUTIVE_FAILURES) {
+          if (!firstPollErrorAt) firstPollErrorAt = Date.now();
+          if (Date.now() - firstPollErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+            let responseError = `Ошибка API (${res.status})`;
+            try {
+              const errorData = await parseJsonResponse<{ error?: string }>(res, 'brief_scoring.poll.error');
+              if (errorData.error) responseError = errorData.error;
+            } catch { /* ignore */ }
             throw new Error(`Оценка ЦА остановлена: ${responseError}`);
           }
-          await sleep(1000);
+          await sleep(pollBackoffMs);
+          pollBackoffMs = Math.min(pollBackoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
           continue;
         }
-        consecutivePollingErrors = 0;
+        firstPollErrorAt = null;
+        pollBackoffMs = 2000;
 
         const data = await parseJsonResponse<{
           job?: {
@@ -6017,7 +6019,8 @@ export function DatabaseSpreadsheet() {
 
     try {
       let resultCursor: string | null = null;
-      let consecutiveErrors = 0;
+      let firstValErrorAt: number | null = null;
+      let valBackoffMs = 2000;
       let lastProgressTime = Date.now();
       let token = currentToken;
 
@@ -6039,12 +6042,16 @@ export function DatabaseSpreadsheet() {
         }
 
         if (!res.ok) {
-          consecutiveErrors += 1;
-          if (consecutiveErrors >= EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES) throw new Error('Слишком много ошибок API подряд');
-          await new Promise((r) => setTimeout(r, 1500));
+          if (!firstValErrorAt) firstValErrorAt = Date.now();
+          if (Date.now() - firstValErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+            throw new Error('Сервер недоступен более 15 минут. Задача продолжает работу в фоне — обновите страницу.');
+          }
+          await new Promise((r) => setTimeout(r, valBackoffMs));
+          valBackoffMs = Math.min(valBackoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
           continue;
         }
-        consecutiveErrors = 0;
+        firstValErrorAt = null;
+        valBackoffMs = 2000;
 
         const data = await parseJsonResponse<{
           job: { status: string; processed: number; total: number; success_count: number; error_count: number };
@@ -6215,9 +6222,9 @@ export function DatabaseSpreadsheet() {
 
       const total = totalFromServer;
 
-      // Poll for results
       let resultCursor: string | null = null;
-      let consecutiveErrors = 0;
+      let firstValErrorAt: number | null = null;
+      let valBackoffMs = 2000;
       let lastProgressTime = Date.now();
       let token = currentToken;
 
@@ -6247,14 +6254,16 @@ export function DatabaseSpreadsheet() {
         }
 
         if (!res.ok) {
-          consecutiveErrors += 1;
-          if (consecutiveErrors >= EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES) {
-            throw new Error('Слишком много ошибок API подряд');
+          if (!firstValErrorAt) firstValErrorAt = Date.now();
+          if (Date.now() - firstValErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+            throw new Error('Сервер недоступен более 15 минут. Задача продолжает работу в фоне — обновите страницу.');
           }
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, valBackoffMs));
+          valBackoffMs = Math.min(valBackoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
           continue;
         }
-        consecutiveErrors = 0;
+        firstValErrorAt = null;
+        valBackoffMs = 2000;
 
         const data = await parseJsonResponse<{
           job: { status: string; processed: number; total: number; success_count: number; error_count: number };
