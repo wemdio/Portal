@@ -23,6 +23,12 @@ export type TgParserJobConfig = {
 };
 
 type TgParserLogLevel = 'info' | 'warning' | 'error';
+type PgErrorLike = {
+  message?: string;
+  code?: string;
+  details?: string | null;
+  hint?: string | null;
+};
 
 const MAX_TEXT_CELL_LEN = Number(process.env.TG_PARSER_MAX_TEXT_CELL_LEN ?? '4000');
 const MAX_MESSAGES_CELL_LEN = Number(process.env.TG_PARSER_MAX_MESSAGES_CELL_LEN ?? '12000');
@@ -59,6 +65,99 @@ function sanitizeUsersForJson(users: ParsedUser[]): ParsedUser[] {
     'Ссылка на источник': sanitizeStringCell(u['Ссылка на источник'], 1000),
     'Название источника': sanitizeStringCell(u['Название источника'], 500),
   }));
+}
+
+function stripMessages(users: ParsedUser[]): ParsedUser[] {
+  return users.map((u) => ({
+    ...u,
+    Сообщения: '',
+  }));
+}
+
+function stripHeavyText(users: ParsedUser[]): ParsedUser[] {
+  return users.map((u) => ({
+    ...u,
+    Сообщения: '',
+    Биография: '',
+  }));
+}
+
+function truncateText(s: string, max = 800): string {
+  return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+function payloadStats(users: ParsedUser[]) {
+  let maxMessagesLen = 0;
+  let maxBioLen = 0;
+  let maxSourceLen = 0;
+  let usersWithCtlChars = 0;
+  let totalMessagesChars = 0;
+  let totalBioChars = 0;
+  const ctlRe = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/;
+
+  for (const u of users) {
+    const msg = String(u.Сообщения ?? '');
+    const bio = String(u.Биография ?? '');
+    const src = String(u['Ссылка на источник'] ?? '');
+    if (msg.length > maxMessagesLen) maxMessagesLen = msg.length;
+    if (bio.length > maxBioLen) maxBioLen = bio.length;
+    if (src.length > maxSourceLen) maxSourceLen = src.length;
+    totalMessagesChars += msg.length;
+    totalBioChars += bio.length;
+    if (ctlRe.test(msg) || ctlRe.test(bio)) usersWithCtlChars += 1;
+  }
+
+  let jsonBytes = -1;
+  let jsonError: string | null = null;
+  try {
+    jsonBytes = Buffer.byteLength(JSON.stringify(users), 'utf8');
+  } catch (e) {
+    jsonError = e instanceof Error ? e.message : String(e);
+  }
+
+  const first = users[0];
+  return {
+    usersCount: users.length,
+    jsonBytes,
+    jsonError,
+    maxMessagesLen,
+    maxBioLen,
+    maxSourceLen,
+    totalMessagesChars,
+    totalBioChars,
+    usersWithCtlChars,
+    sampleId: first?.ID ?? null,
+    sampleUsername: first?.Username ?? '',
+    sampleSource: first?.['Ссылка на источник'] ?? '',
+  };
+}
+
+function formatPersistFailureMessage(args: {
+  mode: string;
+  reason: string;
+  pg?: PgErrorLike | null;
+  stats?: ReturnType<typeof payloadStats>;
+}): string {
+  const chunks: string[] = [
+    `persist fail [mode=${args.mode}]`,
+    `reason=${args.reason}`,
+  ];
+  if (args.pg?.code) chunks.push(`pg.code=${args.pg.code}`);
+  if (args.pg?.details) chunks.push(`pg.details=${truncateText(String(args.pg.details), 220)}`);
+  if (args.pg?.hint) chunks.push(`pg.hint=${truncateText(String(args.pg.hint), 160)}`);
+  if (args.stats) {
+    chunks.push(
+      `users=${args.stats.usersCount}`,
+      `jsonBytes=${args.stats.jsonBytes}`,
+      `maxMsg=${args.stats.maxMessagesLen}`,
+      `maxBio=${args.stats.maxBioLen}`,
+      `ctlUsers=${args.stats.usersWithCtlChars}`,
+      `sampleId=${args.stats.sampleId ?? 'n/a'}`,
+      `sampleUser=${truncateText(args.stats.sampleUsername || '', 40)}`,
+    );
+    if (args.stats.jsonError) chunks.push(`jsonError=${truncateText(args.stats.jsonError, 180)}`);
+  }
+  return truncateText(chunks.join(' | '), 1000);
 }
 
 async function writeJobLog(args: {
@@ -241,7 +340,15 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         stop_reason?: string | null;
         error_message?: string | null;
       },
-      opts?: { fallbackReason?: string; logOnFallback?: string; fallbackLogLevel?: TgParserLogLevel },
+      opts?: {
+        fallbackReason?: string;
+        logOnFallback?: string;
+        fallbackLogLevel?: TgParserLogLevel;
+        applyFallbackOnFailure?: boolean;
+        persistMode?: 'full' | 'no_messages' | 'no_messages_no_bio' | 'error';
+        usersSnapshot?: ParsedUser[];
+        logFailureDetails?: boolean;
+      },
     ): Promise<{ ok: boolean; errorMessage?: string }> => {
       const { data: updated, error: updateErr } = await db
         .from('tg_parser_jobs')
@@ -256,20 +363,48 @@ export async function runTgParserJob(jobId: string): Promise<void> {
 
       if (!updateErr && updated) return { ok: true };
 
-      const reason = updateErr?.message || opts?.fallbackReason || 'Не удалось обновить статус задачи';
+      const pgErr = (updateErr ?? null) as PgErrorLike | null;
+      const reason = pgErr?.message || opts?.fallbackReason || 'Не удалось обновить статус задачи';
       const persistMsg = `Не удалось сохранить итог задачи: ${reason}`;
+      const stats = opts?.usersSnapshot ? payloadStats(opts.usersSnapshot) : undefined;
+      const detailMsg = formatPersistFailureMessage({
+        mode: opts?.persistMode ?? patch.status,
+        reason,
+        pg: pgErr,
+        stats,
+      });
       console.error('[tg-parser-job] final state persist failed', {
         jobId,
         reason,
+        pgCode: pgErr?.code,
+        pgDetails: pgErr?.details,
+        pgHint: pgErr?.hint,
         targetStatus: patch.status,
+        mode: opts?.persistMode ?? 'unknown',
+        stats,
       });
+
+      if (opts?.logFailureDetails) {
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: 'warning',
+          message: detailMsg,
+        });
+      }
+
+      if (opts?.applyFallbackOnFailure === false) {
+        return { ok: false, errorMessage: persistMsg };
+      }
 
       const { data: fallbackRow, error: fallbackErr } = await db
         .from('tg_parser_jobs')
         .update({
           status: 'error',
           stop_reason: 'persist_failed',
-          error_message: persistMsg,
+          error_message: truncateText(persistMsg, 900),
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId)
@@ -291,6 +426,79 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       }
 
       return { ok: false, errorMessage: persistMsg };
+    };
+
+    const persistDoneUsersWithRetry = async (args: {
+      users: ParsedUser[];
+      stopReason: string | null;
+      errorMessage: string | null;
+      fallbackReason: string;
+      fallbackLogOnFailure: string;
+      fallbackLogLevel?: TgParserLogLevel;
+    }): Promise<{ ok: boolean; usersPersistMode?: 'full' | 'no_messages' | 'no_messages_no_bio'; errorMessage?: string }> => {
+      const variants: Array<{
+        mode: 'full' | 'no_messages' | 'no_messages_no_bio';
+        users: ParsedUser[];
+      }> = [
+        { mode: 'full', users: args.users },
+        { mode: 'no_messages', users: stripMessages(args.users) },
+        { mode: 'no_messages_no_bio', users: stripHeavyText(args.users) },
+      ];
+
+      let lastError = 'unknown persist error';
+      for (const variant of variants) {
+        const persisted = await persistTerminalState(
+          {
+            status: 'done',
+            result_users: variant.users,
+            stop_reason: args.stopReason,
+            error_message: args.errorMessage,
+          },
+          {
+            fallbackReason: args.fallbackReason,
+            applyFallbackOnFailure: false,
+            persistMode: variant.mode,
+            usersSnapshot: variant.users,
+            logFailureDetails: true,
+          },
+        );
+        if (persisted.ok) {
+          if (variant.mode !== 'full') {
+            await writeJobLog({
+              jobId,
+              jobUserId,
+              isTarget,
+              accountLabel,
+              level: 'warning',
+              message:
+                variant.mode === 'no_messages'
+                  ? 'Результат сохранён в облегченном виде: поле «Сообщения» очищено для стабильной записи'
+                  : 'Результат сохранён в облегченном виде: очищены поля «Сообщения» и «Биография»',
+            });
+          }
+          return { ok: true, usersPersistMode: variant.mode };
+        }
+        lastError = persisted.errorMessage ?? lastError;
+      }
+
+      const finalFallback = await persistTerminalState(
+        {
+          status: 'done',
+          result_users: [],
+          stop_reason: args.stopReason,
+          error_message: args.errorMessage,
+        },
+        {
+          fallbackReason: args.fallbackReason,
+          logOnFallback: args.fallbackLogOnFailure,
+          fallbackLogLevel: args.fallbackLogLevel ?? 'error',
+          applyFallbackOnFailure: true,
+          persistMode: 'error',
+          usersSnapshot: [],
+          logFailureDetails: true,
+        },
+      );
+      return { ok: false, errorMessage: finalFallback.errorMessage ?? lastError };
     };
 
     if (result.status === 'error') {
@@ -317,19 +525,14 @@ export async function runTgParserJob(jobId: string): Promise<void> {
     }
 
     if (result.status === 'partial') {
-      const persisted = await persistTerminalState(
-        {
-          status: 'done',
-          result_users: safeUsers,
-          stop_reason: result.stop_reason,
-          error_message: result.error ?? null,
-        },
-        {
-          fallbackReason: result.error ?? 'partial result persist failed',
-          logOnFallback: 'Частичный результат не сохранён',
-          fallbackLogLevel: 'warning',
-        },
-      );
+      const persisted = await persistDoneUsersWithRetry({
+        users: safeUsers ?? [],
+        stopReason: result.stop_reason,
+        errorMessage: result.error ?? null,
+        fallbackReason: result.error ?? 'partial result persist failed',
+        fallbackLogOnFailure: 'Частичный результат не сохранён',
+        fallbackLogLevel: 'warning',
+      });
       if (!persisted.ok) {
         await trace?.fail(new Error(persisted.errorMessage ?? 'partial result persist failed'), {
           stage: 'parse',
@@ -339,36 +542,35 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         });
         return;
       }
+      const usersForLog =
+        persisted.usersPersistMode === 'full' ? result.users.length : safeUsers?.length ?? result.users.length;
       await writeJobLog({
         jobId,
         jobUserId,
         isTarget,
         accountLabel,
         level: 'warning',
-        message: `Частичный результат: ${result.users.length} контактов, причина остановки: ${result.stop_reason ?? 'unknown'}`,
+        message: `Частичный результат: ${usersForLog} контактов, причина остановки: ${result.stop_reason ?? 'unknown'}`,
       });
       await trace?.end({
         stage: 'parse',
         status: 'partial',
-        users_count: result.users.length,
+        users_count: usersForLog,
         stop_reason: result.stop_reason,
         error: result.error ?? null,
+        users_persist_mode: persisted.usersPersistMode ?? 'unknown',
       });
       return;
     }
 
-    const persisted = await persistTerminalState(
-      {
-        status: 'done',
-        result_users: safeUsers,
-        stop_reason: null,
-        error_message: null,
-      },
-      {
-        fallbackReason: 'successful result persist failed',
-        logOnFallback: 'Итог не сохранён в tg_parser_jobs',
-      },
-    );
+    const persisted = await persistDoneUsersWithRetry({
+      users: safeUsers ?? [],
+      stopReason: null,
+      errorMessage: null,
+      fallbackReason: 'successful result persist failed',
+      fallbackLogOnFailure: 'Итог не сохранён в tg_parser_jobs',
+      fallbackLogLevel: 'error',
+    });
     if (!persisted.ok) {
       await trace?.fail(new Error(persisted.errorMessage ?? 'result persist failed'), {
         stage: 'parse',
@@ -377,18 +579,21 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       });
       return;
     }
+    const usersForLog =
+      persisted.usersPersistMode === 'full' ? result.users.length : safeUsers?.length ?? result.users.length;
     await writeJobLog({
       jobId,
       jobUserId,
       isTarget,
       accountLabel,
       level: 'info',
-      message: `Успешно завершено: найдено ${result.users.length} контактов`,
+      message: `Успешно завершено: найдено ${usersForLog} контактов`,
     });
     await trace?.end({
       stage: 'parse',
       status: 'done',
-      users_count: result.users.length,
+      users_count: usersForLog,
+      users_persist_mode: persisted.usersPersistMode ?? 'unknown',
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
