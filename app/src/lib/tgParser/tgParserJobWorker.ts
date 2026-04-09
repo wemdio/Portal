@@ -196,16 +196,73 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       max_contacts,
     });
 
-    if (result.status === 'error') {
-      await db
+    const persistTerminalState = async (
+      patch: {
+        status: 'done' | 'error';
+        result_users?: unknown;
+        stop_reason?: string | null;
+        error_message?: string | null;
+      },
+      opts?: { fallbackReason?: string; logOnFallback?: string; fallbackLogLevel?: TgParserLogLevel },
+    ): Promise<{ ok: boolean; errorMessage?: string }> => {
+      const { data: updated, error: updateErr } = await db
         .from('tg_parser_jobs')
         .update({
-          status: 'error',
-          error_message: result.error,
+          ...patch,
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId)
-        .eq('status', 'running');
+        .eq('status', 'running')
+        .select('id')
+        .maybeSingle();
+
+      if (!updateErr && updated) return { ok: true };
+
+      const reason = updateErr?.message || opts?.fallbackReason || 'Не удалось обновить статус задачи';
+      const persistMsg = `Не удалось сохранить итог задачи: ${reason}`;
+      console.error('[tg-parser-job] final state persist failed', {
+        jobId,
+        reason,
+        targetStatus: patch.status,
+      });
+
+      const { data: fallbackRow, error: fallbackErr } = await db
+        .from('tg_parser_jobs')
+        .update({
+          status: 'error',
+          stop_reason: 'persist_failed',
+          error_message: persistMsg,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId)
+        .eq('status', 'running')
+        .select('id')
+        .maybeSingle();
+
+      if (fallbackErr || !fallbackRow) {
+        console.error('[tg-parser-job] fallback persist failed', { jobId, fallbackErr });
+      } else if (opts?.logOnFallback) {
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: opts.fallbackLogLevel ?? 'error',
+          message: `${opts.logOnFallback}: ${reason}`,
+        });
+      }
+
+      return { ok: false, errorMessage: persistMsg };
+    };
+
+    if (result.status === 'error') {
+      const persisted = await persistTerminalState(
+        { status: 'error', error_message: result.error },
+        {
+          fallbackReason: result.error,
+          logOnFallback: 'Не удалось сохранить ошибку задачи в tg_parser_jobs',
+        },
+      );
       await writeJobLog({
         jobId,
         jobUserId,
@@ -214,22 +271,36 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         level: 'error',
         message: `Задача завершилась ошибкой: ${result.error}`,
       });
-      await trace?.fail(new Error(result.error), { stage: 'parse', status: 'error' });
+      await trace?.fail(
+        new Error(persisted.ok ? result.error : persisted.errorMessage ?? result.error),
+        { stage: 'parse', status: 'error' },
+      );
       return;
     }
 
     if (result.status === 'partial') {
-      await db
-        .from('tg_parser_jobs')
-        .update({
+      const persisted = await persistTerminalState(
+        {
           status: 'done',
           result_users: result.users,
           stop_reason: result.stop_reason,
           error_message: result.error ?? null,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', jobId)
-        .eq('status', 'running');
+        },
+        {
+          fallbackReason: result.error ?? 'partial result persist failed',
+          logOnFallback: 'Частичный результат не сохранён',
+          fallbackLogLevel: 'warning',
+        },
+      );
+      if (!persisted.ok) {
+        await trace?.fail(new Error(persisted.errorMessage ?? 'partial result persist failed'), {
+          stage: 'parse',
+          status: 'persist_failed',
+          users_count: result.users.length,
+          stop_reason: result.stop_reason,
+        });
+        return;
+      }
       await writeJobLog({
         jobId,
         jobUserId,
@@ -248,17 +319,26 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       return;
     }
 
-    await db
-      .from('tg_parser_jobs')
-      .update({
+    const persisted = await persistTerminalState(
+      {
         status: 'done',
         result_users: result.users,
         stop_reason: null,
         error_message: null,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId)
-      .eq('status', 'running');
+      },
+      {
+        fallbackReason: 'successful result persist failed',
+        logOnFallback: 'Итог не сохранён в tg_parser_jobs',
+      },
+    );
+    if (!persisted.ok) {
+      await trace?.fail(new Error(persisted.errorMessage ?? 'result persist failed'), {
+        stage: 'parse',
+        status: 'persist_failed',
+        users_count: result.users.length,
+      });
+      return;
+    }
     await writeJobLog({
       jobId,
       jobUserId,
