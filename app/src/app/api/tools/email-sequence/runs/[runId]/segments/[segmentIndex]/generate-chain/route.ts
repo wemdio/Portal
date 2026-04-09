@@ -143,6 +143,12 @@ function buildContext(brief: EmailSequenceBrief, segment: Record<string, unknown
   return parts.join('\n');
 }
 
+function pickWriterModel(raw: unknown): string | null {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  return value.slice(0, 120);
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ runId: string; segmentIndex: string }> },
@@ -193,7 +199,17 @@ export async function POST(
   const sender = safeStr(brief.sender_name).trim();
   if (!sender) return jsonError('Brief is missing sender_name', 400);
 
-  const modelWriter = process.env.EMAIL_SEQUENCE_WRITER_MODEL ?? 'gpt-5.2';
+  let body: { model?: string } = {};
+  try {
+    body = (await req.json()) as { model?: string };
+  } catch {
+    body = {};
+  }
+  const modelWriter =
+    pickWriterModel(body.model) ??
+    pickWriterModel(brief.writer_model) ??
+    process.env.EMAIL_SEQUENCE_WRITER_MODEL ??
+    'gpt-5.2';
 
   let trace: Awaited<ReturnType<typeof startTrace>> | null = null;
 

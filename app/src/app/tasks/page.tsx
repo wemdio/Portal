@@ -97,15 +97,116 @@ type EnrichedTask = Task & {
   isLegacy?: boolean;
 };
 
+type TaskDeadlineDefaultMode = 'tomorrow' | 'fixed';
+
+type TaskDeadlinePreference = {
+  enabled: boolean;
+  mode: TaskDeadlineDefaultMode;
+  at: string | null;
+  time: string;
+};
+
+function toDatetimeLocalValue(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openNativePicker(input: HTMLInputElement): void {
+  const pickerInput = input as HTMLInputElement & { showPicker?: () => void };
+  if (typeof pickerInput.showPicker !== 'function') return;
+  try {
+    pickerInput.showPicker();
+  } catch {
+    // Ignore browser/security restrictions and keep native behavior.
+  }
+}
+
+function formatDateTimeLocalDisplay(value: string, locale: 'ru' | 'en'): string {
+  if (!value) return '';
+  const [datePart, timePart] = value.split('T');
+  if (!datePart) return value;
+  const [year, month, day] = datePart.split('-');
+  if (!year || !month || !day) return value;
+  const time = (timePart ?? '').slice(0, 5);
+  if (locale === 'en') {
+    return `${month}/${day}/${year}${time ? ` ${time}` : ''}`;
+  }
+  return `${day}.${month}.${year}${time ? ` ${time}` : ''}`;
+}
+
+function NativePickerField({
+  type,
+  locale,
+  value,
+  onChange,
+  className,
+  placeholderRu,
+  placeholderEn,
+}: {
+  type: 'datetime-local' | 'time';
+  locale: 'ru' | 'en';
+  value: string;
+  onChange: (nextValue: string) => void;
+  className: string;
+  placeholderRu: string;
+  placeholderEn: string;
+}) {
+  const hiddenRef = useRef<HTMLInputElement>(null);
+  const isEn = locale === 'en';
+  const displayValue = type === 'time' ? value : formatDateTimeLocalDisplay(value, locale);
+
+  const openPicker = useCallback(() => {
+    if (!hiddenRef.current) return;
+    hiddenRef.current.focus();
+    openNativePicker(hiddenRef.current);
+  }, []);
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        readOnly
+        value={displayValue}
+        placeholder={isEn ? placeholderEn : placeholderRu}
+        onClick={openPicker}
+        onFocus={openPicker}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openPicker();
+          }
+        }}
+        className={className}
+      />
+      <input
+        ref={hiddenRef}
+        type={type}
+        lang={isEn ? 'en-GB' : 'ru-RU'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="absolute inset-0 opacity-0 pointer-events-none"
+        tabIndex={-1}
+        aria-hidden="true"
+      />
+    </div>
+  );
+}
+
 function ProjectCombobox({
   projects,
   value,
   onChange,
+  locale,
 }: {
   projects: Project[];
   value: string;
   onChange: (id: string) => void;
+  locale: 'ru' | 'en';
 }) {
+  const isEn = locale === 'en';
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(0);
@@ -114,12 +215,12 @@ function ProjectCombobox({
   const listRef = useRef<HTMLUListElement>(null);
 
   const selectedName = value
-    ? (projects.find((p) => p.id === value)?.client || projects.find((p) => p.id === value)?.name || 'Без названия')
-    : 'Без проекта';
+    ? (projects.find((p) => p.id === value)?.client || projects.find((p) => p.id === value)?.name || (isEn ? 'Untitled' : 'Без названия'))
+    : (isEn ? 'No project' : 'Без проекта');
 
   const allOptions = useMemo(
-    () => [{ id: '', label: 'Без проекта' }, ...projects.map((p) => ({ id: p.id, label: p.client || p.name || 'Без названия' }))],
-    [projects],
+    () => [{ id: '', label: isEn ? 'No project' : 'Без проекта' }, ...projects.map((p) => ({ id: p.id, label: p.client || p.name || (isEn ? 'Untitled' : 'Без названия') }))],
+    [projects, isEn],
   );
 
   const filtered = query
@@ -182,7 +283,7 @@ function ProjectCombobox({
           ref={inputRef}
           type="text"
           value={open ? query : selectedName}
-          placeholder="Поиск проекта…"
+          placeholder={isEn ? 'Search project…' : 'Поиск проекта…'}
           onChange={(e) => { setQuery(e.target.value); setHighlightIdx(0); if (!open) setOpen(true); }}
           onFocus={() => { setOpen(true); setQuery(''); setHighlightIdx(0); }}
           onKeyDown={handleKeyDown}
@@ -208,7 +309,7 @@ function ProjectCombobox({
           className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
         >
           {filtered.length === 0 ? (
-            <li className="px-3 py-2 text-sm text-slate-400">Ничего не найдено</li>
+            <li className="px-3 py-2 text-sm text-slate-400">{isEn ? 'Nothing found' : 'Ничего не найдено'}</li>
           ) : (
             filtered.map((o, idx) => (
               <li
@@ -315,7 +416,9 @@ export default function TasksPage() {
   const [editingResultId, setEditingResultId] = useState<string | null>(null);
   const [editingResultValue, setEditingResultValue] = useState('');
 
-  const { userRole: currentUserRole, userFullName: currentUserName, userId: currentUserId } = useUser();
+  const { userRole: currentUserRole, userFullName: currentUserName, userId: currentUserId, locale } = useUser();
+  const isEn = locale === 'en';
+  const uiDateLocale = isEn ? 'en-GB' : 'ru-RU';
   const [allProfiles, setAllProfiles] = useState<ProfileOption[]>([]);
   const [userDefaultBoardId, setUserDefaultBoardId] = useState<string | null>(null);
   const [boardPreferenceLoaded, setBoardPreferenceLoaded] = useState(false);
@@ -353,6 +456,11 @@ export default function TasksPage() {
   const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
   const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
   const [showDeleteTaskConfirm, setShowDeleteTaskConfirm] = useState(false);
+  const [deadlineDefaultEnabled, setDeadlineDefaultEnabled] = useState(false);
+  const [deadlineDefaultMode, setDeadlineDefaultMode] = useState<TaskDeadlineDefaultMode>('tomorrow');
+  const [deadlineDefaultAt, setDeadlineDefaultAt] = useState('');
+  const [deadlineDefaultTime, setDeadlineDefaultTime] = useState('12:00');
+  const [savingDeadlineDefault, setSavingDeadlineDefault] = useState(false);
 
   const userIsLead = checkIsLead(currentUserRole);
 
@@ -417,6 +525,20 @@ export default function TasksPage() {
           }
         } catch {
           // non-critical — fall back to system default
+        }
+        try {
+          const dlRes = await fetch('/api/user/task-deadline-preference', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (dlRes.ok) {
+            const dlData = (await dlRes.json()) as TaskDeadlinePreference;
+            setDeadlineDefaultEnabled(Boolean(dlData.enabled));
+            setDeadlineDefaultMode(dlData.mode === 'fixed' ? 'fixed' : 'tomorrow');
+            setDeadlineDefaultAt(toDatetimeLocalValue(dlData.at));
+            setDeadlineDefaultTime(dlData.time && /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(dlData.time) ? dlData.time : '12:00');
+          }
+        } catch {
+          // non-critical
         }
       }
 
@@ -772,12 +894,69 @@ export default function TasksPage() {
     return newSpecialists.join(', ').trim();
   }
 
+  const getDeadlineDefaultIso = useCallback((): string | null => {
+    if (!deadlineDefaultEnabled) return null;
+    if (deadlineDefaultMode === 'fixed') {
+      if (!deadlineDefaultAt) return null;
+      const fixed = new Date(deadlineDefaultAt);
+      if (Number.isNaN(fixed.getTime())) return null;
+      return fixed.toISOString();
+    }
+    const [hoursRaw, minutesRaw] = deadlineDefaultTime.split(':');
+    const hours = Number(hoursRaw);
+    const minutes = Number(minutesRaw);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(
+      Number.isFinite(hours) ? hours : 12,
+      Number.isFinite(minutes) ? minutes : 0,
+      0,
+      0
+    );
+    return tomorrow.toISOString();
+  }, [deadlineDefaultAt, deadlineDefaultEnabled, deadlineDefaultMode, deadlineDefaultTime]);
+
+  const getDeadlineDefaultInput = useCallback((): string => {
+    const iso = getDeadlineDefaultIso();
+    return toDatetimeLocalValue(iso);
+  }, [getDeadlineDefaultIso]);
+
+  async function handleSaveDeadlineDefault() {
+    setSavingDeadlineDefault(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const payload: TaskDeadlinePreference = {
+        enabled: deadlineDefaultEnabled,
+        mode: deadlineDefaultMode,
+        at: deadlineDefaultMode === 'fixed' && deadlineDefaultAt ? new Date(deadlineDefaultAt).toISOString() : null,
+        time: deadlineDefaultMode === 'tomorrow' ? deadlineDefaultTime : '12:00',
+      };
+      const res = await fetch('/api/user/task-deadline-preference', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Failed to save deadline default');
+      }
+    } catch (error) {
+      void logError('tasks.deadline-default.save.failed', error);
+    } finally {
+      setSavingDeadlineDefault(false);
+    }
+  }
+
   async function handleAddTask() {
     const specialistValue = getNewTaskSpecialist();
     if (!newTitle.trim() || !specialistValue) return;
     setAddingSaving(true);
     try {
       const isBoardTask = view === 'board' && selectedBoardId && selectedBoardColumns.length > 0;
+      const explicitDeadlineIso = newDeadline ? new Date(newDeadline).toISOString() : null;
+      const fallbackDeadlineIso = getDeadlineDefaultIso();
       const payload: Record<string, string | null> = {
         title: newTitle.trim(),
         specialist: specialistValue,
@@ -785,7 +964,7 @@ export default function TasksPage() {
         status: 'pending',
         description: newDescription.trim() || null,
         image_url: newImageUrl.trim() || null,
-        deadline: newDeadline ? new Date(newDeadline).toISOString() : null,
+        deadline: explicitDeadlineIso ?? fallbackDeadlineIso,
       };
       if (isBoardTask) {
         payload.board_id = selectedBoardId!;
@@ -801,7 +980,7 @@ export default function TasksPage() {
       setNewProjectId('');
       setNewSpecialists([]);
       setNewDescription('');
-      setNewDeadline('');
+      setNewDeadline(getDeadlineDefaultInput());
       setNewImageUrl('');
       setShowAddForm(false);
       setNewTaskColumnId(null);
@@ -994,12 +1173,12 @@ export default function TasksPage() {
               const dl = new Date(task.deadline);
               const diffMs = dl.getTime() - now.getTime();
               const diffDays = Math.floor(diffMs / (1000*60*60*24));
-              const dateFmt = dl.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-              const timeFmt = dl.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+              const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short' });
+              const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
               const hasTime = !/^[\d-]+$/.test(task.deadline) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
               const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
               const cls = diffMs < 0 ? 'text-red-600 bg-red-50' : diffDays === 0 ? 'text-amber-700 bg-amber-50' : diffDays <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
-              const suffix = diffMs < 0 ? ' (просрочено)' : diffDays === 0 ? ' (сегодня)' : '';
+              const suffix = diffMs < 0 ? (isEn ? ' (overdue)' : ' (просрочено)') : diffDays === 0 ? (isEn ? ' (today)' : ' (сегодня)') : '';
               return (
                 <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
                   <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
@@ -1010,17 +1189,20 @@ export default function TasksPage() {
             <span className="relative inline-flex items-center">
               <input
                 type="datetime-local"
+                lang={isEn ? 'en-GB' : 'ru-RU'}
                 value={task.deadline ? (() => { const d = new Date(task.deadline); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })() : ''}
                 onChange={(e) => void updateTaskDeadline(task.id, e.target.value ? new Date(e.target.value).toISOString() : null)}
+                onClick={(e) => openNativePicker(e.currentTarget)}
+                onFocus={(e) => openNativePicker(e.currentTarget)}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 style={{ colorScheme: 'light' }}
               />
               <span className="inline-flex items-center text-[10px] text-gray-400 hover:text-gray-600 pointer-events-none">
-                {task.deadline ? '✏' : '+ срок'}
+                {task.deadline ? '✏' : isEn ? '+ deadline' : '+ срок'}
               </span>
             </span>
             {task.deadline && task.status !== 'done' && (
-              <button type="button" onClick={() => void updateTaskDeadline(task.id, null)} className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title="Убрать дедлайн">✕</button>
+              <button type="button" onClick={() => void updateTaskDeadline(task.id, null)} className="text-[10px] text-gray-400 hover:text-red-500 transition-colors" title={isEn ? 'Remove deadline' : 'Убрать дедлайн'}>✕</button>
             )}
           </div>
         )}
@@ -1103,7 +1285,10 @@ export default function TasksPage() {
             type="button"
             onClick={() => {
               setShowAddForm((v) => {
-                if (!v) setNewSpecialists(defaultSpecialists);
+                if (!v) {
+                  setNewSpecialists(defaultSpecialists);
+                  setNewDeadline(getDeadlineDefaultInput());
+                }
                 return !v;
               });
             }}
@@ -1115,15 +1300,15 @@ export default function TasksPage() {
       </div>
 
       {showAddForm && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/30 space-y-4">
-          <h3 className="text-base font-semibold text-slate-800">Новая задача</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-lg shadow-slate-200/30 space-y-2">
+          <h3 className="text-sm font-semibold text-slate-800">Новая задача</h3>
+          <div className="space-y-2">
             <div>
-              <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
-              <ProjectCombobox projects={projects} value={newProjectId} onChange={setNewProjectId} />
+              <span className="mb-1 block text-xs font-medium text-slate-500">Проект</span>
+              <ProjectCombobox projects={projects} value={newProjectId} onChange={setNewProjectId} locale={locale} />
             </div>
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-slate-500">Задача *</label>
+              <label className="mb-1 block text-xs font-medium text-slate-500">Задача *</label>
               <input
                 type="text"
                 value={newTitle}
@@ -1132,33 +1317,108 @@ export default function TasksPage() {
                   if (e.key === 'Enter') void handleAddTask();
                 }}
                 placeholder="Название задачи"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
               />
             </div>
             <div>
-              <span className="mb-1.5 block text-xs font-medium text-slate-500">Исполнители</span>
-              <div className="max-h-52 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-1 shadow-sm">
+              <span className="mb-1 block text-xs font-medium text-slate-500">Описание</span>
+              <textarea
+                value={newDescription}
+                onChange={(e) => setNewDescription(e.target.value)}
+                onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
+                placeholder={isEn ? 'Task description text...' : 'Текст описания задачи...'}
+                rows={2}
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+              />
+            </div>
+            <div>
+              <span className="mb-1 block text-xs font-medium text-slate-500">Дедлайн</span>
+              <NativePickerField
+                type="datetime-local"
+                locale={locale}
+                value={newDeadline}
+                onChange={setNewDeadline}
+                placeholderRu="ДД.ММ.ГГГГ --:--"
+                placeholderEn="MM/DD/YYYY --:--"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
+              />
+              <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                <label className="flex items-center gap-2 text-xs text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={deadlineDefaultEnabled}
+                    onChange={(e) => setDeadlineDefaultEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-400"
+                  />
+                  Дефолтный дедлайн для новых задач
+                </label>
+                {deadlineDefaultEnabled && (
+                  <div className="mt-2 space-y-2">
+                    <select
+                      value={deadlineDefaultMode}
+                      onChange={(e) => setDeadlineDefaultMode(e.target.value as TaskDeadlineDefaultMode)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:border-blue-400"
+                    >
+                      <option value="tomorrow">Завтра в выбранное время</option>
+                      <option value="fixed">Конкретные дата и время</option>
+                    </select>
+                    {deadlineDefaultMode === 'tomorrow' ? (
+                      <NativePickerField
+                        type="time"
+                        locale={locale}
+                        value={deadlineDefaultTime}
+                        onChange={setDeadlineDefaultTime}
+                        placeholderRu="ЧЧ:ММ"
+                        placeholderEn="HH:MM"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    ) : (
+                      <NativePickerField
+                        type="datetime-local"
+                        locale={locale}
+                        value={deadlineDefaultAt}
+                        onChange={setDeadlineDefaultAt}
+                        placeholderRu="ДД.ММ.ГГГГ --:--"
+                        placeholderEn="MM/DD/YYYY --:--"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:border-blue-400"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveDeadlineDefault()}
+                      disabled={savingDeadlineDefault || (deadlineDefaultMode === 'fixed' && !deadlineDefaultAt)}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                    >
+                      {savingDeadlineDefault ? 'Сохранение...' : 'Сохранить дефолт'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div>
+              <span className="mb-1 block text-xs font-medium text-slate-500">Исполнители</span>
+              <div className="max-h-40 overflow-y-auto rounded-xl border border-slate-200/80 bg-slate-50/60 py-0.5 shadow-sm">
                 {specialistOptions.map((p) => (
                   <label
                     key={p.id}
-                    className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 transition-colors ${newSpecialists.includes(p.value) ? 'bg-blue-50/60' : 'hover:bg-slate-100/50'}`}
+                    className={`flex cursor-pointer items-center gap-2 px-2.5 py-1.5 transition-colors ${newSpecialists.includes(p.value) ? 'bg-blue-50/60' : 'hover:bg-slate-100/50'}`}
                   >
                     <input
                       type="checkbox"
-                            checked={newSpecialists.includes(p.value)}
-                            onChange={(e) => {
-                              setNewSpecialists((prev) =>
-                                e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
-                              );
-                            }}
-                            className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
-                            {p.fullName && p.fullName !== p.nickname && (
-                              <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
-                            )}
-                          </span>
+                      checked={newSpecialists.includes(p.value)}
+                      onChange={(e) => {
+                        setNewSpecialists((prev) =>
+                          e.target.checked ? [...prev, p.value] : prev.filter((x) => x !== p.value)
+                        );
+                      }}
+                      className="h-4 w-4 shrink-0 rounded-md border-slate-300 text-blue-600 shadow-sm focus:ring-2 focus:ring-blue-400 focus:ring-offset-0"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-semibold text-slate-800">@{p.nickname}</span>
+                      {p.fullName && p.fullName !== p.nickname && (
+                        <span className="block truncate text-[10px] text-slate-400">{p.fullName}</span>
+                      )}
+                    </span>
                     {p.role && (
                       <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
                         {ROLE_LABELS[p.role] ?? p.role}
@@ -1171,34 +1431,10 @@ export default function TasksPage() {
                 )}
               </div>
             </div>
-          </div>
-          <div className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <span className="mb-1.5 block text-xs font-medium text-slate-500">Описание</span>
-                <textarea
-                  value={newDescription}
-                  onChange={(e) => setNewDescription(e.target.value)}
-                  onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
-                  placeholder="Текст описания задачи..."
-                  rows={2}
-                  className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-                />
-              </div>
-              <div>
-                <span className="mb-1.5 block text-xs font-medium text-slate-500">Дедлайн</span>
-                <input
-                  type="datetime-local"
-                  value={newDeadline}
-                  onChange={(e) => setNewDeadline(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
-                />
-              </div>
-            </div>
             <div>
-              <span className="mb-1.5 block text-xs font-medium text-slate-500">Картинка</span>
+              <span className="mb-1 block text-xs font-medium text-slate-500">Картинка</span>
               <div
-                className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
+                className="rounded-xl border border-slate-200 bg-slate-50/50 p-2 focus-within:border-slate-400 focus-within:ring-2 focus-within:ring-slate-400/20"
               onPaste={async (e) => {
                 const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith('image/'));
                 const file = item?.getAsFile();
@@ -1293,19 +1529,19 @@ export default function TasksPage() {
             </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={addingSaving || !newTitle.trim() || newSpecialists.length === 0}
               onClick={() => void handleAddTask()}
-              className="rounded-xl bg-slate-800 px-4 py-2.5 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
+              className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-slate-700 disabled:opacity-50"
             >
               {addingSaving ? 'Сохранение...' : 'Создать'}
             </button>
             <button
               type="button"
-              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewDeadline(''); setNewImageUrl(''); }}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
+              onClick={() => { setShowAddForm(false); setNewTaskColumnId(null); setNewTitle(''); setNewProjectId(''); setNewSpecialists([]); setNewDescription(''); setNewDeadline(getDeadlineDefaultInput()); setNewImageUrl(''); }}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50"
             >
               Отмена
             </button>
@@ -1653,7 +1889,7 @@ export default function TasksPage() {
                               setNewProjectId('');
                               setNewSpecialists(defaultSpecialists);
                               setNewDescription('');
-                              setNewDeadline('');
+                              setNewDeadline(getDeadlineDefaultInput());
                               setNewImageUrl('');
                               setAssigneeFilterModal('');
                               setShowAddTaskModal(true);
@@ -1757,7 +1993,7 @@ export default function TasksPage() {
             setNewProjectId('');
             setNewSpecialists([]);
             setNewDescription('');
-            setNewDeadline('');
+            setNewDeadline(getDeadlineDefaultInput());
             setNewImageUrl('');
             setAssigneeFilterModal('');
           }}
@@ -1784,7 +2020,7 @@ export default function TasksPage() {
                   setNewProjectId('');
                   setNewSpecialists([]);
                   setNewDescription('');
-                  setNewDeadline('');
+                  setNewDeadline(getDeadlineDefaultInput());
                   setNewImageUrl('');
                   setAssigneeFilterModal('');
                 }}
@@ -1885,19 +2121,74 @@ export default function TasksPage() {
                   value={newDescription}
                   onChange={(e) => setNewDescription(e.target.value)}
                   onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
-                  placeholder="Текст описания задачи..."
+                  placeholder={isEn ? 'Task description text...' : 'Текст описания задачи...'}
                   rows={2}
                   className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1.5 text-xs text-slate-800 shadow-sm placeholder:text-slate-400 outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
                 />
               </div>
               <div>
                 <span className="mb-1 block text-[11px] font-medium text-slate-500">Дедлайн</span>
-                <input
+                <NativePickerField
                   type="datetime-local"
+                  locale={locale}
                   value={newDeadline}
-                  onChange={(e) => setNewDeadline(e.target.value)}
+                  onChange={setNewDeadline}
+                  placeholderRu="ДД.ММ.ГГГГ --:--"
+                  placeholderEn="MM/DD/YYYY --:--"
                   className="w-full rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 text-xs text-slate-800 shadow-sm outline-none transition focus:border-slate-400 focus:bg-white focus:ring-2 focus:ring-slate-400/20"
                 />
+                <div className="mt-1.5 rounded-lg border border-slate-200 bg-slate-50/60 p-2">
+                  <label className="flex items-center gap-2 text-[11px] text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={deadlineDefaultEnabled}
+                      onChange={(e) => setDeadlineDefaultEnabled(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-400"
+                    />
+                    Дефолтный дедлайн
+                  </label>
+                  {deadlineDefaultEnabled && (
+                    <div className="mt-1.5 space-y-1.5">
+                      <select
+                        value={deadlineDefaultMode}
+                        onChange={(e) => setDeadlineDefaultMode(e.target.value as TaskDeadlineDefaultMode)}
+                        className="w-full rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-blue-400"
+                      >
+                        <option value="tomorrow">Завтра в выбранное время</option>
+                        <option value="fixed">Конкретные дата и время</option>
+                      </select>
+                      {deadlineDefaultMode === 'tomorrow' ? (
+                        <NativePickerField
+                          type="time"
+                          locale={locale}
+                          value={deadlineDefaultTime}
+                          onChange={setDeadlineDefaultTime}
+                          placeholderRu="ЧЧ:ММ"
+                          placeholderEn="HH:MM"
+                          className="w-full rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-blue-400"
+                        />
+                      ) : (
+                        <NativePickerField
+                          type="datetime-local"
+                          locale={locale}
+                          value={deadlineDefaultAt}
+                          onChange={setDeadlineDefaultAt}
+                          placeholderRu="ДД.ММ.ГГГГ --:--"
+                          placeholderEn="MM/DD/YYYY --:--"
+                          className="w-full rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-blue-400"
+                        />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handleSaveDeadlineDefault()}
+                        disabled={savingDeadlineDefault || (deadlineDefaultMode === 'fixed' && !deadlineDefaultAt)}
+                        className="rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                      >
+                        {savingDeadlineDefault ? 'Сохранение...' : 'Сохранить дефолт'}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               <div>
                 <span className="mb-1 block text-[11px] font-medium text-slate-500">Картинка</span>
@@ -2018,7 +2309,7 @@ export default function TasksPage() {
                     setNewProjectId('');
                     setNewSpecialists([]);
                     setNewDescription('');
-                    setNewDeadline('');
+                    setNewDeadline(getDeadlineDefaultInput());
                     setNewImageUrl('');
                     setAssigneeFilterModal('');
                   }}
@@ -2064,7 +2355,7 @@ export default function TasksPage() {
                   {isModalInEditMode ? (
                     <div>
                       <span className="mb-1.5 block text-xs font-medium text-slate-500">Проект</span>
-                      <ProjectCombobox projects={projects} value={editingProjectId} onChange={setEditingProjectId} />
+                      <ProjectCombobox projects={projects} value={editingProjectId} onChange={setEditingProjectId} locale={locale} />
                     </div>
                   ) : (
                     <>
@@ -2136,7 +2427,7 @@ export default function TasksPage() {
                       value={editingDescriptionValue}
                       onChange={(e) => setEditingDescriptionValue(e.target.value)}
                       onInput={(e) => { const t = e.currentTarget; t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }}
-                      placeholder="Описание..."
+                      placeholder={isEn ? 'Description...' : 'Описание...'}
                       rows={3}
                       className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
                     />

@@ -53,6 +53,12 @@ function briefVars(brief: EmailSequenceBrief) {
   };
 }
 
+function pickAnalysisModel(raw: unknown): string | null {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  return value.slice(0, 120);
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ runId: string; segmentIndex: string }> },
@@ -103,7 +109,17 @@ export async function POST(
   const segmentText = String(segment.segment_text ?? '');
   const segmentName = parseSegmentName(segmentText);
 
-  const modelAnalysis = process.env.EMAIL_SEQUENCE_ANALYSIS_MODEL ?? 'gpt-5.1';
+  let body: { model?: string } = {};
+  try {
+    body = (await req.json()) as { model?: string };
+  } catch {
+    body = {};
+  }
+  const modelAnalysis =
+    pickAnalysisModel(body.model) ??
+    pickAnalysisModel(brief.analysis_model) ??
+    process.env.EMAIL_SEQUENCE_ANALYSIS_MODEL ??
+    'gpt-5.1';
 
   let trace: Awaited<ReturnType<typeof startTrace>> | null = null;
 
