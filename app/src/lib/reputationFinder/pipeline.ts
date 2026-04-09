@@ -28,7 +28,16 @@ export type ProgressCallback = (msg: string) => void;
 const YMAPS_POLL_INTERVAL_MS = 8_000;
 const YMAPS_POLL_TIMEOUT_MS = 20 * 60_000;
 
+async function updateJobProgress(jobId: string, stage: string, extra?: Record<string, unknown>) {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin
+    .from('reputation_jobs')
+    .update({ progress_stage: stage, ...extra })
+    .eq('id', jobId);
+}
+
 async function createAndAwaitYmapsJob(
+  repJobId: string,
   userId: string,
   cities: string[],
   rubrics: string[],
@@ -40,6 +49,7 @@ async function createAndAwaitYmapsJob(
   if (searchUrls.length === 0) throw new Error('No search URLs generated — check cities/rubrics');
 
   log(`Создание задачи парсинга Яндекс.Карт (${searchUrls.length} URL)...`);
+  await updateJobProgress(repJobId, `ymaps_init:${searchUrls.length}`);
 
   const { data: job, error } = await supabaseAdmin
     .from('yandex_maps_jobs')
@@ -57,6 +67,7 @@ async function createAndAwaitYmapsJob(
 
   const ymapsJobId = job.id as string;
   log(`Задача парсинга создана: ${ymapsJobId}. Ожидание сбора ссылок...`);
+  await updateJobProgress(repJobId, 'ymaps_collecting:0/' + searchUrls.length, { ymaps_job_id: ymapsJobId });
 
   const deadline = Date.now() + YMAPS_POLL_TIMEOUT_MS;
 
@@ -77,7 +88,9 @@ async function createAndAwaitYmapsJob(
     if (status === 'failed') throw new Error(`Парсинг Я.Карт не удался: ${row.error_message ?? 'unknown'}`);
 
     if (stage === 'links_collected') {
-      log(`Ссылки собраны (${row.total_links ?? 0}). Запуск парсинга организаций...`);
+      const msg = `Ссылки собраны (${row.total_links ?? 0}). Запуск парсинга организаций...`;
+      log(msg);
+      await updateJobProgress(repJobId, `ymaps_links_collected:${row.total_links ?? 0}`);
 
       await supabaseAdmin
         .from('yandex_maps_jobs')
@@ -89,11 +102,14 @@ async function createAndAwaitYmapsJob(
 
     if (status === 'completed' && stage === 'completed') {
       log('Парсинг уже завершён.');
+      await updateJobProgress(repJobId, 'ymaps_completed');
       return ymapsJobId;
     }
 
     if (stage.startsWith('collecting_links')) {
-      log(`Сбор ссылок: ${stage.split(':')[1] ?? '...'}`);
+      const progress = stage.split(':')[1] ?? '...';
+      log(`Сбор ссылок: ${progress}`);
+      await updateJobProgress(repJobId, `ymaps_collecting:${progress}`);
     }
   }
 
@@ -115,12 +131,16 @@ async function createAndAwaitYmapsJob(
     if (status === 'failed') throw new Error(`Парсинг организаций не удался: ${row.error_message ?? 'unknown'}`);
 
     if (status === 'completed' && stage === 'completed') {
-      log(`Парсинг завершён (${row.processed_organizations ?? 0} организаций).`);
+      const msg = `Парсинг завершён (${row.processed_organizations ?? 0} организаций).`;
+      log(msg);
+      await updateJobProgress(repJobId, 'ymaps_completed');
       return ymapsJobId;
     }
 
     if (stage.startsWith('parsing_organizations')) {
-      log(`Парсинг организаций: ${row.processed_organizations ?? 0} обработано`);
+      const msg = `Парсинг организаций: ${row.processed_organizations ?? 0} обработано`;
+      log(msg);
+      await updateJobProgress(repJobId, `ymaps_parsing:${row.processed_organizations ?? 0}`);
     }
   }
 
@@ -149,9 +169,10 @@ export async function runReputationPipeline(
       if (!ac) throw new Error('autoSearch config is required for auto_search mode');
       if (!userId) throw new Error('userId is required for auto_search mode');
 
-      const ymapsJobId = await createAndAwaitYmapsJob(userId, ac.cities, ac.rubrics, log);
+      const ymapsJobId = await createAndAwaitYmapsJob(jobId, userId, ac.cities, ac.rubrics, log);
 
       log('Фильтрация организаций по рейтингу...');
+      await updateJobProgress(jobId, 'filtering');
       const filter: YmapsFilterConfig = {
         maxRating: ac.maxRating,
         minReviews: ac.minReviews,
@@ -173,6 +194,7 @@ export async function runReputationPipeline(
 
       if (ac.enableSerpScan && candidates.length > 0) {
         log(`SERP-скан негатива для ${candidates.length} компаний (бесплатно)...`);
+        await updateJobProgress(jobId, `serp_scanning:0/${candidates.length}`);
         for (let i = 0; i < candidates.length; i++) {
           const c = candidates[i];
           log(`[${i + 1}/${candidates.length}] SERP: ${c.company}...`);
@@ -191,7 +213,7 @@ export async function runReputationPipeline(
 
           await supabaseAdmin
             .from('reputation_jobs')
-            .update({ processed_candidates: i + 1 })
+            .update({ processed_candidates: i + 1, progress_stage: `serp_scanning:${i + 1}/${candidates.length}` })
             .eq('id', jobId);
 
           if (i < candidates.length - 1) {
@@ -246,6 +268,7 @@ export async function runReputationPipeline(
     }
 
     log(`Скоринг ${candidates.length} кандидатов...`);
+    await updateJobProgress(jobId, `scoring:${candidates.length}`);
 
     const stats = { total: candidates.length, autoExport: 0, review: 0, discard: 0 };
 
@@ -282,6 +305,7 @@ export async function runReputationPipeline(
       .from('reputation_jobs')
       .update({
         status: 'completed',
+        progress_stage: 'completed',
         completed_at: new Date().toISOString(),
         processed_candidates: stats.total,
         auto_export_count: stats.autoExport,
@@ -297,7 +321,7 @@ export async function runReputationPipeline(
     const message = err instanceof Error ? err.message : 'Unknown error';
     await supabaseAdmin
       .from('reputation_jobs')
-      .update({ status: 'failed', error_message: message, completed_at: new Date().toISOString() })
+      .update({ status: 'failed', progress_stage: 'failed', error_message: message, completed_at: new Date().toISOString() })
       .eq('id', jobId);
     throw err;
   }
