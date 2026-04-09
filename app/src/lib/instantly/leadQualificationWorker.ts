@@ -3,8 +3,8 @@ import { qualifyReply, getBodyText } from './leadQualifier';
 import * as instantly from './client';
 import type { Email } from './types';
 
-const EMAILS_PER_CAMPAIGN = 30;
-const MAX_QUALIFY_PER_TICK = 5;
+const EMAILS_PER_CAMPAIGN = 50;
+const MAX_QUALIFY_PER_TICK = 20;
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
   process.env.OPENROUTER_BRIEF_API_KEY ??

@@ -21,6 +21,7 @@ import {
   Users,
   Bot,
   BookOpen,
+  ShieldAlert,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -51,6 +52,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'knowledge-base': BookOpen,
   'bugor-outreach': Sparkles,
   'nash-outreach': Building2,
+  'reputation-finder': ShieldAlert,
 };
 
 function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: 'ru' | 'en' }) {
