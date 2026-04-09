@@ -141,6 +141,13 @@ blocks:
                   key=\"\$1\";
                   grep -E \"^\${key}=\" .env | tail -n1 | cut -d= -f2-;
                 };
+                fix_env_permissions() {
+                  if [ ! -f .env ]; then
+                    echo '.env not found in /home/Portal/prod' && exit 1;
+                  fi;
+                  sudo -n chgrp 1001 .env 2>/dev/null || true;
+                  sudo -n chmod 664 .env 2>/dev/null || true;
+                };
                 send_health_alert() {
                   msg=\"\$1\";
                   bot_token=\"\$(read_env TELEGRAM_HEALTH_BOT_TOKEN)\";
@@ -164,6 +171,7 @@ blocks:
                   echo '--- Step 6: disable maintenance mode (fail-safe) ---';
                   echo '[scheduled] maintenance fail-safe executed';
                   upsert_env MAINTENANCE_MODE false || true;
+                  fix_env_permissions || true;
                   SAFE_DOCKER_GID=\$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999);
                   sudo -n docker stop portal 2>/dev/null || true;
                   sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
@@ -189,6 +197,8 @@ blocks:
                 if [ -f /home/Portal/prod/50x.html ]; then
                   sudo -n cp /home/Portal/prod/50x.html /usr/share/nginx/html/50x.html || true;
                 fi;
+                echo '--- Step 0.2: ensure .env permissions for portal ---';
+                fix_env_permissions;
                 echo '--- Step 1: pull new images ---';
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
                 export DOCKER_CLIENT_TIMEOUT=300;
@@ -243,6 +253,7 @@ blocks:
                 };
                 echo '--- Step 2: enable maintenance mode ---';
                 upsert_env MAINTENANCE_MODE true;
+                fix_env_permissions;
                 sudo -n docker stop portal 2>/dev/null || true;
                 sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
                 wait_port_free 3000 15;
