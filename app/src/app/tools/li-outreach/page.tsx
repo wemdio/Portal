@@ -83,6 +83,10 @@ export default function LiOutreachPage() {
   const [importing, setImporting] = useState(false);
   const [importListId, setImportListId] = useState('');
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showCreateListModal, setShowCreateListModal] = useState(false);
+  const [creatingList, setCreatingList] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [newListDescription, setNewListDescription] = useState('');
 
   // ---- Data fetching --------------------------------------------------------
 
@@ -226,6 +230,37 @@ export default function LiOutreachPage() {
       alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
     } finally {
       setImporting(false);
+    }
+  };
+
+  const createLeadList = async () => {
+    const name = newListName.trim();
+    if (!name) {
+      alert('Введите название списка');
+      return;
+    }
+
+    setCreatingList(true);
+    try {
+      const d = await api<{ lead_list: LiLeadList }>('/lead-lists', {
+        method: 'POST',
+        json: {
+          name,
+          description: newListDescription.trim() || undefined,
+        },
+      });
+
+      await loadLeadLists();
+      setImportListId(d.lead_list.id);
+      setCf((prev) => ({ ...prev, lead_list_id: d.lead_list.id }));
+      setScraperListId(d.lead_list.id);
+      setNewListName('');
+      setNewListDescription('');
+      setShowCreateListModal(false);
+    } catch (e) {
+      alert('Ошибка создания списка: ' + (e instanceof Error ? e.message : e));
+    } finally {
+      setCreatingList(false);
     }
   };
 
@@ -523,6 +558,9 @@ export default function LiOutreachPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
             <div className="flex gap-2">
+              <button onClick={() => setShowCreateListModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                + Новый лист
+              </button>
               <button onClick={() => setShowImportModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Импорт CSV
               </button>
@@ -531,6 +569,44 @@ export default function LiOutreachPage() {
               </button>
             </div>
           </div>
+
+          {/* Create List Modal */}
+          {showCreateListModal && (
+            <div className="rounded-xl border border-green-200 bg-green-50/40 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900">Новый список лидов</h3>
+                <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50">Закрыть</button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Название *</label>
+                  <input
+                    type="text"
+                    value={newListName}
+                    onChange={(e) => setNewListName(e.target.value)}
+                    placeholder="Например: SaaS founders US"
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Описание (опционально)</label>
+                  <input
+                    type="text"
+                    value={newListDescription}
+                    onChange={(e) => setNewListDescription(e.target.value)}
+                    placeholder="Источник, сегмент, заметки..."
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-lg bg-green-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-green-700 disabled:opacity-50">
+                  {creatingList ? 'Создание...' : 'Создать список'}
+                </button>
+                <span className="text-xs text-gray-500">Список сразу появится в фильтрах импорта, скрапера и кампаний.</span>
+              </div>
+            </div>
+          )}
 
           {/* Import CSV Modal */}
           {showImportModal && (
