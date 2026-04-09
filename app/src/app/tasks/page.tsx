@@ -2,7 +2,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Search, X, ChevronDown, Trash2 } from 'lucide-react';
+import { Search, X, ChevronDown, Trash2, Pencil } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import {
   DndContext,
@@ -937,6 +937,15 @@ export default function TasksPage() {
     const isEditingResult = editingResultId === task.id;
     const statusOptions: TaskStatus[] = ['pending', 'in_progress', 'done'];
     const selectValue = statusOptions.includes(task.status as TaskStatus) ? task.status : 'pending';
+    const openTaskEditModal = () => {
+      setTaskModalTaskId(task.id);
+      setIsModalInEditMode(true);
+      setEditingTitleValue(task.title);
+      setEditingProjectId(task.project_id ?? '');
+      setEditingSpecialists((task.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+      setEditingDescriptionValue(task.description || '');
+      setEditingImageUrlValue(task.image_url || '');
+    };
 
     return (
       <div key={task.id} className={`rounded-lg border p-3 transition-colors ${task.status === 'done' ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
@@ -948,6 +957,17 @@ export default function TasksPage() {
             </p>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
+            {!task.isLegacy && (
+              <button
+                type="button"
+                onClick={openTaskEditModal}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+                title="Редактировать задачу"
+                aria-label="Редактировать задачу"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            )}
             <select
               value={selectValue}
               onChange={(e) => {
@@ -958,7 +978,7 @@ export default function TasksPage() {
                   void updateTaskStatus(task.id, newStatus);
                 }
               }}
-              className={`appearance-none cursor-pointer rounded-full border px-2.5 py-0.5 text-[10px] font-semibold outline-none ${statusCfg.className}`}
+              className={`appearance-none cursor-pointer rounded-full border px-3 h-6 text-[10px] font-semibold leading-none text-center align-middle outline-none ${statusCfg.className}`}
             >
               {statusOptions.map((s) => (
                 <option key={s} value={s}>{TASK_STATUS_CONFIG[s].label}</option>

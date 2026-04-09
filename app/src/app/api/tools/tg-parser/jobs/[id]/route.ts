@@ -112,7 +112,7 @@ export async function PATCH(
 
       const { data: row } = await supabase
         .from('tg_parser_jobs')
-        .select('id, status')
+        .select('id, status, config')
         .eq('id', id)
         .maybeSingle();
       if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -141,6 +141,16 @@ export async function PATCH(
       if (!updated) {
         return NextResponse.json({ error: 'Задача уже завершилась' }, { status: 409 });
       }
+
+      void supabase.from('tg_parser_logs').insert({
+        job_id: id,
+        job_user_id: user.id,
+        is_target: Boolean((row.config as { is_target?: boolean } | null)?.is_target),
+        account_label: (row.config as { account_label?: string } | null)?.account_label ?? null,
+        level: 'warning',
+        message: 'Остановлено вручную пользователем',
+      });
+
       return NextResponse.json({ ok: true, job: updated });
     },
   );

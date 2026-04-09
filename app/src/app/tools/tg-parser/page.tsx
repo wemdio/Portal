@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   Upload,
   Square,
+  ScrollText,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
@@ -72,6 +73,17 @@ type TgAccount = {
   created_at: string;
 };
 
+type TgParserLog = {
+  id: number;
+  created_at: string;
+  job_id: string;
+  job_user_id: string;
+  is_target: boolean;
+  account_label: string | null;
+  level: 'info' | 'warning' | 'error';
+  message: string;
+};
+
 const API_ACCOUNTS = '/api/tools/tg-parser/accounts';
 
 export default function TgParserPage() {
@@ -87,6 +99,10 @@ export default function TgParserPage() {
   const [maxOfflineDays, setMaxOfflineDays] = useState<string>('');
 
   const [parseJobs, setParseJobs] = useState<ParseJob[]>([]);
+  const [jobsPanelTab, setJobsPanelTab] = useState<'jobs' | 'logs'>('jobs');
+  const [parseLogs, setParseLogs] = useState<TgParserLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const runningAccountKeysRef = useRef<Set<string>>(new Set());
   const [exportingJobId, setExportingJobId] = useState<string | null>(null);
   const [stoppingJobId, setStoppingJobId] = useState<string | null>(null);
@@ -133,6 +149,19 @@ export default function TgParserPage() {
 
   useEffect(() => { void loadAccounts(); }, [loadAccounts]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!cancelled) setCurrentUserId(user?.id ?? null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const loadParseJobs = useCallback(async () => {
     const token = await getAccessToken();
     if (!token) return;
@@ -159,11 +188,37 @@ export default function TgParserPage() {
 
   useEffect(() => { void loadParseJobs(); }, [loadParseJobs]);
 
+  const loadParseLogs = useCallback(async () => {
+    const token = await getAccessToken();
+    if (!token) return;
+    setLogsLoading(true);
+    try {
+      const isTarget = activeTab === 'target';
+      const res = await fetch(`/api/tools/tg-parser/logs?limit=200&is_target=${isTarget}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const { items } = (await res.json()) as { items: TgParserLog[] };
+      setParseLogs((items ?? []).reverse());
+    } catch {
+      /* ignore */
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [activeTab]);
+
   useEffect(() => {
     if (!parseJobs.some((j) => j.status === 'running')) return;
     const t = setInterval(() => { void loadParseJobs(); }, 3000);
     return () => clearInterval(t);
   }, [parseJobs, loadParseJobs]);
+
+  useEffect(() => {
+    if (jobsPanelTab !== 'logs') return;
+    void loadParseLogs();
+    const t = setInterval(() => { void loadParseLogs(); }, 5000);
+    return () => clearInterval(t);
+  }, [jobsPanelTab, loadParseLogs]);
 
   const resetAddForm = () => {
     setAddName(''); setAddApiId(''); setAddApiHash('');
@@ -1047,162 +1102,229 @@ export default function TgParserPage() {
         </div>
       )}
 
-      {parseJobs.length > 0 && (
-        <div className="space-y-4">
-          <h2 className="text-sm font-semibold text-gray-800">Задачи парсинга</h2>
-          {parseJobs.map((job) => (
-            <div
-              key={job.id}
-              className={`rounded-2xl border overflow-hidden ${
-                job.status === 'running'
-                  ? 'border-blue-200 bg-blue-50/30'
-                  : job.status === 'error'
-                    ? 'border-red-200 bg-red-50/30'
-                    : job.warning
-                      ? 'border-amber-200 bg-amber-50/20'
-                      : 'border-gray-200 bg-white'
-              }`}
-            >
-              <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2 text-sm">
-                    {job.status === 'running' && (
-                      <Loader2 className="h-4 w-4 animate-spin text-blue-600 shrink-0" />
-                    )}
-                    <span className="font-medium text-gray-900">{job.accountLabel}</span>
-                    <span className="text-gray-500">
-                      · {job.linkCount} {job.linkCount === 1 ? 'чат' : 'чатов'}
-                    </span>
-                    <span className="text-gray-400 text-xs truncate max-w-full" title={job.linksSummary}>
-                      ({job.linksSummary})
-                    </span>
-                  </div>
-                  {job.status === 'error' && job.error && (
-                    <p className="text-sm text-red-700">{job.error}</p>
-                  )}
-                  {job.status === 'done' && job.warning && (
-                    <p className="text-sm text-amber-900/90">{job.warning}</p>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {job.status === 'running' && (
-                    <button
-                      type="button"
-                      onClick={() => void stopParseJob(job.id)}
-                      disabled={stoppingJobId === job.id}
-                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                      title="Остановить задачу"
-                    >
-                      {stoppingJobId === job.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Square className="h-4 w-4" />
-                      )}
-                      Остановить
-                    </button>
-                  )}
-                  {job.status === 'done' && job.users.length > 0 && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void exportJobCsv(job)}
-                        disabled={exportingJobId === job.id}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        <Download className="h-4 w-4" />
-                        CSV
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void exportJobExcel(job)}
-                        disabled={exportingJobId === job.id}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        <FileSpreadsheet className="h-4 w-4" />
-                        Excel
-                      </button>
-                    </>
-                  )}
-                  {job.status !== 'running' && (
-                    <button
-                      type="button"
-                      onClick={() => void removeParseJob(job.id)}
-                      className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
-                      title="Удалить запись из истории"
-                    >
-                      Скрыть
-                    </button>
-                  )}
-                </div>
-              </div>
-              {job.status === 'done' && job.users.length > 0 && (
-                <>
-                  <div className="px-4 py-2 bg-gray-50/80 border-b border-gray-100">
-                    <p className="text-sm text-gray-600">
-                      Найдено пользователей:{' '}
-                      <span className="font-semibold text-gray-900">{job.users.length}</span>
-                    </p>
-                  </div>
-                  <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
-                    <table className="min-w-full divide-y divide-gray-200 text-sm">
-                      <thead className="bg-gray-50 sticky top-0">
-                        <tr>
-                          {COLUMNS.map((col) => (
-                            <th
-                              key={col}
-                              className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-                            >
-                              {col}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200 bg-white">
-                        {job.users.map((u, i) => (
-                          <tr key={`${job.id}-${i}`} className="hover:bg-gray-50">
-                            {COLUMNS.map((col) => {
-                              const val = u[col];
-                              const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
-                              return (
-                                <td key={col} className="px-4 py-3 text-gray-700 max-w-[200px] truncate">
-                                  {isLink && typeof val === 'string' && val.startsWith('http') ? (
-                                    <a
-                                      href={val}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-blue-600 hover:underline truncate block"
-                                    >
-                                      {val}
-                                    </a>
-                                  ) : (
-                                    cellValue(val)
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-              {job.status === 'done' && job.users.length === 0 && (
-                <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
-              )}
-            </div>
-          ))}
+      <div className="space-y-4">
+        <div className="flex gap-1 border-b border-gray-200">
+          <button
+            type="button"
+            onClick={() => setJobsPanelTab('jobs')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition border-b-2 -mb-px ${
+              jobsPanelTab === 'jobs'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            Задачи
+          </button>
+          <button
+            type="button"
+            onClick={() => setJobsPanelTab('logs')}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition border-b-2 -mb-px ${
+              jobsPanelTab === 'logs'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <ScrollText className="h-4 w-4" />
+            Логи
+          </button>
         </div>
-      )}
 
-      {parseJobs.length === 0 && !error && (
-        <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 p-12 text-center">
-          <p className="text-gray-500 text-sm">
-            Введите ссылки на чаты или каналы (t.me/…), выберите режимы парсинга и нажмите «Запустить парсинг».
-            Парсинг может занять несколько минут. Запущенные задачи отображаются ниже; пока они идут, можно настроить другой аккаунт и запустить ещё одну.
-          </p>
-        </div>
-      )}
+        {jobsPanelTab === 'jobs' && parseJobs.length > 0 && (
+          <div className="space-y-4">
+            <h2 className="text-sm font-semibold text-gray-800">Задачи парсинга</h2>
+            {parseJobs.map((job) => (
+              <div
+                key={job.id}
+                className={`rounded-2xl border overflow-hidden ${
+                  job.status === 'running'
+                    ? 'border-blue-200 bg-blue-50/30'
+                    : job.status === 'error'
+                      ? 'border-red-200 bg-red-50/30'
+                      : job.warning
+                        ? 'border-amber-200 bg-amber-50/20'
+                        : 'border-gray-200 bg-white'
+                }`}
+              >
+                <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      {job.status === 'running' && (
+                        <Loader2 className="h-4 w-4 animate-spin text-blue-600 shrink-0" />
+                      )}
+                      <span className="font-medium text-gray-900">{job.accountLabel}</span>
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${
+                          currentUserId && job.userId === currentUserId
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {currentUserId && job.userId === currentUserId ? 'мой запуск' : 'чужой запуск'}
+                      </span>
+                      <span className="text-gray-500">
+                        · {job.linkCount} {job.linkCount === 1 ? 'чат' : 'чатов'}
+                      </span>
+                      <span className="text-gray-400 text-xs truncate max-w-full" title={job.linksSummary}>
+                        ({job.linksSummary})
+                      </span>
+                    </div>
+                    {job.status === 'error' && job.error && (
+                      <p className="text-sm text-red-700">{job.error}</p>
+                    )}
+                    {job.status === 'done' && job.warning && (
+                      <p className="text-sm text-amber-900/90">{job.warning}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {job.status === 'running' && currentUserId && job.userId === currentUserId && (
+                      <button
+                        type="button"
+                        onClick={() => void stopParseJob(job.id)}
+                        disabled={stoppingJobId === job.id}
+                        className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                        title="Остановить задачу"
+                      >
+                        {stoppingJobId === job.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Square className="h-4 w-4" />
+                        )}
+                        Остановить
+                      </button>
+                    )}
+                    {job.status === 'done' && job.users.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void exportJobCsv(job)}
+                          disabled={exportingJobId === job.id}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          <Download className="h-4 w-4" />
+                          CSV
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void exportJobExcel(job)}
+                          disabled={exportingJobId === job.id}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          <FileSpreadsheet className="h-4 w-4" />
+                          Excel
+                        </button>
+                      </>
+                    )}
+                    {job.status !== 'running' && currentUserId && job.userId === currentUserId && (
+                      <button
+                        type="button"
+                        onClick={() => void removeParseJob(job.id)}
+                        className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                        title="Удалить запись из истории"
+                      >
+                        Скрыть
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {job.status === 'done' && job.users.length > 0 && (
+                  <>
+                    <div className="px-4 py-2 bg-gray-50/80 border-b border-gray-100">
+                      <p className="text-sm text-gray-600">
+                        Найдено пользователей:{' '}
+                        <span className="font-semibold text-gray-900">{job.users.length}</span>
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
+                      <table className="min-w-full divide-y divide-gray-200 text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            {COLUMNS.map((col) => (
+                              <th
+                                key={col}
+                                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+                              >
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200 bg-white">
+                          {job.users.map((u, i) => (
+                            <tr key={`${job.id}-${i}`} className="hover:bg-gray-50">
+                              {COLUMNS.map((col) => {
+                                const val = u[col];
+                                const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
+                                return (
+                                  <td key={col} className="px-4 py-3 text-gray-700 max-w-[200px] truncate">
+                                    {isLink && typeof val === 'string' && val.startsWith('http') ? (
+                                      <a
+                                        href={val}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-blue-600 hover:underline truncate block"
+                                      >
+                                        {val}
+                                      </a>
+                                    ) : (
+                                      cellValue(val)
+                                    )}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+                {job.status === 'done' && job.users.length === 0 && (
+                  <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {jobsPanelTab === 'jobs' && parseJobs.length === 0 && !error && (
+          <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50/50 p-12 text-center">
+            <p className="text-gray-500 text-sm">
+              Введите ссылки на чаты или каналы (t.me/…), выберите режимы парсинга и нажмите «Запустить парсинг».
+              Парсинг может занять несколько минут. Запущенные задачи отображаются ниже; пока они идут, можно настроить другой аккаунт и запустить ещё одну.
+            </p>
+          </div>
+        )}
+
+        {jobsPanelTab === 'logs' && (
+          <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[460px] overflow-auto">
+            {logsLoading && <p className="text-gray-500">Загрузка логов...</p>}
+            {!logsLoading && parseLogs.length === 0 && (
+              <p className="text-gray-600">
+                Нет логов для режима «{activeTab === 'target' ? 'целевой парсинг' : 'обычный парсинг'}».
+              </p>
+            )}
+            {parseLogs.map((log) => (
+              <div key={log.id} className="flex gap-2">
+                <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleTimeString('ru-RU')}</span>
+                <span
+                  className={`shrink-0 font-bold uppercase w-14 ${
+                    log.level === 'error'
+                      ? 'text-rose-400'
+                      : log.level === 'warning'
+                        ? 'text-amber-400'
+                        : 'text-gray-400'
+                  }`}
+                >
+                  {log.level}
+                </span>
+                <span className="text-gray-300 break-all">
+                  [{log.account_label ?? '—'}] {log.message}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

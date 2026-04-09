@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   return withToolTrace(
-    { request: req, operation: 'tools.tg-parser.jobs.get' },
+    { request: req, operation: 'tools.tg-parser.logs.get' },
     async () => {
       const token = getBearerToken(req.headers.get('authorization'));
       if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -18,20 +18,23 @@ export async function GET(req: NextRequest) {
       } = await supabase.auth.getUser();
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-      const limit = Math.min(100, Math.max(1, Number(req.nextUrl.searchParams.get('limit')) || 50));
+      const limit = Math.min(500, Math.max(1, Number(req.nextUrl.searchParams.get('limit')) || 200));
+      const isTargetParam = req.nextUrl.searchParams.get('is_target');
+      const isTarget =
+        isTargetParam == null ? null : isTargetParam === 'true' ? true : isTargetParam === 'false' ? false : null;
 
-      const { data, error } = await supabase
-        .from('tg_parser_jobs')
-        .select(
-          'id, user_id, created_at, status, config, account_id, result_users, stop_reason, error_message, started_at, completed_at',
-        )
+      let query = supabase
+        .from('tg_parser_logs')
+        .select('id, created_at, job_id, job_user_id, is_target, account_label, level, message')
         .order('created_at', { ascending: false })
         .limit(limit);
 
-      if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+      if (isTarget !== null) {
+        query = query.eq('is_target', isTarget);
       }
 
+      const { data, error } = await query;
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ items: data ?? [] });
     },
   );

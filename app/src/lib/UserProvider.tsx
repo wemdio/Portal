@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
@@ -50,6 +50,8 @@ export function UserProvider({
   const [badges, setBadges] = useState<Record<string, number>>({});
   const [locale, setLocaleState] = useState<Locale>(normalizeLocale(initialLocale));
   const [localeSaving, setLocaleSaving] = useState(false);
+  const localeHydratedRef = useRef(false);
+  const localeUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -66,6 +68,8 @@ export function UserProvider({
         setVisibleTools(null);
         setBadges({});
         setLocaleState(normalizeLocale(initialLocale));
+        localeHydratedRef.current = false;
+        localeUserIdRef.current = null;
         return;
       }
 
@@ -97,7 +101,12 @@ export function UserProvider({
         setUserRole(profile.role);
         setUserFullName(profile.full_name);
         setUserAvatarUrl(normalizePublicAvatarUrl(profile.avatar_url));
-        setLocaleState(profile.locale);
+        const isSameUser = localeUserIdRef.current === session.user.id;
+        if (!localeHydratedRef.current || !isSameUser) {
+          setLocaleState(profile.locale);
+          localeHydratedRef.current = true;
+          localeUserIdRef.current = session.user.id;
+        }
 
         const vis: Record<string, boolean> = {};
         for (const id of ALL_NAV_TAB_IDS) {
@@ -116,7 +125,6 @@ export function UserProvider({
         setNavTabVisibility({});
         setVisibleTools(null);
         setBadges({});
-        setLocaleState(normalizeLocale(initialLocale));
       }
     };
 
@@ -198,6 +206,8 @@ export function UserProvider({
   const setLocale = useCallback(async (nextLocale: Locale) => {
     const normalized = normalizeLocale(nextLocale);
     setLocaleState(normalized);
+    localeHydratedRef.current = true;
+    localeUserIdRef.current = userId;
     setLocaleSaving(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -216,7 +226,7 @@ export function UserProvider({
     } finally {
       setLocaleSaving(false);
     }
-  }, []);
+  }, [userId]);
 
   const value = useMemo<UserContextValue>(() => ({
     userId,
