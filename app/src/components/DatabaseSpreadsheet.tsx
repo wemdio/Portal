@@ -209,6 +209,8 @@ type PhoneSplitState = {
   sourceCol: number;
 };
 
+type DetectedEmailJob = { id: string; extraction_type: string; total: number; processed: number; progress: number };
+
 type EmailScrapingState = {
   isOpen: boolean;
   sourceCol: number;
@@ -219,6 +221,7 @@ type EmailScrapingState = {
   retryCount: number;
   error: string | null;
   jobId: string | null;
+  detectedJob: DetectedEmailJob | null;
 };
 
 type EmailValidationState = {
@@ -342,6 +345,8 @@ const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
 const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+const EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS = 2 * 60 * 1000;
+const EMAIL_SCRAPING_MAX_BACKOFF_MS = 30_000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
 const BRIEF_SCORING_MAX_POLL_DELAY_MS = 5000;
@@ -1201,6 +1206,7 @@ export function DatabaseSpreadsheet() {
     retryCount: 0,
     error: null,
     jobId: null,
+    detectedJob: null,
   });
   const emailScrapingAbortRef = useRef<AbortController | null>(null);
   const [emailValidation, setEmailValidation] = useState<EmailValidationState>({
@@ -5440,8 +5446,19 @@ export function DatabaseSpreadsheet() {
 
   // ── Email Scraping (Найти почты) ──────────────────────────────
 
-  const openEmailScrapingModal = () => {
-    setEmailScraping((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null }));
+  const openEmailScrapingModal = async () => {
+    setEmailScraping((prev) => ({ ...prev, isOpen: true, sourceCol: 0, error: null, detectedJob: null }));
+    const token = await getFreshToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/enrich/website/jobs', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const data = await res.json() as { active_job?: DetectedEmailJob | null };
+        if (data.active_job) {
+          setEmailScraping((prev) => ({ ...prev, detectedJob: data.active_job! }));
+        }
+      }
+    } catch { /* ignore */ }
   };
 
   const closeEmailScrapingModal = () => {
@@ -5466,6 +5483,191 @@ export function DatabaseSpreadsheet() {
     }
     setEmailScraping((prev) => ({ ...prev, isGenerating: false, isOpen: false, jobId: null }));
     setLastAction({ message: 'Поиск почт остановлен', time: Date.now() });
+  };
+
+  const handleStopDetectedEmailJob = async () => {
+    const jobId = emailScraping.detectedJob?.id;
+    if (!jobId) return;
+    if (!window.confirm('Остановить выполняющийся поиск почт?')) return;
+
+    const token = await getFreshToken();
+    if (token) {
+      try {
+        await fetch(`/api/enrich/website/jobs/${jobId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+      } catch { /* ignore */ }
+    }
+    setEmailScraping((prev) => ({ ...prev, error: null, detectedJob: null }));
+    setLastAction({ message: 'Поиск почт остановлен', time: Date.now() });
+  };
+
+  const handleResumeEmailScraping = async (overrideJob?: DetectedEmailJob) => {
+    const detected = overrideJob ?? emailScraping.detectedJob;
+    if (!activeTab || emailScraping.isGenerating || !detected) return;
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setEmailScraping((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    emailScrapingAbortRef.current = new AbortController();
+    const signal = emailScrapingAbortRef.current.signal;
+
+    const headerRow = activeTab.data[0] ?? [];
+    let emailColIndex = headerRow.findIndex((h) => String(h).startsWith('Email ('));
+    if (emailColIndex < 0) emailColIndex = headerRow.findIndex((h) => String(h).toLowerCase().includes('email') && String(h).includes('('));
+    if (emailColIndex < 0) {
+      emailColIndex = headerRow.length;
+      const baseData = activeTab.data.map((row, ri) => {
+        const ext = [...row];
+        while (ext.length <= emailColIndex) ext.push('');
+        if (ri === 0) ext[emailColIndex] = 'Email (Ссылка)';
+        return ext;
+      });
+      setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, data: baseData } : t)));
+    }
+
+    setEmailScraping((prev) => ({
+      ...prev,
+      isOpen: false,
+      isGenerating: true,
+      jobId: detected.id,
+      totalRows: detected.total,
+      currentRow: detected.processed,
+      progress: detected.progress,
+      error: null,
+      detectedJob: null,
+    }));
+
+    try {
+      const pendingUpdates: Map<number, string> = new Map();
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const flushUpdates = () => {
+        if (pendingUpdates.size === 0) return;
+        const batch = new Map(pendingUpdates);
+        pendingUpdates.clear();
+        setTabs((prev) => prev.map((tab) => {
+          if (tab.id !== activeTabId) return tab;
+          const data = tab.data.map((row, ri) => {
+            const value = batch.get(ri);
+            if (value === undefined) return row;
+            const nextRow = [...row];
+            while (nextRow.length <= emailColIndex) nextRow.push('');
+            nextRow[emailColIndex] = value;
+            return nextRow;
+          });
+          return { ...tab, data };
+        }));
+      };
+
+      const scheduleFlush = () => {
+        if (flushTimer) return;
+        flushTimer = setTimeout(() => { flushTimer = null; flushUpdates(); }, ENRICHMENT_UPDATE_FLUSH_MS);
+      };
+
+      try {
+        let cursor: string | null = null;
+        let firstErrorAt: number | null = null;
+        let backoffMs = 2000;
+        let lastProgressTime = Date.now();
+        let token = currentToken;
+        let lastProcessed = detected.processed;
+
+        while (!signal?.aborted) {
+          const fetchResults = async (tkn: string) =>
+            fetch(
+              `/api/enrich/website/jobs/${detected.id}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+              { headers: { Authorization: `Bearer ${tkn}` }, signal },
+            );
+
+          let res = await fetchResults(token);
+          if (res.status === 401) {
+            const refreshed = await getFreshToken();
+            if (refreshed) { token = refreshed; res = await fetchResults(token); }
+            else throw new Error('Сессия истекла. Войдите заново.');
+          }
+
+          if (!res.ok) {
+            if (!firstErrorAt) firstErrorAt = Date.now();
+            if (Date.now() - firstErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+              throw new Error('Сервер недоступен более 2 минут. Задача продолжает работу в фоне.');
+            }
+            await new Promise((r) => setTimeout(r, backoffMs));
+            backoffMs = Math.min(backoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
+            continue;
+          }
+          firstErrorAt = null;
+          backoffMs = 2000;
+
+          const data = await parseJsonResponse<{
+            job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+            results: Array<{ row_index: number; result_text: string | null; status: string }>;
+            next_cursor?: string | null;
+          }>(res, 'email_scraping.resume_results');
+
+          if (data.results?.length) {
+            for (const result of data.results) {
+              if (result.status === 'completed' && result.result_text) {
+                pendingUpdates.set(result.row_index, result.result_text);
+              }
+            }
+            scheduleFlush();
+            if (pendingUpdates.size >= ENRICHMENT_UPDATE_BATCH) flushUpdates();
+            lastProgressTime = Date.now();
+          }
+
+          if (data.next_cursor) cursor = data.next_cursor;
+
+          const processed = data.job?.processed ?? 0;
+          const jobTotal = data.job?.total ?? detected.total;
+          if (processed > lastProcessed) {
+            lastProcessed = processed;
+            lastProgressTime = Date.now();
+          }
+          setEmailScraping((prev) => ({
+            ...prev,
+            currentRow: Math.min(processed, jobTotal),
+            progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+          }));
+
+          if (['completed', 'failed', 'cancelled'].includes(data.job?.status)) {
+            flushUpdates();
+            break;
+          }
+
+          if (Date.now() - lastProgressTime > EMAIL_SCRAPING_STALL_TIMEOUT_MS) {
+            throw new Error('Поиск почт не продвигается более 10 минут');
+          }
+
+          await new Promise((r) => setTimeout(r, ENRICHMENT_PROGRESS_INTERVAL_MS));
+        }
+      } finally {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushUpdates();
+      }
+
+      setEmailScraping((prev) => ({ ...prev, isGenerating: false, jobId: null }));
+      setLastAction({ message: 'Поиск почт завершён', time: Date.now() });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({ message: 'Поиск почт отменён', time: Date.now() });
+        setEmailScraping((prev) => ({ ...prev, isGenerating: false, isOpen: false, jobId: null }));
+      } else {
+        setEmailScraping((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isGenerating: false,
+          jobId: null,
+        }));
+      }
+    } finally {
+      emailScrapingAbortRef.current = null;
+    }
   };
 
   const handleStartEmailScraping = async () => {
@@ -5544,9 +5746,20 @@ export function DatabaseSpreadsheet() {
 
       const startData = await parseJsonResponse<{
         job_id?: string; total?: number; processed?: number; error_count?: number; error?: string;
+        active_job?: { id: string; extraction_type: string; total: number; processed: number; progress: number };
       }>(startRes, 'email_scraping.start');
 
       if (!startRes.ok || !startData.job_id) {
+        if (startRes.status === 409 && startData.active_job?.id) {
+          setEmailScraping((prev) => ({
+            ...prev,
+            error: null,
+            isGenerating: false,
+            jobId: null,
+            detectedJob: startData.active_job!,
+          }));
+          return;
+        }
         throw new Error(startData.error ?? 'Не удалось создать задачу');
       }
 
@@ -5565,9 +5778,9 @@ export function DatabaseSpreadsheet() {
         error: null,
       }));
 
-      // Poll for results — reuse the same enrichment polling pattern
       let cursor: string | null = null;
-      let consecutiveErrors = 0;
+      let firstErrorAt: number | null = null;
+      let backoffMs = 2000;
       let lastProgressTime = Date.now();
       let token = currentToken;
       let lastProcessed = processedCount;
@@ -5614,14 +5827,16 @@ export function DatabaseSpreadsheet() {
           }
 
           if (!res.ok) {
-            consecutiveErrors += 1;
-            if (consecutiveErrors >= ENRICHMENT_MAX_CONSECUTIVE_FAILURES) {
-              throw new Error(`Слишком много ошибок API (${consecutiveErrors})`);
+            if (!firstErrorAt) firstErrorAt = Date.now();
+            if (Date.now() - firstErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
+              throw new Error('Сервер недоступен более 2 минут. Задача продолжает работу в фоне.');
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, backoffMs));
+            backoffMs = Math.min(backoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
             continue;
           }
-          consecutiveErrors = 0;
+          firstErrorAt = null;
+          backoffMs = 2000;
 
           const data = await parseJsonResponse<{
             job: { status: string; processed: number; total: number; success_count: number; error_count: number };
@@ -5688,6 +5903,25 @@ export function DatabaseSpreadsheet() {
       emailScrapingAbortRef.current = null;
     }
   };
+
+  // Auto-detect active email scraping job on mount and resume polling
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/enrich/website/jobs', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { active_job?: DetectedEmailJob | null };
+        if (data.active_job && data.active_job.extraction_type === 'email' && !cancelled) {
+          void handleResumeEmailScraping(data.active_job);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Email Validation (Валидация почт) ──────────────────────────────
 
@@ -9172,6 +9406,28 @@ export function DatabaseSpreadsheet() {
             </div>
 
             <div className="space-y-6 px-6 py-6">
+              {emailScraping.detectedJob && !emailScraping.isGenerating && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium space-y-2.5">
+                  <p>Найдена незавершённая задача ({emailScraping.detectedJob.progress}% — {emailScraping.detectedJob.processed}/{emailScraping.detectedJob.total}).</p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleResumeEmailScraping()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white shadow transition hover:bg-amber-700"
+                    >
+                      ▶ Подключиться
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleStopDetectedEmailJob()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white shadow transition hover:bg-red-700"
+                    >
+                      ■ Остановить
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {emailScraping.error && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 font-medium">
                   {emailScraping.error}
