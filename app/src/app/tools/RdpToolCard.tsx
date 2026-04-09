@@ -4,12 +4,19 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { Monitor, AlertCircle } from 'lucide-react';
+import { useUser } from '@/lib/UserProvider';
 
-const PC_BREAKPOINT = 768; // md в Tailwind
+const PC_BREAKPOINT = 768;
 
 export function RdpToolCard() {
+  const { locale } = useUser();
   const [isPcViewport, setIsPcViewport] = useState<boolean | null>(null);
   const [showPcOnlyModal, setShowPcOnlyModal] = useState(false);
+
+  const t = locale === 'en';
+  const title = t ? 'Remote desktop' : 'Удалённый рабочий стол';
+  const desc = t ? 'Connect to a remote PC in the browser.' : 'Подключение к удалённому ПК через браузер.';
+  const openLabel = t ? 'Open →' : 'Открыть →';
 
   useEffect(() => {
     const mql = window.matchMedia(`(min-width: ${PC_BREAKPOINT}px)`);
@@ -23,16 +30,12 @@ export function RdpToolCard() {
     <>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-base font-semibold text-gray-900">Удалённый рабочий стол</p>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Подключение к удалённому ПК через браузер.
-          </p>
+          <p className="text-base font-semibold text-gray-900">{title}</p>
+          <p className="text-sm text-gray-500 mt-0.5">{desc}</p>
         </div>
         <Monitor className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
       </div>
-      <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">
-        Открыть →
-      </div>
+      <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">{openLabel}</div>
     </>
   );
 
@@ -40,16 +43,12 @@ export function RdpToolCard() {
     <>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-base font-semibold text-gray-500">Удалённый рабочий стол</p>
-          <p className="text-sm text-gray-400 mt-0.5">
-            Подключение к удалённому ПК через браузер.
-          </p>
+          <p className="text-base font-semibold text-gray-500">{title}</p>
+          <p className="text-sm text-gray-400 mt-0.5">{desc}</p>
         </div>
         <Monitor className="h-8 w-8 text-gray-400 shrink-0" />
       </div>
-      <div className="mt-4 text-sm font-medium text-gray-400">
-        Открыть →
-      </div>
+      <div className="mt-4 text-sm font-medium text-gray-400">{openLabel}</div>
     </>
   );
 
@@ -104,19 +103,19 @@ export function RdpToolCard() {
                 <AlertCircle className="h-6 w-6 text-amber-600" />
               </div>
               <p id="rdp-pc-only-title" className="text-amber-900 font-semibold text-center">
-                Только с ПК/ноутбука
+                {t ? 'PC/laptop only' : 'Только с ПК/ноутбука'}
               </p>
             </div>
             <div className="px-8 pb-8 pt-3">
               <p className="text-gray-600 text-sm text-center">
-                Воспользуйтесь данным функционалом через ваш ПК или ноутбук.
+                {t ? 'Please use this feature from your PC or laptop.' : 'Воспользуйтесь данным функционалом через ваш ПК или ноутбук.'}
               </p>
               <button
                 type="button"
                 onClick={() => setShowPcOnlyModal(false)}
                 className="mt-4 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-600 transition flex items-center justify-center gap-2"
               >
-                Понятно
+                {t ? 'Got it' : 'Понятно'}
               </button>
             </div>
           </div>

@@ -76,23 +76,51 @@ HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
 
 LEADS_PAGE_LIMIT = int(os.environ.get("INSTANTLY_LEADS_PAGE_LIMIT", "100"))
-LEADS_CONCURRENCY = int(os.environ.get("INSTANTLY_LEADS_CONCURRENCY", "3"))
+LEADS_CONCURRENCY = int(os.environ.get("INSTANTLY_LEADS_CONCURRENCY", "2"))
 LEADS_UPSERT_BATCH = 500
 MAX_LEADS_PAGES = 5000
 LEADS_DB_POOL_MIN = 2
 LEADS_DB_POOL_MAX = LEADS_CONCURRENCY + 3
-LEADS_HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_LEADS_HTTP_TIMEOUT_SEC", "60"))
+LEADS_HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_LEADS_HTTP_TIMEOUT_SEC", "120"))
 LEADS_RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_LEADS_RETRY_ATTEMPTS", "5"))
-LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "2"))
+LEADS_RETRY_BASE_DELAY_SEC: float = float(os.environ.get("INSTANTLY_LEADS_RETRY_BASE_DELAY_SEC", "3"))
 LEADS_RETRY_5XX_MULTIPLIER: float = float(
-    os.environ.get("INSTANTLY_LEADS_RETRY_5XX_MULTIPLIER", "1.5")
+    os.environ.get("INSTANTLY_LEADS_RETRY_5XX_MULTIPLIER", "2.0")
 )
 LEADS_INTER_PAGE_DELAY_SEC: float = float(
-    os.environ.get("INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC", "0.2")
+    os.environ.get("INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC", "0.5")
 )
 LEADS_FLUSH_THRESHOLD = int(os.environ.get("INSTANTLY_LEADS_FLUSH_THRESHOLD", "5000"))
+LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "3.0"))
 
 _CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
+
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+
+class _TokenBucket:
+    """Simple token-bucket rate limiter shared across all concurrent workers."""
+
+    def __init__(self, rate: float, burst: int = 1):
+        self._rate = rate
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last: float | None = None
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if self._last is None:
+                self._last = now
+            self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            if self._tokens < 1:
+                wait = (1 - self._tokens) / self._rate
+                await asyncio.sleep(wait)
+                self._tokens = 0
+            else:
+                self._tokens -= 1
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -519,16 +547,19 @@ async def _fetch_leads_page(
     client: httpx.AsyncClient,
     campaign_id: str,
     starting_after: str | None,
+    rate_limiter: _TokenBucket | None = None,
 ) -> dict:
     """Fetch one page of leads for a campaign from Instantly."""
     url = f"{INSTANTLY_BASE}/leads/list"
     headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
-    body: dict[str, Any] = {"campaign_id": campaign_id, "limit": LEADS_PAGE_LIMIT}
+    body: dict[str, Any] = {"campaign": campaign_id, "limit": LEADS_PAGE_LIMIT}
     if starting_after:
         body["starting_after"] = starting_after
 
     last_err: BaseException | None = None
     for attempt in range(LEADS_RETRY_ATTEMPTS):
+        if rate_limiter is not None:
+            await rate_limiter.acquire()
         try:
             r = await client.post(url, json=body, headers=headers)
             r.raise_for_status()
@@ -536,11 +567,23 @@ async def _fetch_leads_page(
         except httpx.HTTPStatusError as e:
             last_err = e
             code = e.response.status_code if e.response is not None else None
+            if code is not None and code < 500 and code != 429:
+                raise
             if attempt < LEADS_RETRY_ATTEMPTS - 1:
                 delay = _leads_retry_delay(attempt, status_code=code)
                 print(
-                    f"[leads-sync] campaign {campaign_id}: leads/list attempt "
+                    f"[leads-sync] campaign {campaign_id[:12]}: attempt "
                     f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {_format_leads_sync_error(e)}. "
+                    f"Retry in {delay:.1f}s…"
+                )
+                await asyncio.sleep(delay)
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            last_err = e
+            if attempt < LEADS_RETRY_ATTEMPTS - 1:
+                delay = _leads_retry_delay(attempt, status_code=None) * 1.5
+                print(
+                    f"[leads-sync] campaign {campaign_id[:12]}: attempt "
+                    f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} timeout. "
                     f"Retry in {delay:.1f}s…"
                 )
                 await asyncio.sleep(delay)
@@ -549,7 +592,7 @@ async def _fetch_leads_page(
             if attempt < LEADS_RETRY_ATTEMPTS - 1:
                 delay = _leads_retry_delay(attempt, status_code=None)
                 print(
-                    f"[leads-sync] campaign {campaign_id}: leads/list attempt "
+                    f"[leads-sync] campaign {campaign_id[:12]}: attempt "
                     f"{attempt + 1}/{LEADS_RETRY_ATTEMPTS} failed: {_format_leads_sync_error(e)}. "
                     f"Retry in {delay:.1f}s…"
                 )
@@ -561,6 +604,7 @@ async def _fetch_leads_page(
 async def _iter_leads_pages(
     client: httpx.AsyncClient,
     campaign_id: str,
+    rate_limiter: _TokenBucket | None = None,
 ) -> AsyncIterator[list[dict]]:
     """Yield one page of leads at a time — keeps memory flat for huge campaigns."""
     after: str | None = None
@@ -576,10 +620,10 @@ async def _iter_leads_pages(
 
         pages += 1
         if pages > MAX_LEADS_PAGES:
-            print(f"[leads-sync] WARNING: reached page cap ({MAX_LEADS_PAGES}) for {campaign_id}")
+            print(f"[leads-sync] WARNING: reached page cap ({MAX_LEADS_PAGES}) for {campaign_id[:12]}")
             break
 
-        data = await _fetch_leads_page(client, campaign_id, after)
+        data = await _fetch_leads_page(client, campaign_id, after, rate_limiter)
         items = data.get("items", []) if isinstance(data, dict) else []
         if items:
             yield items
@@ -652,6 +696,7 @@ async def _sync_single_campaign(
     campaign_id: str,
     user_ids: list[str],
     progress: dict[str, int],
+    rate_limiter: _TokenBucket | None = None,
 ) -> tuple[int, int]:
     """Sync leads for one campaign. Returns (leads_count, error_count)."""
     try:
@@ -659,7 +704,7 @@ async def _sync_single_campaign(
         now = datetime.now(timezone.utc)
         buffer: list[dict] = []
 
-        async for page_items in _iter_leads_pages(http_client, campaign_id):
+        async for page_items in _iter_leads_pages(http_client, campaign_id, rate_limiter):
             buffer.extend(page_items)
             campaign_leads += len(page_items)
 
@@ -708,9 +753,10 @@ async def sync_client_leads() -> dict[str, int]:
     LEADS_UPSERT_BATCH.  DB connections are held only during flushes.
 
     Resource budget (2xXeon E5-2670 / 64GB):
-      DB pool: max 6 conns  ← well under 95% of pgbouncer limit (57 of 60)
-      HTTP:    max 7 conns  ← 3 active + 4 keepalive buffer
-      Memory:  ~3 × 5000 leads × ~2KB ≈ 30MB peak — acceptable
+      DB pool: max 5 conns  ← well under 95% of pgbouncer limit (57 of 60)
+      HTTP:    max 4 conns  ← 2 active + 2 keepalive buffer
+      Rate:    ~3 RPS global limit across all workers
+      Memory:  ~2 × 5000 leads × ~2KB ≈ 20MB peak — acceptable
     """
     pool = await asyncpg.create_pool(
         DATABASE_URL,
@@ -743,18 +789,24 @@ async def sync_client_leads() -> dict[str, int]:
         semaphore = asyncio.Semaphore(LEADS_CONCURRENCY)
         progress: dict[str, int] = {"done": 0, "total": len(campaign_users)}
 
-        _timeout = httpx.Timeout(LEADS_HTTP_TIMEOUT)
-        _limits = httpx.Limits(
-            max_connections=LEADS_CONCURRENCY + 4,
-            max_keepalive_connections=LEADS_CONCURRENCY + 4,
+        _timeout = httpx.Timeout(
+            connect=15.0,
+            read=float(LEADS_HTTP_TIMEOUT),
+            write=30.0,
+            pool=30.0,
         )
+        _limits = httpx.Limits(
+            max_connections=LEADS_CONCURRENCY + 2,
+            max_keepalive_connections=LEADS_CONCURRENCY + 2,
+        )
+        rate_limiter = _TokenBucket(rate=LEADS_RPS_LIMIT, burst=max(1, int(LEADS_RPS_LIMIT)))
 
         async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
 
             async def _bounded(cid: str, uids: list[str]) -> tuple[int, int]:
                 async with semaphore:
                     return await _sync_single_campaign(
-                        pool, http_client, cid, uids, progress,
+                        pool, http_client, cid, uids, progress, rate_limiter,
                     )
 
             results = await asyncio.gather(
@@ -940,6 +992,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
             or result.get("removed", 0) > 0
             or result.get("api_errors", 0) > 0
             or result.get("leads_campaigns_failed", 0) > 0
+            or result.get("leads_total", 0) > 0
         )
 
         if manual or result.get("status") == "error" or has_changes:
@@ -1002,7 +1055,9 @@ async def main() -> None:
 
     print(
         f"[sync] Started. interval={effective_interval_sec}s, retry_attempts={RETRY_ATTEMPTS}, "
-        f"leads_retry_attempts={LEADS_RETRY_ATTEMPTS}. Commands: /sync /last /help"
+        f"leads_retry_attempts={LEADS_RETRY_ATTEMPTS}, leads_page_limit={LEADS_PAGE_LIMIT}, "
+        f"leads_concurrency={LEADS_CONCURRENCY}, leads_rps={LEADS_RPS_LIMIT}. "
+        f"Commands: /sync /last /help"
     )
 
     try:

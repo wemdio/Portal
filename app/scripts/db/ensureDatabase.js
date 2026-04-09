@@ -14,7 +14,8 @@
  */
 const path = require('path');
 const fs = require('fs/promises');
-const dns = require('dns').promises;
+const dns = require('dns');
+const dnsPromises = dns.promises;
 const dotenv = require('dotenv');
 const { Client } = require('pg');
 
@@ -26,6 +27,15 @@ const MAX_CLIENTS_HINT = `
   Supabase Dashboard → Connect → Transaction pooler
   Замените в SUPABASE_DB_URL порт 5432 на 6543.
 `;
+
+if (typeof dns.setDefaultResultOrder === 'function') {
+  const order = (process.env.DB_DNS_RESULT_ORDER || 'ipv4first').toLowerCase();
+  if (order === 'ipv4first' || order === 'verbatim') {
+    dns.setDefaultResultOrder(order);
+  } else {
+    dns.setDefaultResultOrder('ipv4first');
+  }
+}
 
 function isRetryableDbError(err) {
   const msg = (err && err.message) ? String(err.message) : '';
@@ -111,7 +121,7 @@ async function connectionConfigWithIPv4(dbUrl, ssl) {
 
     let host = hostname;
     try {
-      const ips = await dns.resolve4(hostname);
+      const ips = await dnsPromises.resolve4(hostname);
       if (ips && ips[0]) {
         host = ips[0];
       }

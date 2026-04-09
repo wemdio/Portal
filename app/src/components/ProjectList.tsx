@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Project, ProjectNote, ProjectStatus, Task, UserProfile } from '@/types';
+import { Project, ProjectNote, ProjectStatus, Task, TaskStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 import { canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
@@ -41,6 +41,17 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; 
   'завершен': { label: 'Завершен', color: 'text-zinc-600', bg: 'bg-zinc-100/50', border: 'border-zinc-200/50' },
   'отменен': { label: 'Отменен', color: 'text-red-700', bg: 'bg-red-50/50', border: 'border-red-200/50' },
 };
+
+function translateStatusLabel(label: string, locale: 'ru' | 'en'): string {
+  const normalized = label.toLowerCase().replace(/ё/g, 'е');
+  if (normalized.includes('в работе')) return locale === 'en' ? 'In progress' : 'В работе';
+  if (normalized.includes('тест')) return locale === 'en' ? 'Testing' : 'Тестирование';
+  if (normalized.includes('на паузе')) return locale === 'en' ? 'Paused' : 'На паузе';
+  if (normalized.includes('подготов')) return locale === 'en' ? 'Preparation' : 'Подготовка';
+  if (normalized.includes('заверш')) return locale === 'en' ? 'Completed' : 'Завершен';
+  if (normalized.includes('отмен')) return locale === 'en' ? 'Cancelled' : 'Отменен';
+  return label;
+}
 
 function getStatusConfig(status: string | null | undefined) {
   if (!status) return STATUS_CONFIG['в работе'];
@@ -180,6 +191,7 @@ function getCommentValue(project: Project) {
 }
 
 type PopoverItem = { id: string; title: string; status?: string; deadline?: string | null };
+type TaskDeadlineDefaultMode = 'tomorrow' | 'fixed';
 
 type ItemPopoverProps = {
   items: PopoverItem[];
@@ -197,6 +209,7 @@ type ItemPopoverProps = {
   placeholder: string;
   showStatusDot?: boolean;
   onDeadlineChange?: (id: string, deadline: string | null) => void;
+  onItemClick?: (item: PopoverItem) => void;
 };
 
 function formatDeadlineLabel(deadline: string): { text: string; color: string } {
@@ -214,7 +227,44 @@ function formatDeadlineLabel(deadline: string): { text: string; color: string } 
   return { text: formatted, color: 'text-zinc-500 bg-zinc-100' };
 }
 
-function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange }: ItemPopoverProps) {
+function getDefaultTaskDeadlineIso(
+  enabled: boolean,
+  mode: TaskDeadlineDefaultMode,
+  at: string,
+  time: string
+): string | null {
+  if (!enabled) return null;
+  if (mode === 'fixed') {
+    if (!at) return null;
+    const fixed = new Date(at);
+    if (Number.isNaN(fixed.getTime())) return null;
+    return fixed.toISOString();
+  }
+  const [hoursRaw, minutesRaw] = time.split(':');
+  const hours = Number(hoursRaw);
+  const minutes = Number(minutesRaw);
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(Number.isFinite(hours) ? hours : 12, Number.isFinite(minutes) ? minutes : 0, 0, 0);
+  return tomorrow.toISOString();
+}
+
+function formatTaskDeadlineInput(deadline: string | null | undefined): string {
+  if (!deadline) return '';
+  const d = new Date(deadline);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function getTaskStatusLabel(status: TaskStatus, locale: 'ru' | 'en'): string {
+  if (status === 'in_progress') return locale === 'en' ? 'In progress' : 'В работе';
+  if (status === 'done') return locale === 'en' ? 'Completed' : 'Завершено';
+  return locale === 'en' ? 'Pending' : 'Ожидает';
+}
+
+function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange, onItemClick }: ItemPopoverProps) {
+  const { locale } = useUser();
   return (
     <div
       ref={popoverRef}
@@ -236,8 +286,22 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
         {items.map((item) => {
           const isDone = item.status === 'done';
           const dlInfo = item.deadline && !isDone ? formatDeadlineLabel(item.deadline) : null;
+          const interactive = Boolean(onItemClick);
+          const inlineActionsEnabled = canEdit && !interactive;
           return (
-            <div key={item.id} className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${isDone ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'}`}>
+            <div
+              key={item.id}
+              role={interactive ? 'button' : undefined}
+              tabIndex={interactive ? 0 : undefined}
+              onClick={interactive ? () => onItemClick?.(item) : undefined}
+              onKeyDown={interactive ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onItemClick?.(item);
+                }
+              } : undefined}
+              className={`flex items-start gap-2.5 rounded-lg p-2.5 text-[13px] group transition-colors ${isDone ? 'bg-zinc-50/80' : 'bg-zinc-50 hover:bg-zinc-100/80'} ${interactive ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300/60' : ''}`}
+            >
               {showStatusDot && (
                 <span className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${isDone ? 'bg-emerald-400' : item.status === 'in_progress' ? 'bg-blue-500' : 'bg-zinc-300'}`} />
               )}
@@ -250,7 +314,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
                       {dlInfo.text}
                     </span>
                   )}
-                  {canEdit && onDeadlineChange && !isDone && (
+                  {inlineActionsEnabled && onDeadlineChange && !isDone && (
                     <span className="relative inline-flex items-center opacity-0 group-hover:opacity-100 transition-colors">
                       <input
                         type="datetime-local"
@@ -260,30 +324,30 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
                         style={{ colorScheme: 'light' }}
                       />
                       <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-600 pointer-events-none">
-                        {item.deadline ? '✏' : '+ срок'}
+                        {item.deadline ? '✏' : (locale === 'en' ? '+ due date' : '+ срок')}
                       </span>
                     </span>
                   )}
-                  {canEdit && onDeadlineChange && item.deadline && !isDone && (
+                  {inlineActionsEnabled && onDeadlineChange && item.deadline && !isDone && (
                     <button
                       type="button"
                       onClick={() => onDeadlineChange(item.id, null)}
                       className="text-[10px] text-zinc-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
-                      title="Убрать дедлайн"
+                      title={locale === 'en' ? 'Remove deadline' : 'Убрать дедлайн'}
                     >
                       ✕
                     </button>
                   )}
                 </div>
               </div>
-              {canEdit && (
+              {inlineActionsEnabled && (
                 deleteConfirmId === item.id ? (
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    <button type="button" onClick={() => { onDelete(item.id); setDeleteConfirmId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">Да</button>
-                    <button type="button" onClick={() => setDeleteConfirmId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">Нет</button>
+                    <button type="button" onClick={() => { onDelete(item.id); setDeleteConfirmId(null); }} className="text-[11px] text-red-600 hover:text-red-700 font-medium px-1.5 py-0.5 rounded bg-red-50 hover:bg-red-100 transition-colors">{locale === 'en' ? 'Yes' : 'Да'}</button>
+                    <button type="button" onClick={() => setDeleteConfirmId(null)} className="text-[11px] text-zinc-500 hover:text-zinc-700 font-medium px-1.5 py-0.5 rounded hover:bg-zinc-100 transition-colors">{locale === 'en' ? 'No' : 'Нет'}</button>
                   </div>
                 ) : (
-                  <button type="button" onClick={() => setDeleteConfirmId(item.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title="Удалить">
+                  <button type="button" onClick={() => setDeleteConfirmId(item.id)} className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded text-zinc-300 hover:text-red-500 hover:bg-red-50 transition-colors" title={locale === 'en' ? 'Delete' : 'Удалить'}>
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 3.5h7M4.5 3.5V2.5a1 1 0 011-1h1a1 1 0 011 1v1M5 5.5v3M7 5.5v3M3.5 3.5l.5 6a1 1 0 001 1h2a1 1 0 001-1l.5-6" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   </button>
                 )
@@ -291,7 +355,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
             </div>
           );
         })}
-        {items.length === 0 && <p className="text-[13px] text-zinc-400 text-center py-4">Пусто</p>}
+        {items.length === 0 && <p className="text-[13px] text-zinc-400 text-center py-4">{locale === 'en' ? 'Empty' : 'Пусто'}</p>}
       </div>
       {canEdit && (
         <div className="flex gap-1.5 px-3 py-2.5 border-t border-zinc-100">
@@ -312,7 +376,7 @@ function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, 
 
 export function ProjectList() {
   const isTma = useIsTma();
-  const { userRole } = useUser();
+  const { userRole, locale } = useUser();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -342,6 +406,16 @@ export function ProjectList() {
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [deleteConfirmTaskId, setDeleteConfirmTaskId] = useState<string | null>(null);
   const taskPopoverRef = useRef<HTMLDivElement>(null);
+  const [taskModalContext, setTaskModalContext] = useState<{ projectId: string; taskId: string } | null>(null);
+  const [taskModalTitle, setTaskModalTitle] = useState('');
+  const [taskModalStatus, setTaskModalStatus] = useState<TaskStatus>('pending');
+  const [taskModalDeadline, setTaskModalDeadline] = useState('');
+  const [taskModalSaving, setTaskModalSaving] = useState(false);
+  const [taskModalDeleting, setTaskModalDeleting] = useState(false);
+  const [taskDeadlineDefaultEnabled, setTaskDeadlineDefaultEnabled] = useState(false);
+  const [taskDeadlineDefaultMode, setTaskDeadlineDefaultMode] = useState<TaskDeadlineDefaultMode>('tomorrow');
+  const [taskDeadlineDefaultAt, setTaskDeadlineDefaultAt] = useState('');
+  const [taskDeadlineDefaultTime, setTaskDeadlineDefaultTime] = useState('12:00');
 
   const [projectNotes, setProjectNotes] = useState<Record<string, ProjectNote[]>>({});
   const [notePopoverId, setNotePopoverId] = useState<string | null>(null);
@@ -350,11 +424,16 @@ export function ProjectList() {
   const [deleteConfirmNoteId, setDeleteConfirmNoteId] = useState<string | null>(null);
   const notePopoverRef = useRef<HTMLDivElement>(null);
 
+  const taskModalTask = taskModalContext
+    ? (projectTasks[taskModalContext.projectId] ?? []).find((t) => t.id === taskModalContext.taskId) ?? null
+    : null;
+
   useEffect(() => {
     void fetchProjects();
     void fetchAssigneeOptions();
     void fetchAllTasks();
     void fetchAllNotes();
+    void fetchTaskDeadlineDefault();
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -424,7 +503,7 @@ export function ProjectList() {
 
       if (error) throw error;
       const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
-      setAssigneeOptions(buildAssigneeOptions(profiles));
+      setAssigneeOptions(buildAssigneeOptions(profiles, locale));
       const publicAvatarMap = new Map<string, string>();
       for (const profile of profiles) {
         const name = normalizeAssigneeName(profile.full_name?.trim() || profile.email?.split('@')[0]?.trim());
@@ -516,11 +595,40 @@ export function ProjectList() {
     }
   }
 
+  async function fetchTaskDeadlineDefault() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/user/task-deadline-preference', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { enabled?: boolean; mode?: string; at?: string | null; time?: string | null };
+      setTaskDeadlineDefaultEnabled(Boolean(data.enabled));
+      setTaskDeadlineDefaultMode(data.mode === 'fixed' ? 'fixed' : 'tomorrow');
+      setTaskDeadlineDefaultAt(data.at ?? '');
+      setTaskDeadlineDefaultTime(
+        data.time && /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(data.time)
+          ? data.time
+          : '12:00'
+      );
+    } catch {
+      // non-critical
+    }
+  }
+
   async function addTask(projectId: string, title: string, specialist?: string) {
     if (!title.trim()) return;
+    const deadline = getDefaultTaskDeadlineIso(
+      taskDeadlineDefaultEnabled,
+      taskDeadlineDefaultMode,
+      taskDeadlineDefaultAt,
+      taskDeadlineDefaultTime
+    );
     const { data, error } = await supabase
       .from('tasks')
-      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null })
+      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null, deadline })
       .select()
       .single();
     if (error) return;
@@ -548,6 +656,60 @@ export function ProjectList() {
         t.id === taskId ? { ...t, deadline } : t,
       ),
     }));
+  }
+
+  function openTaskModal(projectId: string, item: PopoverItem) {
+    const sourceTask = (projectTasks[projectId] ?? []).find((t) => t.id === item.id);
+    if (!sourceTask) return;
+    setTaskModalContext({ projectId, taskId: item.id });
+    setTaskModalTitle(sourceTask.title);
+    setTaskModalStatus(sourceTask.status);
+    setTaskModalDeadline(formatTaskDeadlineInput(sourceTask.deadline));
+    setDeleteConfirmTaskId(null);
+  }
+
+  async function saveTaskFromModal() {
+    if (!taskModalContext) return;
+    const title = taskModalTitle.trim();
+    if (!title) return;
+    const deadline = taskModalDeadline ? new Date(taskModalDeadline).toISOString() : null;
+    const updatedAt = new Date().toISOString();
+    setTaskModalSaving(true);
+    try {
+      const { error } = await supabase
+        .from('tasks')
+        .update({ title, status: taskModalStatus, deadline, updated_at: updatedAt })
+        .eq('id', taskModalContext.taskId);
+      if (error) throw error;
+      setProjectTasks((prev) => ({
+        ...prev,
+        [taskModalContext.projectId]: (prev[taskModalContext.projectId] ?? []).map((t) =>
+          t.id === taskModalContext.taskId
+            ? { ...t, title, status: taskModalStatus, deadline, updated_at: updatedAt }
+            : t,
+        ),
+      }));
+      setTaskModalContext(null);
+    } catch (error) {
+      void logError('tasks.modal.save.failed', error, {
+        projectId: taskModalContext.projectId,
+        taskId: taskModalContext.taskId,
+      });
+    } finally {
+      setTaskModalSaving(false);
+    }
+  }
+
+  async function deleteTaskFromModal() {
+    if (!taskModalContext) return;
+    setTaskModalDeleting(true);
+    try {
+      await deleteTask(taskModalContext.taskId, taskModalContext.projectId);
+      setTaskModalContext(null);
+      setDeleteConfirmTaskId(null);
+    } finally {
+      setTaskModalDeleting(false);
+    }
   }
 
   async function fetchAllNotes() {
@@ -852,7 +1014,9 @@ export function ProjectList() {
     <div className={isTma ? 'space-y-4' : 'flex flex-1 min-h-0 flex-col gap-4'}>
       {/* Header + Controls — single row */}
       <div className={isTma ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-2'}>
-        <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>Проекты</h1>
+        <h1 className={`${isTma ? 'text-xl' : 'text-lg'} font-semibold tracking-tight text-zinc-900 mr-auto`}>
+          {locale === 'en' ? 'Projects' : 'Проекты'}
+        </h1>
 
         {/* Search */}
         <div className="relative">
@@ -862,7 +1026,7 @@ export function ProjectList() {
           <input
             type="text"
             className="w-44 rounded-xl border border-zinc-200/80 bg-white py-2 pl-8 pr-3 text-xs text-zinc-900 placeholder-zinc-400 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md"
-            placeholder="Поиск..."
+            placeholder={locale === 'en' ? 'Search...' : 'Поиск...'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -876,7 +1040,7 @@ export function ProjectList() {
               onChange={(e) => setLeadFilter(e.target.value)}
               className={`appearance-none rounded-xl border border-zinc-200/80 bg-white py-2 pl-3 ${isTma ? 'pr-3' : 'pr-7'} text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-zinc-200 focus:border-transparent outline-none transition-all shadow-sm hover:shadow-md cursor-pointer`}
             >
-              <option value="all">Все лиды</option>
+              <option value="all">{locale === 'en' ? 'All leads' : 'Все лиды'}</option>
               {uniqueLeads.map((lead) => (
                 <option key={lead} value={lead}>{lead}</option>
               ))}
@@ -893,12 +1057,12 @@ export function ProjectList() {
         {viewMode !== 'kanban' && (
           <div className={isTma ? 'flex w-full items-center gap-0.5 overflow-x-auto no-scrollbar' : 'flex items-center gap-0.5 overflow-x-auto no-scrollbar bg-white px-1 py-0.5 rounded-xl shadow-sm border border-zinc-200/80'}>
             {[
-              { key: 'all', label: 'Все' },
-              { key: 'подготовка', label: 'Подготовка' },
-              { key: 'в работе', label: 'В работе' },
-              { key: 'тестирование', label: 'Тест' },
-              { key: 'на паузе', label: 'Пауза' },
-              { key: 'завершен', label: 'Завершено' },
+              { key: 'all', label: locale === 'en' ? 'All' : 'Все' },
+              { key: 'подготовка', label: locale === 'en' ? 'Preparation' : 'Подготовка' },
+              { key: 'в работе', label: locale === 'en' ? 'In progress' : 'В работе' },
+              { key: 'тестирование', label: locale === 'en' ? 'Test' : 'Тест' },
+              { key: 'на паузе', label: locale === 'en' ? 'Paused' : 'Пауза' },
+              { key: 'завершен', label: locale === 'en' ? 'Completed' : 'Завершено' },
             ].map((tab) => (
               <button
                 key={tab.key}
@@ -930,7 +1094,7 @@ export function ProjectList() {
                 : 'bg-white text-zinc-700 shadow-sm hover:shadow-md border border-zinc-200/80'
             }`}
           >
-            {isTableEditing ? 'Завершить' : 'Редактировать'}
+            {isTableEditing ? (locale === 'en' ? 'Done' : 'Завершить') : (locale === 'en' ? 'Edit' : 'Редактировать')}
           </button>
         )}
         {canCreate && (
@@ -938,7 +1102,7 @@ export function ProjectList() {
             href="/projects/new"
             className={`inline-flex items-center justify-center rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-zinc-800 transition-all duration-200 ${isTma ? 'w-full' : ''}`}
           >
-            <span className="mr-1.5 text-sm leading-none">+</span> Новый проект
+            <span className="mr-1.5 text-sm leading-none">+</span> {locale === 'en' ? 'New project' : 'Новый проект'}
           </Link>
         )}
       </div>
@@ -946,16 +1110,18 @@ export function ProjectList() {
       {/* Empty State */}
       {filteredProjects.length === 0 && (
         <div className="text-center py-16 bg-white rounded-2xl border border-dashed border-zinc-200">
-          <h3 className="mt-4 text-lg font-medium text-zinc-900">Нет проектов</h3>
+          <h3 className="mt-4 text-lg font-medium text-zinc-900">{locale === 'en' ? 'No projects' : 'Нет проектов'}</h3>
           <p className="mt-2 text-sm text-zinc-500">
-            {searchTerm ? 'Попробуйте изменить поиск' : 'Создайте первый проект или импортируйте данные'}
+            {searchTerm
+              ? (locale === 'en' ? 'Try changing your search' : 'Попробуйте изменить поиск')
+              : (locale === 'en' ? 'Create your first project or import data' : 'Создайте первый проект или импортируйте данные')}
           </p>
           {canCreate && (
             <Link 
               href="/projects/new"
               className="mt-4 inline-flex items-center text-sm font-medium text-zinc-900 hover:text-zinc-600 underline underline-offset-4"
             >
-              Создать проект
+              {locale === 'en' ? 'Create project' : 'Создать проект'}
             </Link>
           )}
         </div>
@@ -1036,20 +1202,20 @@ export function ProjectList() {
             <table className="w-full divide-y divide-zinc-200/50 text-xs min-w-[1400px]">
               <thead className="bg-white/95 backdrop-blur sticky top-0 z-10">
                 <tr>
-                  <th className="px-3 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[140px]">Проект</th>
-                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Статус</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">Сумма</th>
-                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">Дог.</th>
-                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">Пер.</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Дедлайн</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">KPI План</th>
-                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[70px]">KPI Факт</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">Контакты</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Специалист</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Лид (PM)</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">Формат</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Задачи</th>
-                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">Заметки</th>
+                  <th className="px-3 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[140px]">{locale === 'en' ? 'Project' : 'Проект'}</th>
+                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Status' : 'Статус'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">{locale === 'en' ? 'Amount' : 'Сумма'}</th>
+                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">{locale === 'en' ? 'Ctr.' : 'Дог.'}</th>
+                  <th className="px-1.5 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[48px]">{locale === 'en' ? 'Mo.' : 'Пер.'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Deadline' : 'Дедлайн'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">{locale === 'en' ? 'KPI Plan' : 'KPI План'}</th>
+                  <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[70px]">{locale === 'en' ? 'KPI Fact' : 'KPI Факт'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Contacts' : 'Контакты'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Specialist' : 'Специалист'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Lead (PM)' : 'Лид (PM)'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">{locale === 'en' ? 'Format' : 'Формат'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Tasks' : 'Задачи'}</th>
+                  <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Notes' : 'Заметки'}</th>
               </tr>
             </thead>
               <tbody className="divide-y divide-zinc-200/50 bg-white">
@@ -1137,12 +1303,12 @@ export function ProjectList() {
                               className={`appearance-none cursor-pointer text-xs font-medium px-2.5 py-1 rounded-full border-0 ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color} focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
                             >
                               {STATUS_OPTIONS.map((s) => (
-                                <option key={s} value={s}>{s}</option>
+                                <option key={s} value={s}>{translateStatusLabel(s, locale)}</option>
                               ))}
                             </select>
                           ) : (
                             <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ring-black/5 ${cfg.bg} ${cfg.color}`}>
-                              {cfg.label}
+                              {translateStatusLabel(cfg.label, locale)}
                             </span>
                           );
                         })()}
@@ -1154,7 +1320,7 @@ export function ProjectList() {
                             onChange={(value) => setDraftValue(project.id, 'budget', value)}
                             onCommit={(value) => void commitProjectUpdate(project, { budget: value })}
                             disabled={isDisabled}
-                            placeholder="Сумма"
+                            placeholder={locale === 'en' ? 'Amount' : 'Сумма'}
                           />
                         ) : (
                           <span className="text-zinc-900 font-medium">{readOnlyBudget}</span>
@@ -1466,7 +1632,7 @@ export function ProjectList() {
                                   onAdd={() => void addTask(project.id, newTaskTitle, project.specialist)}
                                   placeholder="Новая задача..."
                                   showStatusDot
-                                  onDeadlineChange={(id, dl) => void updateTaskDeadline(id, project.id, dl)}
+                                  onItemClick={(item) => openTaskModal(project.id, item)}
                                 />
                               )}
                             </>
@@ -1545,7 +1711,7 @@ export function ProjectList() {
               <div className={isTma ? 'flex-1' : 'flex-1 pr-4'}>
                 <div className="flex items-center gap-3 mb-2">
                   <h2 className="text-xl font-medium text-zinc-900 leading-tight">
-                    {selectedProject.client || 'Без названия'}
+                    {selectedProject.client || (locale === 'en' ? 'Untitled' : 'Без названия')}
                   </h2>
                   {selectedProject.name && (
                     <div className="flex flex-wrap gap-1.5 mt-1">
@@ -1558,13 +1724,15 @@ export function ProjectList() {
                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset ${
                         getStatusConfig(selectedProject.status).bg.replace('bg-', 'bg-').replace('text-', 'text-').replace('border-', 'ring-')
                      } ${getStatusConfig(selectedProject.status).color}`}>
-                       {getStatusConfig(selectedProject.status).label}
+                       {translateStatusLabel(getStatusConfig(selectedProject.status).label, locale)}
                      </span>
                   )}
                 </div>
                 <div className="flex items-center gap-3 text-xs text-zinc-500">
                    <div className="flex items-center gap-1.5">
-                     <span>Дедлайн: {selectedProject.deadline ? formatDate(selectedProject.deadline) : 'Не указан'}</span>
+                     <span>
+                      {locale === 'en' ? 'Deadline' : 'Дедлайн'}: {selectedProject.deadline ? formatDate(selectedProject.deadline) : (locale === 'en' ? 'Not set' : 'Не указан')}
+                    </span>
                    </div>
                    {selectedProject.budget && (
                      <div className="flex items-center gap-1.5">
@@ -1579,7 +1747,7 @@ export function ProjectList() {
                     type="button"
                     onClick={() => requestDeleteProject(selectedProject.id)}
                     className="rounded-full p-2 text-zinc-400 hover:bg-red-50 hover:text-red-500 transition-all"
-                    title="Удалить проект"
+                    title={locale === 'en' ? 'Delete project' : 'Удалить проект'}
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                   </button>
@@ -1599,7 +1767,7 @@ export function ProjectList() {
               <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-200 transition-colors group hover:bg-zinc-100/50">
                   <div className="flex items-center gap-3 mb-3">
-                    <label className="text-xs font-medium text-zinc-700 tracking-wide uppercase">Специалист</label>
+                    <label className="text-xs font-medium text-zinc-700 tracking-wide uppercase">{locale === 'en' ? 'Specialist' : 'Специалист'}</label>
                   </div>
                   <InlineSelect
                     value={getDraftValue(selectedProject, 'specialist')}
@@ -2053,6 +2221,140 @@ export function ProjectList() {
         </div>
       )}
 
+      {taskModalContext && taskModalTask && (
+        <div className="fixed inset-0 z-[65] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-black/30 backdrop-blur-[1px]"
+            onClick={() => {
+              if (!taskModalSaving && !taskModalDeleting) setTaskModalContext(null);
+            }}
+          />
+          <div className="relative w-full max-w-md rounded-2xl border border-zinc-200/80 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+              <h3 className="text-base font-semibold text-zinc-900">{locale === 'en' ? 'Task' : 'Задача'}</h3>
+              <button
+                type="button"
+                onClick={() => setTaskModalContext(null)}
+                disabled={taskModalSaving || taskModalDeleting}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-50"
+                aria-label={locale === 'en' ? 'Close' : 'Закрыть'}
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-4 p-4">
+              <div>
+                <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  {locale === 'en' ? 'Title' : 'Название'}
+                </label>
+                <input
+                  type="text"
+                  value={taskModalTitle}
+                  onChange={(e) => setTaskModalTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void saveTaskFromModal();
+                  }}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-400"
+                  placeholder={locale === 'en' ? 'Task title...' : 'Название задачи...'}
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    {locale === 'en' ? 'Status' : 'Статус'}
+                  </label>
+                  <select
+                    value={taskModalStatus}
+                    onChange={(e) => setTaskModalStatus(e.target.value as TaskStatus)}
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-400"
+                  >
+                    {(['pending', 'in_progress', 'done'] as TaskStatus[]).map((status) => (
+                      <option key={status} value={status}>
+                        {getTaskStatusLabel(status, locale)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    {locale === 'en' ? 'Deadline' : 'Срок'}
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={taskModalDeadline}
+                    onChange={(e) => setTaskModalDeadline(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-400"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between border-t border-zinc-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmTaskId(taskModalTask.id)}
+                  disabled={taskModalSaving || taskModalDeleting}
+                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
+                >
+                  {locale === 'en' ? 'Delete' : 'Удалить'}
+                </button>
+                <div className="flex items-center gap-2">
+                  {taskModalDeadline && (
+                    <button
+                      type="button"
+                      onClick={() => setTaskModalDeadline('')}
+                      disabled={taskModalSaving || taskModalDeleting}
+                      className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                      {locale === 'en' ? 'Clear date' : 'Убрать срок'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setTaskModalContext(null)}
+                    disabled={taskModalSaving || taskModalDeleting}
+                    className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-50"
+                  >
+                    {locale === 'en' ? 'Cancel' : 'Отмена'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void saveTaskFromModal()}
+                    disabled={taskModalSaving || taskModalDeleting || !taskModalTitle.trim()}
+                    className="rounded-lg bg-zinc-900 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    {taskModalSaving ? (locale === 'en' ? 'Saving...' : 'Сохранение...') : (locale === 'en' ? 'Save' : 'Сохранить')}
+                  </button>
+                </div>
+              </div>
+              {deleteConfirmTaskId === taskModalTask.id && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                  <p className="text-xs text-red-700">
+                    {locale === 'en' ? 'Delete this task permanently?' : 'Удалить эту задачу без возможности восстановления?'}
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void deleteTaskFromModal()}
+                      disabled={taskModalDeleting || taskModalSaving}
+                      className="rounded-md bg-red-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                    >
+                      {taskModalDeleting ? (locale === 'en' ? 'Deleting...' : 'Удаление...') : (locale === 'en' ? 'Yes, delete' : 'Да, удалить')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteConfirmTaskId(null)}
+                      disabled={taskModalDeleting || taskModalSaving}
+                      className="rounded-md border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-600 hover:bg-white disabled:opacity-50"
+                    >
+                      {locale === 'en' ? 'Cancel' : 'Отмена'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete confirmation modal */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
@@ -2337,6 +2639,7 @@ function ProjectCard({
   canDelete?: boolean;
 }) {
   const isTma = useIsTma();
+  const { locale } = useUser();
   const statusConfig = getStatusConfig(project.status);
   const deadlineStatus = getDeadlineStatus(project.deadline);
   const isMenuOpen = openMenuId === project.id;
@@ -2381,7 +2684,7 @@ function ProjectCard({
         </Link>
         <div className="flex items-center gap-2">
           <span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-medium ${statusConfig.bg} ${statusConfig.color}`}>
-            {statusConfig.label}
+            {translateStatusLabel(statusConfig.label, locale)}
           </span>
           <div className="relative">
           <button 
@@ -2398,16 +2701,16 @@ function ProjectCard({
                   href={`/projects/${project.id}`}
                   className="flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                 >
-                  Открыть
+                  {locale === 'en' ? 'Open' : 'Открыть'}
                 </Link>
                 <Link 
                     href={`/projects/${project.id}?mode=edit`}
                   className="flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                 >
-                  Редактировать
+                  {locale === 'en' ? 'Edit' : 'Редактировать'}
                 </Link>
                 <div className="border-t border-zinc-100 my-1" />
-                <div className="px-3 py-1 text-xs text-zinc-400 uppercase">Статус</div>
+                <div className="px-3 py-1 text-xs text-zinc-400 uppercase">{locale === 'en' ? 'Status' : 'Статус'}</div>
                 {Object.entries(STATUS_CONFIG).map(([key, config]) => (
                   <button
                     key={key}
@@ -2415,7 +2718,7 @@ function ProjectCard({
                     className="w-full flex items-center px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50"
                   >
                     <span className={`w-2 h-2 rounded-full mr-2 ${config.bg.replace('-50', '-500')}`} />
-                    {config.label}
+                    {translateStatusLabel(config.label, locale)}
                   </button>
                 ))}
                 {canDelete && onDeleteRequest && (
@@ -2426,7 +2729,7 @@ function ProjectCard({
                       className="w-full flex items-center px-3 py-2 text-sm text-red-600 hover:bg-red-50"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                      Удалить
+                      {locale === 'en' ? 'Delete' : 'Удалить'}
                     </button>
                   </>
                 )}
@@ -2438,38 +2741,38 @@ function ProjectCard({
       </div>
 
       <div className={`mt-4 grid grid-cols-1 gap-4 ${isTma ? '' : 'md:grid-cols-2 xl:grid-cols-4'}`}>
-        <InfoItem label="Сумма договора" value={project.budget} />
+        <InfoItem label={locale === 'en' ? 'Contract amount' : 'Сумма договора'} value={project.budget} />
         <InfoItem
-          label="Дедлайн"
+          label={locale === 'en' ? 'Deadline' : 'Дедлайн'}
           value={deadlineLabel}
           valueClassName={deadlineClassName}
         />
         <InfoItem
-          label="Специалист"
+          label={locale === 'en' ? 'Specialist' : 'Специалист'}
           value={project.specialist}
           valueClassName="inline-flex items-center rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-800"
         />
         <InfoItem
-          label="Лид"
+          label={locale === 'en' ? 'Lead' : 'Лид'}
           value={project.manager}
           valueClassName="inline-flex items-center rounded-full bg-lime-100 px-2.5 py-1 text-xs font-semibold text-lime-800"
         />
         {!isTma && (
           <>
-            <InfoItem label="Маржа" value={project.margin} />
+            <InfoItem label={locale === 'en' ? 'Margin' : 'Маржа'} value={project.margin} />
             <InfoItem label="KPI" value={kpiValue} />
             <InfoItem
-              label="Ссылка на договор"
+              label={locale === 'en' ? 'Contract link' : 'Ссылка на договор'}
               value={contractHref ? formatUrlLabel(contractHref) : ''}
               href={contractHref}
             />
             <InfoItem
-              label="Ссылка на передачу"
+              label={locale === 'en' ? 'Handoff link' : 'Ссылка на передачу'}
               value={handoffHref ? formatUrlLabel(handoffHref) : ''}
               href={handoffHref}
             />
             <InfoItem
-              label="Где ведется проект"
+              label={locale === 'en' ? 'Project platform' : 'Где ведется проект'}
               value={platformConfig?.label}
               valueClassName={
                 platformConfig?.className
@@ -2478,7 +2781,7 @@ function ProjectCard({
               }
             />
             <InfoItem
-              label="Комментарий"
+              label={locale === 'en' ? 'Comment' : 'Комментарий'}
               value={commentValue}
               className="md:col-span-2 xl:col-span-4"
               valueClassName="text-zinc-700 break-words"
@@ -2504,6 +2807,7 @@ function KanbanCard({
   onDeleteRequest?: (id: string) => void;
   canDelete?: boolean;
 }) {
+  const { locale } = useUser();
   const [showMenu, setShowMenu] = useState(false);
   const deadlineStatus = getDeadlineStatus(project.deadline);
 
@@ -2516,7 +2820,7 @@ function KanbanCard({
       <div className="flex items-start justify-between">
         <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
           <h4 className="text-sm font-medium text-zinc-900 group-hover:text-blue-600 truncate">
-            {project.client || 'Без названия'}
+            {project.client || (locale === 'en' ? 'Untitled' : 'Без названия')}
           </h4>
           {project.name && (
             <div className="flex flex-wrap gap-1 mt-0.5">
@@ -2553,7 +2857,7 @@ function KanbanCard({
                       onClick={() => { onDeleteRequest(project.id); setShowMenu(false); }}
                       className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
                     >
-                      Удалить
+                      {locale === 'en' ? 'Delete' : 'Удалить'}
                     </button>
                   </>
                 )}
