@@ -23,6 +23,12 @@ export type TgParserJobConfig = {
 };
 
 type TgParserLogLevel = 'info' | 'warning' | 'error';
+type PgErrorLike = {
+  message?: string;
+  code?: string;
+  details?: string | null;
+  hint?: string | null;
+};
 
 const MAX_TEXT_CELL_LEN = Number(process.env.TG_PARSER_MAX_TEXT_CELL_LEN ?? '4000');
 const MAX_MESSAGES_CELL_LEN = Number(process.env.TG_PARSER_MAX_MESSAGES_CELL_LEN ?? '12000');
@@ -74,6 +80,84 @@ function stripHeavyText(users: ParsedUser[]): ParsedUser[] {
     Сообщения: '',
     Биография: '',
   }));
+}
+
+function truncateText(s: string, max = 800): string {
+  return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+function payloadStats(users: ParsedUser[]) {
+  let maxMessagesLen = 0;
+  let maxBioLen = 0;
+  let maxSourceLen = 0;
+  let usersWithCtlChars = 0;
+  let totalMessagesChars = 0;
+  let totalBioChars = 0;
+  const ctlRe = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/;
+
+  for (const u of users) {
+    const msg = String(u.Сообщения ?? '');
+    const bio = String(u.Биография ?? '');
+    const src = String(u['Ссылка на источник'] ?? '');
+    if (msg.length > maxMessagesLen) maxMessagesLen = msg.length;
+    if (bio.length > maxBioLen) maxBioLen = bio.length;
+    if (src.length > maxSourceLen) maxSourceLen = src.length;
+    totalMessagesChars += msg.length;
+    totalBioChars += bio.length;
+    if (ctlRe.test(msg) || ctlRe.test(bio)) usersWithCtlChars += 1;
+  }
+
+  let jsonBytes = -1;
+  let jsonError: string | null = null;
+  try {
+    jsonBytes = Buffer.byteLength(JSON.stringify(users), 'utf8');
+  } catch (e) {
+    jsonError = e instanceof Error ? e.message : String(e);
+  }
+
+  const first = users[0];
+  return {
+    usersCount: users.length,
+    jsonBytes,
+    jsonError,
+    maxMessagesLen,
+    maxBioLen,
+    maxSourceLen,
+    totalMessagesChars,
+    totalBioChars,
+    usersWithCtlChars,
+    sampleId: first?.ID ?? null,
+    sampleUsername: first?.Username ?? '',
+    sampleSource: first?.['Ссылка на источник'] ?? '',
+  };
+}
+
+function formatPersistFailureMessage(args: {
+  mode: string;
+  reason: string;
+  pg?: PgErrorLike | null;
+  stats?: ReturnType<typeof payloadStats>;
+}): string {
+  const chunks: string[] = [
+    `persist fail [mode=${args.mode}]`,
+    `reason=${args.reason}`,
+  ];
+  if (args.pg?.code) chunks.push(`pg.code=${args.pg.code}`);
+  if (args.pg?.details) chunks.push(`pg.details=${truncateText(String(args.pg.details), 220)}`);
+  if (args.pg?.hint) chunks.push(`pg.hint=${truncateText(String(args.pg.hint), 160)}`);
+  if (args.stats) {
+    chunks.push(
+      `users=${args.stats.usersCount}`,
+      `jsonBytes=${args.stats.jsonBytes}`,
+      `maxMsg=${args.stats.maxMessagesLen}`,
+      `maxBio=${args.stats.maxBioLen}`,
+      `ctlUsers=${args.stats.usersWithCtlChars}`,
+      `sampleId=${args.stats.sampleId ?? 'n/a'}`,
+      `sampleUser=${truncateText(args.stats.sampleUsername || '', 40)}`,
+    );
+    if (args.stats.jsonError) chunks.push(`jsonError=${truncateText(args.stats.jsonError, 180)}`);
+  }
+  return truncateText(chunks.join(' | '), 1000);
 }
 
 async function writeJobLog(args: {
@@ -261,6 +345,9 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         logOnFallback?: string;
         fallbackLogLevel?: TgParserLogLevel;
         applyFallbackOnFailure?: boolean;
+        persistMode?: 'full' | 'no_messages' | 'no_messages_no_bio' | 'error';
+        usersSnapshot?: ParsedUser[];
+        logFailureDetails?: boolean;
       },
     ): Promise<{ ok: boolean; errorMessage?: string }> => {
       const { data: updated, error: updateErr } = await db
@@ -276,13 +363,37 @@ export async function runTgParserJob(jobId: string): Promise<void> {
 
       if (!updateErr && updated) return { ok: true };
 
-      const reason = updateErr?.message || opts?.fallbackReason || 'Не удалось обновить статус задачи';
+      const pgErr = (updateErr ?? null) as PgErrorLike | null;
+      const reason = pgErr?.message || opts?.fallbackReason || 'Не удалось обновить статус задачи';
       const persistMsg = `Не удалось сохранить итог задачи: ${reason}`;
+      const stats = opts?.usersSnapshot ? payloadStats(opts.usersSnapshot) : undefined;
+      const detailMsg = formatPersistFailureMessage({
+        mode: opts?.persistMode ?? patch.status,
+        reason,
+        pg: pgErr,
+        stats,
+      });
       console.error('[tg-parser-job] final state persist failed', {
         jobId,
         reason,
+        pgCode: pgErr?.code,
+        pgDetails: pgErr?.details,
+        pgHint: pgErr?.hint,
         targetStatus: patch.status,
+        mode: opts?.persistMode ?? 'unknown',
+        stats,
       });
+
+      if (opts?.logFailureDetails) {
+        await writeJobLog({
+          jobId,
+          jobUserId,
+          isTarget,
+          accountLabel,
+          level: 'warning',
+          message: detailMsg,
+        });
+      }
 
       if (opts?.applyFallbackOnFailure === false) {
         return { ok: false, errorMessage: persistMsg };
@@ -293,7 +404,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         .update({
           status: 'error',
           stop_reason: 'persist_failed',
-          error_message: persistMsg,
+          error_message: truncateText(persistMsg, 900),
           completed_at: new Date().toISOString(),
         })
         .eq('id', jobId)
@@ -346,6 +457,9 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           {
             fallbackReason: args.fallbackReason,
             applyFallbackOnFailure: false,
+            persistMode: variant.mode,
+            usersSnapshot: variant.users,
+            logFailureDetails: true,
           },
         );
         if (persisted.ok) {
@@ -379,6 +493,9 @@ export async function runTgParserJob(jobId: string): Promise<void> {
           logOnFallback: args.fallbackLogOnFailure,
           fallbackLogLevel: args.fallbackLogLevel ?? 'error',
           applyFallbackOnFailure: true,
+          persistMode: 'error',
+          usersSnapshot: [],
+          logFailureDetails: true,
         },
       );
       return { ok: false, errorMessage: finalFallback.errorMessage ?? lastError };
