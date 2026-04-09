@@ -191,6 +191,7 @@ function getCommentValue(project: Project) {
 }
 
 type PopoverItem = { id: string; title: string; status?: string; deadline?: string | null };
+type TaskDeadlineDefaultMode = 'tomorrow' | 'fixed';
 
 type ItemPopoverProps = {
   items: PopoverItem[];
@@ -224,6 +225,28 @@ function formatDeadlineLabel(deadline: string): { text: string; color: string } 
   if (diffDays === 0) return { text: `${formatted} (сегодня)`, color: 'text-amber-700 bg-amber-50' };
   if (diffDays <= 2) return { text: formatted, color: 'text-amber-600 bg-amber-50' };
   return { text: formatted, color: 'text-zinc-500 bg-zinc-100' };
+}
+
+function getDefaultTaskDeadlineIso(
+  enabled: boolean,
+  mode: TaskDeadlineDefaultMode,
+  at: string,
+  time: string
+): string | null {
+  if (!enabled) return null;
+  if (mode === 'fixed') {
+    if (!at) return null;
+    const fixed = new Date(at);
+    if (Number.isNaN(fixed.getTime())) return null;
+    return fixed.toISOString();
+  }
+  const [hoursRaw, minutesRaw] = time.split(':');
+  const hours = Number(hoursRaw);
+  const minutes = Number(minutesRaw);
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(Number.isFinite(hours) ? hours : 12, Number.isFinite(minutes) ? minutes : 0, 0, 0);
+  return tomorrow.toISOString();
 }
 
 function formatTaskDeadlineInput(deadline: string | null | undefined): string {
@@ -389,6 +412,10 @@ export function ProjectList() {
   const [taskModalDeadline, setTaskModalDeadline] = useState('');
   const [taskModalSaving, setTaskModalSaving] = useState(false);
   const [taskModalDeleting, setTaskModalDeleting] = useState(false);
+  const [taskDeadlineDefaultEnabled, setTaskDeadlineDefaultEnabled] = useState(false);
+  const [taskDeadlineDefaultMode, setTaskDeadlineDefaultMode] = useState<TaskDeadlineDefaultMode>('tomorrow');
+  const [taskDeadlineDefaultAt, setTaskDeadlineDefaultAt] = useState('');
+  const [taskDeadlineDefaultTime, setTaskDeadlineDefaultTime] = useState('12:00');
 
   const [projectNotes, setProjectNotes] = useState<Record<string, ProjectNote[]>>({});
   const [notePopoverId, setNotePopoverId] = useState<string | null>(null);
@@ -406,6 +433,7 @@ export function ProjectList() {
     void fetchAssigneeOptions();
     void fetchAllTasks();
     void fetchAllNotes();
+    void fetchTaskDeadlineDefault();
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -567,11 +595,40 @@ export function ProjectList() {
     }
   }
 
+  async function fetchTaskDeadlineDefault() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/user/task-deadline-preference', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { enabled?: boolean; mode?: string; at?: string | null; time?: string | null };
+      setTaskDeadlineDefaultEnabled(Boolean(data.enabled));
+      setTaskDeadlineDefaultMode(data.mode === 'fixed' ? 'fixed' : 'tomorrow');
+      setTaskDeadlineDefaultAt(data.at ?? '');
+      setTaskDeadlineDefaultTime(
+        data.time && /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(data.time)
+          ? data.time
+          : '12:00'
+      );
+    } catch {
+      // non-critical
+    }
+  }
+
   async function addTask(projectId: string, title: string, specialist?: string) {
     if (!title.trim()) return;
+    const deadline = getDefaultTaskDeadlineIso(
+      taskDeadlineDefaultEnabled,
+      taskDeadlineDefaultMode,
+      taskDeadlineDefaultAt,
+      taskDeadlineDefaultTime
+    );
     const { data, error } = await supabase
       .from('tasks')
-      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null })
+      .insert({ project_id: projectId, title: title.trim(), specialist: specialist || null, deadline })
       .select()
       .single();
     if (error) return;
