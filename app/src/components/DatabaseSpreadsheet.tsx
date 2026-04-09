@@ -345,7 +345,7 @@ const ENRICHMENT_HIGHLIGHT_DURATION = 2500;
 const ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 10;
 const ENRICHMENT_STALL_TIMEOUT_MS = 3 * 60 * 1000;
 const EMAIL_SCRAPING_STALL_TIMEOUT_MS = 10 * 60 * 1000;
-const EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS = 2 * 60 * 1000;
+const EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS = 15 * 60 * 1000;
 const EMAIL_SCRAPING_MAX_BACKOFF_MS = 30_000;
 const BRIEF_SCORING_HIGHLIGHT_DURATION = 2500;
 const BRIEF_SCORING_POLL_INTERVAL_MS = 1000;
@@ -5595,7 +5595,7 @@ export function DatabaseSpreadsheet() {
           if (!res.ok) {
             if (!firstErrorAt) firstErrorAt = Date.now();
             if (Date.now() - firstErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
-              throw new Error('Сервер недоступен более 2 минут. Задача продолжает работу в фоне.');
+              throw new Error('Сервер недоступен более 15 минут. Задача продолжает работу в фоне — обновите страницу.');
             }
             await new Promise((r) => setTimeout(r, backoffMs));
             backoffMs = Math.min(backoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
@@ -5829,7 +5829,7 @@ export function DatabaseSpreadsheet() {
           if (!res.ok) {
             if (!firstErrorAt) firstErrorAt = Date.now();
             if (Date.now() - firstErrorAt > EMAIL_SCRAPING_MAX_ERROR_WINDOW_MS) {
-              throw new Error('Сервер недоступен более 2 минут. Задача продолжает работу в фоне.');
+              throw new Error('Сервер недоступен более 15 минут. Задача продолжает работу в фоне — обновите страницу.');
             }
             await new Promise((r) => setTimeout(r, backoffMs));
             backoffMs = Math.min(backoffMs * 2, EMAIL_SCRAPING_MAX_BACKOFF_MS);
