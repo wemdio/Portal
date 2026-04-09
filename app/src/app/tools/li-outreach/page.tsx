@@ -63,6 +63,27 @@ export default function LiOutreachPage() {
   const [scraperMax, setScraperMax] = useState(100);
   const [scraperType, setScraperType] = useState<'search' | 'reactions'>('search');
 
+  // Campaign creation
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [cf, setCf] = useState({
+    name: '', account_id: '', lead_list_id: '',
+    invite_message: 'Привет! Заметил вашу активность в LinkedIn. Хотел бы добавить вас в профессиональную сеть.',
+    welcome_message: 'Спасибо за добавление! Рад расширить профессиональную сеть.',
+    followup1_message: 'Добрый день! Мы подключились недавно, и мне интересно узнать больше о вашем опыте.',
+    followup1_days: 2, followup1_hours: 0,
+    followup2_enabled: true,
+    followup2_message: 'Добрый день! Хотел напомнить о себе. Давайте созвонимся на 15 минут?',
+    followup2_days: 3, followup2_hours: 0,
+    use_ai: true, daily_invite_limit: 25, min_delay: 60, max_delay: 180,
+    stop_on_reply: true,
+  });
+
+  // CSV import
+  const [importing, setImporting] = useState(false);
+  const [importListId, setImportListId] = useState('');
+  const [showImportModal, setShowImportModal] = useState(false);
+
   // ---- Data fetching --------------------------------------------------------
 
   const loadAccounts = useCallback(async () => {
@@ -100,8 +121,8 @@ export default function LiOutreachPage() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'leads') void loadLeads();
-    if (tab === 'scraper') void loadTasks();
+    if (tab === 'leads' || tab === 'dashboard') void loadLeads();
+    if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -130,6 +151,83 @@ export default function LiOutreachPage() {
   };
 
   const cancelTask = async (taskId: string) => { await api(`/scraper/tasks/${taskId}/cancel`, { method: 'POST', json: {} }); void loadTasks(); };
+
+  const createCampaign = async () => {
+    if (!cf.name.trim()) { alert('Введите название кампании'); return; }
+    if (!cf.account_id) { alert('Выберите аккаунт'); return; }
+    setCreating(true);
+    try {
+      const steps: { type: string; message?: string; days?: number; hours?: number }[] = [
+        { type: 'invite', message: cf.invite_message },
+        { type: 'wait', days: cf.followup1_days, hours: cf.followup1_hours },
+        { type: 'message', message: cf.followup1_message },
+      ];
+      if (cf.followup2_enabled) {
+        steps.push({ type: 'wait', days: cf.followup2_days, hours: cf.followup2_hours });
+        steps.push({ type: 'message', message: cf.followup2_message });
+      }
+      await api('/campaigns', {
+        method: 'POST',
+        json: {
+          name: cf.name,
+          account_id: cf.account_id,
+          lead_list_id: cf.lead_list_id || null,
+          steps,
+          use_ai: cf.use_ai,
+          stop_on_reply: cf.stop_on_reply,
+          daily_invite_limit: cf.daily_invite_limit,
+          min_delay: cf.min_delay,
+          max_delay: cf.max_delay,
+          welcome_message: cf.welcome_message || null,
+        },
+      });
+      setShowCreate(false);
+      await loadCampaigns();
+    } catch (e) {
+      alert('Ошибка: ' + (e instanceof Error ? e.message : e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const exportLeadsCsv = async () => {
+    const token = await getToken();
+    if (!token) return;
+    const res = await fetch('/api/tools/li-outreach/leads/export', { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) { alert('Ошибка экспорта'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `li_leads_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importLeadsCsv = async (file: File) => {
+    setImporting(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error('Not authenticated');
+      const fd = new FormData();
+      fd.append('file', file);
+      if (importListId) fd.append('lead_list_id', importListId);
+      const res = await fetch('/api/tools/li-outreach/leads/import', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await res.json() as { imported?: number; skipped?: number; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      alert(`Импортировано: ${data.imported}, пропущено: ${data.skipped ?? 0}`);
+      setShowImportModal(false);
+      await loadLeads();
+    } catch (e) {
+      alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   // ---- Tab bar --------------------------------------------------------------
 
@@ -166,55 +264,255 @@ export default function LiOutreachPage() {
 
       {/* Dashboard */}
       {tab === 'dashboard' && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} />
-          <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} />
-          <StatCard label="Лиды" value={leadsTotal} />
-          <StatCard label="Списки" value={leadLists.length} />
+        <div className="space-y-5">
+          {/* Top stats row */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} accent="green" />
+            <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
+            <StatCard label="Лиды" value={leadsTotal} accent="violet" />
+            <StatCard label="Списки" value={leadLists.length} accent="gray" />
+          </div>
+
+          {/* Lead funnel */}
+          <div className="rounded-xl border border-gray-200 bg-white p-4">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Воронка лидов</h3>
+            <LeadFunnel leads={leads} total={leadsTotal} />
+          </div>
+
+          {/* Two-column: campaigns + tasks */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Active campaigns */}
+            <div className="rounded-xl border border-gray-200 bg-white p-4">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Кампании</h3>
+              {campaigns.length === 0 ? (
+                <p className="text-xs text-gray-400">Нет кампаний</p>
+              ) : (
+                <div className="space-y-2">
+                  {campaigns.slice(0, 5).map((c) => (
+                    <div key={c.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <span className="font-medium text-gray-900 truncate block">{c.name}</span>
+                        <span className="text-xs text-gray-500">{(c.steps ?? []).length} шагов · AI {c.use_ai ? 'вкл' : 'выкл'} · {c.daily_invite_limit}/день</span>
+                      </div>
+                      <span className={`ml-2 shrink-0 text-xs px-2 py-0.5 rounded-md font-medium ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-200 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>
+                        {c.status === 'running' ? '● Активна' : c.status === 'draft' ? 'Черновик' : c.status === 'paused' ? 'Пауза' : c.status}
+                      </span>
+                    </div>
+                  ))}
+                  {campaigns.length > 5 && <p className="text-xs text-gray-400 text-center">ещё {campaigns.length - 5}…</p>}
+                </div>
+              )}
+            </div>
+
+            {/* Scraper tasks */}
+            <div className="rounded-xl border border-gray-200 bg-white p-4">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Скрапер задачи</h3>
+              {tasks.length === 0 ? (
+                <p className="text-xs text-gray-400">Нет задач</p>
+              ) : (
+                <div className="space-y-2">
+                  {tasks.slice(0, 5).map((t) => {
+                    const pct = t.total > 0 ? Math.round((t.progress / t.total) * 100) : 0;
+                    return (
+                      <div key={t.id} className="rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-gray-900">{t.type}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${t.status === 'completed' ? 'bg-green-100 text-green-700' : t.status === 'running' ? 'bg-blue-100 text-blue-700' : t.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-600'}`}>
+                            {t.status}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <div className="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                            <div className={`h-full rounded-full transition-all ${t.status === 'completed' ? 'bg-green-500' : t.status === 'failed' ? 'bg-red-400' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="text-xs text-gray-500 tabular-nums">{t.progress}/{t.total}</span>
+                        </div>
+                        {t.error_message && <p className="text-xs text-red-600 mt-1">{t.error_message}</p>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Accounts health */}
+          <div className="rounded-xl border border-gray-200 bg-white p-4">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
+            {accounts.length === 0 ? (
+              <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {accounts.map((a) => (
+                  <div key={a.id} className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                    <span className={`shrink-0 w-2 h-2 rounded-full ${a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
+                    <div className="min-w-0 flex-1">
+                      <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
+                      {a.headline && <span className="text-xs text-gray-500 truncate block">{a.headline}</span>}
+                    </div>
+                    <span className="text-[10px] text-gray-400 shrink-0">
+                      {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* Campaigns */}
       {tab === 'campaigns' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="space-y-3">
-            <h2 className="text-sm font-semibold text-gray-900">Кампании</h2>
-            {campaigns.length === 0 ? (
-              <div className="text-sm text-gray-500">Нет кампаний</div>
-            ) : campaigns.map((c) => (
-              <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
+        <div className="space-y-4">
+          {/* Create Campaign Panel */}
+          {showCreate && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900">Новая кампания</h2>
+                <button onClick={() => setShowCreate(false)} className="text-xs text-gray-500 hover:text-gray-700">Отмена</button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Название *</label>
+                  <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
+                  <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                    <option value="">Выберите...</option>
+                    {accounts.filter((a) => a.is_active).map((a) => <option key={a.id} value={a.id}>{a.name || a.unipile_account_id}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Список лидов</label>
+                  <select value={cf.lead_list_id} onChange={(e) => setCf({ ...cf, lead_list_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                    <option value="">Без списка</option>
+                    {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* Step 1: Invite */}
+              <div className="rounded-lg border-l-4 border-blue-400 bg-white p-3 space-y-2">
+                <div className="text-xs font-semibold text-blue-700">Шаг 1 — Инвайт</div>
+                <textarea rows={2} value={cf.invite_message} onChange={(e) => setCf({ ...cf, invite_message: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+              </div>
+
+              {/* Step 2: Welcome */}
+              <div className="rounded-lg border-l-4 border-teal-400 bg-white p-3 space-y-2">
+                <div className="text-xs font-semibold text-teal-700">Шаг 2 — Welcome (при принятии инвайта)</div>
+                <textarea rows={2} value={cf.welcome_message} onChange={(e) => setCf({ ...cf, welcome_message: e.target.value })} placeholder="Оставьте пустым, чтобы пропустить" className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+              </div>
+
+              {/* Step 3: Follow-up 1 */}
+              <div className="rounded-lg border-l-4 border-green-400 bg-white p-3 space-y-2">
+                <div className="text-xs font-semibold text-green-700">Шаг 3 — Follow-up #1</div>
+                <div className="flex gap-2 items-center">
+                  <label className="text-xs text-gray-500">Задержка:</label>
+                  <input type="number" min={0} value={cf.followup1_days} onChange={(e) => setCf({ ...cf, followup1_days: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                  <span className="text-xs text-gray-400">дней</span>
+                  <input type="number" min={0} max={23} value={cf.followup1_hours} onChange={(e) => setCf({ ...cf, followup1_hours: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                  <span className="text-xs text-gray-400">часов</span>
+                </div>
+                <textarea rows={2} value={cf.followup1_message} onChange={(e) => setCf({ ...cf, followup1_message: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+              </div>
+
+              {/* Step 4: Follow-up 2 (optional) */}
+              <div className="rounded-lg border-l-4 border-amber-400 bg-white p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <div className="font-medium text-gray-900">{c.name}</div>
-                  <span className={`text-xs px-2 py-0.5 rounded-md ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>{c.status}</span>
+                  <div className="text-xs font-semibold text-amber-700">Шаг 4 — Follow-up #2</div>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+                    <input type="checkbox" checked={cf.followup2_enabled} onChange={(e) => setCf({ ...cf, followup2_enabled: e.target.checked })} className="rounded" />
+                    Включить
+                  </label>
                 </div>
-                <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
-                <div className="flex gap-2 mt-2">
-                  {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
-                  {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
-                  <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="rounded-xl border border-gray-200 p-4 min-h-[200px]">
-            {!selectedCampaign ? (
-              <div className="text-sm text-gray-400 text-center py-8">Выберите кампанию</div>
-            ) : (
-              <div className="space-y-3">
-                <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
-                <div className="max-h-[400px] overflow-y-auto space-y-1">
-                  {campaignLogs.length === 0 ? (
-                    <div className="text-xs text-gray-400">Нет логов</div>
-                  ) : campaignLogs.map((log) => (
-                    <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
-                      <span className="text-gray-400">{new Date(log.created_at).toLocaleTimeString()}</span>{' '}
-                      {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
-                      {log.message}
+                {cf.followup2_enabled && (
+                  <>
+                    <div className="flex gap-2 items-center">
+                      <label className="text-xs text-gray-500">Задержка:</label>
+                      <input type="number" min={0} value={cf.followup2_days} onChange={(e) => setCf({ ...cf, followup2_days: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                      <span className="text-xs text-gray-400">дней</span>
+                      <input type="number" min={0} max={23} value={cf.followup2_hours} onChange={(e) => setCf({ ...cf, followup2_hours: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                      <span className="text-xs text-gray-400">часов</span>
                     </div>
-                  ))}
+                    <textarea rows={2} value={cf.followup2_message} onChange={(e) => setCf({ ...cf, followup2_message: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                  </>
+                )}
+              </div>
+
+              {/* Settings row */}
+              <div className="flex flex-wrap gap-4 items-center">
+                <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                  <input type="checkbox" checked={cf.use_ai} onChange={(e) => setCf({ ...cf, use_ai: e.target.checked })} className="rounded" />
+                  AI-персонализация
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                  <input type="checkbox" checked={cf.stop_on_reply} onChange={(e) => setCf({ ...cf, stop_on_reply: e.target.checked })} className="rounded" />
+                  Стоп при ответе
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <label className="text-xs text-gray-600">Лимит/день:</label>
+                  <input type="number" min={1} max={100} value={cf.daily_invite_limit} onChange={(e) => setCf({ ...cf, daily_invite_limit: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <label className="text-xs text-gray-600">Задержка (сек):</label>
+                  <input type="number" min={10} value={cf.min_delay} onChange={(e) => setCf({ ...cf, min_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
+                  <span className="text-xs text-gray-400">—</span>
+                  <input type="number" min={30} value={cf.max_delay} onChange={(e) => setCf({ ...cf, max_delay: +e.target.value })} className="w-16 rounded border border-gray-200 px-2 py-1 text-xs" />
                 </div>
               </div>
-            )}
+
+              <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
+                {creating ? 'Создание...' : 'Создать кампанию'}
+              </button>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900">Кампании</h2>
+                {!showCreate && (
+                  <button onClick={() => setShowCreate(true)} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
+                )}
+              </div>
+              {campaigns.length === 0 ? (
+                <div className="text-sm text-gray-500">Нет кампаний</div>
+              ) : campaigns.map((c) => (
+                <div key={c.id} className={`rounded-xl border p-3 text-sm cursor-pointer ${selectedCampaignId === c.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setSelectedCampaignId(c.id)}>
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium text-gray-900">{c.name}</div>
+                    <span className={`text-xs px-2 py-0.5 rounded-md ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>{c.status}</span>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
+                  <div className="flex gap-2 mt-2">
+                    {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
+                    {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
+                    <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded-xl border border-gray-200 p-4 min-h-[200px]">
+              {!selectedCampaign ? (
+                <div className="text-sm text-gray-400 text-center py-8">Выберите кампанию</div>
+              ) : (
+                <div className="space-y-3">
+                  <h3 className="font-semibold text-gray-900">{selectedCampaign.name} — Логи</h3>
+                  <div className="max-h-[400px] overflow-y-auto space-y-1">
+                    {campaignLogs.length === 0 ? (
+                      <div className="text-xs text-gray-400">Нет логов</div>
+                    ) : campaignLogs.map((log) => (
+                      <div key={log.id} className={`text-xs px-2 py-1 rounded ${log.level === 'error' ? 'bg-red-50 text-red-700' : log.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-700'}`}>
+                        <span className="text-gray-400">{new Date(log.created_at).toLocaleTimeString()}</span>{' '}
+                        {log.lead_name ? <span className="font-medium">[{log.lead_name}]</span> : null}{' '}
+                        {log.message}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -224,7 +522,53 @@ export default function LiOutreachPage() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
+            <div className="flex gap-2">
+              <button onClick={() => setShowImportModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                Импорт CSV
+              </button>
+              <button onClick={() => void exportLeadsCsv()} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                Экспорт CSV
+              </button>
+            </div>
           </div>
+
+          {/* Import CSV Modal */}
+          {showImportModal && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900">Импорт лидов из CSV</h3>
+                <button onClick={() => setShowImportModal(false)} className="text-xs text-gray-500 hover:text-gray-700">Закрыть</button>
+              </div>
+              <p className="text-xs text-gray-500">
+                Формат CSV: <code className="bg-gray-100 px-1 rounded">name, first_name, last_name, position, company, profile_url, public_identifier</code>
+                <br />Первая строка — заголовки. Обязательное поле: <code className="bg-gray-100 px-1 rounded">name</code> (или <code className="bg-gray-100 px-1 rounded">first_name</code> + <code className="bg-gray-100 px-1 rounded">last_name</code>).
+              </p>
+              <div className="flex gap-3 items-end flex-wrap">
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Список (опционально)</label>
+                  <select value={importListId} onChange={(e) => setImportListId(e.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                    <option value="">Без списка</option>
+                    {leadLists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Файл CSV</label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    disabled={importing}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void importLeadsCsv(f);
+                    }}
+                    className="text-sm file:mr-2 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-blue-700 disabled:opacity-50"
+                  />
+                </div>
+                {importing && <span className="text-xs text-gray-500">Импорт...</span>}
+              </div>
+            </div>
+          )}
+
           <div className="max-h-[600px] overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 sticky top-0">
@@ -344,13 +688,59 @@ export default function LiOutreachPage() {
   );
 }
 
-function StatCard({ label, value, total }: { label: string; value: number; total?: number }) {
+const ACCENT_STYLES: Record<string, { dot: string; bar: string }> = {
+  green:  { dot: 'bg-green-500',  bar: 'bg-green-500' },
+  blue:   { dot: 'bg-blue-500',   bar: 'bg-blue-500' },
+  violet: { dot: 'bg-violet-500', bar: 'bg-violet-500' },
+  gray:   { dot: 'bg-gray-400',   bar: 'bg-gray-400' },
+};
+
+function StatCard({ label, value, total, accent = 'gray' }: { label: string; value: number; total?: number; accent?: string }) {
+  const s = ACCENT_STYLES[accent] ?? ACCENT_STYLES.gray;
+  const pct = total && total > 0 ? Math.round((value / total) * 100) : null;
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
-      <div className="text-xs text-gray-500">{label}</div>
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+        <span className="text-xs text-gray-500">{label}</span>
+      </div>
       <div className="text-2xl font-bold text-gray-900 mt-1">
         {value}{total !== undefined && total !== value ? <span className="text-sm font-normal text-gray-400">/{total}</span> : null}
       </div>
+      {pct !== null && (
+        <div className="mt-2 h-1 rounded-full bg-gray-100 overflow-hidden">
+          <div className={`h-full rounded-full ${s.bar}`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+const LEAD_STAGES: { key: string; label: string; color: string; bg: string }[] = [
+  { key: 'new',       label: 'Новые',       color: 'text-gray-700',  bg: 'bg-gray-400' },
+  { key: 'invited',   label: 'Приглашены',   color: 'text-amber-700', bg: 'bg-amber-400' },
+  { key: 'connected', label: 'Подключены',   color: 'text-blue-700',  bg: 'bg-blue-500' },
+  { key: 'replied',   label: 'Ответили',     color: 'text-green-700', bg: 'bg-green-500' },
+];
+
+function LeadFunnel({ leads, total }: { leads: LiLead[]; total: number }) {
+  const counts = LEAD_STAGES.map(({ key }) => leads.filter((l) => l.status === key).length);
+  const max = Math.max(total, 1);
+  if (total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
+  return (
+    <div className="space-y-2">
+      {LEAD_STAGES.map((stage, i) => {
+        const pct = Math.round((counts[i] / max) * 100);
+        return (
+          <div key={stage.key} className="flex items-center gap-3">
+            <span className={`w-24 text-xs font-medium ${stage.color}`}>{stage.label}</span>
+            <div className="flex-1 h-4 rounded bg-gray-100 overflow-hidden">
+              <div className={`h-full rounded ${stage.bg} transition-all`} style={{ width: `${Math.max(pct, counts[i] > 0 ? 2 : 0)}%` }} />
+            </div>
+            <span className="w-16 text-right text-xs tabular-nums text-gray-600">{counts[i]} <span className="text-gray-400">({pct}%)</span></span>
+          </div>
+        );
+      })}
     </div>
   );
 }

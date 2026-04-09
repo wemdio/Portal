@@ -7,12 +7,18 @@ import { Sidebar } from './Sidebar';
 import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
-import { UserProvider } from '@/lib/UserProvider';
+import { UserProvider, useUser } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
+import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
 import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
 
 const MD_BREAKPOINT = 768;
+
+function LocaleTextTranslator() {
+  const { locale } = useUser();
+  return <GlobalTextTranslator locale={locale} />;
+}
 
 export function LayoutShell({
   children,
@@ -92,6 +98,7 @@ export function LayoutShell({
   return (
     <>
     <UserProvider initialLocale={locale}>
+    <LocaleTextTranslator />
     <PortalDocumentTitle />
     <PortalLoadingProvider>
     <div

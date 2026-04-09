@@ -29,6 +29,10 @@ function getErrorMessage(err: unknown): string {
   return 'Неизвестная ошибка';
 }
 
+function tr(locale: 'ru' | 'en', ru: string, en: string): string {
+  return locale === 'en' ? en : ru;
+}
+
 function getInitial(value: string) {
   const trimmed = value.trim();
   return (trimmed[0] ?? '?').toUpperCase();
@@ -298,7 +302,7 @@ export default function ProfilePage() {
         const body = await res.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error || `Ошибка сохранения (${res.status})`);
       }
-      setMessage('Кампании для лидов сохранены');
+      setMessage(locale === 'en' ? 'Lead campaign preferences saved' : 'Кампании для лидов сохранены');
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -343,7 +347,7 @@ export default function ProfilePage() {
       if (!res.ok) throw new Error('Не удалось отвязать');
       setTgLinked(false);
       setTgDeeplink(null);
-      setMessage('Telegram отвязан');
+      setMessage(locale === 'en' ? 'Telegram unlinked' : 'Telegram отвязан');
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -374,7 +378,7 @@ export default function ProfilePage() {
       if (profileErr) throw profileErr;
 
       setProfile((updated as ProfileRow) ?? null);
-      setMessage('Профиль сохранён');
+      setMessage(locale === 'en' ? 'Profile saved' : 'Профиль сохранён');
       void logAudit('profile.update.success', 'Profile updated', { userId });
 
       const currentAuthEmail = authEmail.trim().toLowerCase();
@@ -382,7 +386,7 @@ export default function ProfilePage() {
         const { error: authErr } = await supabase.auth.updateUser({ email: nextEmail });
         if (authErr) throw authErr;
         setAuthEmail(nextEmail);
-        setMessage('Email обновлён');
+        setMessage(locale === 'en' ? 'Email updated' : 'Email обновлён');
         void logAudit('profile.email.update.requested', 'Email update requested', { userId });
       }
     } catch (err) {
@@ -401,15 +405,15 @@ export default function ProfilePage() {
     setMessage('');
 
     if (pw.length < 8) {
-      setError('Пароль должен быть минимум 8 символов');
+      setError(locale === 'en' ? 'Password must be at least 8 characters' : 'Пароль должен быть минимум 8 символов');
       return;
     }
     if (pw.length > 72) {
-      setError('Пароль слишком длинный (максимум 72 символа)');
+      setError(locale === 'en' ? 'Password is too long (maximum 72 characters)' : 'Пароль слишком длинный (максимум 72 символа)');
       return;
     }
     if (pw !== pw2) {
-      setError('Пароли не совпадают');
+      setError(locale === 'en' ? 'Passwords do not match' : 'Пароли не совпадают');
       return;
     }
 
@@ -419,7 +423,7 @@ export default function ProfilePage() {
       if (error) throw error;
       setNewPassword('');
       setNewPassword2('');
-      setMessage('Пароль обновлён');
+      setMessage(locale === 'en' ? 'Password updated' : 'Пароль обновлён');
       void logAudit('profile.password.update.success', 'Password updated', { userId: userId ?? undefined });
     } catch (err) {
       void logError('profile.password.update.failed', err);
@@ -508,7 +512,7 @@ export default function ProfilePage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <div className="text-gray-500">{tr(locale, 'Загрузка...', 'Loading...')}</div>
       </div>
     );
   }
@@ -546,7 +550,7 @@ export default function ProfilePage() {
 
         <div className="min-w-0 flex-1 flex flex-col min-h-[96px]">
           <h1 className={`${isTma ? 'text-xl' : 'text-2xl'} font-bold tracking-tight text-gray-900`}>
-            Профиль специалиста портала
+            {tr(locale, 'Профиль специалиста портала', 'Portal specialist profile')}
           </h1>
           <p className="mt-1 text-sm text-gray-500 truncate">
             {displayName}{roleLabel ? ` · ${roleLabel}` : ''}
@@ -558,10 +562,10 @@ export default function ProfilePage() {
               onClick={() => fileInputRef.current?.click()}
               className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             >
-              {uploadingAvatar ? 'Загрузка...' : 'Сменить аватар'}
+              {uploadingAvatar ? tr(locale, 'Загрузка...', 'Uploading...') : tr(locale, 'Сменить аватар', 'Change avatar')}
             </button>
             <span className="text-xs text-gray-500">
-              до 10MB
+              {tr(locale, 'до 10MB', 'up to 10MB')}
             </span>
           </div>
         </div>
@@ -580,8 +584,8 @@ export default function ProfilePage() {
 
       <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
-          <h2 className="text-sm font-semibold text-gray-900">Профиль</h2>
-          <p className="mt-1 text-xs text-gray-500">Имя и email для отображения в портале</p>
+          <h2 className="text-sm font-semibold text-gray-900">{tr(locale, 'Профиль', 'Profile')}</h2>
+          <p className="mt-1 text-xs text-gray-500">{tr(locale, 'Имя и email для отображения в портале', 'Name and email shown in the portal')}</p>
         </div>
         <div className="p-5 space-y-4">
           <div>
@@ -591,7 +595,7 @@ export default function ProfilePage() {
             <LanguageToggle />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Имя</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{tr(locale, 'Имя', 'Name')}</label>
             <input
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
@@ -619,7 +623,7 @@ export default function ProfilePage() {
               disabled={saving}
               className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {saving ? 'Сохранение...' : 'Сохранить'}
+              {saving ? tr(locale, 'Сохранение...', 'Saving...') : tr(locale, 'Сохранить', 'Save')}
             </button>
           </div>
         </div>
@@ -629,14 +633,14 @@ export default function ProfilePage() {
         <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
           <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
             <h2 className="text-sm font-semibold text-gray-900">Telegram</h2>
-            <p className="mt-1 text-xs text-gray-500">AI-ассистент портала в Telegram</p>
+            <p className="mt-1 text-xs text-gray-500">{tr(locale, 'AI-ассистент портала в Telegram', 'Portal AI assistant in Telegram')}</p>
           </div>
           <div className="p-5">
             {tgLinked ? (
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                  <span className="text-sm text-gray-700">Telegram привязан</span>
+                  <span className="text-sm text-gray-700">{tr(locale, 'Telegram привязан', 'Telegram linked')}</span>
                 </div>
                 <button
                   type="button"
@@ -644,13 +648,13 @@ export default function ProfilePage() {
                   disabled={tgLoading}
                   className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                 >
-                  {tgLoading ? 'Отвязка...' : 'Отвязать'}
+                  {tgLoading ? tr(locale, 'Отвязка...', 'Unlinking...') : tr(locale, 'Отвязать', 'Unlink')}
                 </button>
               </div>
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-gray-600">
-                  Привяжите Telegram, чтобы получать информацию о проектах, задачах и аналитике через бота <b>@Polza_portal_bot</b>.
+                  {tr(locale, 'Привяжите Telegram, чтобы получать информацию о проектах, задачах и аналитике через бота', 'Link Telegram to receive project, task, and analytics info via')} <b>@Polza_portal_bot</b>.
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -662,7 +666,7 @@ export default function ProfilePage() {
                     <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
                     </svg>
-                    {tgLoading ? 'Генерация ссылки...' : 'Привязать Telegram'}
+                    {tgLoading ? tr(locale, 'Генерация ссылки...', 'Generating link...') : tr(locale, 'Привязать Telegram', 'Link Telegram')}
                   </button>
                   {tgDeeplink && (
                     <a
@@ -671,11 +675,11 @@ export default function ProfilePage() {
                       rel="noopener noreferrer"
                       className="text-sm text-blue-600 hover:text-blue-800 underline"
                     >
-                      Открыть ссылку повторно
+                      {tr(locale, 'Открыть ссылку повторно', 'Open link again')}
                     </a>
                   )}
                 </div>
-                <p className="text-xs text-gray-400">Ссылка действительна 10 минут</p>
+                <p className="text-xs text-gray-400">{tr(locale, 'Ссылка действительна 10 минут', 'Link is valid for 10 minutes')}</p>
               </div>
             )}
           </div>
@@ -685,16 +689,16 @@ export default function ProfilePage() {
       {!userIsClient && (
         <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
           <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
-            <h2 className="text-sm font-semibold text-gray-900">Кампании для лидов</h2>
+            <h2 className="text-sm font-semibold text-gray-900">{tr(locale, 'Кампании для лидов', 'Lead campaigns')}</h2>
             <p className="mt-1 text-xs text-gray-500">
-              Выберите кампании Instantly, по которым хотите видеть AI-квалифицированных лидов
+              {tr(locale, 'Выберите кампании Instantly, по которым хотите видеть AI-квалифицированных лидов', 'Select Instantly campaigns for AI-qualified leads')}
             </p>
           </div>
           <div className="p-5 space-y-3">
             {campaignsLoading ? (
-              <p className="text-sm text-gray-500">Загрузка кампаний…</p>
+              <p className="text-sm text-gray-500">{tr(locale, 'Загрузка кампаний…', 'Loading campaigns…')}</p>
             ) : allCampaigns.length === 0 ? (
-              <p className="text-sm text-gray-500">Кампании не найдены</p>
+              <p className="text-sm text-gray-500">{tr(locale, 'Кампании не найдены', 'No campaigns found')}</p>
             ) : (
               <>
                 <div className="flex items-center gap-2">
@@ -702,11 +706,11 @@ export default function ProfilePage() {
                     type="text"
                     value={campaignSearch}
                     onChange={(e) => setCampaignSearch(e.target.value)}
-                    placeholder="Поиск по названию…"
+                    placeholder={tr(locale, 'Поиск по названию…', 'Search by name…')}
                     className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <span className="text-xs text-gray-400 whitespace-nowrap">
-                    Выбрано: {campaignPrefs.length}
+                    {tr(locale, 'Выбрано', 'Selected')}: {campaignPrefs.length}
                   </span>
                 </div>
                 <div className="max-h-60 overflow-y-auto space-y-0.5 border border-gray-100 rounded-lg p-2">
@@ -741,14 +745,14 @@ export default function ProfilePage() {
                     disabled={savingPrefs}
                     className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 disabled:opacity-50"
                   >
-                    {savingPrefs ? 'Сохранение…' : 'Сохранить'}
+                    {savingPrefs ? tr(locale, 'Сохранение…', 'Saving…') : tr(locale, 'Сохранить', 'Save')}
                   </button>
                   <button
                     type="button"
                     onClick={() => { setCampaignPrefs([]); void handleSaveCampaignPrefs([]); }}
                     className="text-xs text-gray-400 hover:text-gray-600"
                   >
-                    Сбросить
+                    {tr(locale, 'Сбросить', 'Reset')}
                   </button>
                 </div>
               </>
@@ -759,31 +763,31 @@ export default function ProfilePage() {
 
       <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
         <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
-          <h2 className="text-sm font-semibold text-gray-900">Пароль</h2>
-          <p className="mt-1 text-xs text-gray-500">Смена пароля для входа</p>
+          <h2 className="text-sm font-semibold text-gray-900">{tr(locale, 'Пароль', 'Password')}</h2>
+          <p className="mt-1 text-xs text-gray-500">{tr(locale, 'Смена пароля для входа', 'Change your sign-in password')}</p>
         </div>
         <div className="p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Новый пароль</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{tr(locale, 'Новый пароль', 'New password')}</label>
               <input
                 type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 autoComplete="new-password"
-                placeholder="Минимум 8 символов"
+                placeholder={tr(locale, 'Минимум 8 символов', 'Minimum 8 characters')}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Повторите пароль</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{tr(locale, 'Повторите пароль', 'Repeat password')}</label>
               <input
                 type="password"
                 value={newPassword2}
                 onChange={(e) => setNewPassword2(e.target.value)}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 autoComplete="new-password"
-                placeholder="Повтор"
+                placeholder={tr(locale, 'Повтор', 'Repeat')}
               />
             </div>
           </div>
@@ -795,7 +799,7 @@ export default function ProfilePage() {
               disabled={saving || !newPassword.trim() || !newPassword2.trim()}
               className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 disabled:opacity-50"
             >
-              {saving ? 'Сохранение...' : 'Сменить пароль'}
+              {saving ? tr(locale, 'Сохранение...', 'Saving...') : tr(locale, 'Сменить пароль', 'Change password')}
             </button>
           </div>
         </div>

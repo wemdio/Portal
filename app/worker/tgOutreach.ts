@@ -53,8 +53,13 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
 
   if (runningCampaigns.has(campaignId)) {
-    log('warn', `Campaign ${campaignId} already running, skipping start`);
-    await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+    if (shouldStop()) {
+      log('info', `Campaign ${campaignId} already running and worker is shutting down — re-queueing job for next worker`);
+      await db.from('tg_outreach_jobs').update({ status: 'pending', started_at: null }).eq('id', job.id);
+    } else {
+      log('warn', `Campaign ${campaignId} already running, skipping start`);
+      await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+    }
     return;
   }
 

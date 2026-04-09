@@ -5,6 +5,7 @@ describe('tgParserApiRowToUi', () => {
   it('maps pending to running UI status', () => {
     const row: TgParserJobApiRow = {
       id: 'a',
+      user_id: 'user-a',
       created_at: '2025-01-01T00:00:00Z',
       status: 'pending',
       config: { links: ['https://t.me/x'], account_label: 'Test', links_summary: '(https://t.me/x)' },
@@ -23,6 +24,7 @@ describe('tgParserApiRowToUi', () => {
   it('maps done + stop_reason to warning', () => {
     const row: TgParserJobApiRow = {
       id: 'b',
+      user_id: 'user-b',
       created_at: '2025-01-01T00:00:00Z',
       status: 'done',
       config: { links: [], links_summary: '' },

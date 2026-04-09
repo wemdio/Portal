@@ -22,6 +22,32 @@ export type TgParserJobConfig = {
   links_summary?: string;
 };
 
+type TgParserLogLevel = 'info' | 'warning' | 'error';
+
+async function writeJobLog(args: {
+  jobId: string;
+  jobUserId: string;
+  isTarget: boolean;
+  accountLabel: string | null;
+  level: TgParserLogLevel;
+  message: string;
+}): Promise<void> {
+  const db = supabaseAdmin;
+  if (!db) return;
+  try {
+    await db.from('tg_parser_logs').insert({
+      job_id: args.jobId,
+      job_user_id: args.jobUserId,
+      is_target: args.isTarget,
+      account_label: args.accountLabel,
+      level: args.level,
+      message: args.message,
+    });
+  } catch {
+    // Логи не должны ломать выполнение парсера.
+  }
+}
+
 export async function runTgParserJob(jobId: string): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
@@ -42,6 +68,20 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   if (job.status !== 'running') return;
 
   const cfg = job.config as TgParserJobConfig;
+  const isTarget = Boolean(cfg.is_target);
+  const accountLabel = cfg.account_label ?? null;
+  const jobUserId = job.user_id;
+  const links = Array.isArray(cfg.links) ? cfg.links.filter((l): l is string => typeof l === 'string') : [];
+
+  await writeJobLog({
+    jobId,
+    jobUserId,
+    isTarget,
+    accountLabel,
+    level: 'info',
+    message: `Запуск задачи: ссылок ${links.length}, режим ${isTarget ? 'целевой' : 'обычный'}`,
+  });
+
   const trace = await startTrace({
     name: 'tg-parser.job.run',
     message: cfg.account_label ?? 'TG Parser job',
@@ -59,7 +99,6 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       account_label: cfg.account_label ?? null,
     },
   });
-  const links = Array.isArray(cfg.links) ? cfg.links.filter((l): l is string => typeof l === 'string') : [];
   if (links.length === 0) {
     const msg = 'Пустой список ссылок';
     await db
@@ -71,6 +110,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       })
       .eq('id', jobId)
       .eq('status', 'running');
+    await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
     await trace?.fail(new Error(msg), { stage: 'validate_links' });
     return;
   }
@@ -79,7 +119,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   let max_contacts: number | null = null;
   const accountId = typeof job.account_id === 'string' ? job.account_id.trim() : '';
 
-  if (cfg.is_target) {
+  if (isTarget) {
     if (!process.env.TG_TARGET_API_ID || !process.env.TG_TARGET_SESSION) {
       const msg = 'Целевой аккаунт не настроен на сервере';
       await db
@@ -91,6 +131,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         })
         .eq('id', jobId)
         .eq('status', 'running');
+      await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'target_account_check' });
       return;
     }
@@ -118,6 +159,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         })
         .eq('id', jobId)
         .eq('status', 'running');
+      await writeJobLog({ jobId, jobUserId, isTarget, accountLabel, level: 'error', message: msg });
       await trace?.fail(new Error(msg), { stage: 'account_check' });
       return;
     }
@@ -131,6 +173,15 @@ export async function runTgParserJob(jobId: string): Promise<void> {
   }
 
   try {
+    await writeJobLog({
+      jobId,
+      jobUserId,
+      isTarget,
+      accountLabel,
+      level: 'info',
+      message: 'Начинаем парсинг Telegram источников',
+    });
+
     const result = await parseTgUsers({
       links,
       parse_chat_messages: cfg.parse_chat_messages ?? true,
@@ -155,6 +206,14 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         })
         .eq('id', jobId)
         .eq('status', 'running');
+      await writeJobLog({
+        jobId,
+        jobUserId,
+        isTarget,
+        accountLabel,
+        level: 'error',
+        message: `Задача завершилась ошибкой: ${result.error}`,
+      });
       await trace?.fail(new Error(result.error), { stage: 'parse', status: 'error' });
       return;
     }
@@ -171,6 +230,14 @@ export async function runTgParserJob(jobId: string): Promise<void> {
         })
         .eq('id', jobId)
         .eq('status', 'running');
+      await writeJobLog({
+        jobId,
+        jobUserId,
+        isTarget,
+        accountLabel,
+        level: 'warning',
+        message: `Частичный результат: ${result.users.length} контактов, причина остановки: ${result.stop_reason ?? 'unknown'}`,
+      });
       await trace?.end({
         stage: 'parse',
         status: 'partial',
@@ -192,6 +259,14 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       })
       .eq('id', jobId)
       .eq('status', 'running');
+    await writeJobLog({
+      jobId,
+      jobUserId,
+      isTarget,
+      accountLabel,
+      level: 'info',
+      message: `Успешно завершено: найдено ${result.users.length} контактов`,
+    });
     await trace?.end({
       stage: 'parse',
       status: 'done',
@@ -209,6 +284,14 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       })
       .eq('id', jobId)
       .eq('status', 'running');
+    await writeJobLog({
+      jobId,
+      jobUserId,
+      isTarget,
+      accountLabel,
+      level: 'error',
+      message: `Исключение в воркере: ${msg}`,
+    });
     await trace?.fail(err, { stage: 'exception' });
   }
 }
