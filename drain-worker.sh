@@ -243,6 +243,7 @@ containers=(
   "portal-worker-tg-outreach"
   "portal-worker-aicaller"
   "portal-worker-tg-transcribe"
+  "portal-worker-outreach"
 )
 
 echo "[drain] Stopping worker containers (timeout 15s each)..."
