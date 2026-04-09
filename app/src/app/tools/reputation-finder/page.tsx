@@ -22,6 +22,7 @@ import {
 import { supabase } from '@/lib/supabaseClient';
 import { writePendingDbImport, buildDatabasesImportUrl } from '@/lib/databases/pendingImport';
 import { CITIES, RUBRICS } from '@/lib/parsers/yandexMapsData';
+import { humanProgressStage } from '@/lib/reputationFinder/progressStages';
 
 /* ───────── types ───────── */
 
@@ -79,6 +80,7 @@ async function getToken(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token ?? null;
 }
+
 
 async function apiFetch(path: string, init?: RequestInit) {
   const token = await getToken();
@@ -220,10 +222,45 @@ export default function ReputationFinderPage() {
     });
   };
 
+  // ── poll DB for job progress (fallback when SSE drops) ──
+  const pollJobProgress = useCallback(async (jobId: string, signal: AbortSignal) => {
+    const POLL_MS = 5_000;
+    let lastStage = '';
+    while (!signal.aborted) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      if (signal.aborted) break;
+
+      const { data: row } = await supabase
+        .from('reputation_jobs')
+        .select('status, progress_stage, error_message, processed_candidates, total_candidates, auto_export_count, review_count, discard_count')
+        .eq('id', jobId)
+        .single();
+
+      if (!row) break;
+
+      const stage = String(row.progress_stage ?? '');
+      if (stage && stage !== lastStage && stage !== 'pending') {
+        lastStage = stage;
+        const msg = humanProgressStage(stage);
+        if (msg) setProgressLog((prev) => [...prev, msg]);
+      }
+
+      if (row.status === 'completed') {
+        setProgressLog((prev) => [...prev, 'Pipeline завершён.']);
+        break;
+      }
+      if (row.status === 'failed') {
+        setProgressLog((prev) => [...prev, `Ошибка: ${row.error_message ?? 'Pipeline failed'}`]);
+        break;
+      }
+    }
+  }, []);
+
   // ── create + run job ──
   const handleRun = useCallback(async () => {
     setRunning(true);
     setProgressLog([]);
+    let createdJobId: string | null = null;
     try {
       let config: Record<string, unknown>;
       let jobMode: string;
@@ -257,6 +294,7 @@ export default function ReputationFinderPage() {
       });
       if (!createRes.ok) throw new Error('Failed to create job');
       const { job } = await createRes.json();
+      createdJobId = job.id;
       setActiveJobId(job.id);
       setTab('results');
 
@@ -284,28 +322,39 @@ export default function ReputationFinderPage() {
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          const raw = line.replace(/^data:\s*/, '');
+          const raw = line.replace(/^data:\s*/, '').replace(/^:\s*\w+$/, '');
           if (!raw) continue;
           try {
             const ev = JSON.parse(raw);
             if (ev.message) setProgressLog((prev) => [...prev, ev.message]);
             if (ev.done) setProgressLog((prev) => [...prev, 'Pipeline завершён.']);
             if (ev.error) setProgressLog((prev) => [...prev, `Ошибка: ${ev.error}`]);
-          } catch { /* skip non-json */ }
+          } catch { /* skip non-json or heartbeats */ }
         }
       }
 
       await fetchJobs();
       await fetchCandidates(job.id);
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
+      if ((err as Error).name === 'AbortError') return;
+
+      if (createdJobId) {
+        setProgressLog((prev) => [...prev, 'SSE-соединение потеряно, переключение на опрос БД...']);
+        const pollAc = new AbortController();
+        abortRef.current = pollAc;
+        try {
+          await pollJobProgress(createdJobId, pollAc.signal);
+          await fetchJobs();
+          await fetchCandidates(createdJobId);
+        } catch { /* noop */ }
+      } else {
         setProgressLog((prev) => [...prev, `Критическая ошибка: ${(err as Error).message}`]);
       }
     } finally {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [mode, maxRating, minReviews, enableSerpScan, selectedCities, selectedRubrics, ymapsJobIds, fetchJobs, fetchCandidates]);
+  }, [mode, maxRating, minReviews, enableSerpScan, selectedCities, selectedRubrics, ymapsJobIds, fetchJobs, fetchCandidates, pollJobProgress]);
 
   // ── review decision ──
   const handleReview = useCallback(async (candidateId: string, decision: 'accept' | 'reject') => {
