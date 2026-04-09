@@ -11,6 +11,8 @@ export type EmailSequenceBrief = {
   sender_name?: string;
   language?: string;
   notes?: string;
+  analysis_model?: string;
+  writer_model?: string;
 };
 
 export type EmailSequenceRunRow = {

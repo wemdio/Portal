@@ -21,7 +21,22 @@ const EMPTY_BRIEF: EmailSequenceBrief = {
   sender_name: '',
   language: 'ru',
   notes: '',
+  analysis_model: 'gpt-4.1-mini',
+  writer_model: 'gpt-5.2',
 };
+
+const ANALYSIS_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini (быстрее и стабильнее)' },
+  { value: 'gpt-4.1', label: 'gpt-4.1 (сильнее)' },
+  { value: 'gpt-5.1', label: 'gpt-5.1' },
+  { value: 'gpt-5.2', label: 'gpt-5.2' },
+];
+
+const WRITER_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini (быстрее)' },
+  { value: 'gpt-4.1', label: 'gpt-4.1 (баланс)' },
+  { value: 'gpt-5.2', label: 'gpt-5.2 (качество)' },
+];
 
 async function getToken() {
   const { data: { session } } = await supabase.auth.getSession();
@@ -143,6 +158,35 @@ function TextAreaField({
         rows={rows}
         className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
       />
+    </label>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+}) {
+  return (
+    <label className="block">
+      <div className="text-sm font-medium text-gray-700 mb-1">{label}</div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+      >
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }
@@ -343,7 +387,7 @@ export default function EmailSequencePage() {
       setRun(runData.run ?? null);
       setSegments(runData.segments ?? []);
       setLetters(runData.letters ?? []);
-      setBrief((runData.run?.brief ?? {}) as EmailSequenceBrief);
+      setBrief({ ...EMPTY_BRIEF, ...((runData.run?.brief ?? {}) as EmailSequenceBrief) });
     }
   }, []);
 
@@ -468,7 +512,7 @@ export default function EmailSequencePage() {
         try {
           await authedFetchWithTimeout(
             `/api/tools/email-sequence/runs/${run.id}/segments/${nextIdx}/analyze`,
-            { method: 'POST' },
+            { method: 'POST', body: JSON.stringify({ model: brief.analysis_model }) },
           );
           await refresh(run.id);
         } catch (e) {
@@ -478,7 +522,7 @@ export default function EmailSequencePage() {
         }
       })();
     }, 0);
-  }, [analyzeQueueByRun, busy, refresh, run?.id]);
+  }, [analyzeQueueByRun, brief.analysis_model, busy, refresh, run?.id]);
 
   const createRun = useCallback(async () => {
     setError(null);
@@ -521,7 +565,7 @@ export default function EmailSequencePage() {
       try {
         await authedFetchWithTimeout(
           `/api/tools/email-sequence/runs/${run.id}/segments/${idx}/analyze`,
-          { method: 'POST' },
+          { method: 'POST', body: JSON.stringify({ model: brief.analysis_model }) },
           360_000,
         );
         await refresh(run.id);
@@ -531,7 +575,7 @@ export default function EmailSequencePage() {
         setBusy(null);
       }
     },
-    [run?.id, refresh],
+    [brief.analysis_model, run?.id, refresh],
   );
 
   const requestAnalyze = useCallback(
@@ -561,7 +605,10 @@ export default function EmailSequencePage() {
       setError(null);
       setBusy(`chain:${idx}`);
       try {
-        await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}/segments/${idx}/generate-chain`, { method: 'POST' });
+        await authedFetchWithTimeout(`/api/tools/email-sequence/runs/${run.id}/segments/${idx}/generate-chain`, {
+          method: 'POST',
+          body: JSON.stringify({ model: brief.writer_model }),
+        });
         setSelectedSegment(idx);
         await refresh(run.id);
       } catch (e) {
@@ -570,7 +617,7 @@ export default function EmailSequencePage() {
         setBusy(null);
       }
     },
-    [run?.id, refresh],
+    [brief.writer_model, run?.id, refresh],
   );
 
   const resetToNewBrief = useCallback(() => {
@@ -874,7 +921,7 @@ export default function EmailSequencePage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Сегменты</h2>
             <p className="text-sm text-gray-500 mt-1">
-              Генерируем 5 сегментов и ЛПР (Perplexity sonar-pro).
+              Генерируем до 5 сегментов и ЛПР (Perplexity sonar-pro), затем анализируем выбранной моделью.
             </p>
             {busy === 'segments' && (
               <p className="mt-2 text-xs text-gray-500">
@@ -892,7 +939,16 @@ export default function EmailSequencePage() {
               </p>
             ) : null}
           </div>
-          <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+          <div className="flex flex-col items-end gap-2">
+            <div className="w-full min-w-[300px] sm:w-auto">
+              <SelectField
+                label="Модель анализа сегмента"
+                value={brief.analysis_model ?? EMPTY_BRIEF.analysis_model ?? 'gpt-4.1-mini'}
+                onChange={(v) => setBrief((b) => ({ ...b, analysis_model: v }))}
+                options={ANALYSIS_MODEL_OPTIONS}
+              />
+            </div>
+            <div className="flex items-center gap-2 sm:self-end">
             <button
               type="button"
               onClick={generateSegments}
@@ -909,6 +965,7 @@ export default function EmailSequencePage() {
             >
               Добавить сегмент
             </button>
+            </div>
           </div>
         </div>
 
@@ -994,31 +1051,41 @@ export default function EmailSequencePage() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Анализ и цепочка</h2>
-            <p className="text-sm text-gray-500 mt-1">Выберите сегмент и сгенерируйте 4 письма.</p>
+            <p className="text-sm text-gray-500 mt-1">Выберите сегмент и сгенерируйте 4 письма выбранной моделью.</p>
             {busy?.startsWith('chain:') && (
               <p className="mt-2 text-xs text-gray-500">
                 Генерируем цепочку… Это может занять 2–4 минуты.
               </p>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => (selectedSegment != null ? generateChain(selectedSegment) : null)}
-            disabled={selectedSegment == null || busy != null}
-            className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
-          >
-            {busy?.startsWith('chain:') ? (
-              <>
-                <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
-                  <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth="3" opacity="0.9" />
-                </svg>
-                Генерация…
-              </>
-            ) : (
-              'Сгенерировать цепочку'
-            )}
-          </button>
+          <div className="flex flex-col items-end gap-2">
+            <div className="w-full min-w-[300px] sm:w-auto">
+              <SelectField
+                label="Модель генерации писем"
+                value={brief.writer_model ?? EMPTY_BRIEF.writer_model ?? 'gpt-5.2'}
+                onChange={(v) => setBrief((b) => ({ ...b, writer_model: v }))}
+                options={WRITER_MODEL_OPTIONS}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => (selectedSegment != null ? generateChain(selectedSegment) : null)}
+              disabled={selectedSegment == null || busy != null}
+              className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+            >
+              {busy?.startsWith('chain:') ? (
+                <>
+                  <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+                    <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth="3" opacity="0.9" />
+                  </svg>
+                  Генерация…
+                </>
+              ) : (
+                'Сгенерировать цепочку'
+              )}
+            </button>
+          </div>
         </div>
 
         {selected ? (

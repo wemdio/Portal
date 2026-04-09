@@ -992,6 +992,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
             or result.get("removed", 0) > 0
             or result.get("api_errors", 0) > 0
             or result.get("leads_campaigns_failed", 0) > 0
+            or result.get("leads_total", 0) > 0
         )
 
         if manual or result.get("status") == "error" or has_changes:
