@@ -5,7 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { startTrace } from '@/lib/tracer';
 import { parseTgUsers } from '@/lib/tgParser/parser';
 import { clampTgParserMaxContactsPerRun } from '@/lib/tgParser/constants';
-import type { TgParserAccount } from '@/lib/tgParser/types';
+import type { ParsedUser, TgParserAccount } from '@/lib/tgParser/types';
 
 export type TgParserJobConfig = {
   links: string[];
@@ -23,6 +23,43 @@ export type TgParserJobConfig = {
 };
 
 type TgParserLogLevel = 'info' | 'warning' | 'error';
+
+const MAX_TEXT_CELL_LEN = Number(process.env.TG_PARSER_MAX_TEXT_CELL_LEN ?? '4000');
+const MAX_MESSAGES_CELL_LEN = Number(process.env.TG_PARSER_MAX_MESSAGES_CELL_LEN ?? '12000');
+
+function sanitizeStringCell(value: unknown, maxLen: number): string {
+  const s = String(value ?? '');
+  // Remove control chars that can break JSON/DB parsing.
+  const noCtl = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
+  return noCtl.length > maxLen ? noCtl.slice(0, maxLen) : noCtl;
+}
+
+function sanitizeNumberCell(value: unknown, fallback = 0): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.floor(n);
+}
+
+function sanitizeUsersForJson(users: ParsedUser[]): ParsedUser[] {
+  return users.map((u) => ({
+    'ID/Username': sanitizeStringCell(u['ID/Username'], 200),
+    ID: sanitizeNumberCell(u.ID),
+    Username: sanitizeStringCell(u.Username, 200),
+    Имя: sanitizeStringCell(u.Имя, 200),
+    Фамилия: sanitizeStringCell(u.Фамилия, 200),
+    'Полное имя': sanitizeStringCell(u['Полное имя'], 300),
+    Пол: sanitizeStringCell(u.Пол, 50),
+    Биография: sanitizeStringCell(u.Биография, MAX_TEXT_CELL_LEN),
+    'Личный канал': sanitizeStringCell(u['Личный канал'], 500),
+    'Статус онлайн': sanitizeStringCell(u['Статус онлайн'], 50) as ParsedUser['Статус онлайн'],
+    'Последний раз в сети': sanitizeStringCell(u['Последний раз в сети'], 100),
+    Сообщения: sanitizeStringCell(u.Сообщения, MAX_MESSAGES_CELL_LEN),
+    'Количество сообщений': sanitizeNumberCell(u['Количество сообщений']),
+    'Тип источника': sanitizeStringCell(u['Тип источника'], 50) as ParsedUser['Тип источника'],
+    'Ссылка на источник': sanitizeStringCell(u['Ссылка на источник'], 1000),
+    'Название источника': sanitizeStringCell(u['Название источника'], 500),
+  }));
+}
 
 async function writeJobLog(args: {
   jobId: string;
@@ -195,6 +232,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       account,
       max_contacts,
     });
+    const safeUsers = result.status === 'error' ? null : sanitizeUsersForJson(result.users);
 
     const persistTerminalState = async (
       patch: {
@@ -282,7 +320,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
       const persisted = await persistTerminalState(
         {
           status: 'done',
-          result_users: result.users,
+          result_users: safeUsers,
           stop_reason: result.stop_reason,
           error_message: result.error ?? null,
         },
@@ -322,7 +360,7 @@ export async function runTgParserJob(jobId: string): Promise<void> {
     const persisted = await persistTerminalState(
       {
         status: 'done',
-        result_users: result.users,
+        result_users: safeUsers,
         stop_reason: null,
         error_message: null,
       },

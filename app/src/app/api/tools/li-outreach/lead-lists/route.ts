@@ -15,7 +15,21 @@ export async function GET(req: NextRequest) {
       .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ lead_lists: data ?? [] });
+    const lists = data ?? [];
+    if (!lists.length) return NextResponse.json({ lead_lists: [] });
+
+    const withCounts = await Promise.all(
+      lists.map(async (list) => {
+        const { count } = await auth.supabase
+          .from('li_leads')
+          .select('*', { head: true, count: 'exact' })
+          .eq('user_id', auth.user.id)
+          .eq('lead_list_id', list.id);
+        return { ...list, leads_count: count ?? 0 };
+      }),
+    );
+
+    return NextResponse.json({ lead_lists: withCounts });
   });
 }
 

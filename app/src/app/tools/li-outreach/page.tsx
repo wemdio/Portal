@@ -8,12 +8,58 @@ import { supabase } from '@/lib/supabaseClient';
 type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'settings';
 
 type LiAccount = { id: string; unipile_account_id: string; name: string | null; is_active: boolean; profile_url: string | null; headline: string | null; last_synced_at: string | null; created_at: string };
-type LiLeadList = { id: string; name: string; description: string | null; created_at: string };
+type LiLeadList = { id: string; name: string; description: string | null; created_at: string; leads_count?: number };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; created_at: string };
-type LiCampaign = { id: string; name: string; account_id: string | null; lead_list_id: string | null; steps: unknown[]; status: string; use_ai: boolean; daily_invite_limit: number; created_at: string; updated_at: string };
+type LiCampaign = {
+  id: string;
+  name: string;
+  account_id: string | null;
+  lead_list_id: string | null;
+  steps: unknown[];
+  status: string;
+  use_ai: boolean;
+  daily_invite_limit: number;
+  min_delay: number;
+  max_delay: number;
+  stop_on_reply: boolean;
+  ai_prompt_invite: string | null;
+  ai_prompt_chat: string | null;
+  message_existing_connections: boolean;
+  use_ai_welcome: boolean;
+  use_ai_followup: boolean;
+  welcome_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
 type LiTask = { id: string; type: string; status: string; progress: number; total: number; error_message: string | null; created_at: string };
 type LiCampaignLog = { id: number; level: string; message: string; lead_name: string | null; step_index: number | null; created_at: string };
 type LiSettings = { unipile_dsn: string; unipile_api_key: string; openai_api_key: string; openai_model: string; webhook_secret: string; proxy_url: string };
+type CampaignStep = { type?: unknown; message?: unknown; days?: unknown; hours?: unknown };
+
+const DEFAULT_CAMPAIGN_FORM = {
+  name: '',
+  account_id: '',
+  lead_list_id: '',
+  invite_message: 'Привет! Заметил вашу активность в LinkedIn. Хотел бы добавить вас в профессиональную сеть.',
+  welcome_message: 'Спасибо за добавление! Рад расширить профессиональную сеть.',
+  followup1_message: 'Добрый день! Мы подключились недавно, и мне интересно узнать больше о вашем опыте.',
+  followup1_days: 2,
+  followup1_hours: 0,
+  followup2_enabled: true,
+  followup2_message: 'Добрый день! Хотел напомнить о себе. Давайте созвонимся на 15 минут?',
+  followup2_days: 3,
+  followup2_hours: 0,
+  use_ai: true,
+  daily_invite_limit: 25,
+  min_delay: 60,
+  max_delay: 180,
+  stop_on_reply: true,
+  ai_prompt_invite: 'Персонализируй сообщение, подставив имя получателя в начале и упомянув его должность или компанию там, где это уместно. Сохрани общий смысл исходного сообщения.',
+  ai_prompt_chat: 'Ты профессиональный менеджер. Отвечай вежливо и по делу. Учитывай историю переписки. Старайся договориться о звонке или встрече. Не выдумывай факты.',
+  message_existing_connections: false,
+  use_ai_welcome: false,
+  use_ai_followup: true,
+};
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -47,6 +93,7 @@ export default function LiOutreachPage() {
   const [leadLists, setLeadLists] = useState<LiLeadList[]>([]);
   const [leads, setLeads] = useState<LiLead[]>([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
+  const [leadListFilterId, setLeadListFilterId] = useState('');
   const [campaigns, setCampaigns] = useState<LiCampaign[]>([]);
   const [tasks, setTasks] = useState<LiTask[]>([]);
   const [_settings, setSettings] = useState<LiSettings | null>(null);
@@ -66,18 +113,8 @@ export default function LiOutreachPage() {
   // Campaign creation
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [cf, setCf] = useState({
-    name: '', account_id: '', lead_list_id: '',
-    invite_message: 'Привет! Заметил вашу активность в LinkedIn. Хотел бы добавить вас в профессиональную сеть.',
-    welcome_message: 'Спасибо за добавление! Рад расширить профессиональную сеть.',
-    followup1_message: 'Добрый день! Мы подключились недавно, и мне интересно узнать больше о вашем опыте.',
-    followup1_days: 2, followup1_hours: 0,
-    followup2_enabled: true,
-    followup2_message: 'Добрый день! Хотел напомнить о себе. Давайте созвонимся на 15 минут?',
-    followup2_days: 3, followup2_hours: 0,
-    use_ai: true, daily_invite_limit: 25, min_delay: 60, max_delay: 180,
-    stop_on_reply: true,
-  });
+  const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
+  const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
   // CSV import
   const [importing, setImporting] = useState(false);
@@ -96,8 +133,16 @@ export default function LiOutreachPage() {
   const loadLeadLists = useCallback(async () => {
     try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch { /* */ }
   }, []);
-  const loadLeads = useCallback(async () => {
-    try { const d = await api<{ leads: LiLead[]; total: number }>('/leads?limit=200'); setLeads(d.leads); setLeadsTotal(d.total); } catch { /* */ }
+  const loadLeads = useCallback(async (listId?: string) => {
+    try {
+      const params = new URLSearchParams({ limit: '200' });
+      if (listId) params.set('lead_list_id', listId);
+      const d = await api<{ leads: LiLead[]; total: number }>(`/leads?${params.toString()}`);
+      setLeads(d.leads);
+      setLeadsTotal(d.total);
+    } catch {
+      /* */
+    }
   }, []);
   const loadCampaigns = useCallback(async () => {
     try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch { /* */ }
@@ -125,10 +170,11 @@ export default function LiOutreachPage() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'leads' || tab === 'dashboard') void loadLeads();
+    if (tab === 'dashboard') void loadLeads();
+    if (tab === 'leads') void loadLeads(leadListFilterId || undefined);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, leadListFilterId]);
 
   useEffect(() => {
     if (selectedCampaignId) void loadCampaignLogs(selectedCampaignId);
@@ -170,8 +216,8 @@ export default function LiOutreachPage() {
         steps.push({ type: 'wait', days: cf.followup2_days, hours: cf.followup2_hours });
         steps.push({ type: 'message', message: cf.followup2_message });
       }
-      await api('/campaigns', {
-        method: 'POST',
+      await api(editingCampaignId ? `/campaigns/${editingCampaignId}` : '/campaigns', {
+        method: editingCampaignId ? 'PUT' : 'POST',
         json: {
           name: cf.name,
           account_id: cf.account_id,
@@ -183,15 +229,74 @@ export default function LiOutreachPage() {
           min_delay: cf.min_delay,
           max_delay: cf.max_delay,
           welcome_message: cf.welcome_message || null,
+          ai_prompt_invite: cf.ai_prompt_invite || null,
+          ai_prompt_chat: cf.ai_prompt_chat || null,
+          message_existing_connections: cf.message_existing_connections,
+          use_ai_welcome: cf.use_ai_welcome,
+          use_ai_followup: cf.use_ai_followup,
         },
       });
       setShowCreate(false);
+      setEditingCampaignId(null);
+      setCf(DEFAULT_CAMPAIGN_FORM);
       await loadCampaigns();
     } catch (e) {
       alert('Ошибка: ' + (e instanceof Error ? e.message : e));
     } finally {
       setCreating(false);
     }
+  };
+
+  const openCreateCampaignForm = () => {
+    setEditingCampaignId(null);
+    setCf(DEFAULT_CAMPAIGN_FORM);
+    setShowCreate(true);
+  };
+
+  const openEditCampaignForm = (campaign: LiCampaign) => {
+    const steps = Array.isArray(campaign.steps) ? (campaign.steps as CampaignStep[]) : [];
+    const inviteStep = steps.find((step) => step?.type === 'invite');
+    const waitSteps = steps.filter((step) => step?.type === 'wait');
+    const messageSteps = steps.filter((step) => step?.type === 'message');
+    const toNumber = (value: unknown, fallback: number, min = 0, max?: number) => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return fallback;
+      if (max === undefined) return Math.max(min, parsed);
+      return Math.min(max, Math.max(min, parsed));
+    };
+    const followup1Message = typeof messageSteps[0]?.message === 'string' ? messageSteps[0].message : DEFAULT_CAMPAIGN_FORM.followup1_message;
+    const followup2Message = typeof messageSteps[1]?.message === 'string' ? messageSteps[1].message : DEFAULT_CAMPAIGN_FORM.followup2_message;
+    const hasFollowup2 = Boolean(waitSteps[1] || messageSteps[1]);
+
+    setCf({
+      ...DEFAULT_CAMPAIGN_FORM,
+      name: campaign.name ?? '',
+      account_id: campaign.account_id ?? '',
+      lead_list_id: campaign.lead_list_id ?? '',
+      invite_message: typeof inviteStep?.message === 'string' ? inviteStep.message : DEFAULT_CAMPAIGN_FORM.invite_message,
+      followup1_message: followup1Message,
+      followup1_days: toNumber(waitSteps[0]?.days, DEFAULT_CAMPAIGN_FORM.followup1_days, 0),
+      followup1_hours: toNumber(waitSteps[0]?.hours, DEFAULT_CAMPAIGN_FORM.followup1_hours, 0, 23),
+      followup2_enabled: hasFollowup2,
+      followup2_message: followup2Message,
+      followup2_days: toNumber(waitSteps[1]?.days, DEFAULT_CAMPAIGN_FORM.followup2_days, 0),
+      followup2_hours: toNumber(waitSteps[1]?.hours, DEFAULT_CAMPAIGN_FORM.followup2_hours, 0, 23),
+      use_ai: campaign.use_ai,
+      daily_invite_limit: toNumber(campaign.daily_invite_limit, DEFAULT_CAMPAIGN_FORM.daily_invite_limit, 1),
+      min_delay: toNumber((campaign as Record<string, unknown>).min_delay, DEFAULT_CAMPAIGN_FORM.min_delay, 10),
+      max_delay: toNumber((campaign as Record<string, unknown>).max_delay, DEFAULT_CAMPAIGN_FORM.max_delay, 30),
+      stop_on_reply: campaign.stop_on_reply !== false,
+      welcome_message: typeof campaign.welcome_message === 'string'
+        ? String(campaign.welcome_message)
+        : DEFAULT_CAMPAIGN_FORM.welcome_message,
+      ai_prompt_invite: typeof campaign.ai_prompt_invite === 'string' ? campaign.ai_prompt_invite : DEFAULT_CAMPAIGN_FORM.ai_prompt_invite,
+      ai_prompt_chat: typeof campaign.ai_prompt_chat === 'string' ? campaign.ai_prompt_chat : DEFAULT_CAMPAIGN_FORM.ai_prompt_chat,
+      message_existing_connections: Boolean(campaign.message_existing_connections),
+      use_ai_welcome: Boolean(campaign.use_ai_welcome),
+      use_ai_followup: campaign.use_ai_followup !== false,
+    });
+    setEditingCampaignId(campaign.id);
+    setShowCreate(true);
   };
 
   const exportLeadsCsv = async () => {
@@ -204,6 +309,30 @@ export default function LiOutreachPage() {
     const a = document.createElement('a');
     a.href = url;
     a.download = `li_leads_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportLeadListCsv = async (list: LiLeadList) => {
+    const d = await api<{ leads: LiLead[] }>(`/leads?limit=1000&lead_list_id=${encodeURIComponent(list.id)}`);
+    const escapeCsv = (value: string | null | undefined) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+    const rows = [
+      ['name', 'first_name', 'last_name', 'position', 'company', 'profile_url', 'status'].join(','),
+      ...d.leads.map((lead) => [
+        escapeCsv(lead.name),
+        escapeCsv(lead.first_name),
+        escapeCsv(lead.last_name),
+        escapeCsv(lead.position),
+        escapeCsv(lead.company),
+        escapeCsv(lead.profile_url),
+        escapeCsv(lead.status),
+      ].join(',')),
+    ];
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `li_leads_list_${list.name.replaceAll(/\s+/g, '_')}_${Date.now()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -226,10 +355,27 @@ export default function LiOutreachPage() {
       alert(`Импортировано: ${data.imported}, пропущено: ${data.skipped ?? 0}`);
       setShowImportModal(false);
       await loadLeads();
+      await loadLeadLists();
     } catch (e) {
       alert('Ошибка импорта: ' + (e instanceof Error ? e.message : e));
     } finally {
       setImporting(false);
+    }
+  };
+
+  const deleteLeadList = async (list: LiLeadList) => {
+    if (!confirm(`Удалить список "${list.name}"?`)) return;
+    try {
+      await api(`/lead-lists/${list.id}`, { method: 'DELETE' });
+      const nextFilterId = leadListFilterId === list.id ? '' : leadListFilterId;
+      setLeadListFilterId(nextFilterId);
+      if (importListId === list.id) setImportListId('');
+      if (scraperListId === list.id) setScraperListId('');
+      setCf((prev) => (prev.lead_list_id === list.id ? { ...prev, lead_list_id: '' } : prev));
+      await loadLeadLists();
+      await loadLeads(nextFilterId || undefined);
+    } catch (e) {
+      alert('Ошибка удаления списка: ' + (e instanceof Error ? e.message : e));
     }
   };
 
@@ -252,6 +398,7 @@ export default function LiOutreachPage() {
 
       await loadLeadLists();
       setImportListId(d.lead_list.id);
+      setLeadListFilterId(d.lead_list.id);
       setCf((prev) => ({ ...prev, lead_list_id: d.lead_list.id }));
       setScraperListId(d.lead_list.id);
       setNewListName('');
@@ -403,8 +550,8 @@ export default function LiOutreachPage() {
           {showCreate && (
             <div className="rounded-xl border border-blue-200 bg-blue-50/40 p-4 space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-900">Новая кампания</h2>
-                <button onClick={() => setShowCreate(false)} className="text-xs text-gray-500 hover:text-gray-700">Отмена</button>
+                <h2 className="text-sm font-semibold text-gray-900">{editingCampaignId ? 'Редактирование кампании' : 'Новая кампания'}</h2>
+                <button onClick={() => { setShowCreate(false); setEditingCampaignId(null); }} className="text-xs text-gray-500 hover:text-gray-700">Отмена</button>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div>
@@ -497,8 +644,65 @@ export default function LiOutreachPage() {
                 </div>
               </div>
 
+              {/* AI settings */}
+              <details className="rounded-lg border border-blue-200 bg-blue-50/40 p-3">
+                <summary className="cursor-pointer text-xs font-semibold text-blue-800">AI настройки (промпты и режимы)</summary>
+                <div className="mt-3 space-y-3">
+                  <p className="text-xs text-gray-600">
+                    Промпт персонализации используется для инвайтов и follow-up, промпт автоответов - для ответов на входящие сообщения.
+                  </p>
+                  <div>
+                    <label className="text-xs text-gray-600 block mb-1">Промпт персонализации</label>
+                    <textarea
+                      rows={3}
+                      value={cf.ai_prompt_invite}
+                      onChange={(e) => setCf({ ...cf, ai_prompt_invite: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-600 block mb-1">Промпт автоответов</label>
+                    <textarea
+                      rows={3}
+                      value={cf.ai_prompt_chat}
+                      onChange={(e) => setCf({ ...cf, ai_prompt_chat: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-4">
+                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={cf.use_ai_welcome}
+                        onChange={(e) => setCf({ ...cf, use_ai_welcome: e.target.checked })}
+                        className="rounded"
+                      />
+                      AI для welcome-сообщения
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={cf.use_ai_followup}
+                        onChange={(e) => setCf({ ...cf, use_ai_followup: e.target.checked })}
+                        className="rounded"
+                      />
+                      AI для follow-up
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={cf.message_existing_connections}
+                        onChange={(e) => setCf({ ...cf, message_existing_connections: e.target.checked })}
+                        className="rounded"
+                      />
+                      Писать тем, кто уже в контактах
+                    </label>
+                  </div>
+                </div>
+              </details>
+
               <button onClick={() => void createCampaign()} disabled={creating} className="rounded-lg bg-green-600 text-white px-5 py-2 text-sm font-medium disabled:opacity-50">
-                {creating ? 'Создание...' : 'Создать кампанию'}
+                {creating ? (editingCampaignId ? 'Сохранение...' : 'Создание...') : (editingCampaignId ? 'Сохранить изменения' : 'Создать кампанию')}
               </button>
             </div>
           )}
@@ -508,7 +712,7 @@ export default function LiOutreachPage() {
               <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-gray-900">Кампании</h2>
                 {!showCreate && (
-                  <button onClick={() => setShowCreate(true)} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
+                  <button onClick={openCreateCampaignForm} className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium">+ Новая</button>
                 )}
               </div>
               {campaigns.length === 0 ? (
@@ -521,6 +725,7 @@ export default function LiOutreachPage() {
                   </div>
                   <div className="text-xs text-gray-500 mt-1">{(c.steps ?? []).length} шагов • AI: {c.use_ai ? 'вкл' : 'выкл'} • лимит: {c.daily_invite_limit}/день</div>
                   <div className="flex gap-2 mt-2">
+                    <button onClick={(e) => { e.stopPropagation(); openEditCampaignForm(c); }} className="text-xs text-blue-700 hover:underline">Редактировать</button>
                     {c.status !== 'running' && <button onClick={(e) => { e.stopPropagation(); void startCampaign(c.id); }} className="text-xs text-green-700 hover:underline">▶ Запустить</button>}
                     {c.status === 'running' && <button onClick={(e) => { e.stopPropagation(); void stopCampaign(c.id); }} className="text-xs text-amber-700 hover:underline">⏹ Остановить</button>}
                     <button onClick={(e) => { e.stopPropagation(); void deleteCampaign(c.id); }} className="text-xs text-red-600 hover:underline">Удалить</button>
@@ -559,7 +764,7 @@ export default function LiOutreachPage() {
             <h2 className="text-sm font-semibold text-gray-900">Лиды ({leadsTotal})</h2>
             <div className="flex gap-2">
               <button onClick={() => setShowCreateListModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
-                + Новый лист
+                Управление листами
               </button>
               <button onClick={() => setShowImportModal(true)} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
                 Импорт CSV
@@ -570,40 +775,77 @@ export default function LiOutreachPage() {
             </div>
           </div>
 
+          <div className="rounded-xl border border-gray-200 bg-white p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Списки лидов:</span>
+              <button
+                onClick={() => setLeadListFilterId('')}
+                className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === '' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+              >
+                Все
+              </button>
+              {leadLists.map((list) => (
+                <button
+                  key={list.id}
+                  onClick={() => setLeadListFilterId(list.id)}
+                  className={`rounded-md px-2 py-1 text-xs ${leadListFilterId === list.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                >
+                  {list.name}
+                </button>
+              ))}
+            </div>
+            {leadLists.length === 0 && (
+              <p className="text-xs text-gray-400 mt-2">Списков пока нет.</p>
+            )}
+          </div>
+
           {/* Create List Modal */}
           {showCreateListModal && (
-            <div className="rounded-xl border border-green-200 bg-green-50/40 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900">Новый список лидов</h3>
-                <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50">Закрыть</button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Название *</label>
-                  <input
-                    type="text"
-                    value={newListName}
-                    onChange={(e) => setNewListName(e.target.value)}
-                    placeholder="Например: SaaS founders US"
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                  />
+            <div className="fixed inset-0 z-40 bg-black/30 p-4 flex items-center justify-center">
+              <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
+                <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Manage Lead Lists</h3>
+                  <button onClick={() => setShowCreateListModal(false)} disabled={creatingList} className="text-sm text-gray-500 hover:text-gray-700 disabled:opacity-50">✕</button>
                 </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Описание (опционально)</label>
-                  <input
-                    type="text"
-                    value={newListDescription}
-                    onChange={(e) => setNewListDescription(e.target.value)}
-                    placeholder="Источник, сегмент, заметки..."
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-                  />
+                <div className="p-4 space-y-4">
+                  <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                    <div className="text-xs font-medium text-gray-700 mb-2">Create New List</div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={newListName}
+                        onChange={(e) => setNewListName(e.target.value)}
+                        placeholder="List name"
+                        className="flex-1 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm"
+                      />
+                      <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50">
+                        {creatingList ? '...' : 'Create'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-[50vh] overflow-y-auto space-y-2 pr-1">
+                    {leadLists.length === 0 ? (
+                      <p className="text-xs text-gray-400">Списков пока нет.</p>
+                    ) : leadLists.map((list) => (
+                      <div key={list.id} className="rounded-lg border border-gray-200 bg-white px-3 py-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            onClick={() => { setLeadListFilterId(list.id); setShowCreateListModal(false); }}
+                            className={`text-left text-sm font-medium ${leadListFilterId === list.id ? 'text-blue-700' : 'text-gray-900 hover:text-blue-700'}`}
+                          >
+                            {list.name}
+                            <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} leads)</span>
+                          </button>
+                          <div className="flex items-center gap-3">
+                            <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Export</button>
+                            <button onClick={() => void deleteLeadList(list)} className="text-xs text-red-600 hover:underline">Delete</button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button onClick={() => void createLeadList()} disabled={creatingList} className="rounded-lg bg-green-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-green-700 disabled:opacity-50">
-                  {creatingList ? 'Создание...' : 'Создать список'}
-                </button>
-                <span className="text-xs text-gray-500">Список сразу появится в фильтрах импорта, скрапера и кампаний.</span>
               </div>
             </div>
           )}
