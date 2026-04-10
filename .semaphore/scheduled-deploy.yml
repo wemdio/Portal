@@ -199,6 +199,13 @@ blocks:
                 fi;
                 echo '--- Step 0.2: ensure .env permissions for portal ---';
                 fix_env_permissions;
+                echo '--- Step 0.3: ensure instantly-postgres + instantly-postgrest are running ---';
+                sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-recreate instantly-postgres 2>/dev/null || true;
+                for _pg_i in \$(seq 1 30); do
+                  if sudo -n docker inspect portal-instantly-postgres --format '{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; then break; fi;
+                  sleep 2;
+                done;
+                sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-recreate instantly-postgrest 2>/dev/null || true;
                 echo '--- Step 1: pull new images ---';
                 sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin;
                 export DOCKER_CLIENT_TIMEOUT=300;
@@ -225,7 +232,8 @@ blocks:
                   pull_attempt=$((pull_attempt + 1));
                 done;
                 echo '--- Step 1.1: preflight migration check on new portal image ---';
-                MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network host --env-file .env ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
+                INSTANTLY_PG_PW=\$(read_env INSTANTLY_PG_PASSWORD);
+                MIGRATION_OUTPUT=\"\$(sudo -n docker run --rm --network host --env-file .env -e INSTANTLY_DATABASE_URL=\"postgresql://instantly:\${INSTANTLY_PG_PW}@127.0.0.1:5433/instantly\" ${DOCKER_USERNAME}/portal:prod node scripts/db/ensureDatabase.js 2>&1)\" || MIGRATION_RC=\$?;
                 MIGRATION_RC=\${MIGRATION_RC:-0};
                 if [ \"\${MIGRATION_RC}\" -ne 0 ]; then
                   echo \"\${MIGRATION_OUTPUT}\";
