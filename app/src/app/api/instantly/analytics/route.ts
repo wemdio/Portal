@@ -45,10 +45,12 @@ export const GET = withAuth(async (req) => {
   const campaign_id = url.searchParams.get('campaign_id') ?? undefined;
   const start_date = url.searchParams.get('start_date') ?? undefined;
   const end_date = url.searchParams.get('end_date') ?? undefined;
+  const source = url.searchParams.get('source');
+  const useDb = source !== 'api';
 
   switch (type) {
     case 'overview': {
-      if (supabaseInstantly) {
+      if (useDb && supabaseInstantly) {
         try {
           let query = supabaseInstantly
             .from('instantly_campaign_catalog')
@@ -106,8 +108,8 @@ export const GET = withAuth(async (req) => {
     }
 
     default: {
-      // type=campaigns — read from DB
-      if (supabaseInstantly) {
+      // type=campaigns — read from DB (skip when source=api)
+      if (useDb && supabaseInstantly) {
         try {
           let query = supabaseInstantly
             .from('instantly_campaign_catalog')
