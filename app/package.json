@@ -72,7 +72,6 @@
     "guacamole-common-js": "^1.5.0",
     "iconv-lite": "^0.7.2",
     "jimp": "^1.6.0",
-    "linkedin-private-api": "^1.1.2",
     "lucide-react": "^0.562.0",
     "mammoth": "^1.12.0",
     "next": "^16.1.1",
