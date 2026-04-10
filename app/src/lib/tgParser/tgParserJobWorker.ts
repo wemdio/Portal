@@ -37,7 +37,27 @@ function sanitizeStringCell(value: unknown, maxLen: number): string {
   const s = String(value ?? '');
   // Remove control chars that can break JSON/DB parsing.
   const noCtl = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
-  return noCtl.length > maxLen ? noCtl.slice(0, maxLen) : noCtl;
+  // Remove invalid UTF-16 surrogate halves that PostgREST may reject as invalid JSON (PGRST102).
+  let cleaned = '';
+  for (let i = 0; i < noCtl.length; i += 1) {
+    const ch = noCtl.charCodeAt(i);
+    if (ch >= 0xd800 && ch <= 0xdbff) {
+      const next = i + 1 < noCtl.length ? noCtl.charCodeAt(i + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        cleaned += noCtl[i] + noCtl[i + 1];
+        i += 1;
+      } else {
+        cleaned += ' ';
+      }
+      continue;
+    }
+    if (ch >= 0xdc00 && ch <= 0xdfff) {
+      cleaned += ' ';
+      continue;
+    }
+    cleaned += noCtl[i];
+  }
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
 }
 
 function sanitizeNumberCell(value: unknown, fallback = 0): number {
