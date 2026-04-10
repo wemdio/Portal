@@ -86,6 +86,89 @@ function nextHelo(): { domain: string; from: string } {
   return { domain, from: `verify@${domain}` };
 }
 
+export type SmtpCheckResult = {
+  code: number;
+  exists: boolean | null;
+  isCatchAll: boolean | null;
+  greylist: boolean;
+  error?: string;
+};
+
+// ─── 7a. Remote SMTP proxy (round-robin with failover) ──────────────────────
+
+const SMTP_PROXY_URLS: string[] = (() => {
+  const single = process.env.SMTP_PROXY_URL?.trim();
+  const multi = process.env.SMTP_PROXY_URLS?.trim();
+  if (multi) return multi.split(',').map((u) => u.trim()).filter(Boolean);
+  if (single) return [single];
+  return [];
+})();
+
+const SMTP_PROXY_API_KEY = process.env.SMTP_PROXY_API_KEY ?? '';
+const SMTP_PROXY_TIMEOUT_MS = 25_000;
+
+let proxyIndex = 0;
+
+function nextProxyUrl(): string {
+  const url = SMTP_PROXY_URLS[proxyIndex % SMTP_PROXY_URLS.length];
+  proxyIndex = (proxyIndex + 1) % SMTP_PROXY_URLS.length;
+  return url;
+}
+
+async function smtpVerifyViaProxy(
+  email: string,
+  mxHost: string,
+  options?: { checkCatchAll?: boolean; timeout?: number },
+): Promise<SmtpCheckResult> {
+  const helo = nextHelo();
+  const body = {
+    email,
+    mxHost,
+    heloDomain: helo.domain,
+    heloFrom: helo.from,
+    checkCatchAll: options?.checkCatchAll ?? false,
+    timeout: options?.timeout ?? SMTP_CONNECT_TIMEOUT_MS,
+  };
+
+  let lastError: string | undefined;
+
+  for (let attempt = 0; attempt < SMTP_PROXY_URLS.length; attempt++) {
+    const baseUrl = nextProxyUrl();
+    const url = `${baseUrl.replace(/\/+$/, '')}/smtp-check`;
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SMTP_PROXY_TIMEOUT_MS);
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(SMTP_PROXY_API_KEY ? { Authorization: `Bearer ${SMTP_PROXY_API_KEY}` } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        lastError = `Proxy ${baseUrl}: HTTP ${res.status}`;
+        continue;
+      }
+
+      return (await res.json()) as SmtpCheckResult;
+    } catch (err) {
+      lastError = `Proxy ${baseUrl}: ${err instanceof Error ? err.message : 'unknown error'}`;
+      continue;
+    }
+  }
+
+  return { code: 0, exists: null, isCatchAll: null, greylist: false, error: lastError ?? 'All SMTP proxies failed' };
+}
+
+// ─── 7b. Direct SMTP (fallback for local dev / no proxy configured) ─────────
+
 type SmtpResponse = { code: number; text: string };
 
 function parseSmtpResponse(data: string): SmtpResponse {
@@ -154,15 +237,7 @@ function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpRes
   });
 }
 
-export type SmtpCheckResult = {
-  code: number;
-  exists: boolean | null;
-  isCatchAll: boolean | null;
-  greylist: boolean;
-  error?: string;
-};
-
-export async function smtpVerify(
+async function smtpVerifyDirect(
   email: string,
   mxHost: string,
   options?: { checkCatchAll?: boolean; timeout?: number },
@@ -257,6 +332,19 @@ export async function smtpVerify(
   }
 
   return result;
+}
+
+// ─── 7c. Public entry point ─────────────────────────────────────────────────
+
+export async function smtpVerify(
+  email: string,
+  mxHost: string,
+  options?: { checkCatchAll?: boolean; timeout?: number },
+): Promise<SmtpCheckResult> {
+  if (SMTP_PROXY_URLS.length > 0) {
+    return smtpVerifyViaProxy(email, mxHost, options);
+  }
+  return smtpVerifyDirect(email, mxHost, options);
 }
 
 // ─── 10. Smart Verify (Aggregate Signals) ───────────────────────────────────
