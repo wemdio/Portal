@@ -112,5 +112,14 @@
   },
   "optionalDependencies": {
     "lightningcss-linux-x64-gnu": "^1.31.1"
+  },
+  "overrides": {
+    "linkedin-private-api": {
+      "axios": "^1.15.0",
+      "cookie": "^0.7.0"
+    },
+    "sqlite3": {
+      "tar": "^7.5.11"
+    }
   }
 }

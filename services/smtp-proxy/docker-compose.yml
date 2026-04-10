@@ -1,0 +1,15 @@
+services:
+  smtp-proxy:
+    build: .
+    container_name: smtp-proxy
+    environment:
+      - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
+      - PORT=3100
+    ports:
+      - "80:3100"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1'
+    restart: unless-stopped
