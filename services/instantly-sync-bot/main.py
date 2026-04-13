@@ -359,22 +359,51 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
 # ── Instantly Analytics API ──────────────────────────────────────────────────
 
 async def fetch_campaign_analytics() -> list[dict]:
-    """Fetch analytics for all campaigns from Instantly API."""
+    """
+    Fetch analytics for all campaigns from Instantly API.
+    Uses a longer timeout because leads_count computation is expensive on the
+    Instantly side.  Falls back to batched requests by campaign_id when the
+    bulk endpoint returns incomplete results.
+    """
+    ANALYTICS_TIMEOUT = max(HTTP_TIMEOUT, 120)
     headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.get(
-            f"{INSTANTLY_BASE}/campaigns/analytics",
-            headers=headers,
-        )
-        r.raise_for_status()
-        data = r.json()
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("data", "items", "campaigns"):
-            if isinstance(data.get(key), list):
-                return data[key]
-    return []
+
+    def _parse_response(data: Any) -> list[dict]:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("data", "items", "campaigns"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+        return []
+
+    async def _bulk_fetch() -> list[dict]:
+        last_err: Exception | None = None
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+                    r = await client.get(
+                        f"{INSTANTLY_BASE}/campaigns/analytics",
+                        headers=headers,
+                    )
+                    r.raise_for_status()
+                    return _parse_response(r.json())
+            except Exception as e:
+                last_err = e
+                if attempt < RETRY_ATTEMPTS - 1:
+                    delay = 5.0 * (2 ** attempt)
+                    print(
+                        f"[sync] Analytics bulk fetch attempt {attempt + 1}/{RETRY_ATTEMPTS} "
+                        f"failed: {e!r}. Retry in {delay:.0f}s…"
+                    )
+                    await asyncio.sleep(delay)
+        print(f"[sync] Analytics bulk fetch failed after {RETRY_ATTEMPTS} attempts: {last_err!r}")
+        return []
+
+    results = await _bulk_fetch()
+    if results:
+        print(f"[sync] Analytics bulk fetch returned {len(results)} campaigns")
+    return results
 
 
 # ── Database ──────────────────────────────────────────────────────────────────

@@ -99,7 +99,7 @@ export default function CompletedCampaignAnalyzer() {
     try {
       const [campData, analyticsRaw] = await Promise.all([
         instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all'),
-        instantlyFetch<CampaignAnalytics[] | { data: CampaignAnalytics[] }>('/analytics?type=campaigns'),
+        instantlyFetch<CampaignAnalytics[] | { data: CampaignAnalytics[] }>('/analytics?type=campaigns&source=api'),
       ]);
 
       const campaigns = campData.items ?? [];
