@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import type { Route } from 'next';
 import {
   ChevronLeft, ChevronRight, Loader2, Mail, Send, Reply, Search, Inbox, X,
@@ -218,11 +219,12 @@ function CampaignCombobox({
 }
 
 export default function EmailsPage() {
+  const searchParams = useSearchParams();
   const [emails, setEmails] = useState<Email[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [campaignId, setCampaignId] = useState('');
+  const [campaignId, setCampaignId] = useState(searchParams.get('campaign_id') ?? '');
   const [startingAfter, setStartingAfter] = useState<string | undefined>();
   const [hasMore, setHasMore] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);

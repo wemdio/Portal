@@ -16,7 +16,7 @@ const LEAD_SELECT = 'id, company_name, website, city, employee_count, descriptio
 
 async function loadSenderConfig(): Promise<SenderConfig> {
   const defaults: SenderConfig = {
-    sender_name: 'Nick S.',
+    sender_name: 'Егор',
     sender_calendly: 'https://calendly.com/nickerhov89/brief-intro',
     sender_website: 'polzaagency.com',
     auto_upload_enabled: true,

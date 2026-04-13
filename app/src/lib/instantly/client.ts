@@ -38,7 +38,7 @@ export class InstantlyApiError extends Error {
 }
 
 function getApiKey(): string {
-  const key = (process.env.INSTANTLY_API_KEY ?? process.env.INSTANTLY_PORTAL_API_KEY ?? '').trim();
+  const key = (process.env.INSTANTLY_API_KEY || process.env.INSTANTLY_PORTAL_API_KEY || '').trim();
   if (!key) throw new InstantlyApiError('INSTANTLY_API_KEY is not configured', 503);
   return key;
 }

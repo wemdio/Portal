@@ -57,6 +57,19 @@ export async function runCollection(): Promise<NextResponse> {
       return NextResponse.json({ ok: true, ...result, message: 'No relevant leads after enrichment' });
     }
 
+    // Overlay company website from HH employer API if LLM missed it
+    const hhSiteMap = new Map<string, string>();
+    for (const item of rawItems) {
+      if (item.hh?.employer_id && item.hh.company_site_url) {
+        hhSiteMap.set(item.hh.employer_id, item.hh.company_site_url);
+      }
+    }
+    for (const lead of enriched) {
+      if (!lead.website && lead.hh_employer_id && hhSiteMap.has(lead.hh_employer_id)) {
+        lead.website = hhSiteMap.get(lead.hh_employer_id)!;
+      }
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const { data: existing } = await supabaseAdmin
       .from('nash_outreach_leads')
