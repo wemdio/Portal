@@ -1,0 +1,268 @@
+# Instantly DB infrastructure: prod + dev instances
+# Deploy on a dedicated DB server, separate from the Portal app server.
+#
+# Host ports (avoid 5432/3000/3001 defaults on shared servers):
+#   prod: PG 35432, PostgREST 35401, pgAdmin 127.0.0.1:35410
+#   dev:  PG 35433, PostgREST 35402, pgAdmin 127.0.0.1:35411
+#
+# Usage:
+#   cp .env.example .env   # fill in passwords
+#   docker compose up -d
+#
+# Migrator runs once on every `up` and applies pending SQL migrations.
+# Backup container runs pg_dump on a cron schedule and uploads to Supabase Storage.
+
+services:
+  # ─── PROD ──────────────────────────────────────────────────────────────────────
+
+  instantly-postgres-prod:
+    image: postgres:16-alpine
+    container_name: instantly-postgres-prod
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=256MB
+    environment:
+      POSTGRES_DB: instantly
+      POSTGRES_USER: instantly
+      POSTGRES_PASSWORD: ${INSTANTLY_PROD_PG_PASSWORD}
+    volumes:
+      - prod-pg-data:/var/lib/postgresql/data
+    ports:
+      - "0.0.0.0:35432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instantly -d instantly"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '1.0'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  instantly-postgrest-prod:
+    image: postgrest/postgrest:v12.2.8
+    container_name: instantly-postgrest-prod
+    environment:
+      PGRST_DB_URI: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly
+      PGRST_DB_POOL: 10
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+      PGRST_DB_ANON_ROLE: instantly
+      PGRST_DB_SCHEMAS: public
+      PGRST_JWT_SECRET: ${INSTANTLY_PROD_JWT_SECRET:-instantly-local-jwt-secret-change-in-prod}
+    depends_on:
+      instantly-postgres-prod:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    ports:
+      - "0.0.0.0:35401:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  instantly-pgadmin-prod:
+    image: dpage/pgadmin4:9.3
+    container_name: instantly-pgadmin-prod
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${INSTANTLY_PROD_PGADMIN_EMAIL:-admin@portal.local}
+      PGADMIN_DEFAULT_PASSWORD: ${INSTANTLY_PROD_PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 5050
+    depends_on:
+      instantly-postgres-prod:
+        condition: service_healthy
+    volumes:
+      - prod-pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "127.0.0.1:35410:5050"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  # ─── DEV ───────────────────────────────────────────────────────────────────────
+
+  instantly-postgres-dev:
+    image: postgres:16-alpine
+    container_name: instantly-postgres-dev
+    command:
+      - postgres
+      - -c
+      - max_connections=20
+      - -c
+      - shared_buffers=128MB
+    environment:
+      POSTGRES_DB: instantly
+      POSTGRES_USER: instantly
+      POSTGRES_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
+    volumes:
+      - dev-pg-data:/var/lib/postgresql/data
+    ports:
+      - "0.0.0.0:35433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instantly -d instantly"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  instantly-postgrest-dev:
+    image: postgrest/postgrest:v12.2.8
+    container_name: instantly-postgrest-dev
+    environment:
+      PGRST_DB_URI: postgresql://instantly:${INSTANTLY_DEV_PG_PASSWORD}@instantly-postgres-dev:5432/instantly
+      PGRST_DB_POOL: 5
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+      PGRST_DB_ANON_ROLE: instantly
+      PGRST_DB_SCHEMAS: public
+      PGRST_JWT_SECRET: ${INSTANTLY_DEV_JWT_SECRET:-instantly-dev-jwt-secret}
+    depends_on:
+      instantly-postgres-dev:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    ports:
+      - "0.0.0.0:35402:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.1'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  instantly-pgadmin-dev:
+    image: dpage/pgadmin4:9.3
+    container_name: instantly-pgadmin-dev
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${INSTANTLY_DEV_PGADMIN_EMAIL:-admin@portal.local}
+      PGADMIN_DEFAULT_PASSWORD: ${INSTANTLY_DEV_PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 5050
+    depends_on:
+      instantly-postgres-dev:
+        condition: service_healthy
+    volumes:
+      - dev-pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "127.0.0.1:35411:5050"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  # ─── MIGRATOR ──────────────────────────────────────────────────────────────────
+  # Applies pending SQL migrations to both prod and dev databases on every `up`.
+
+  instantly-migrator:
+    image: node:20-alpine
+    container_name: instantly-migrator
+    working_dir: /app
+    volumes:
+      - ./migrations:/app/supabase/instantly-migrations:ro
+      - ./scripts:/app/scripts:ro
+    environment:
+      INSTANTLY_PROD_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly
+      INSTANTLY_DEV_DATABASE_URL: postgresql://instantly:${INSTANTLY_DEV_PG_PASSWORD}@instantly-postgres-dev:5432/instantly
+    depends_on:
+      instantly-postgres-prod:
+        condition: service_healthy
+      instantly-postgres-dev:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cd /app
+        npm install --no-save pg dotenv 2>/dev/null
+        echo "[migrator] Applying migrations to PROD..."
+        INSTANTLY_DATABASE_URL="$$INSTANTLY_PROD_DATABASE_URL" node scripts/db/ensureDatabase.js
+        echo "[migrator] Applying migrations to DEV..."
+        INSTANTLY_DATABASE_URL="$$INSTANTLY_DEV_DATABASE_URL" node scripts/db/ensureDatabase.js
+        echo "[migrator] Done."
+    restart: "no"
+    networks:
+      - instantly-network
+
+  # ─── BACKUP ────────────────────────────────────────────────────────────────────
+
+  instantly-backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    container_name: instantly-backup
+    environment:
+      PROD_PG_HOST: instantly-postgres-prod
+      PROD_PG_PORT: "5432"
+      PROD_PG_USER: instantly
+      PROD_PG_PASSWORD: ${INSTANTLY_PROD_PG_PASSWORD}
+      PROD_PG_DB: instantly
+      DEV_PG_HOST: instantly-postgres-dev
+      DEV_PG_PORT: "5432"
+      DEV_PG_USER: instantly
+      DEV_PG_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
+      DEV_PG_DB: instantly
+      BACKUP_SUPABASE_URL: ${BACKUP_SUPABASE_URL}
+      BACKUP_SUPABASE_KEY: ${BACKUP_SUPABASE_KEY}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    volumes:
+      - backup-data:/backups
+    depends_on:
+      instantly-postgres-prod:
+        condition: service_healthy
+      instantly-postgres-dev:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+volumes:
+  prod-pg-data:
+  prod-pgadmin-data:
+  dev-pg-data:
+  dev-pgadmin-data:
+  backup-data:
+
+networks:
+  instantly-network:
+    driver: bridge
