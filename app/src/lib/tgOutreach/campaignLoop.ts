@@ -56,6 +56,32 @@ function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function isLowValueReply(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[«»"'`]/g, '')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return true;
+
+  const blockedExact = new Set([
+    'ничего',
+    'nothing',
+    'none',
+    'n/a',
+    '-',
+    '—',
+    '.',
+    '..',
+    '...',
+    '?',
+    '??',
+    '???',
+  ]);
+
+  return blockedExact.has(normalized);
+}
+
 function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolean {
   const now = new Date();
   const utcH = now.getUTCHours();
@@ -353,6 +379,10 @@ export async function handleChat(
   if (!replyText) {
     return { replied: false, triggerType: null };
   }
+  if (isLowValueReply(replyText)) {
+    log('warning', `${displayName}: сгенерирован пустой/бессмысленный ответ "${replyText}" — пропускаю отправку`);
+    return { replied: false, triggerType: null };
+  }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
@@ -447,6 +477,10 @@ async function handleFollowUp(
 
       const reply = await openaiGenerate(oai, followUpMessages);
       if (!reply) continue;
+      if (isLowValueReply(reply)) {
+        log('warning', `Follow-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
+        continue;
+      }
 
       const followUpDelay = randomRange(tg.read_reply_delay_range) * 1000;
       if (shouldStop) await interruptibleSleep(followUpDelay, shouldStop); else await sleep(followUpDelay);
@@ -509,6 +543,10 @@ async function handleMissedRepliesLastDays(
     try {
       const reply = await openaiGenerate(oai, messages);
       if (!reply) continue;
+      if (isLowValueReply(reply)) {
+        log('warning', `Catch-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
+        continue;
+      }
 
       const replyDelay = randomRange(tg.read_reply_delay_range) * 1000;
       if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
