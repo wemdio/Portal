@@ -1,0 +1,4 @@
+# Prod: every 6 hours
+0 */6 * * * /backup.sh prod >> /var/log/cron.log 2>&1
+# Dev: once a day at 03:00 UTC
+0 3 * * * /backup.sh dev >> /var/log/cron.log 2>&1

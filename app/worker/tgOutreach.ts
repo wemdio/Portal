@@ -204,7 +204,7 @@ async function pollOnce(): Promise<boolean> {
   return true;
 }
 
-async function resumeRunningCampaigns() {
+export async function resumeRunningCampaigns() {
   const { data: running } = await db
     .from('tg_outreach_campaigns')
     .select('id, user_id')
@@ -218,6 +218,7 @@ async function resumeRunningCampaigns() {
       .from('tg_outreach_jobs')
       .select('id')
       .eq('campaign_id', campaign.id)
+      .eq('action', 'start')
       .in('status', ['pending', 'running'])
       .maybeSingle();
 
@@ -263,4 +264,6 @@ async function main() {
   process.exit(0);
 }
 
-void main();
+if (process.env.NODE_ENV !== 'test') {
+  void main();
+}
