@@ -4,7 +4,7 @@ import { runCryptoPaymentJob } from '@/lib/parsers/cryptoPaymentsWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-const MAX_CONCURRENCY = 3;
+const MAX_CONCURRENCY = 5;
 const STALE_JOB_MINUTES = Number(process.env.ENRICH_STALE_JOB_MINUTES ?? '10');
 const WATCHDOG_INTERVAL_MS = 60_000;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;
