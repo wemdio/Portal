@@ -118,6 +118,116 @@ blocks:
                 done;
                 echo \"[backup] Done: \${ok} uploaded, \${fail} failed\""
 
+              # ─── Instantly DB server (optional): sync compose + migrations, up stack, wait for migrator ───
+              # Semaphore secrets / env: INSTANTLY_DB_SSH_HOST (enable). Optional: INSTANTLY_DB_SSH_USER (default: USER),
+              # INSTANTLY_DB_SSH_PASSWORD (default: SERVER_PASSWORD), INSTANTLY_DB_REMOTE_DIR (default: /opt/instantly-db).
+              # One-time Supabase → local PG copy: set INSTANTLY_SOURCE_DB_URL (pooler URL). Skipped if .supabase_import_done exists.
+              # Re-run import: INSTANTLY_FORCE_SUPABASE_IMPORT=1 (removes marker). DB server must have .env (see deploy/instantly-db/.env.example).
+              IDB_HOST="${INSTANTLY_DB_SSH_HOST:-}"
+              if [ -n "$IDB_HOST" ]; then
+                IDB_USER="${INSTANTLY_DB_SSH_USER:-$USER}"
+                IDB_PASS="${INSTANTLY_DB_SSH_PASSWORD:-$SERVER_PASSWORD}"
+                IDB_PATH="${INSTANTLY_DB_REMOTE_DIR:-/opt/instantly-db}"
+                run_ssh_idb() {
+                  desc="$1"
+                  remote="$2"
+                  n=1
+                  while [ "$n" -le "$SSH_RETRIES" ]; do
+                    if sshpass -p "${IDB_PASS}" ssh ${SSH_BASE} ${IDB_USER}@${IDB_HOST} "$remote"; then
+                      return 0
+                    fi
+                    echo "[scheduled] ${desc}: SSH (instantly-db) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                    n=$((n + 1))
+                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                  done
+                  return 1
+                }
+                run_scp_idb() {
+                  desc="$1"
+                  shift
+                  n=1
+                  while [ "$n" -le "$SSH_RETRIES" ]; do
+                    if sshpass -p "${IDB_PASS}" scp ${SSH_BASE} "$@"; then
+                      return 0
+                    fi
+                    echo "[scheduled] ${desc}: scp (instantly-db) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                    n=$((n + 1))
+                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                  done
+                  return 1
+                }
+                echo "[scheduled] Instantly DB: syncing to ${IDB_USER}@${IDB_HOST}:${IDB_PATH}"
+                IDB_TMP=$(mktemp -d)
+                mkdir -p "${IDB_TMP}/migrations" "${IDB_TMP}/scripts/db"
+                cp deploy/instantly-db/docker-compose.yml deploy/instantly-db/Dockerfile.backup deploy/instantly-db/backup.sh deploy/instantly-db/crontab "${IDB_TMP}/"
+                cp deploy/instantly-db/scripts/db/ensureDatabase.js "${IDB_TMP}/scripts/db/"
+                shopt -s nullglob
+                cp supabase/instantly-migrations/*.sql "${IDB_TMP}/migrations/" || true
+                shopt -u nullglob
+                run_ssh_idb "mkdir instantly-db" "sudo -n mkdir -p ${IDB_PATH} && sudo -n chown -R ${IDB_USER}:${IDB_USER} ${IDB_PATH}"
+                ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db files" docker-compose.yml Dockerfile.backup backup.sh crontab "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
+                ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db migrations" -r migrations "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
+                ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db scripts" -r scripts "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
+                rm -rf "${IDB_TMP}"
+                run_ssh_idb "instantly-db compose up + migrator" "set -e
+                cd ${IDB_PATH}
+                if [ ! -f .env ]; then echo \"[idb] FATAL: нет .env в ${IDB_PATH} — создай по deploy/instantly-db/.env.example\"; exit 1; fi
+                chmod +x backup.sh 2>/dev/null || true
+                printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                export DOCKER_CLIENT_TIMEOUT=300
+                export COMPOSE_HTTP_TIMEOUT=300
+                sudo -n docker rm -f instantly-migrator 2>/dev/null || true
+                sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env pull
+                sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env up -d --build
+                echo '[idb] waiting for instantly-migrator...'
+                mrc=\$(sudo -n docker wait instantly-migrator)
+                if [ \"\$mrc\" != \"0\" ]; then
+                  echo \"[idb] migrator exited with \$mrc\" >&2
+                  sudo -n docker logs instantly-migrator 2>&1 | tail -120 || true
+                  exit 1
+                fi
+                echo '[idb] migrator OK'
+                "
+                IDB_DO_IMPORT=0
+                if [ -n "${INSTANTLY_SOURCE_DB_URL:-}" ]; then
+                  if [ "${INSTANTLY_FORCE_SUPABASE_IMPORT:-}" = "1" ]; then
+                    run_ssh_idb "remove supabase import marker" "rm -f ${IDB_PATH}/.supabase_import_done" || true
+                  fi
+                  if run_ssh_idb "check supabase import marker" "test ! -f ${IDB_PATH}/.supabase_import_done"; then
+                    IDB_DO_IMPORT=1
+                  else
+                    echo "[scheduled] Instantly DB: одноразовый импорт из Supabase уже выполнен (.supabase_import_done)"
+                  fi
+                else
+                  echo "[scheduled] Instantly DB: INSTANTLY_SOURCE_DB_URL пуст — пропуск одноразового импорта из Supabase"
+                fi
+                if [ "${IDB_DO_IMPORT}" = 1 ]; then
+                  IDB_IMP=$(mktemp)
+                  printf 'INSTANTLY_SOURCE_DB_URL=%s\n' "${INSTANTLY_SOURCE_DB_URL}" > "${IDB_IMP}"
+                  chmod 600 "${IDB_IMP}"
+                  run_scp_idb "sync instantly-ci-import.env" "${IDB_IMP}" "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/.instantly-ci-import.env"
+                  rm -f "${IDB_IMP}"
+                  run_ssh_idb "supabase → instantly prod (one-time)" "set -e
+                  cd ${IDB_PATH}
+                  umask 077
+                  PW=\$(grep '^INSTANTLY_PROD_PG_PASSWORD=' .env | tail -1 | cut -d= -f2-)
+                  printf 'INSTANTLY_DATABASE_URL=postgresql://instantly:%s@127.0.0.1:35432/instantly\n' \"\${PW}\" > .instantly-ci-target.env
+                  chmod 600 .instantly-ci-import.env .instantly-ci-target.env 2>/dev/null || true
+                  printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                  sudo -n docker pull \"${DOCKER_USERNAME}/portal:prod\"
+                  sudo -n docker run --rm --network host \\
+                    --env-file .instantly-ci-import.env \\
+                    --env-file .instantly-ci-target.env \\
+                    \"${DOCKER_USERNAME}/portal:prod\" node scripts/migrate-instantly-to-local-pg.mjs
+                  rm -f .instantly-ci-import.env .instantly-ci-target.env
+                  touch .supabase_import_done
+                  echo '[idb] supabase import done; убери INSTANTLY_SOURCE_DB_URL из CI после проверки'
+                  "
+                fi
+              else
+                echo "[scheduled] Instantly DB: INSTANTLY_DB_SSH_HOST пуст — деплой БД на отдельном сервере пропущен (только Portal + preflight по .env)"
+              fi
+
               run_scp "copy compose files" \
                 docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
 
