@@ -28,13 +28,34 @@ export async function fetchThreadContext(
   leadEmail: string,
   threadId?: string | null,
 ): Promise<ThreadContext | null> {
-  const params: Record<string, string | number> = {
-    campaign_id: campaignId,
-    limit: 50,
-  };
+  let allEmails: Email[] = [];
 
-  const response = await instantly.listEmails(params);
-  const allEmails = response.items ?? [];
+  // Try to fetch emails specifically for this lead (much more accurate)
+  try {
+    const leads = await instantly.getLeadsByEmail({ email: leadEmail });
+    const lead = leads?.find(
+      (l) => l.campaign_id === campaignId || !campaignId,
+    );
+    if (lead?.id) {
+      const res = await instantly.listEmails({
+        campaign_id: campaignId,
+        lead_id: lead.id,
+        limit: 100,
+      });
+      allEmails = res.items ?? [];
+    }
+  } catch {
+    // fall through to campaign-wide fetch
+  }
+
+  // Fallback: fetch recent campaign emails if lead-specific fetch returned nothing
+  if (allEmails.length === 0) {
+    const response = await instantly.listEmails({
+      campaign_id: campaignId,
+      limit: 100,
+    });
+    allEmails = response.items ?? [];
+  }
 
   let threadEmails: Email[];
   if (threadId) {

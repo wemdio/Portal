@@ -372,10 +372,10 @@ function LeadRow({
       {expanded && (
         <div className="px-5 pb-5 pt-1 ml-8 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
           {item.ai_reason && (
-            <div className="rounded-xl border border-zinc-200/80 bg-gradient-to-br from-zinc-50 to-white p-4">
-              <div className="flex items-center gap-1.5 mb-2">
-                <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                <span className="text-xs font-semibold text-zinc-700 tracking-wide uppercase">AI-анализ</span>
+            <div className="rounded-xl border border-zinc-200/80 bg-gradient-to-br from-zinc-50 to-white p-5">
+              <div className="flex items-center gap-1.5 mb-3">
+                <Sparkles className="h-4 w-4 text-amber-500" />
+                <span className="text-sm font-semibold text-zinc-700 tracking-wide uppercase">AI-анализ</span>
               </div>
               <p className="text-sm text-zinc-700 leading-relaxed">{item.ai_reason}</p>
               {item.interest_signals && item.interest_signals.length > 0 && (
@@ -413,7 +413,7 @@ function LeadRow({
           {item.last_outbound_preview && (
             <div>
               <p className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-1.5">Наше последнее письмо</p>
-              <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 text-sm text-zinc-600 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
+              <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-5 text-sm text-zinc-600 whitespace-pre-wrap max-h-[400px] overflow-y-auto leading-relaxed">
                 {item.last_outbound_preview}
               </div>
             </div>
@@ -423,7 +423,7 @@ function LeadRow({
             <p className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-1.5">
               Ответ{item.reply_subject ? `: ${item.reply_subject}` : ''}
             </p>
-            <div className="rounded-xl border border-zinc-200/80 bg-white p-4 text-sm text-zinc-700 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed shadow-sm">
+            <div className="rounded-xl border border-zinc-200/80 bg-white p-5 text-sm text-zinc-700 whitespace-pre-wrap max-h-[500px] overflow-y-auto leading-relaxed shadow-sm">
               {item.reply_body ?? item.reply_preview ?? '(пусто)'}
             </div>
           </div>
@@ -553,7 +553,7 @@ export default function IncomingLeadsPage() {
   const unreadCount = items.filter(i => !i.read_at).length;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
+    <div className="mx-auto max-w-7xl px-4 py-8">
       <Link
         href={'/instantly' as Route}
         className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 mb-4 transition-colors"
