@@ -2,9 +2,11 @@
 
 import { useState } from 'react';
 import { HHParserView } from '@/components/parsers/HHParserView';
+import { SearchParserView } from '@/components/parsers/SearchParserView';
+import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
 import { EmailSequenceView } from '@/components/email-sequence/EmailSequenceView';
 
-type Tab = 'hh' | 'email-sequence';
+type Tab = 'hh' | 'search' | 'yandexmaps' | 'email-sequence';
 
 export default function ClientParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -33,6 +35,28 @@ export default function ClientParsersPage() {
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('search')}
+            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
+              activeTab === 'search'
+                ? 'neu-card shadow-sm'
+                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
+            }`}
+          >
+            Поиск
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('yandexmaps')}
+            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
+              activeTab === 'yandexmaps'
+                ? 'neu-card shadow-sm'
+                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
+            }`}
+          >
+            Яндекс.Карты
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('email-sequence')}
             className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
               activeTab === 'email-sequence'
@@ -45,11 +69,10 @@ export default function ClientParsersPage() {
         </div>
       </div>
 
-      {activeTab === 'hh' ? (
-        <HHParserView clientMode />
-      ) : (
-        <EmailSequenceView clientMode />
-      )}
+      {activeTab === 'hh' && <HHParserView clientMode />}
+      {activeTab === 'search' && <SearchParserView clientMode />}
+      {activeTab === 'yandexmaps' && <YandexMapsParserView clientMode />}
+      {activeTab === 'email-sequence' && <EmailSequenceView clientMode />}
     </div>
   );
 }
