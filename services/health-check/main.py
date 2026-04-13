@@ -206,7 +206,7 @@ SETTINGS_TABLE = "health_check_settings"
 
 # PgBouncer in transaction mode: prepared statements are not supported (per-connection).
 # Disable asyncpg statement cache to avoid "prepared statement already exists".
-_CONNECT_KWARGS: dict = {"statement_cache_size": 0}
+_CONNECT_KWARGS: dict = {"statement_cache_size": 0, "timeout": 15, "command_timeout": 15}
 
 
 async def _ensure_settings_table() -> None:
@@ -651,7 +651,9 @@ def _track(key: str, failed: bool) -> tuple[bool, bool]:
 
 # ── Health check (every 5 min) ──────────────────────────────────────────────
 
-async def run_health_check():
+HEALTH_CHECK_TIMEOUT_SEC = max(60, HEALTH_INTERVAL_SEC - 10)
+
+async def _run_health_check_inner():
     """Check all services. Alert on sustained failures (>= HEALTH_ALERT_MIN_CONSECUTIVE)."""
     global LAST_HEALTH_CHECK_TS
     LAST_HEALTH_CHECK_TS = asyncio.get_running_loop().time()
@@ -771,6 +773,16 @@ async def run_health_check():
         print(f"[health] RECOVERY sent: {len(recoveries)} item(s)")
 
     await _collect_metrics()
+
+
+async def run_health_check():
+    """Wrapper with timeout so a stuck DB connection doesn't block all future checks."""
+    try:
+        await asyncio.wait_for(_run_health_check_inner(), timeout=HEALTH_CHECK_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        print(f"[health] WARNING: health check timed out after {HEALTH_CHECK_TIMEOUT_SEC}s")
+    except Exception as exc:
+        print(f"[health] ERROR in health check: {exc}")
 
 
 async def _collect_metrics_for(
@@ -1386,26 +1398,35 @@ async def main():
     scheduler = AsyncIOScheduler()
 
     # Health check every 5 min
+    # misfire_grace_time + max_instances ensure a stuck check doesn't block all future runs
     scheduler.add_job(
         run_health_check, "interval",
         seconds=HEALTH_INTERVAL_SEC,
         id="health",
+        max_instances=2,
+        misfire_grace_time=HEALTH_INTERVAL_SEC,
     )
     scheduler.add_job(
         run_deadman_check, "interval",
         seconds=max(60, HEALTH_INTERVAL_SEC),
         id="deadman",
+        max_instances=2,
+        misfire_grace_time=HEALTH_INTERVAL_SEC,
     )
     scheduler.add_job(
         send_heartbeat, "interval",
         seconds=HEARTBEAT_INTERVAL_SEC,
         id="heartbeat",
+        max_instances=2,
+        misfire_grace_time=HEARTBEAT_INTERVAL_SEC,
     )
     if SUPABASE_KEEPALIVE_INTERVAL_SEC > 0 and SUPABASE_REST_URL:
         scheduler.add_job(
             run_supabase_keepalive, "interval",
             seconds=SUPABASE_KEEPALIVE_INTERVAL_SEC,
             id="supabase_keepalive",
+            max_instances=2,
+            misfire_grace_time=SUPABASE_KEEPALIVE_INTERVAL_SEC,
         )
 
     # Run first health check now

@@ -521,44 +521,88 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       processed = completedCount + failedCount + skippedCount;
       success = completedCount;
       errors = failedCount + skippedCount;
-      await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .update({ status: 'running', completed_at: null })
-        .eq('id', jobId);
+      await withSupabaseTimeout(
+        supabaseAdmin
+          .from('website_enrichment_jobs')
+          .update({ status: 'running', completed_at: null })
+          .eq('id', jobId),
+        'Таймаут возобновления задачи',
+      );
     }
 
     if (job.status === 'pending') {
-      await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .update({ status: 'running', started_at: new Date().toISOString() })
-        .eq('id', jobId);
+      await withSupabaseTimeout(
+        supabaseAdmin
+          .from('website_enrichment_jobs')
+          .update({ status: 'running', started_at: new Date().toISOString() })
+          .eq('id', jobId),
+        'Таймаут запуска задачи',
+      );
     }
     let cancelled = false;
 
     // Reset stale processing items
-    await supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
-      p_job_id: jobId,
-      p_minutes: STALE_PROCESSING_MINUTES,
-    });
+    await withSupabaseTimeout(
+      supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
+        p_job_id: jobId,
+        p_minutes: STALE_PROCESSING_MINUTES,
+      }),
+      'Таймаут сброса зависших элементов очереди',
+    ).catch(() => {});
 
     const inflight = new Map<string, Promise<FetchResult>>();
+    let consecutiveDbErrors = 0;
+    const MAX_CONSECUTIVE_DB_ERRORS = 20;
+
     while (true) {
-      const { data: jobStatus } = await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .select('status')
-        .eq('id', jobId)
-        .single<{ status: JobRow['status'] }>();
+      if (consecutiveDbErrors >= MAX_CONSECUTIVE_DB_ERRORS) {
+        throw new Error(`Supabase недоступен: ${consecutiveDbErrors} ошибок подряд, перезапускаем задачу`);
+      }
+
+      let jobStatus: { status: JobRow['status'] } | null = null;
+      try {
+        const result = await withSupabaseTimeout(
+          supabaseAdmin
+            .from('website_enrichment_jobs')
+            .select('status')
+            .eq('id', jobId)
+            .single<{ status: JobRow['status'] }>(),
+          'Таймаут проверки статуса задачи',
+        );
+        jobStatus = result.data;
+        consecutiveDbErrors = 0;
+      } catch {
+        consecutiveDbErrors++;
+        await sleep(2000 * Math.min(consecutiveDbErrors, 5));
+        continue;
+      }
       if (jobStatus?.status === 'cancelled') {
         cancelled = true;
         break;
       }
 
-      const { data: items, error } = await supabaseAdmin.rpc('claim_website_enrichment_items', {
-        p_job_id: jobId,
-        p_limit: WORKER_BATCH_SIZE,
-      });
+      let items: QueueItem[] | null = null;
+      let error: unknown = null;
+      try {
+        const result = await withSupabaseTimeout(
+          supabaseAdmin.rpc('claim_website_enrichment_items', {
+            p_job_id: jobId,
+            p_limit: WORKER_BATCH_SIZE,
+          }),
+          'Таймаут получения элементов очереди',
+        );
+        items = result.data as QueueItem[] | null;
+        error = result.error;
+        consecutiveDbErrors = 0;
+      } catch (claimErr) {
+        consecutiveDbErrors++;
+        await logError('website.enrichment.worker.claim_timeout', claimErr, { jobId });
+        await sleep(2000 * Math.min(consecutiveDbErrors, 5));
+        continue;
+      }
 
       if (error) {
+        consecutiveDbErrors++;
         await logError('website.enrichment.worker.claim_failed', error, { jobId });
         await sleep(500);
         continue;
@@ -575,10 +619,13 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
         if (processingCount > 0) {
           const oldestProcessing = await getOldestProcessingUpdatedAt(jobId);
           if (oldestProcessing && Date.now() - oldestProcessing.getTime() > staleProcessingMs) {
-            await supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
-              p_job_id: jobId,
-              p_minutes: STALE_PROCESSING_MINUTES,
-            });
+            await withSupabaseTimeout(
+              supabaseAdmin.rpc('reset_stale_website_enrichment_items', {
+                p_job_id: jobId,
+                p_minutes: STALE_PROCESSING_MINUTES,
+              }),
+              'Таймаут сброса зависших элементов очереди (loop)',
+            ).catch(() => {});
           }
         }
 
@@ -681,28 +728,34 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
         },
       );
 
-      await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .update({
-          processed,
-          success_count: success,
-          error_count: errors,
-        })
-        .eq('id', jobId);
+      await withSupabaseTimeout(
+        supabaseAdmin
+          .from('website_enrichment_jobs')
+          .update({
+            processed,
+            success_count: success,
+            error_count: errors,
+          })
+          .eq('id', jobId),
+        'Таймаут обновления прогресса задачи',
+      ).catch(() => {});
     }
 
     if (cancelled) {
       const now = new Date().toISOString();
-      await supabaseAdmin
-        .from('website_enrichment_queue')
-        .update({
-          status: 'failed',
-          last_error: 'Операция отменена пользователем',
-          updated_at: now,
-          completed_at: now,
-        })
-        .eq('job_id', jobId)
-        .in('status', ['pending', 'processing']);
+      await withSupabaseTimeout(
+        supabaseAdmin
+          .from('website_enrichment_queue')
+          .update({
+            status: 'failed',
+            last_error: 'Операция отменена пользователем',
+            updated_at: now,
+            completed_at: now,
+          })
+          .eq('job_id', jobId)
+          .in('status', ['pending', 'processing']),
+        'Таймаут отмены элементов очереди',
+      ).catch(() => {});
     }
 
     const [completedCount, failedCount, skippedCount] = await Promise.all([
@@ -715,16 +768,19 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     const finalErrors = failedCount + skippedCount;
 
     const finalStatus: JobRow['status'] = cancelled ? 'cancelled' : 'completed';
-    await supabaseAdmin
-      .from('website_enrichment_jobs')
-      .update({
-        status: finalStatus,
-        processed: processedTotal,
-        success_count: finalSuccess,
-        error_count: finalErrors,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', jobId);
+    await withSupabaseTimeout(
+      supabaseAdmin
+        .from('website_enrichment_jobs')
+        .update({
+          status: finalStatus,
+          processed: processedTotal,
+          success_count: finalSuccess,
+          error_count: finalErrors,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', jobId),
+      'Таймаут финализации задачи',
+    );
 
     await logInfo('website.enrichment.worker.completed', 'Website enrichment job completed', {
       jobId,
@@ -737,14 +793,17 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     await logError('website.enrichment.worker.failed', err, { jobId });
     await trace?.fail(err);
     if (supabaseAdmin) {
-      await supabaseAdmin
-        .from('website_enrichment_jobs')
-        .update({
-          status: 'failed',
-          completed_at: new Date().toISOString(),
-          error_message: err instanceof Error ? err.message : 'Worker error',
-        })
-        .eq('id', jobId);
+      await withSupabaseTimeout(
+        supabaseAdmin
+          .from('website_enrichment_jobs')
+          .update({
+            status: 'failed',
+            completed_at: new Date().toISOString(),
+            error_message: err instanceof Error ? err.message : 'Worker error',
+          })
+          .eq('id', jobId),
+        'Таймаут записи ошибки задачи',
+      ).catch(() => {});
     }
   }
 }

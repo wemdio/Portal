@@ -5,9 +5,12 @@ import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdo
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const MAX_CONCURRENCY = 2;
+const STALE_JOB_MINUTES = Number(process.env.ENRICH_STALE_JOB_MINUTES ?? '10');
+const WATCHDOG_INTERVAL_MS = 60_000;
 const WORKER_ID = `enrich-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
+const jobProgress = new Map<string, { processed: number; checkedAt: number }>();
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -146,6 +149,45 @@ async function pollOnce(): Promise<boolean> {
   return true;
 }
 
+async function watchdog(): Promise<void> {
+  const db = requireSupabaseAdmin(log);
+  try {
+    const { data: runningJobs } = await db
+      .from('website_enrichment_jobs')
+      .select('id, processed')
+      .eq('status', 'running');
+
+    if (!runningJobs?.length) {
+      jobProgress.clear();
+      return;
+    }
+
+    const staleMs = STALE_JOB_MINUTES * 60_000;
+    const now = Date.now();
+
+    for (const job of runningJobs) {
+      const prev = jobProgress.get(job.id);
+      if (prev && job.processed === prev.processed && now - prev.checkedAt > staleMs) {
+        log('warn', `Watchdog: job ${job.id} stuck at ${job.processed} for ${STALE_JOB_MINUTES}+ min, resetting to pending`);
+        await db
+          .from('website_enrichment_jobs')
+          .update({ status: 'pending' })
+          .eq('id', job.id)
+          .eq('status', 'running');
+        jobProgress.delete(job.id);
+      } else if (!prev || job.processed !== prev.processed) {
+        jobProgress.set(job.id, { processed: job.processed, checkedAt: now });
+      }
+    }
+
+    for (const id of jobProgress.keys()) {
+      if (!runningJobs.some((j) => j.id === id)) jobProgress.delete(id);
+    }
+  } catch (err) {
+    log('warn', 'Watchdog tick failed', err);
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Enrichment worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
@@ -155,7 +197,11 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
+  const watchdogTimer = setInterval(() => { void watchdog(); }, WATCHDOG_INTERVAL_MS);
+
   await pollLoop({ log, pollIntervalMs: POLL_INTERVAL_MS, shouldStop, pollOnce, realtimeTables: ['website_enrichment_jobs', 'brief_scoring_jobs', 'crypto_payment_jobs'] });
+
+  clearInterval(watchdogTimer);
 }
 
 main().catch((err) => {
