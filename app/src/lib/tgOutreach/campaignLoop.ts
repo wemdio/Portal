@@ -16,6 +16,7 @@ import { DEFAULT_FOLLOW_UP } from './types';
 import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
 import { truncateMessage } from '@/lib/logger';
+import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
 const BUCKET_SESSIONS = 'tg-outreach-sessions';
 const SESSION_CACHE_MAX = 100;
@@ -54,6 +55,163 @@ async function interruptibleSleep(ms: number, shouldStop: () => boolean, chunkMs
 
 function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function isLowValueReply(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[«»"'`]/g, '')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return true;
+
+  const blockedExact = new Set([
+    'ничего',
+    'nothing',
+    'none',
+    'n/a',
+    '-',
+    '—',
+    '.',
+    '..',
+    '...',
+    '?',
+    '??',
+    '???',
+  ]);
+
+  return blockedExact.has(normalized);
+}
+
+const VOICE_MAX_DURATION_SEC = 300;
+const VOICE_DOWNLOAD_TIMEOUT_MS = 30_000;
+
+function isVoiceOrAudioMessage(msg: Api.Message): boolean {
+  const media = msg.media;
+  if (!(media instanceof Api.MessageMediaDocument)) return false;
+  if (media.voice) return true;
+  const doc = media.document;
+  if (!(doc instanceof Api.Document)) return false;
+  return doc.attributes.some(
+    (a) => a instanceof Api.DocumentAttributeAudio && a.voice,
+  );
+}
+
+function getAudioDuration(msg: Api.Message): number {
+  const media = msg.media;
+  if (!(media instanceof Api.MessageMediaDocument)) return 0;
+  const doc = media.document;
+  if (!(doc instanceof Api.Document)) return 0;
+  for (const a of doc.attributes) {
+    if (a instanceof Api.DocumentAttributeAudio) return a.duration;
+  }
+  return 0;
+}
+
+async function transcribeVoice(
+  client: TelegramClient,
+  msg: Api.Message,
+  log: LogFn,
+  label: string,
+): Promise<string | null> {
+  const duration = getAudioDuration(msg);
+  if (duration > VOICE_MAX_DURATION_SEC) {
+    log('info', `${label}: голосовое слишком длинное (${duration}с > ${VOICE_MAX_DURATION_SEC}с) — пропуск`);
+    return null;
+  }
+
+  try {
+    const buf = await Promise.race([
+      client.downloadMedia(msg, {}) as Promise<Buffer | string | undefined>,
+      new Promise<undefined>((_, reject) =>
+        setTimeout(() => reject(new Error('voice download timeout')), VOICE_DOWNLOAD_TIMEOUT_MS),
+      ),
+    ]);
+
+    if (!buf || typeof buf === 'string') return null;
+    const oggBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+    if (oggBuf.length === 0) return null;
+
+    const mp3 = await extractOrConvertToMp3({ bytes: oggBuf, inputExt: '.ogg' });
+    const text = await transcribeAudio({ audioMp3: mp3 });
+    if (text) {
+      log('info', `${label}: расшифровано голосовое (${duration}с → ${text.length} симв.)`);
+    }
+    return text || null;
+  } catch (err) {
+    log('warning', `${label}: ошибка расшифровки голосового — ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+function describeMediaType(msg: Api.Message): string | null {
+  const media = msg.media;
+  if (!media || media instanceof Api.MessageMediaEmpty) return null;
+
+  if (media instanceof Api.MessageMediaPhoto) return 'Фото';
+  if (media instanceof Api.MessageMediaGeo || media instanceof Api.MessageMediaGeoLive) return 'Геолокация';
+  if (media instanceof Api.MessageMediaContact) return 'Контакт';
+  if (media instanceof Api.MessageMediaPoll) return 'Опрос';
+  if (media instanceof Api.MessageMediaDice) return 'Кубик/эмодзи';
+  if (media instanceof Api.MessageMediaStory) return 'История';
+
+  if (media instanceof Api.MessageMediaDocument) {
+    if (media.voice) return 'Голосовое сообщение';
+    if (media.round) return 'Видеосообщение (кружок)';
+    if (media.video) return 'Видео';
+
+    const doc = media.document;
+    if (doc instanceof Api.Document) {
+      for (const a of doc.attributes) {
+        if (a instanceof Api.DocumentAttributeSticker) return 'Стикер';
+        if (a instanceof Api.DocumentAttributeAudio) {
+          return a.voice ? 'Голосовое сообщение' : 'Аудиофайл';
+        }
+        if (a instanceof Api.DocumentAttributeVideo) {
+          return a.roundMessage ? 'Видеосообщение (кружок)' : 'Видео';
+        }
+      }
+      const mime = doc.mimeType ?? '';
+      if (mime.startsWith('image/')) return 'GIF/изображение';
+    }
+    return 'Файл';
+  }
+
+  return null;
+}
+
+async function extractMessagesFromHistory(
+  client: TelegramClient,
+  history: Api.Message[],
+  log: LogFn,
+  label: string,
+): Promise<DialogMessage[]> {
+  const chatMessages: DialogMessage[] = [];
+  for (const msg of history) {
+    const isOut = msg.out ?? false;
+    const role = isOut ? 'assistant' : 'user';
+    const timestamp = msg.date ? new Date(msg.date * 1000).toISOString() : undefined;
+    const mediaTag = describeMediaType(msg);
+
+    if (msg.message) {
+      const content = mediaTag ? `[${mediaTag}] ${msg.message}` : msg.message;
+      chatMessages.push({ role, content, timestamp });
+      continue;
+    }
+
+    if (!isOut && isVoiceOrAudioMessage(msg)) {
+      const text = await transcribeVoice(client, msg, log, label);
+      if (text) {
+        chatMessages.push({ role: 'user', content: `[Голосовое сообщение]: ${text}`, timestamp });
+        continue;
+      }
+    }
+
+    if (mediaTag) {
+      chatMessages.push({ role, content: `[${mediaTag}]`, timestamp });
+    }
+  }
+  return chatMessages;
 }
 
 function isInSleepPeriod(sleepPeriods: string[], timezoneOffset: number): boolean {
@@ -308,24 +466,12 @@ export async function handleChat(
       throw err;
     }
   }
-  const chatMessages: DialogMessage[] = [];
-
-  for (const msg of history.reverse()) {
-    if (!msg.message) continue;
-    const isOut = msg.out ?? false;
-    chatMessages.push({
-      role: isOut ? 'assistant' : 'user',
-      content: msg.message,
-      timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
-    });
-  }
+  const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, displayName);
 
   if (chatMessages.length === 0) {
     return { replied: false, triggerType: null };
   }
 
-  // Always persist fetched messages so they are visible in the UI,
-  // even if the bot decides not to reply below.
   await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
 
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
@@ -351,6 +497,10 @@ export async function handleChat(
   }
 
   if (!replyText) {
+    return { replied: false, triggerType: null };
+  }
+  if (isLowValueReply(replyText)) {
+    log('warning', `${displayName}: сгенерирован пустой/бессмысленный ответ "${replyText}" — пропускаю отправку`);
     return { replied: false, triggerType: null };
   }
 
@@ -447,6 +597,10 @@ async function handleFollowUp(
 
       const reply = await openaiGenerate(oai, followUpMessages);
       if (!reply) continue;
+      if (isLowValueReply(reply)) {
+        log('warning', `Follow-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
+        continue;
+      }
 
       const followUpDelay = randomRange(tg.read_reply_delay_range) * 1000;
       if (shouldStop) await interruptibleSleep(followUpDelay, shouldStop); else await sleep(followUpDelay);
@@ -509,12 +663,21 @@ async function handleMissedRepliesLastDays(
     try {
       const reply = await openaiGenerate(oai, messages);
       if (!reply) continue;
+      if (isLowValueReply(reply)) {
+        log('warning', `Catch-up пропущен для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}: бессмысленный ответ "${reply}"`);
+        continue;
+      }
 
       const replyDelay = randomRange(tg.read_reply_delay_range) * 1000;
       if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
 
-      const peerLookup = tgUsername ?? tgUserId;
-      const entity = await client.getEntity(peerLookup);
+      let entity;
+      try {
+        entity = await client.getEntity(tgUserId);
+      } catch {
+        if (tgUsername) entity = await client.getEntity(tgUsername);
+        else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
+      }
       await client.sendMessage(entity, { message: reply });
 
       messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
@@ -558,23 +721,21 @@ async function backfillEmptyDialogs(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     try {
-      const peerLookup = tgUsername ?? tgUserId;
-      const entity = await client.getEntity(peerLookup);
+      let entity;
+      try {
+        entity = await client.getEntity(tgUserId);
+      } catch {
+        if (tgUsername) entity = await client.getEntity(tgUsername);
+        else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
+      }
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
-      const chatMessages: DialogMessage[] = [];
-      for (const msg of history.reverse()) {
-        if (!msg.message) continue;
-        chatMessages.push({
-          role: (msg.out ?? false) ? 'assistant' : 'user',
-          content: msg.message,
-          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
-        });
-      }
+      const backfillLabel = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
+      const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, backfillLabel);
 
       if (chatMessages.length > 0) {
         await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot: Boolean(dialog.tg_is_bot) });
-        log('info', `Backfill: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
+        log('info', `Backfill: ${backfillLabel} — ${chatMessages.length} сообщ.`);
       }
     } catch (err) {
       log('warning', `Backfill ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -647,6 +808,8 @@ export async function runCampaignLoop(
   }
 
   await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
+
+  const offsetErrorCounts = new Map<string, number>();
 
   try {
     while (!shouldStop()) {
@@ -735,6 +898,21 @@ export async function runCampaignLoop(
               .update({ is_active: false, cooldown_until: null })
               .eq('id', account.id);
             log('warning', `${account.session_name}: аккаунт деактивирован (${errMsg.includes('AUTH_KEY_UNREGISTERED') ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED'})`);
+          } else if (errMsg.includes('offset') && errMsg.includes('out of range')) {
+            const count = (offsetErrorCounts.get(account.id) ?? 0) + 1;
+            offsetErrorCounts.set(account.id, count);
+            if (count >= 2) {
+              await db
+                .from('tg_outreach_accounts')
+                .update({ is_active: false, cooldown_until: null })
+                .eq('id', account.id);
+              log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → аккаунт деактивирован. Пересоздайте .session.`);
+            } else {
+              const cooldownUntil = new Date(Date.now() + 3600_000).toISOString();
+              await db.from('tg_outreach_accounts').update({ cooldown_until: cooldownUntil }).eq('id', account.id);
+              (account as OutreachAccount).cooldown_until = cooldownUntil;
+              log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → cooldown 1ч. Деактивация после 2-й попытки.`);
+            }
           } else {
             log('error', `${account.session_name}: ${errMsg}`);
           }
@@ -882,19 +1060,17 @@ export async function refetchEmptyDialogs(
     const tgUsername = dialog.tg_username as string | null;
 
     try {
-      const peerLookup = tgUsername ?? tgUserId;
-      const entity = await client.getEntity(peerLookup);
+      let entity;
+      try {
+        entity = await client.getEntity(tgUserId);
+      } catch {
+        if (tgUsername) entity = await client.getEntity(tgUsername);
+        else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
+      }
       const history = await client.getMessages(entity, { limit: tg.history_limit });
 
-      const chatMessages: DialogMessage[] = [];
-      for (const msg of history.reverse()) {
-        if (!msg.message) continue;
-        chatMessages.push({
-          role: (msg.out ?? false) ? 'assistant' : 'user',
-          content: msg.message,
-          timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : undefined,
-        });
-      }
+      const refetchLabel = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
+      const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, refetchLabel);
 
       if (chatMessages.length > 0) {
         await upsertDialog(
@@ -903,7 +1079,7 @@ export async function refetchEmptyDialogs(
           { tgIsBot: Boolean(dialog.tg_is_bot) },
         );
         fetched++;
-        log('info', `Refetch: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`} — ${chatMessages.length} сообщ.`);
+        log('info', `Refetch: ${refetchLabel} — ${chatMessages.length} сообщ.`);
       }
       await reportProgress(tgUsername, chatMessages.length);
     } catch (err) {

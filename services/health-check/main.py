@@ -51,6 +51,8 @@ except ImportError:
 
 PORTAL_URL = os.environ.get("HEALTH_PORTAL_URL", "https://polza-portal.ru")
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+INSTANTLY_DATABASE_URL = os.environ.get("INSTANTLY_DATABASE_URL")
+INSTANTLY_DISK_TOTAL_GB = float(os.environ.get("HEALTH_INSTANTLY_DISK_TOTAL_GB", "8"))
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
@@ -109,6 +111,7 @@ SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 # (monotonic_ts, active_connections, cumulative_txn_count)
 _METRICS: deque[tuple[float, int, int]] = deque(maxlen=60)
+_METRICS_INSTANTLY: deque[tuple[float, int, int]] = deque(maxlen=60)
 
 
 def _spark(values: list[int | float]) -> str:
@@ -500,6 +503,38 @@ async def check_db() -> tuple[bool, str, int | None, int | None]:
     return False, error_text, None, None
 
 
+async def check_instantly_db() -> tuple[bool, str, int | None, int | None]:
+    """Check Instantly DB connectivity. Returns (ok, message, connections, max)."""
+    if not INSTANTLY_DATABASE_URL:
+        return True, "not configured (skip)", None, None
+    last_error: Exception | None = None
+    for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
+        try:
+            conn = await asyncpg.connect(INSTANTLY_DATABASE_URL, **_CONNECT_KWARGS)
+            try:
+                await conn.execute("SELECT 1")
+                cur = await conn.fetchval(
+                    "SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()"
+                )
+                max_raw = await conn.fetchval("SHOW max_connections")
+                max_c = int(max_raw) if max_raw else None
+                return True, "OK", cur, max_c
+            finally:
+                await conn.close()
+        except Exception as e:
+            last_error = e
+            print(
+                f"[health] Instantly DB check attempt {attempt}/{HEALTH_RETRY_ATTEMPTS} error: "
+                f"{type(e).__name__}: {repr(e)}"
+            )
+            if attempt < HEALTH_RETRY_ATTEMPTS and HEALTH_RETRY_DELAY_SEC > 0:
+                await asyncio.sleep(HEALTH_RETRY_DELAY_SEC * attempt)
+
+    if last_error is None:
+        return False, "unknown DB error", None, None
+    return False, _normalize_network_error(last_error), None, None
+
+
 async def check_proxy(proxy_url: str) -> tuple[bool, str]:
     """Try to make a request through the proxy to httpbin."""
     last_error: Exception | None = None
@@ -668,15 +703,29 @@ async def run_health_check():
     db_ok, db_msg, db_cur, db_max = await check_db()
     _check(
         "db", not db_ok,
-        f"🔴 <b>БД</b>: {db_msg}",
-        "✅ <b>БД</b>: восстановлена",
+        f"🔴 <b>БД (Supabase)</b>: {db_msg}",
+        "✅ <b>БД (Supabase)</b>: восстановлена",
     )
     if db_ok and db_cur is not None and db_max is not None:
         usage_pct = db_cur / db_max * 100
         if usage_pct > 80:
             problems.append(
-                f"🟡 <b>БД connections</b>: {db_cur}/{db_max} ({usage_pct:.0f}%)"
+                f"🟡 <b>БД Supabase connections</b>: {db_cur}/{db_max} ({usage_pct:.0f}%)"
             )
+
+    if INSTANTLY_DATABASE_URL:
+        idb_ok, idb_msg, idb_cur, idb_max = await check_instantly_db()
+        _check(
+            "instantly_db", not idb_ok,
+            f"🔴 <b>БД (Instantly)</b>: {idb_msg}",
+            "✅ <b>БД (Instantly)</b>: восстановлена",
+        )
+        if idb_ok and idb_cur is not None and idb_max is not None:
+            idb_pct = idb_cur / idb_max * 100
+            if idb_pct > 80:
+                problems.append(
+                    f"🟡 <b>БД Instantly connections</b>: {idb_cur}/{idb_max} ({idb_pct:.0f}%)"
+                )
 
     proxy_results = await check_all_proxies()
     dead_proxies = [(g, addr, msg) for g, addr, ok, msg in proxy_results if not ok]
@@ -724,12 +773,16 @@ async def run_health_check():
     await _collect_metrics()
 
 
-async def _collect_metrics() -> None:
-    """Record DB connection count and cumulative txn count for sparkline charts."""
-    if not DATABASE_URL:
+async def _collect_metrics_for(
+    db_url: str | None,
+    metrics_deque: deque,
+    label: str,
+) -> None:
+    """Record DB connection count and cumulative txn count for one database."""
+    if not db_url:
         return
     try:
-        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        conn = await asyncpg.connect(db_url, **_CONNECT_KWARGS)
         try:
             cur = await conn.fetchval(
                 "SELECT count(*)::int FROM pg_stat_activity "
@@ -739,33 +792,67 @@ async def _collect_metrics() -> None:
                 "SELECT (xact_commit + xact_rollback)::bigint "
                 "FROM pg_stat_database WHERE datname = current_database()"
             )
-            _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
+            metrics_deque.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
         finally:
             await conn.close()
     except Exception as e:
-        print(f"[health] metrics collect error: {e}")
+        print(f"[health] metrics collect ({label}) error: {e}")
 
 
-def _render_heartbeat_chart() -> bytes | None:
-    """Render transactions & connections chart as PNG bytes."""
-    if not HAS_MATPLOTLIB or len(_METRICS) < 3:
+async def _collect_metrics() -> None:
+    """Record metrics for all monitored databases."""
+    tasks = [_collect_metrics_for(DATABASE_URL, _METRICS, "main")]
+    if INSTANTLY_DATABASE_URL:
+        tasks.append(_collect_metrics_for(INSTANTLY_DATABASE_URL, _METRICS_INSTANTLY, "instantly"))
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _extract_chart_series(
+    metrics: deque,
+) -> tuple[list[datetime], list[int], list[int]] | None:
+    """Extract timestamps, txn rates, and connection counts from a metrics deque."""
+    if len(metrics) < 3:
         return None
-
-    pts = list(_METRICS)
+    pts = list(metrics)
     msk = timezone(timedelta(hours=3))
-
     timestamps: list[datetime] = []
     rates: list[int] = []
     conns: list[int] = []
-
     for i in range(1, len(pts)):
-        ts = datetime.fromtimestamp(pts[i][0], tz=msk)
-        timestamps.append(ts)
-        delta = pts[i][2] - pts[i - 1][2]
-        rates.append(max(0, delta))
+        timestamps.append(datetime.fromtimestamp(pts[i][0], tz=msk))
+        rates.append(max(0, pts[i][2] - pts[i - 1][2]))
         conns.append(pts[i][1])
-
     if not rates:
+        return None
+    return timestamps, rates, conns
+
+
+def _apply_xticks(ax, timestamps: list[datetime], n: int) -> None:
+    if n <= 1:
+        return
+    step = max(1, n // 5)
+    ticks = list(range(0, n, step))
+    if ticks[-1] != n - 1:
+        ticks.append(n - 1)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(
+        [timestamps[i].strftime("%H:%M") for i in ticks],
+        color="#8E8E93",
+    )
+
+
+def _render_heartbeat_chart() -> bytes | None:
+    """Render transactions & connections chart as PNG bytes.
+
+    Shows a 2-column layout when Instantly DB metrics are available.
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+
+    main_series = _extract_chart_series(_METRICS)
+    inst_series = _extract_chart_series(_METRICS_INSTANTLY)
+
+    if not main_series and not inst_series:
         return None
 
     BG = "#1C1C1E"
@@ -774,50 +861,60 @@ def _render_heartbeat_chart() -> bytes | None:
     GRID = "#3A3A3C"
     GREEN = "#3ECF8E"
     BLUE = "#0A84FF"
+    ORANGE = "#FF9F0A"
+    PURPLE = "#BF5AF2"
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(8, 4.5), facecolor=BG,
-        gridspec_kw={"hspace": 0.55},
+    ncols = 2 if (main_series and inst_series) else 1
+    fig_w = 10 if ncols == 2 else 8
+    fig, axes = plt.subplots(
+        2, ncols, figsize=(fig_w, 4.5), facecolor=BG,
+        gridspec_kw={"hspace": 0.55, "wspace": 0.3},
+        squeeze=False,
     )
 
-    for ax in (ax1, ax2):
-        ax.set_facecolor(BG)
-        ax.tick_params(colors=SUBTEXT, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
-        ax.grid(axis="y", color=GRID, linewidth=0.5, alpha=0.5)
-        ax.set_axisbelow(True)
+    for row in axes:
+        for ax in row:
+            ax.set_facecolor(BG)
+            ax.tick_params(colors=SUBTEXT, labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
+            ax.grid(axis="y", color=GRID, linewidth=0.5, alpha=0.5)
+            ax.set_axisbelow(True)
 
-    total_txn = sum(rates)
-    fmt_total = f"{total_txn:,}".replace(",", " ")
-    ax1.set_title(
-        f"Транзакции БД — {fmt_total}",
-        color=TEXT, fontsize=12, fontweight="bold", loc="left", pad=10,
-    )
-    x = range(len(rates))
-    ax1.bar(x, rates, color=GREEN, alpha=0.85, width=0.7)
+    col_data: list[tuple[str, list[datetime], list[int], list[int], str, str]] = []
+    if main_series:
+        col_data.append(("Main DB", *main_series, GREEN, BLUE))
+    if inst_series:
+        col_data.append(("Instantly DB", *inst_series, ORANGE, PURPLE))
 
-    ax2.set_title(
-        f"Подключения — {conns[-1]}",
-        color=TEXT, fontsize=12, fontweight="bold", loc="left", pad=10,
-    )
-    x2 = range(len(conns))
-    ax2.fill_between(x2, conns, color=BLUE, alpha=0.2)
-    ax2.plot(x2, conns, color=BLUE, linewidth=1.5)
+    for col_idx, (db_label, timestamps, rates, conns, bar_color, line_color) in enumerate(col_data):
+        ax_txn = axes[0][col_idx]
+        ax_conn = axes[1][col_idx]
 
-    for ax, n in [(ax1, len(rates)), (ax2, len(conns))]:
-        if n <= 1:
-            continue
-        step = max(1, n // 5)
-        ticks = list(range(0, n, step))
-        if ticks[-1] != n - 1:
-            ticks.append(n - 1)
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(
-            [timestamps[i].strftime("%H:%M") for i in ticks],
-            color=SUBTEXT,
+        total_txn = sum(rates)
+        fmt_total = f"{total_txn:,}".replace(",", " ")
+        ax_txn.set_title(
+            f"{db_label}: Транзакции — {fmt_total}",
+            color=TEXT, fontsize=11, fontweight="bold", loc="left", pad=10,
         )
+        x = range(len(rates))
+        ax_txn.bar(x, rates, color=bar_color, alpha=0.85, width=0.7)
+        _apply_xticks(ax_txn, timestamps, len(rates))
+
+        ax_conn.set_title(
+            f"{db_label}: Подключения — {conns[-1]}",
+            color=TEXT, fontsize=11, fontweight="bold", loc="left", pad=10,
+        )
+        x2 = range(len(conns))
+        ax_conn.fill_between(x2, conns, color=line_color, alpha=0.2)
+        ax_conn.plot(x2, conns, color=line_color, linewidth=1.5)
+        _apply_xticks(ax_conn, timestamps, len(conns))
+
+    # Hide unused axes when only one DB has data in a 2-col layout
+    if ncols == 2 and len(col_data) < 2:
+        for row in axes:
+            row[1].set_visible(False)
 
     fig.tight_layout(pad=1.5)
 
@@ -831,16 +928,21 @@ def _render_heartbeat_chart() -> bytes | None:
     return buf.getvalue()
 
 
-async def _fetch_heartbeat_db_data() -> dict:
-    """Single DB connection with retry to collect all heartbeat data."""
-    data: dict = {"ok": False, "error": ""}
-    if not DATABASE_URL:
+async def _fetch_heartbeat_db_data_generic(
+    db_url: str,
+    metrics_deque: deque,
+    label: str = "DB",
+    job_tables: list[tuple[str, str, list[str]]] | None = None,
+) -> dict:
+    """Collect heartbeat data from any Postgres database."""
+    data: dict = {"ok": False, "error": "", "label": label}
+    if not db_url:
         return data
 
     last_err: Exception | None = None
     for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
         try:
-            conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+            conn = await asyncpg.connect(db_url, **_CONNECT_KWARGS)
             try:
                 rows = await conn.fetch(
                     "SELECT state, count(*)::int AS n FROM pg_stat_activity "
@@ -873,7 +975,7 @@ async def _fetch_heartbeat_db_data() -> dict:
                     "SELECT (xact_commit + xact_rollback)::bigint "
                     "FROM pg_stat_database WHERE datname = current_database()"
                 )
-                _METRICS.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
+                metrics_deque.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
 
                 data["db_users"] = await conn.fetch(
                     "SELECT usename, count(*)::int AS n "
@@ -881,7 +983,8 @@ async def _fetch_heartbeat_db_data() -> dict:
                     "GROUP BY usename ORDER BY n DESC LIMIT 5"
                 )
 
-                data["active_jobs"] = await _fetch_active_jobs(conn)
+                if job_tables is not None:
+                    data["active_jobs"] = await _fetch_active_jobs(conn, job_tables)
 
                 data["ok"] = True
                 return data
@@ -890,7 +993,7 @@ async def _fetch_heartbeat_db_data() -> dict:
         except Exception as e:
             last_err = e
             print(
-                f"[health] heartbeat DB attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: "
+                f"[health] heartbeat {label} attempt {attempt}/{HEALTH_RETRY_ATTEMPTS}: "
                 f"{type(e).__name__}: {e}"
             )
             if attempt < HEALTH_RETRY_ATTEMPTS:
@@ -900,19 +1003,40 @@ async def _fetch_heartbeat_db_data() -> dict:
     return data
 
 
-def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> str:
-    """Format heartbeat caption from pre-fetched data (pure formatting, no DB)."""
-    parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
+async def _fetch_heartbeat_db_data() -> dict:
+    """Collect heartbeat data from the main (Supabase) database."""
+    return await _fetch_heartbeat_db_data_generic(
+        DATABASE_URL, _METRICS, label="Main DB", job_tables=_JOB_TABLES,
+    )
+
+
+async def _fetch_heartbeat_instantly_data() -> dict:
+    """Collect heartbeat data from the Instantly database."""
+    return await _fetch_heartbeat_db_data_generic(
+        INSTANTLY_DATABASE_URL, _METRICS_INSTANTLY, label="Instantly DB",
+    )
+
+
+def _format_db_section(
+    data: dict,
+    disk_total_gb: float,
+    metrics: deque,
+    label: str,
+    icon: str,
+    include_sparklines: bool = True,
+) -> list[str]:
+    """Format one DB section for the heartbeat caption."""
+    parts: list[str] = [f"{icon} <b>{label}</b>"]
 
     if not data.get("ok"):
         err = data.get("error", "")
         if err:
-            parts.append(f"⚠️ <b>БД недоступна</b>: {err}")
-        return "\n".join(parts)
+            parts.append(f"  ⚠️ БД недоступна: {err}")
+        return parts
 
     total = data["conn_total"]
     max_c = data["conn_max"]
-    line = f"🔌 <b>Подключения</b>: {total}"
+    line = f"  🔌 Подключения: {total}"
     if max_c:
         line += f" / {max_c}"
     bits = []
@@ -929,14 +1053,14 @@ def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> st
     db_bytes = data["disk_db"]
     wal_bytes = data["disk_wal"]
     total_used = db_bytes + wal_bytes
-    disk_limit = DISK_TOTAL_GB * (1024 ** 3)
+    disk_limit = disk_total_gb * (1024 ** 3)
     pct = total_used / disk_limit * 100 if disk_limit else 0
     filled = min(20, int(pct / 100 * 20))
     bar = "█" * filled + "░" * (20 - filled)
 
     parts.append(
-        f"💾 <b>Диск</b>: {_fmt_bytes(total_used)} / "
-        f"{DISK_TOTAL_GB:g} GB ({pct:.0f}%)"
+        f"  💾 Диск: {_fmt_bytes(total_used)} / "
+        f"{disk_total_gb:g} GB ({pct:.0f}%)"
     )
     parts.append(f"<code>  {bar}</code>")
     detail = [f"БД {_fmt_bytes(db_bytes)}"]
@@ -944,8 +1068,8 @@ def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> st
         detail.append(f"WAL {_fmt_bytes(wal_bytes)}")
     parts.append("  " + " · ".join(detail))
 
-    if include_sparklines and len(_METRICS) >= 2:
-        pts = list(_METRICS)
+    if include_sparklines and len(metrics) >= 2:
+        pts = list(metrics)
         rates: list[int] = []
         conns: list[int] = []
         for i in range(1, len(pts)):
@@ -957,20 +1081,42 @@ def _format_heartbeat_caption(data: dict, include_sparklines: bool = True) -> st
         total_txn = sum(rates)
         fmt_txn = f"{total_txn:,}".replace(",", " ")
 
-        parts.append("")
-        parts.append(f"📊 <b>Транзакции</b> ({span_min} мин): {fmt_txn}")
+        parts.append(f"  📊 Транзакции ({span_min} мин): {fmt_txn}")
         spark_r = _spark(rates)
         if spark_r:
-            parts.append(f"<code>{spark_r}</code>")
+            parts.append(f"<code>  {spark_r}</code>")
 
         if conns:
             mn_c, mx_c = min(conns), max(conns)
-            parts.append(
-                f"📈 <b>Подключения</b> ({span_min} мин): {mn_c}–{mx_c}"
-            )
+            parts.append(f"  📈 Подключения ({span_min} мин): {mn_c}–{mx_c}")
             spark_c = _spark(conns)
             if spark_c:
-                parts.append(f"<code>{spark_c}</code>")
+                parts.append(f"<code>  {spark_c}</code>")
+
+    return parts
+
+
+def _format_heartbeat_caption(
+    data: dict,
+    instantly_data: dict | None = None,
+    include_sparklines: bool = True,
+) -> str:
+    """Format heartbeat caption from pre-fetched data (pure formatting, no DB)."""
+    parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
+
+    parts.append("")
+    parts.extend(_format_db_section(
+        data, DISK_TOTAL_GB, _METRICS, "Supabase (основная)", "🟢",
+        include_sparklines=include_sparklines,
+    ))
+
+    if instantly_data and (instantly_data.get("ok") or instantly_data.get("error")):
+        parts.append("")
+        parts.extend(_format_db_section(
+            instantly_data, INSTANTLY_DISK_TOTAL_GB, _METRICS_INSTANTLY,
+            "Instantly DB", "🟠",
+            include_sparklines=include_sparklines,
+        ))
 
     return "\n".join(parts)
 
@@ -994,10 +1140,13 @@ _JOB_TABLES: list[tuple[str, str, list[str]]] = [
 ]
 
 
-async def _fetch_active_jobs(conn) -> list[dict]:
+async def _fetch_active_jobs(
+    conn,
+    job_tables: list[tuple[str, str, list[str]]] | None = None,
+) -> list[dict]:
     """Query all job tables for active task counts (safe — skips missing tables)."""
     results: list[dict] = []
-    for table, label, statuses in _JOB_TABLES:
+    for table, label, statuses in (job_tables or _JOB_TABLES):
         try:
             placeholders = ", ".join(f"${i+1}" for i in range(len(statuses)))
             rows = await conn.fetch(
@@ -1035,19 +1184,6 @@ def _format_active_jobs(data: dict) -> str | None:
         detail = ", ".join(parts)
         lines.append(f"  • {j['label']}: {detail}")
 
-    return "\n".join(lines)
-
-
-def _format_db_users(data: dict) -> str | None:
-    """Format DB user connection breakdown from pre-fetched data."""
-    if not data.get("ok"):
-        return None
-    users = data.get("db_users")
-    if not users:
-        return None
-    lines = ["👥 <b>Пользователи БД</b> (подключения):"]
-    for r in users:
-        lines.append(f"  • {r['usename']}: {r['n']}")
     return "\n".join(lines)
 
 
@@ -1135,6 +1271,20 @@ async def _ping_proxies(count: int = 3) -> str:
 
 
 
+def _format_db_users_section(data: dict, label: str = "") -> str | None:
+    """Format DB user connection breakdown from pre-fetched data."""
+    if not data.get("ok"):
+        return None
+    users = data.get("db_users")
+    if not users:
+        return None
+    header = f"👥 <b>Пользователи {label}</b> (подключения):" if label else "👥 <b>Пользователи БД</b> (подключения):"
+    lines = [header]
+    for r in users:
+        lines.append(f"  • {r['usename']}: {r['n']}")
+    return "\n".join(lines)
+
+
 async def send_heartbeat():
     """Periodic heartbeat: chart + caption + jobs + db users + proxies (single message)."""
     global HEARTBEAT_STARTED
@@ -1143,30 +1293,46 @@ async def send_heartbeat():
         await send_telegram(f"🟢 <b>HEALTH BOT ONLINE</b> — {_now_msk()}", force=True)
         return
 
-    db_data = await _fetch_heartbeat_db_data()
-    ping_text, proxy_text = await asyncio.gather(_ping_site(), _ping_proxies())
+    fetch_tasks: list = [_fetch_heartbeat_db_data(), _ping_site(), _ping_proxies()]
+    if INSTANTLY_DATABASE_URL:
+        fetch_tasks.append(_fetch_heartbeat_instantly_data())
+
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+    db_data = results[0] if not isinstance(results[0], Exception) else {"ok": False, "error": str(results[0])}
+    ping_text = results[1] if not isinstance(results[1], Exception) else "🌐 Пинг: ошибка"
+    proxy_text = results[2] if not isinstance(results[2], Exception) else "🔗 Прокси: ошибка"
+    instantly_data: dict | None = None
+    if INSTANTLY_DATABASE_URL and len(results) > 3:
+        instantly_data = results[3] if not isinstance(results[3], Exception) else {"ok": False, "error": str(results[3])}
 
     extra_parts: list[str] = []
     jobs_text = _format_active_jobs(db_data)
     if jobs_text:
         extra_parts.append(jobs_text)
-    users_text = _format_db_users(db_data)
-    if users_text:
-        extra_parts.append(users_text)
+
+    main_users = _format_db_users_section(db_data, label="Supabase")
+    if main_users:
+        extra_parts.append(main_users)
+    if instantly_data:
+        inst_users = _format_db_users_section(instantly_data, label="Instantly")
+        if inst_users:
+            extra_parts.append(inst_users)
+
     extra_parts.append(proxy_text)
     extra_block = "\n\n".join(extra_parts)
 
     chart = _render_heartbeat_chart()
     if chart:
-        caption = _format_heartbeat_caption(db_data, include_sparklines=False)
+        caption = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=False)
         caption += f"\n\n{ping_text}\n\n{extra_block}"
         ok = await send_telegram_photo(chart, caption=caption)
         if not ok:
-            text = _format_heartbeat_caption(db_data, include_sparklines=True)
+            text = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=True)
             text += f"\n\n{ping_text}\n\n{extra_block}"
             await send_telegram(text)
     else:
-        text = _format_heartbeat_caption(db_data, include_sparklines=True)
+        text = _format_heartbeat_caption(db_data, instantly_data, include_sparklines=True)
         text += f"\n\n{ping_text}\n\n{extra_block}"
         await send_telegram(text)
 
@@ -1257,9 +1423,14 @@ async def main():
         if SUPABASE_KEEPALIVE_INTERVAL_SEC > 0 and SUPABASE_REST_URL
         else "keepalive disabled"
     )
+    instantly_info = (
+        "instantly_db=configured"
+        if INSTANTLY_DATABASE_URL
+        else "instantly_db=not set"
+    )
     print(
         f"[health] Started: site={PORTAL_URL}, server={SERVER_IP}, "
-        f"proxies={proxy_count}, health every {HEALTH_INTERVAL_SEC}s, "
+        f"proxies={proxy_count}, {instantly_info}, health every {HEALTH_INTERVAL_SEC}s, "
         f"heartbeat every {HEARTBEAT_INTERVAL_SEC}s, {keepalive_info}. "
         "Commands in chat: /mute /вкл /alerts"
     )
