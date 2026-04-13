@@ -462,6 +462,75 @@ async function handleFollowUp(
   }
 }
 
+async function handleMissedRepliesLastDays(
+  client: TelegramClient,
+  account: OutreachAccount,
+  campaign: OutreachCampaign,
+  db: SupabaseClient,
+  log: LogFn,
+  shouldStop?: () => boolean,
+) {
+  const tg = campaign.telegram_settings as TelegramSettings;
+  const oai = campaign.openai_settings as OpenAISettings;
+  const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
+  const lookbackMs = 3 * 24 * 60 * 60 * 1000;
+  const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
+
+  const { data: dialogs } = await db
+    .from('tg_outreach_dialogs')
+    .select('id, tg_user_id, tg_username, tg_is_bot, status, can_send, messages, last_message_at')
+    .eq('campaign_id', campaign.id)
+    .eq('account_id', account.id)
+    .eq('status', 'none')
+    .eq('can_send', true)
+    .gte('last_message_at', cutoffIso)
+    .order('last_message_at', { ascending: true })
+    .limit(200);
+
+  if (!dialogs?.length) return;
+
+  let processed = 0;
+  let replied = 0;
+  for (const dialog of dialogs) {
+    if (shouldStop?.()) break;
+    processed++;
+
+    const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+    const isBot = Boolean(dialog.tg_is_bot);
+    if (isBot && tg.ignore_bot_usernames) continue;
+    if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) continue;
+
+    const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
+    if (messages.length === 0) continue;
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage.role !== 'user') continue;
+
+    try {
+      const reply = await openaiGenerate(oai, messages);
+      if (!reply) continue;
+
+      const replyDelay = randomRange(tg.read_reply_delay_range) * 1000;
+      if (shouldStop) await interruptibleSleep(replyDelay, shouldStop); else await sleep(replyDelay);
+
+      const peerLookup = tgUsername ?? tgUserId;
+      const entity = await client.getEntity(peerLookup);
+      await client.sendMessage(entity, { message: reply });
+
+      messages.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
+      await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, messages, undefined, { tgIsBot: isBot });
+      replied++;
+      log('info', `Catch-up reply: ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
+    } catch (err) {
+      log('warning', `Catch-up ошибка ${tgUsername ?? tgUserId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (processed > 0) {
+    log('info', `Catch-up за 3 дня: обработано ${processed}, отправлено ${replied}`);
+  }
+}
+
 async function backfillEmptyDialogs(
   client: TelegramClient,
   account: OutreachAccount,
@@ -640,6 +709,7 @@ export async function runCampaignLoop(
           }
 
           await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
+          await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
 
           try {
             await backfillEmptyDialogs(client, account, campaign as unknown as OutreachCampaign, db, log);
