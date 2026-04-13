@@ -32,6 +32,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 try:
     from dotenv import load_dotenv
@@ -93,7 +94,22 @@ LEADS_INTER_PAGE_DELAY_SEC: float = float(
 LEADS_FLUSH_THRESHOLD = int(os.environ.get("INSTANTLY_LEADS_FLUSH_THRESHOLD", "5000"))
 LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "3.0"))
 
-_CONNECT_KWARGS: dict = {"statement_cache_size": 0, "ssl": "require"}
+def _resolve_db_ssl_mode(database_url: str) -> bool | str:
+    """Resolve SSL mode from env/query to avoid forcing SSL on self-hosted PG."""
+    ssl_mode = (
+        os.environ.get("INSTANTLY_DB_SSLMODE")
+        or os.environ.get("PGSSLMODE")
+        or parse_qs(urlparse(database_url).query).get("sslmode", [""])[0]
+    ).strip().lower()
+    if ssl_mode in {"disable", "allow", "prefer"}:
+        return False
+    return "require"
+
+
+_CONNECT_KWARGS: dict[str, bool | str | int] = {
+    "statement_cache_size": 0,
+    "ssl": _resolve_db_ssl_mode(DATABASE_URL),
+}
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
