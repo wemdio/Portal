@@ -574,61 +574,8 @@ services:
     networks:
       - portal-network
 
-  instantly-postgres:
-    image: postgres:16-alpine
-    container_name: portal-instantly-postgres
-    environment:
-      POSTGRES_DB: instantly
-      POSTGRES_USER: instantly
-      POSTGRES_PASSWORD: ${INSTANTLY_PG_PASSWORD}
-    volumes:
-      - instantly-pg-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U instantly -d instantly"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 1024M
-          cpus: '0.5'
-    restart: unless-stopped
-    networks:
-      - portal-network
-
-  instantly-postgrest:
-    image: postgrest/postgrest:v12.2.8
-    container_name: portal-instantly-postgrest
-    environment:
-      PGRST_DB_URI: postgresql://instantly:${INSTANTLY_PG_PASSWORD}@instantly-postgres:5432/instantly
-      PGRST_DB_ANON_ROLE: instantly
-      PGRST_DB_SCHEMAS: public
-      PGRST_JWT_SECRET: ${INSTANTLY_JWT_SECRET:-instantly-local-jwt-secret-change-in-prod}
-    depends_on:
-      instantly-postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: '0.1'
-    restart: unless-stopped
-    networks:
-      - portal-network
-
 volumes:
   telegram-bot-api-data:
-  instantly-pg-data:
 
 networks:
   portal-network:
