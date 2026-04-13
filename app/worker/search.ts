@@ -2,7 +2,7 @@ import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
-const MAX_CONCURRENCY = 3;
+const MAX_CONCURRENCY = 5;
 const WORKER_ID = `search-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();

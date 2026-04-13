@@ -171,7 +171,7 @@ const SEGMENT_LABELS: Record<Segment, string> = {
 
 function buildSystemPrompt(sender: SenderConfig, segment: Segment, signalType?: string, signalDetail?: string, vacancyName?: string | null): string {
   const isPartnership = segment === 'marketing';
-  const senderName = isPartnership ? 'Никита' : sender.sender_name;
+  const senderName = isPartnership ? 'Никита' : 'Егор';
   const senderTitle = isPartnership ? 'Директор' : 'Руководитель отдела продаж';
   const senderTg = isPartnership ? 'http://t.me/sorichev' : '';
   const phone = '+7 (495) 120-29-71';

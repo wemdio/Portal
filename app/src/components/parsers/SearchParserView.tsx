@@ -248,7 +248,12 @@ function getExportFilename(extension: string) {
   return `leads_${d}${m}${y}_${h}${min}.${extension}`;
 }
 
-export function SearchParserView() {
+type SearchParserViewProps = {
+  /** Hides staff-only features like "Add to Database" (uses /tools/databases) */
+  clientMode?: boolean;
+};
+
+export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
   const [jobs, setJobs] = useState<SearchParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -853,7 +858,8 @@ export function SearchParserView() {
               </div>
 
               <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-nowrap">
-                <button
+                {!clientMode && (
+                  <button
                   type="button"
                   onClick={addToDatabase}
                   disabled={companyLeads.length === 0}
@@ -863,6 +869,7 @@ export function SearchParserView() {
                   <Database className="h-4 w-4" />
                   В базу
                 </button>
+                )}
                 <button
                   type="button"
                   onClick={handleRepeat}
