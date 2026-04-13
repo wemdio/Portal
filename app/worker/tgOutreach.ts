@@ -118,6 +118,10 @@ async function handleStopJob(job: { id: string; campaign_id: string }) {
   const running = runningCampaigns.get(campaignId);
 
   if (running) {
+    await db
+      .from('tg_outreach_campaigns')
+      .update({ status: 'stopped', updated_at: new Date().toISOString() })
+      .eq('id', campaignId);
     running.stop();
     log('info', `Signaled stop for campaign ${campaignId}`);
     await running.promise;

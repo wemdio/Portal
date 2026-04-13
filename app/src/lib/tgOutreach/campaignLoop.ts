@@ -659,6 +659,12 @@ export async function runCampaignLoop(
             if (tlSchemaErrorCount === 1) {
               log('warning', `GramJS TL schema устарела — Telegram вернул неизвестный объект. Нужно обновить пакет 'telegram'. Ошибка: ${errMsg.slice(0, 150)}`);
             }
+          } else if (errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('USER_DEACTIVATED')) {
+            await db
+              .from('tg_outreach_accounts')
+              .update({ is_active: false, cooldown_until: null })
+              .eq('id', account.id);
+            log('warning', `${account.session_name}: аккаунт деактивирован (${errMsg.includes('AUTH_KEY_UNREGISTERED') ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED'})`);
           } else {
             log('error', `${account.session_name}: ${errMsg}`);
           }
@@ -691,12 +697,17 @@ export async function runCampaignLoop(
     }
   } finally {
     await disconnectAll(clients);
-    // Only set 'stopped' if campaign is NOT 'paused' (drain-worker.sh sets 'paused' before deploy
-    // and we must preserve it so resumeRunningCampaigns() can pick it up on the new worker).
-    await db.from('tg_outreach_campaigns')
-      .update({ status: 'stopped', updated_at: new Date().toISOString() })
-      .eq('id', campaignId)
-      .neq('status', 'paused');
+    // On worker shutdown we must preserve campaign status (running/paused), otherwise
+    // auto-resume on the next worker start will skip it.
+    // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.
+    if (!shouldStop()) {
+      await db.from('tg_outreach_campaigns')
+        .update({ status: 'stopped', updated_at: new Date().toISOString() })
+        .eq('id', campaignId)
+        .neq('status', 'paused');
+    } else {
+      log('info', 'Остановка воркера — статус кампании сохранён для автоподъёма');
+    }
     log('info', 'Кампания остановлена');
   }
 }
