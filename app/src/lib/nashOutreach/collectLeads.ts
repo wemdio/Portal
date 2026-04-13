@@ -37,6 +37,24 @@ interface HHApiResponse {
   items: HHApiItem[];
 }
 
+interface HHEmployerDetail {
+  site_url?: string | null;
+}
+
+async function fetchEmployerSite(employerId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://api.hh.ru/employers/${employerId}`, {
+      signal: withTimeout(8_000),
+      headers: { 'User-Agent': HH_USER_AGENT },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as HHEmployerDetail;
+    return data.site_url?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchHHSignals(): Promise<RawSignalItem[]> {
   const items: RawSignalItem[] = [];
   const seenEmployers = new Set<string>();
@@ -62,6 +80,11 @@ async function fetchHHSignals(): Promise<RawSignalItem[]> {
           if (seenEmployers.has(empKey)) continue;
           seenEmployers.add(empKey);
 
+          let companySite: string | null = null;
+          if (v.employer.id) {
+            companySite = await fetchEmployerSite(String(v.employer.id));
+          }
+
           items.push({
             title: `[HH.ru] ${v.employer.name} ищет: ${v.name}`,
             description: `Компания ${v.employer.name} (${v.area.name}) разместила вакансию: ${v.name}`,
@@ -73,6 +96,7 @@ async function fetchHHSignals(): Promise<RawSignalItem[]> {
               company_name: v.employer.name,
               area: v.area.name,
               vacancy_name: v.name,
+              company_site_url: companySite ?? undefined,
             },
           });
         }

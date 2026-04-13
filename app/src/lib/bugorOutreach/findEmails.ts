@@ -30,12 +30,25 @@ const PLACEHOLDER_LOCAL_PARTS = new Set([
   'changeme', 'placeholder', 'sample', 'demo',
 ]);
 
+const JOB_BOARD_DOMAINS = new Set([
+  'hh.ru', 'zarplata.ru', 'headhunter.ru', 'superjob.ru', 'rabota.ru',
+  'trudvsem.ru', 'avito.ru', 'job.ru', 'rabota.mail.ru', 'career.habr.com',
+  'djinni.co', 'linkedin.com', 'indeed.com', 'glassdoor.com', 'monster.com',
+  'geekjob.ru', 'careerspace.app', 'finder.vc', 'remote-job.ru',
+]);
+
 function isJunkEmail(email: string): boolean {
   const lower = email.toLowerCase();
   if (PLACEHOLDER_EMAILS.has(lower)) return true;
 
-  const local = lower.split('@')[0];
+  const [local, domain] = lower.split('@');
+  if (!local || !domain) return true;
+
   if (PLACEHOLDER_LOCAL_PARTS.has(local)) return true;
+
+  if (JOB_BOARD_DOMAINS.has(domain) || [...JOB_BOARD_DOMAINS].some((jb) => domain.endsWith(`.${jb}`))) {
+    return true;
+  }
 
   return JUNK_PREFIXES.some((p) => local === p || local.startsWith(`${p}+`) || local.startsWith(`${p}.`));
 }
@@ -215,6 +228,15 @@ export interface FindEmailsResult {
   tier: number;
 }
 
+function isJobBoardUrl(url: string): boolean {
+  try {
+    const hostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\./, '');
+    return JOB_BOARD_DOMAINS.has(hostname) || [...JOB_BOARD_DOMAINS].some((jb) => hostname.endsWith(`.${jb}`));
+  } catch {
+    return false;
+  }
+}
+
 async function findForOne(lead: FindEmailsInput): Promise<FindEmailsResult> {
   const companyDomain = lead.website ? extractDomain(lead.website) : null;
 
@@ -225,8 +247,8 @@ async function findForOne(lead: FindEmailsInput): Promise<FindEmailsResult> {
     if (ranked.length > 0) return { id: lead.id, emails: ranked, tier: 1 };
   }
 
-  // Tier 2: source article — prefer company domain, fallback to any
-  if (lead.source_url) {
+  // Tier 2: source article — skip job board pages (they contain job board emails, not company emails)
+  if (lead.source_url && !isJobBoardUrl(lead.source_url)) {
     const emails = await tier2_parseArticle(lead.source_url);
     const onDomain = companyDomain ? emails.filter((e) => emailMatchesDomain(e, companyDomain)) : emails;
     const ranked = filterAndRank(onDomain.length > 0 ? onDomain : emails);
