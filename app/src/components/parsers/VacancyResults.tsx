@@ -304,6 +304,7 @@ export function VacancyResults({
                 <span className="whitespace-nowrap">{exportProgress}</span>
               </div>
             ) : null}
+            {onAddToDatabase ? (
             <button
               type="button"
               onClick={onAddToDatabase}
@@ -314,6 +315,7 @@ export function VacancyResults({
               <Database className="h-4 w-4" />
               В базу
             </button>
+            ) : null}
             <button
               type="button"
               onClick={onExportCsv}
