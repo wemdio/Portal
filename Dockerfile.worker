@@ -34,7 +34,7 @@ COPY app/ ./
 # so loggerServer, tracer, supabaseAdmin etc. work fine outside Next.js.
 # --external:playwright: keep playwright as a runtime require (native binaries).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/instantlyLeads.ts worker/outreach.ts \
+RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts \
   --bundle \
   --platform=node \
   --target=node20 \
@@ -54,6 +54,10 @@ RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 worker
 
 # Copy Playwright browser cache from deps stage
 COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
+
+# ffmpeg for audio/video extraction (transcription workers)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install only Playwright system libraries (no browser download)
 RUN npx playwright install-deps chromium

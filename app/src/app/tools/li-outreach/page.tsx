@@ -128,10 +128,10 @@ export default function LiOutreachPage() {
   // ---- Data fetching --------------------------------------------------------
 
   const loadAccounts = useCallback(async () => {
-    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch { /* */ }
+    try { const d = await api<{ accounts: LiAccount[] }>('/accounts'); setAccounts(d.accounts); } catch (e) { console.error('[li-outreach] loadAccounts failed', e); }
   }, []);
   const loadLeadLists = useCallback(async () => {
-    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch { /* */ }
+    try { const d = await api<{ lead_lists: LiLeadList[] }>('/lead-lists'); setLeadLists(d.lead_lists); } catch (e) { console.error('[li-outreach] loadLeadLists failed', e); }
   }, []);
   const loadLeads = useCallback(async (listId?: string) => {
     try {
@@ -140,37 +140,58 @@ export default function LiOutreachPage() {
       const d = await api<{ leads: LiLead[]; total: number }>(`/leads?${params.toString()}`);
       setLeads(d.leads);
       setLeadsTotal(d.total);
-    } catch {
-      /* */
+    } catch (e) {
+      console.error('[li-outreach] loadLeads failed', e);
     }
   }, []);
   const loadCampaigns = useCallback(async () => {
-    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch { /* */ }
+    try { const d = await api<{ campaigns: LiCampaign[] }>('/campaigns'); setCampaigns(d.campaigns); } catch (e) { console.error('[li-outreach] loadCampaigns failed', e); }
   }, []);
   const loadTasks = useCallback(async () => {
-    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch { /* */ }
+    try { const d = await api<{ tasks: LiTask[] }>('/scraper/tasks'); setTasks(d.tasks); } catch (e) { console.error('[li-outreach] loadTasks failed', e); }
   }, []);
   const loadSettings = useCallback(async () => {
     try {
       const d = await api<{ settings: LiSettings | null }>('/settings');
       setSettings(d.settings);
       if (d.settings) setSettingsForm(d.settings);
-    } catch { /* */ }
+    } catch (e) { console.error('[li-outreach] loadSettings failed', e); }
   }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
-    try { const d = await api<{ logs: LiCampaignLog[] }>(`/campaigns/${id}/logs`); setCampaignLogs(d.logs); } catch { /* */ }
+    try { const d = await api<{ logs: LiCampaignLog[] }>(`/campaigns/${id}/logs`); setCampaignLogs(d.logs); } catch (e) { console.error('[li-outreach] loadCampaignLogs failed', e); }
   }, []);
 
   useEffect(() => {
-    void loadAccounts();
-    void loadCampaigns();
-    void loadLeadLists();
-    void loadSettings();
+    let cancelled = false;
+    const init = async () => {
+      // Wait for Supabase auth session to be ready before making API calls
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        // Session not ready yet — listen for auth state change
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+          if (s && !cancelled) {
+            void loadAccounts();
+            void loadCampaigns();
+            void loadLeadLists();
+            void loadSettings();
+            subscription.unsubscribe();
+          }
+        });
+        return () => { cancelled = true; subscription.unsubscribe(); };
+      }
+      void loadAccounts();
+      void loadCampaigns();
+      void loadLeadLists();
+      void loadSettings();
+    };
+    void init();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (tab === 'dashboard') void loadLeads();
+    if (tab === 'dashboard') { void loadLeads(); void loadCampaigns(); }
+    if (tab === 'campaigns') void loadCampaigns();
     if (tab === 'leads') void loadLeads(leadListFilterId || undefined);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps

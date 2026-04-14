@@ -27,8 +27,10 @@ import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWor
 import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
 import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
+import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
+const LI_CAMPAIGN_TICK_INTERVAL_MS = Number(process.env.LI_CAMPAIGN_TICK_INTERVAL_MS ?? String(5 * 60 * 1000));
 const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
@@ -623,6 +625,47 @@ async function periodicSyncLoop(): Promise<void> {
 }
 
 // --------------------------------------------------------------------------
+// LinkedIn Outreach campaign tick loop
+// --------------------------------------------------------------------------
+
+async function liCampaignTickLoop(): Promise<void> {
+  while (!shuttingDown) {
+    await sleep(LI_CAMPAIGN_TICK_INTERVAL_MS);
+    if (shuttingDown) break;
+
+    if (!supabaseAdmin) continue;
+
+    try {
+      const { data: campaigns, error } = await supabaseAdmin
+        .from('li_campaigns')
+        .select('id, user_id, name')
+        .eq('status', 'running')
+        .order('updated_at', { ascending: true });
+
+      if (error) {
+        log('warn', `LI campaigns fetch failed: ${error.message}`);
+        continue;
+      }
+      if (!campaigns || campaigns.length === 0) continue;
+
+      log('info', `Processing ${campaigns.length} LinkedIn campaign(s)`);
+      for (const c of campaigns) {
+        try {
+          const result = await runCampaignTick(c.id as string, c.user_id as string);
+          if (result.processed > 0 || result.errors > 0) {
+            log('info', `LI campaign "${c.name}": processed=${result.processed}, errors=${result.errors}`);
+          }
+        } catch (err) {
+          log('error', `LI campaign "${c.name}" (${c.id}) tick failed`, err);
+        }
+      }
+    } catch (err) {
+      log('error', 'LI campaign tick loop error', err);
+    }
+  }
+}
+
+// --------------------------------------------------------------------------
 // Scheduled Nash Outreach collection (daily at 07:00 Moscow time = 04:00 UTC)
 // --------------------------------------------------------------------------
 
@@ -778,6 +821,9 @@ async function main(): Promise<void> {
 
   // Start Nash Outreach daily collection scheduler (default 04:00 UTC = 07:00 MSK).
   void nashCollectScheduler();
+
+  // Start LinkedIn Outreach campaign tick loop (every 5 min by default).
+  void liCampaignTickLoop();
 
   await pollLoop();
 }

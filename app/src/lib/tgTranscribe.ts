@@ -268,15 +268,39 @@ export interface VideoProgressEvent {
   downloadedBytes?: number;
   totalBytes?: number;
   error?: string;
+  transcriptionJobId?: string;
+}
+
+async function hasSuccessfulTranscript(chatId: number, messageId: number): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('tg_video_transcripts')
+      .select('id')
+      .eq('tg_chat_id', chatId)
+      .eq('tg_message_id', messageId)
+      .eq('status', 'completed')
+      .is('error_text', null)
+      .limit(1);
+    if (error) return false;
+    return (data?.length ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function processVideoMessage(
   msg: TgMessage,
   videoInfo: VideoInfo,
   onProgress?: (event: VideoProgressEvent) => void,
-): Promise<{ status: 'completed' | 'error' | 'skipped_size'; text?: string; error?: string }> {
+): Promise<{ status: 'completed' | 'error' | 'skipped_size' | 'skipped_exists'; text?: string; error?: string }> {
   if (!supabaseAdmin) {
     throw new Error('Supabase admin client not configured');
+  }
+
+  if (await hasSuccessfulTranscript(msg.chat.id, msg.message_id)) {
+    console.log(`[tg-transcribe] Skipping ${videoInfo.filename} (msgId=${msg.message_id}) — already transcribed`);
+    return { status: 'skipped_exists' };
   }
 
   const senderName = getSenderName(msg);
@@ -307,6 +331,7 @@ export async function processVideoMessage(
     return { status: 'skipped_size', error: errorText };
   }
 
+  console.log(`[tg-transcribe] Processing ${videoInfo.filename} (${((videoInfo.fileSize ?? 0) / 1e6).toFixed(1)} MB), mtproto=${canUseMtproto}, large=${isLargeFile}, localApi=${isLocalApi()}`);
   onProgress?.({ phase: 'downloading', downloadedBytes: 0, totalBytes: videoInfo.fileSize });
 
   if (canUseMtproto && isLargeFile) {
@@ -319,6 +344,7 @@ export async function processVideoMessage(
       });
       const stat = await fs.stat(videoPath);
       fileSizeBytes = stat.size;
+      console.log(`[tg-transcribe] Downloaded ${videoInfo.filename}, ${(fileSizeBytes / 1e6).toFixed(1)} MB on disk, converting...`);
       onProgress?.({ phase: 'converting' });
       mp3 = await extractMp3FromFile(videoPath);
     } finally {
@@ -351,8 +377,11 @@ export async function processVideoMessage(
     mp3 = await extractOrConvertToMp3({ bytes: result.bytes, inputExt: ext });
   }
 
-  onProgress?.({ phase: 'transcribing' });
-  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename });
+  console.log(`[tg-transcribe] Converted ${videoInfo.filename} → MP3 (${(mp3.byteLength / 1e6).toFixed(1)} MB), sending to transcriber...`);
+  const transcriptionJobId = crypto.randomUUID();
+  onProgress?.({ phase: 'transcribing', transcriptionJobId });
+  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
+  console.log(`[tg-transcribe] Transcribed ${videoInfo.filename}, text length: ${text.length}`);
 
   await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
@@ -411,15 +440,25 @@ export async function saveErrorRecord(
   videoInfo: VideoInfo,
   err: unknown,
 ): Promise<void> {
+  const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined;
+  console.error(
+    `[tg-transcribe] Video error: ${err instanceof Error ? err.message : err}`,
+    cause ? `cause: ${cause}` : '',
+    `file: ${videoInfo.filename}`,
+    `msgId: ${msg.message_id}`,
+  );
   await logError('tg-transcribe.error', err, {
     chatId: msg.chat.id,
     messageId: msg.message_id,
     senderId: getSenderId(msg),
+    cause,
   });
 
   if (!supabaseAdmin) return;
 
-  const errorText = err instanceof Error ? err.message : 'Неизвестная ошибка';
+  const errorText = err instanceof Error
+    ? (cause ? `${err.message} (cause: ${cause})` : err.message)
+    : 'Неизвестная ошибка';
   await safeInsertTranscript({
     tg_chat_id: msg.chat.id,
     tg_message_id: msg.message_id,

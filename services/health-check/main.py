@@ -52,7 +52,6 @@ except ImportError:
 PORTAL_URL = os.environ.get("HEALTH_PORTAL_URL", "https://polza-portal.ru")
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 INSTANTLY_DATABASE_URL = os.environ.get("INSTANTLY_DATABASE_URL")
-INSTANTLY_DISK_TOTAL_GB = float(os.environ.get("HEALTH_INSTANTLY_DISK_TOTAL_GB", "8"))
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
@@ -1065,16 +1064,20 @@ def _format_db_section(
     db_bytes = data["disk_db"]
     wal_bytes = data["disk_wal"]
     total_used = db_bytes + wal_bytes
-    disk_limit = disk_total_gb * (1024 ** 3)
-    pct = total_used / disk_limit * 100 if disk_limit else 0
-    filled = min(20, int(pct / 100 * 20))
-    bar = "█" * filled + "░" * (20 - filled)
 
-    parts.append(
-        f"  💾 Диск: {_fmt_bytes(total_used)} / "
-        f"{disk_total_gb:g} GB ({pct:.0f}%)"
-    )
-    parts.append(f"<code>  {bar}</code>")
+    if disk_total_gb > 0:
+        disk_limit = disk_total_gb * (1024 ** 3)
+        pct = total_used / disk_limit * 100 if disk_limit else 0
+        filled = min(20, int(pct / 100 * 20))
+        bar = "█" * filled + "░" * (20 - filled)
+        parts.append(
+            f"  💾 Диск: {_fmt_bytes(total_used)} / "
+            f"{disk_total_gb:g} GB ({pct:.0f}%)"
+        )
+        parts.append(f"<code>  {bar}</code>")
+    else:
+        parts.append(f"  💾 Диск: {_fmt_bytes(total_used)}")
+
     detail = [f"БД {_fmt_bytes(db_bytes)}"]
     if wal_bytes:
         detail.append(f"WAL {_fmt_bytes(wal_bytes)}")
@@ -1125,7 +1128,7 @@ def _format_heartbeat_caption(
     if instantly_data and (instantly_data.get("ok") or instantly_data.get("error")):
         parts.append("")
         parts.extend(_format_db_section(
-            instantly_data, INSTANTLY_DISK_TOTAL_GB, _METRICS_INSTANTLY,
+            instantly_data, 0, _METRICS_INSTANTLY,
             "Instantly DB", "🟠",
             include_sparklines=include_sparklines,
         ))

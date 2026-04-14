@@ -26,6 +26,7 @@ interface ScanVideoRow {
   downloadedBytes?: number;
   totalBytes?: number;
   error?: string;
+  transcriptionJobId?: string;
 }
 
 interface TgChatFull {
@@ -304,17 +305,18 @@ export async function runTgScanJob(jobId: string): Promise<void> {
             v.phase = evt.phase;
             if (evt.downloadedBytes != null) v.downloadedBytes = evt.downloadedBytes;
             if (evt.totalBytes != null) v.totalBytes = evt.totalBytes;
+            if (evt.transcriptionJobId) v.transcriptionJobId = evt.transcriptionJobId;
           }
           void flushProgress();
         });
 
         const v = videos.find((x) => x.idx === videoIdx);
         if (v) {
-          v.phase = result.status === 'completed' ? 'done' : 'error';
+          v.phase = (result.status === 'completed' || result.status === 'skipped_exists') ? 'done' : 'error';
           if (result.error) v.error = result.error;
         }
 
-        if (result.status === 'completed') {
+        if (result.status === 'completed' || result.status === 'skipped_exists') {
           completed++;
         } else {
           errors++;

@@ -1,0 +1,2 @@
+﻿ИНН,Компания,Email,Телефоны,ФИО/ЛПР,Ссылка на отчёт,Ошибка
+7707083893,,,,,,"HTTP error: HTTPSConnectionPool(host='api.himera-search.info', port=443): Read timed out. (read timeout=60)"
