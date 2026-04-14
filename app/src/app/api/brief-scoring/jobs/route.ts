@@ -13,6 +13,9 @@ type BriefScoringJobRequest = {
   mode?: 'staged';
   job_id?: string;
   finalize?: boolean;
+  spreadsheet_tab_id?: string;
+  score_col_index?: number;
+  reason_col_index?: number;
 };
 
 type PreparedQueueItem = {
@@ -306,6 +309,9 @@ export async function POST(req: NextRequest) {
         error_count: invalidCount,
         created_at: now,
         started_at: isStagedMode ? now : null,
+        spreadsheet_tab_id: body.spreadsheet_tab_id ?? null,
+        score_col_index: body.score_col_index ?? null,
+        reason_col_index: body.reason_col_index ?? null,
       })
       .select('id')
       .single<{ id: string }>();

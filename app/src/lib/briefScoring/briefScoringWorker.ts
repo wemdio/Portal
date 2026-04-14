@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { scoreBriefCompanies, type BriefScoringResult } from '@/lib/briefScoring/scoring';
+import { applyBriefScoringResults } from '@/lib/spreadsheet/applyJobResults';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
 
@@ -21,6 +22,9 @@ type JobRow = {
   processed: number;
   success_count: number;
   error_count: number;
+  spreadsheet_tab_id: string | null;
+  score_col_index: number | null;
+  reason_col_index: number | null;
 };
 
 type QueueStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -183,7 +187,7 @@ export async function runBriefScoringJob(jobId: string) {
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('brief_scoring_jobs')
-      .select('id, user_id, status, brief_text, total, processed, success_count, error_count')
+      .select('id, user_id, status, brief_text, total, processed, success_count, error_count, spreadsheet_tab_id, score_col_index, reason_col_index')
       .eq('id', jobId)
       .single<JobRow>();
 
@@ -387,6 +391,22 @@ export async function runBriefScoringJob(jobId: string) {
       success: completedCount,
       errors: failedCount,
     });
+
+    if (
+      finalStatus === 'completed' &&
+      job.spreadsheet_tab_id &&
+      job.score_col_index != null &&
+      job.reason_col_index != null
+    ) {
+      await applyBriefScoringResults(
+        job.user_id,
+        jobId,
+        job.spreadsheet_tab_id,
+        job.score_col_index,
+        job.reason_col_index,
+      );
+    }
+
     await trace?.end({ processed: processedTotal, success: completedCount, errors: failedCount, status: finalStatus });
   } catch (err) {
     await logError('brief.scoring.worker.failed', err, { jobId });
