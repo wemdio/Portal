@@ -49,6 +49,9 @@ switch (kind) {
   case 'outreach':
     run('./outreach');
     break;
+  case 'lioutreach':
+    run('./liOutreach');
+    break;
   case 'all':
   default:
     run('./index');
