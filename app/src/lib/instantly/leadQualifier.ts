@@ -30,31 +30,30 @@ export async function fetchThreadContext(
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
 
-  // Try to fetch emails specifically for this lead (much more accurate)
+  // Fetch emails for this specific lead using the search parameter
+  // (lead_id filter on /emails does not work correctly in Instantly API v2)
   try {
-    const leads = await instantly.getLeadsByEmail({ email: leadEmail });
-    const lead = leads?.find(
-      (l) => l.campaign_id === campaignId || !campaignId,
-    );
-    if (lead?.id) {
-      const res = await instantly.listEmails({
-        campaign_id: campaignId,
-        lead_id: lead.id,
-        limit: 100,
-      });
-      allEmails = res.items ?? [];
-    }
+    const res = await instantly.listEmails({
+      campaign_id: campaignId,
+      search: leadEmail,
+      limit: 100,
+    });
+    allEmails = res.items ?? [];
   } catch {
     // fall through to campaign-wide fetch
   }
 
-  // Fallback: fetch recent campaign emails if lead-specific fetch returned nothing
+  // Fallback: fetch recent campaign emails if search returned nothing
   if (allEmails.length === 0) {
-    const response = await instantly.listEmails({
-      campaign_id: campaignId,
-      limit: 100,
-    });
-    allEmails = response.items ?? [];
+    try {
+      const response = await instantly.listEmails({
+        campaign_id: campaignId,
+        limit: 100,
+      });
+      allEmails = response.items ?? [];
+    } catch {
+      return null;
+    }
   }
 
   let threadEmails: Email[];
@@ -146,9 +145,7 @@ export function isAutoReplyOrUnsubscribe(text: string): boolean {
 
 export function isProposalMessage(text: string): boolean {
   if (!text) return false;
-  if (text.length < 100) return false;
-  if (isContactRequestOnly(text)) return false;
-  return true;
+  return text.length >= 200;
 }
 
 // ─── AI Classification ──────────────────────────────────────────────────────
@@ -326,7 +323,7 @@ export async function classifyWithAI(
             { role: 'user', content: userMessage },
           ],
           temperature: 0.1,
-          max_tokens: 800,
+          max_tokens: 1500,
           response_format: { type: 'json_object' },
         }),
       });
@@ -406,34 +403,21 @@ export async function qualifyReply(
     };
   }
 
-  if (!ctx.lastOutbound) {
-    return {
-      isLead: false,
-      proposalSeen: false,
-      interestSignals: [],
-      reason: 'Не найдено исходящее письмо перед ответом',
-      confidence: 0.7,
-      needsReview: true,
-      objectionHandleable: false,
-      objectionDraft: null,
-      threadContext: ctx,
-    };
-  }
-
-  const outboundText = getBodyText(ctx.lastOutbound.body);
-
-  if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText)) {
-    return {
-      isLead: false,
-      proposalSeen: false,
-      interestSignals: [],
-      reason: 'Ответ на запрос контакта — клиент не видел предложение',
-      confidence: 0.9,
-      needsReview: false,
-      objectionHandleable: false,
-      objectionDraft: null,
-      threadContext: ctx,
-    };
+  if (ctx.lastOutbound) {
+    const outboundText = getBodyText(ctx.lastOutbound.body);
+    if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText)) {
+      return {
+        isLead: false,
+        proposalSeen: false,
+        interestSignals: [],
+        reason: 'Ответ на запрос контакта — клиент не видел предложение',
+        confidence: 0.9,
+        needsReview: false,
+        objectionHandleable: false,
+        objectionDraft: null,
+        threadContext: ctx,
+      };
+    }
   }
 
   let briefText = aiOptions.briefText ?? null;
