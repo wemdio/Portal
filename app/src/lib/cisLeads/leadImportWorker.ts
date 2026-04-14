@@ -12,6 +12,7 @@ import { runWebsiteTeamEnrichment } from '@/lib/cisLeads/websiteTeamParser';
 import { runSiteDiscoveryEnrichment } from '@/lib/cisLeads/siteDiscoveryEnrichment';
 import { runYandexMapsEnrichment } from '@/lib/cisLeads/yandexMapsEnrichment';
 import { runWhatsAppCheckBatch } from '@/lib/cisLeads/whatsappCheckWorker';
+import { runEmailDiscoveryEnrichment } from '@/lib/cisLeads/emailDiscoveryWorker';
 import { guessLprRoleFromPost, normalizeInn, isLegalEntityName } from '@/lib/cisLeads/lprRole';
 import { extractLeadFields, extractInnFromRow } from '@/lib/cisLeads/leadImportRow';
 
@@ -529,7 +530,7 @@ async function setEnrichmentProgress(jobId: string, progress: number): Promise<v
     .eq('id', jobId);
 }
 
-const TOTAL_PROGRESS_STEPS = 13;
+const TOTAL_PROGRESS_STEPS = 14;
 
 async function isJobCancelled(jobId: string): Promise<boolean> {
   if (LOCAL_CANCELLED_JOBS.has(jobId)) return true;
@@ -650,7 +651,17 @@ async function runLeadPostProcessingInternal(jobId: string, userId: string): Pro
 
   await checkCancelled();
 
-  // ── Phase 3: social profiles (stages 11-12) ──
+  // ── Phase 2.5: email discovery via OfData + permutator + SMTP ──
+  try {
+    log('emailDiscoveryEnrichment start');
+    const r = await runEmailDiscoveryEnrichment(jobId, userId);
+    log('emailDiscoveryEnrichment', { processed: r.processed, emailsFound: r.emailsFound });
+    await advanceProgress('emailDiscoveryEnrichment');
+  } catch (e) { if (e instanceof JobCancelledError) throw e; logErr('emailDiscoveryEnrichment', e); stageIdx++; }
+
+  await checkCancelled();
+
+  // ── Phase 3: social profiles (stages 12-13) ──
   try {
     log('socialProfileSerperEnrichment start');
     const { runSocialProfileSerperEnrichment } = await import('@/lib/cisLeads/socialProfileSerperEnrichment');
