@@ -160,14 +160,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
   const txPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!isTranscribing || !video.transcriptionJobId) {
-      if (txPollRef.current) {
-        clearInterval(txPollRef.current);
-        txPollRef.current = null;
-      }
-      setTxProgress(null);
-      return;
-    }
+    if (!isTranscribing || !video.transcriptionJobId) return;
 
     const poll = async () => {
       try {
@@ -193,6 +186,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
         clearInterval(txPollRef.current);
         txPollRef.current = null;
       }
+      setTxProgress(null);
     };
   }, [isTranscribing, video.transcriptionJobId]);
 
