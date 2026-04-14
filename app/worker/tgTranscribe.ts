@@ -110,7 +110,7 @@ async function runTranscribeJob(job: TgTranscribeJobRow): Promise<void> {
   try {
     const result = await processVideoMessage(msg, resolvedVideoInfo);
 
-    if (result.status === 'completed') {
+    if (result.status === 'completed' || result.status === 'skipped_exists') {
       await db
         .from('tg_transcribe_jobs')
         .update({

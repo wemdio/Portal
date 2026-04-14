@@ -35,6 +35,7 @@ interface TranscriptItem {
   length: number;
   status: string;
   error_text: string | null;
+  hasFullText?: boolean;
 }
 
 interface BotChat {
@@ -57,6 +58,15 @@ interface ScanVideoInfo {
   downloadedBytes?: number;
   totalBytes?: number;
   error?: string;
+  transcriptionJobId?: string;
+}
+
+interface TranscriptionProgress {
+  found: boolean;
+  stage?: string;
+  progressPercent?: number;
+  processedSeconds?: number | null;
+  audioDurationSeconds?: number | null;
 }
 
 interface ScanJob {
@@ -74,6 +84,7 @@ interface ScanJob {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  isOwner?: boolean;
 }
 
 async function getToken() {
@@ -128,15 +139,73 @@ function phaseLabel(phase: string): { text: string; color: string } {
   }
 }
 
+function formatMmSs(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = Math.floor(totalSec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
   const { text: statusText, color: statusColor } = phaseLabel(video.phase);
   const isDownloading = video.phase === 'downloading';
+  const isTranscribing = video.phase === 'transcribing';
   const dlPercent =
     isDownloading && video.totalBytes && video.totalBytes > 0
       ? Math.round(((video.downloadedBytes ?? 0) / video.totalBytes) * 100)
       : null;
 
   const isActive = ['downloading', 'converting', 'transcribing'].includes(video.phase);
+
+  const [txProgress, setTxProgress] = useState<TranscriptionProgress | null>(null);
+  const txPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isTranscribing || !video.transcriptionJobId) return;
+
+    const poll = async () => {
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const res = await fetch(
+          `/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(video.transcriptionJobId!)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (res.ok) {
+          const data = (await res.json()) as TranscriptionProgress;
+          if (data.found) {
+            setTxProgress(data);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+
+    void poll();
+    txPollRef.current = setInterval(poll, 4000);
+    return () => {
+      if (txPollRef.current) {
+        clearInterval(txPollRef.current);
+        txPollRef.current = null;
+      }
+      setTxProgress(null);
+    };
+  }, [isTranscribing, video.transcriptionJobId]);
+
+  const txLabel = (() => {
+    if (!isTranscribing || !txProgress) return null;
+    const { processedSeconds, audioDurationSeconds, progressPercent } = txProgress;
+    if (processedSeconds != null && audioDurationSeconds != null && audioDurationSeconds > 0) {
+      return `${formatMmSs(processedSeconds)} / ${formatMmSs(audioDurationSeconds)}`;
+    }
+    if (progressPercent != null && progressPercent > 0) {
+      return `${Math.round(progressPercent)}%`;
+    }
+    return null;
+  })();
+
+  const txPercent =
+    txProgress?.processedSeconds != null && txProgress?.audioDurationSeconds != null && txProgress.audioDurationSeconds > 0
+      ? Math.round((txProgress.processedSeconds / txProgress.audioDurationSeconds) * 100)
+      : txProgress?.progressPercent ?? null;
 
   return (
     <div
@@ -167,6 +236,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <span className={`font-medium ${statusColor}`}>
             {statusText}
             {dlPercent != null && ` ${dlPercent}%`}
+            {txLabel != null && ` ${txLabel}`}
           </span>
         </div>
       </div>
@@ -175,6 +245,14 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <div
             className="h-full rounded-full bg-blue-500 transition-all duration-500"
             style={{ width: dlPercent != null ? `${dlPercent}%` : '0%' }}
+          />
+        </div>
+      )}
+      {isTranscribing && txPercent != null && txPercent > 0 && (
+        <div className="mt-1.5 h-1 w-full rounded-full bg-gray-200 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-violet-500 transition-all duration-500"
+            style={{ width: `${Math.min(txPercent, 100)}%` }}
           />
         </div>
       )}
@@ -257,14 +335,14 @@ function StopConfirmDialog({
 }
 
 export default function TgTranscribePage() {
-  const [items, setItems] = useState<TranscriptItem[]>([]);
-  const [senders, setSenders] = useState<string[]>([]);
+  const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [total, setTotal] = useState(0);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const fullTextCache = useRef<Record<string, string>>({});
+  const [loadingTextId, setLoadingTextId] = useState<string | null>(null);
 
   const [botChats, setBotChats] = useState<BotChat[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
@@ -291,6 +369,7 @@ export default function TgTranscribePage() {
   const [addChatTitle, setAddChatTitle] = useState('');
 
   const isJobActive = activeJob && ['pending', 'running'].includes(activeJob.status);
+  const isJobOwner = activeJob?.isOwner !== false;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -557,78 +636,71 @@ export default function TgTranscribePage() {
     }
   };
 
-  const limit = 50;
+  const PAGE_SIZE = 50;
 
-  const fetchSenders = useCallback(async () => {
+  const fetchAllItems = useCallback(async () => {
+    setLoading(true);
     try {
       const token = await getToken();
-      if (!token) return;
-      const res = await fetch('/api/tools/tg-transcribe/senders', {
+      if (!token) { setAllItems([]); return; }
+      const res = await fetch('/api/tools/tg-transcribe?limit=200&offset=0', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) return;
-      const json = (await res.json()) as { senders: string[] };
-      setSenders(json.senders ?? []);
+      if (!res.ok) { setAllItems([]); return; }
+      const json = (await res.json()) as { items: TranscriptItem[] };
+      setAllItems(json.items ?? []);
+      fullTextCache.current = {};
     } catch {
-      /* ignore */
+      setAllItems([]);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  const fetchItems = useCallback(
-    async (sender: string | null, pageOffset: number) => {
-      setLoading(true);
-      try {
-        const token = await getToken();
-        if (!token) {
-          setItems([]);
-          return;
-        }
-        const params = new URLSearchParams({ limit: String(limit), offset: String(pageOffset) });
-        if (sender) params.set('sender', sender);
+  const senders = React.useMemo(() => {
+    const names = new Set<string>();
+    for (const item of allItems) {
+      if (item.sender_name) names.add(item.sender_name);
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [allItems]);
 
-        const res = await fetch(`/api/tools/tg-transcribe?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          setItems([]);
-          return;
-        }
-        const json = (await res.json()) as { items: TranscriptItem[]; total: number };
-        setItems(json.items ?? []);
-        setTotal(json.total ?? 0);
-      } catch {
-        setItems([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [limit],
+  const filteredItems = React.useMemo(
+    () => activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems,
+    [allItems, activeSender],
+  );
+
+  const total = filteredItems.length;
+  const items = React.useMemo(
+    () => filteredItems.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    [filteredItems, page],
   );
 
   useEffect(() => {
-    void fetchSenders();
+    void fetchAllItems();
     void fetchChats();
-  }, [fetchSenders, fetchChats]);
+  }, [fetchAllItems, fetchChats]);
 
-  useEffect(() => {
-    void fetchItems(activeSender, offset);
-  }, [activeSender, offset, fetchItems]);
-
-  // Refresh transcript list when a job finishes
+  // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
+  const prevCompletedRef = useRef<number>(0);
   useEffect(() => {
     if (activeJob) {
       prevJobRef.current = activeJob.id;
+      if (activeJob.completed > prevCompletedRef.current) {
+        prevCompletedRef.current = activeJob.completed;
+        void fetchAllItems();
+      }
     } else if (prevJobRef.current && scanResult) {
-      void fetchItems(activeSender, offset);
-      void fetchSenders();
+      prevCompletedRef.current = 0;
+      void fetchAllItems();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, activeSender, offset, fetchItems, fetchSenders]);
+  }, [activeJob, scanResult, fetchAllItems]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
-    setOffset(0);
+    setPage(0);
     setExpandedId(null);
   };
 
@@ -654,8 +726,8 @@ export default function TgTranscribePage() {
     URL.revokeObjectURL(url);
   };
 
-  const totalPages = Math.ceil(total / limit);
-  const currentPage = Math.floor(offset / limit) + 1;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const currentPage = page + 1;
 
   return (
     <div className="flex gap-6 text-left max-w-full">
@@ -855,7 +927,7 @@ export default function TgTranscribePage() {
                   className="block w-20 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none disabled:opacity-50"
                 />
               </label>
-              {isJobActive ? (
+              {isJobActive && isJobOwner ? (
                 <button
                   type="button"
                   onClick={() => setShowStopDialog(true)}
@@ -864,7 +936,7 @@ export default function TgTranscribePage() {
                   <Square className="h-3 w-3" />
                   Остановить
                 </button>
-              ) : (
+              ) : !isJobActive ? (
                 <button
                   type="button"
                   onClick={onScan}
@@ -879,7 +951,7 @@ export default function TgTranscribePage() {
                   <Search className="h-3.5 w-3.5" />
                   Сканировать
                 </button>
-              )}
+              ) : null}
             </div>
 
             {scanError && (
@@ -895,10 +967,12 @@ export default function TgTranscribePage() {
                 <div className="flex items-center justify-between rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2">
                   <div className="flex items-center gap-2 text-xs text-indigo-700">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span className="font-medium">Транскрибация выполняется в фоне</span>
+                    <span className="font-medium">
+                      {isJobOwner ? 'Транскрибация выполняется в фоне' : 'Транскрибация запущена другим пользователем'}
+                    </span>
                   </div>
                   <span className="text-[10px] text-indigo-500">
-                    Можно закрыть страницу — процесс продолжится
+                    {isJobOwner ? 'Можно закрыть страницу — процесс продолжится' : 'Новую транскрибацию начать нельзя'}
                   </span>
                 </div>
 
@@ -1079,7 +1153,24 @@ export default function TgTranscribePage() {
                 >
                   <button
                     type="button"
-                    onClick={() => setExpandedId(isExpanded ? null : item.id)}
+                    onClick={() => {
+                      if (isExpanded) { setExpandedId(null); return; }
+                      setExpandedId(item.id);
+                      if (item.hasFullText && !fullTextCache.current[item.id]) {
+                        setLoadingTextId(item.id);
+                        getToken().then((token) => {
+                          if (!token) return;
+                          return fetch(`/api/tools/tg-transcribe?id=${encodeURIComponent(item.id)}`, {
+                            headers: { Authorization: `Bearer ${token}` },
+                          });
+                        })
+                          .then((res) => res?.ok ? res.json() : null)
+                          .then((json: { text?: string } | null) => {
+                            if (json?.text) fullTextCache.current[item.id] = json.text;
+                          })
+                          .finally(() => setLoadingTextId(null));
+                      }
+                    }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50/50 transition-colors rounded-xl"
                   >
                     <div className="flex-1 min-w-0">
@@ -1137,48 +1228,61 @@ export default function TgTranscribePage() {
                         </div>
                       )}
 
-                      {item.text && (
-                        <>
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void onCopy(item.text, item.id);
-                              }}
-                              className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition"
-                            >
-                              {copiedId === item.id ? (
-                                <>
-                                  <Check className="h-3.5 w-3.5" />
-                                  Скопировано
-                                </>
+                      {item.text && (() => {
+                        const displayText = fullTextCache.current[item.id] || item.text;
+                        const isLoadingFull = loadingTextId === item.id;
+                        return (
+                          <>
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                disabled={isLoadingFull}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void onCopy(displayText, item.id);
+                                }}
+                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50"
+                              >
+                                {copiedId === item.id ? (
+                                  <>
+                                    <Check className="h-3.5 w-3.5" />
+                                    Скопировано
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3.5 w-3.5" />
+                                    Копировать
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isLoadingFull}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onDownloadTxt(displayText, item.filename);
+                                }}
+                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                TXT
+                              </button>
+                            </div>
+                            <div className="max-h-96 overflow-auto rounded-xl bg-gray-50 px-3 py-2">
+                              {isLoadingFull ? (
+                                <div className="flex items-center gap-2 py-2 text-xs text-gray-400">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Загрузка полного текста…
+                                </div>
                               ) : (
-                                <>
-                                  <Copy className="h-3.5 w-3.5" />
-                                  Копировать
-                                </>
+                                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-800">
+                                  {displayText}
+                                </pre>
                               )}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDownloadTxt(item.text, item.filename);
-                              }}
-                              className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition"
-                            >
-                              <Download className="h-3.5 w-3.5" />
-                              TXT
-                            </button>
-                          </div>
-                          <div className="max-h-96 overflow-auto rounded-xl bg-gray-50 px-3 py-2">
-                            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-800">
-                              {item.text}
-                            </pre>
-                          </div>
-                        </>
-                      )}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -1193,7 +1297,7 @@ export default function TgTranscribePage() {
             <button
               type="button"
               disabled={currentPage <= 1}
-              onClick={() => setOffset(Math.max(0, offset - limit))}
+              onClick={() => setPage(Math.max(0, page - 1))}
               className={[
                 'rounded-full px-3 py-1.5 text-xs font-medium border transition',
                 currentPage <= 1
@@ -1209,7 +1313,7 @@ export default function TgTranscribePage() {
             <button
               type="button"
               disabled={currentPage >= totalPages}
-              onClick={() => setOffset(offset + limit)}
+              onClick={() => setPage(page + 1)}
               className={[
                 'rounded-full px-3 py-1.5 text-xs font-medium border transition',
                 currentPage >= totalPages
