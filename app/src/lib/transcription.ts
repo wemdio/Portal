@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Agent } from 'undici';
 
 const OPENROUTER_VIDEO_TRANSCRIPT_API_KEY = (
   process.env.OPENROUTER_VIDEO_TRANSCRIPT_API_KEY ?? ''
@@ -23,6 +24,13 @@ const TRANSCRIPTION_WORKER_URL =
   process.env.TRANSCRIPTION_WORKER_URL || 'http://transcribe-worker:8070';
 
 const LOCAL_TRANSCRIBE_TIMEOUT_MS = 180 * 60 * 1000;
+
+const transcribeAgent = new Agent({
+  headersTimeout: LOCAL_TRANSCRIBE_TIMEOUT_MS,
+  bodyTimeout: LOCAL_TRANSCRIBE_TIMEOUT_MS,
+  keepAliveTimeout: 10_000,
+  keepAliveMaxTimeout: 10_000,
+});
 
 type LocalProgressStage = 'queued' | 'converting' | 'transcribing' | 'done' | 'cancelled' | 'error';
 
@@ -296,6 +304,8 @@ async function callLocalTranscription(input: {
     body: form,
     headers: input.jobId ? { 'x-transcribe-job-id': input.jobId } : undefined,
     signal: AbortSignal.timeout(LOCAL_TRANSCRIBE_TIMEOUT_MS),
+    // @ts-expect-error -- undici dispatcher option; bypasses default 5-min headersTimeout
+    dispatcher: transcribeAgent,
   });
 
   const raw = await res.text().catch(() => '');
