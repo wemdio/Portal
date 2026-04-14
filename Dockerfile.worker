@@ -55,6 +55,10 @@ RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 worker
 # Copy Playwright browser cache from deps stage
 COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
 
+# ffmpeg for audio/video extraction (transcription workers)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install only Playwright system libraries (no browser download)
 RUN npx playwright install-deps chromium
 
