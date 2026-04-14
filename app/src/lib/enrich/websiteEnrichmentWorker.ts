@@ -4,6 +4,7 @@ import { extractNormalizedUrls, fetchAndExtract, normalizeUrl } from '@/lib/enri
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
+import { applyEnrichmentResults } from '@/lib/spreadsheet/applyJobResults';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
 
@@ -27,6 +28,9 @@ type JobRow = {
   processed: number;
   success_count: number;
   error_count: number;
+  spreadsheet_tab_id: string | null;
+  result_col_index: number | null;
+  result_col_header: string | null;
 };
 
 type FetchResult = { text?: string; error?: string };
@@ -485,7 +489,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count')
+      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count, spreadsheet_tab_id, result_col_index, result_col_header')
       .eq('id', jobId)
       .single<JobRow>();
 
@@ -788,6 +792,21 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       success: finalSuccess,
       errors: finalErrors,
     });
+
+    if (
+      finalStatus === 'completed' &&
+      job.spreadsheet_tab_id &&
+      job.result_col_index != null
+    ) {
+      await applyEnrichmentResults(
+        job.user_id,
+        jobId,
+        job.spreadsheet_tab_id,
+        job.result_col_index,
+        job.result_col_header ?? undefined,
+      );
+    }
+
     await trace?.end({ processed: processedTotal, success: finalSuccess, errors: finalErrors, status: finalStatus });
   } catch (err) {
     await logError('website.enrichment.worker.failed', err, { jobId });

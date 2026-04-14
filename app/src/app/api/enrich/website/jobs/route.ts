@@ -70,9 +70,15 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return jsonError('Unauthorized', 401);
 
-    let body: { rows?: EnqueueRow[]; extraction_type?: string };
+    let body: {
+      rows?: EnqueueRow[];
+      extraction_type?: string;
+      spreadsheet_tab_id?: string;
+      result_col_index?: number;
+      result_col_header?: string;
+    };
     try {
-      body = (await req.json()) as { rows?: EnqueueRow[]; extraction_type?: string };
+      body = (await req.json()) as typeof body;
     } catch {
       return jsonError('Invalid JSON body', 400);
     }
@@ -184,6 +190,9 @@ export async function POST(req: NextRequest) {
         success_count: 0,
         error_count: invalidCount,
         created_at: now,
+        spreadsheet_tab_id: body.spreadsheet_tab_id ?? null,
+        result_col_index: body.result_col_index ?? null,
+        result_col_header: body.result_col_header ?? null,
       })
       .select('id')
       .single<{ id: string }>();

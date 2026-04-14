@@ -444,7 +444,7 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
       </div>
 
       {/* Actions footer */}
-      <div className="shrink-0 border-t border-zinc-200 px-6 py-3 flex items-center gap-3">
+      <div className="sticky bottom-0 z-10 border-t border-zinc-200 bg-white px-6 py-3 flex items-center gap-3">
         <Link
           href={`/instantly/emails?campaign_id=${item.campaign_id}` as Route}
           className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
@@ -661,7 +661,7 @@ export default function IncomingLeadsPage() {
         </div>
 
         {/* Right: detail */}
-        <div className="bg-white">
+        <div className="bg-white overflow-y-auto">
           {selectedItem ? (
             <DetailPanel item={selectedItem} onRefresh={loadData} />
           ) : (
