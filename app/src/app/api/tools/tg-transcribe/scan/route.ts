@@ -43,18 +43,17 @@ export async function POST(req: NextRequest) {
 
         if (!chatId) return jsonError('Необходим chatId', 400);
 
-        // Check for existing active job for this chat
+        // Block if any scan job is already running (globally)
         const { data: active } = await admin
           .from('tg_scan_jobs')
           .select('id, status')
-          .eq('tg_chat_id', chatId)
           .in('status', ['pending', 'running'])
           .limit(1)
-          .single();
+          .maybeSingle();
 
         if (active) {
           return NextResponse.json(
-            { error: 'Для этого чата уже запущено сканирование', jobId: active.id },
+            { error: 'Уже запущена транскрибация. Дождитесь завершения.', jobId: active.id },
             { status: 409 },
           );
         }
@@ -91,25 +90,27 @@ export async function GET(req: NextRequest) {
         const user = await getUser(req);
         if (!user) return jsonError('Необходима авторизация', 401);
 
-        // Return any active job first
+        const JOB_COLS = 'id,tg_chat_id,topic_id,video_count,status,scanned,videos_found,completed,errors,videos,error_message,created_at,updated_at,finished_at,user_id' as const;
+
+        // Return any active job (global, not just current user's)
         const { data: active } = await admin
           .from('tg_scan_jobs')
-          .select('id,tg_chat_id,topic_id,video_count,status,scanned,videos_found,completed,errors,videos,error_message,created_at,updated_at,finished_at')
-          .eq('user_id', user.id)
+          .select(JOB_COLS)
           .in('status', ['pending', 'running'])
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle();
 
         if (active) {
-          return NextResponse.json({ job: active });
+          const { user_id: jobUserId, ...rest } = active;
+          return NextResponse.json({ job: { ...rest, isOwner: jobUserId === user.id } });
         }
 
-        // Return the last finished job (within 5 minutes) for showing result
+        // Return the last finished job from current user (within 5 minutes)
         const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         const { data: recent } = await admin
           .from('tg_scan_jobs')
-          .select('id,tg_chat_id,topic_id,video_count,status,scanned,videos_found,completed,errors,videos,error_message,created_at,updated_at,finished_at')
+          .select(JOB_COLS)
           .eq('user_id', user.id)
           .in('status', ['completed', 'failed', 'stopped'])
           .gte('finished_at', fiveMinAgo)
@@ -117,7 +118,12 @@ export async function GET(req: NextRequest) {
           .limit(1)
           .maybeSingle();
 
-        return NextResponse.json({ job: recent ?? null });
+        if (recent) {
+          const { user_id: _uid, ...rest } = recent;
+          return NextResponse.json({ job: { ...rest, isOwner: true } });
+        }
+
+        return NextResponse.json({ job: null });
     },
   );
 }

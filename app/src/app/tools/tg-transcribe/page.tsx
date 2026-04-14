@@ -83,6 +83,7 @@ interface ScanJob {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  isOwner?: boolean;
 }
 
 async function getToken() {
@@ -377,6 +378,7 @@ export default function TgTranscribePage() {
   const [addChatTitle, setAddChatTitle] = useState('');
 
   const isJobActive = activeJob && ['pending', 'running'].includes(activeJob.status);
+  const isJobOwner = activeJob?.isOwner !== false;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -941,7 +943,7 @@ export default function TgTranscribePage() {
                   className="block w-20 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none disabled:opacity-50"
                 />
               </label>
-              {isJobActive ? (
+              {isJobActive && isJobOwner ? (
                 <button
                   type="button"
                   onClick={() => setShowStopDialog(true)}
@@ -950,7 +952,7 @@ export default function TgTranscribePage() {
                   <Square className="h-3 w-3" />
                   Остановить
                 </button>
-              ) : (
+              ) : !isJobActive ? (
                 <button
                   type="button"
                   onClick={onScan}
@@ -965,7 +967,7 @@ export default function TgTranscribePage() {
                   <Search className="h-3.5 w-3.5" />
                   Сканировать
                 </button>
-              )}
+              ) : null}
             </div>
 
             {scanError && (
@@ -981,10 +983,12 @@ export default function TgTranscribePage() {
                 <div className="flex items-center justify-between rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2">
                   <div className="flex items-center gap-2 text-xs text-indigo-700">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span className="font-medium">Транскрибация выполняется в фоне</span>
+                    <span className="font-medium">
+                      {isJobOwner ? 'Транскрибация выполняется в фоне' : 'Транскрибация запущена другим пользователем'}
+                    </span>
                   </div>
                   <span className="text-[10px] text-indigo-500">
-                    Можно закрыть страницу — процесс продолжится
+                    {isJobOwner ? 'Можно закрыть страницу — процесс продолжится' : 'Новую транскрибацию начать нельзя'}
                   </span>
                 </div>
 
