@@ -145,9 +145,7 @@ export function isAutoReplyOrUnsubscribe(text: string): boolean {
 
 export function isProposalMessage(text: string): boolean {
   if (!text) return false;
-  if (text.length < 100) return false;
-  if (isContactRequestOnly(text)) return false;
-  return true;
+  return text.length >= 200;
 }
 
 // ─── AI Classification ──────────────────────────────────────────────────────
