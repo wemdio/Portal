@@ -138,20 +138,32 @@ function ForwardToClientDialog({
   const [allChats, setAllChats] = useState<BotChat[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
-  const [addMode, setAddMode] = useState(false);
-  const [newChatId, setNewChatId] = useState('');
-  const [adding, setAdding] = useState(false);
+
+  const loadChats = useCallback(async (scan = false) => {
+    try {
+      const url = scan ? '/api/instantly/bot-chats?scan=true' : '/api/instantly/bot-chats';
+      const res = await fetchWithAuth<{ chats: BotChat[] }>(url);
+      setAllChats(res.chats ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки чатов');
+    }
+  }, []);
 
   useEffect(() => {
-    fetchWithAuth<{ chats: BotChat[] }>('/api/instantly/bot-chats')
-      .then((res) => setAllChats(res.chats ?? []))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Ошибка'))
-      .finally(() => setLoading(false));
-  }, []);
+    loadChats().finally(() => setLoading(false));
+  }, [loadChats]);
+
+  const handleScan = async () => {
+    setScanning(true);
+    setError('');
+    await loadChats(true);
+    setScanning(false);
+  };
 
   const filtered = allChats.filter((c) =>
     !search || (c.chat_title ?? '').toLowerCase().includes(search.toLowerCase()),
@@ -176,27 +188,6 @@ function ForwardToClientDialog({
     }
   };
 
-  const handleAddChat = async () => {
-    const chatId = Number(newChatId.trim());
-    if (!chatId || isNaN(chatId)) { setError('Введите числовой Chat ID'); return; }
-    setAdding(true);
-    setError('');
-    try {
-      const res = await fetchWithAuth<{ chat: { chat_id: number; title: string; type: string } }>(`/api/instantly/bot-chats?verify=${chatId}`);
-      setAllChats((prev) => {
-        if (prev.some((c) => c.chat_id === res.chat.chat_id)) return prev;
-        return [...prev, { chat_id: res.chat.chat_id, chat_title: res.chat.title, chat_type: res.chat.type }];
-      });
-      setSelectedChat(res.chat.chat_id);
-      setAddMode(false);
-      setNewChatId('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Бот не найден в этом чате');
-    } finally {
-      setAdding(false);
-    }
-  };
-
   const selectedTitle = allChats.find((c) => c.chat_id === selectedChat)?.chat_title;
 
   return (
@@ -204,7 +195,7 @@ function ForwardToClientDialog({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1.5">
           <Send className="h-3.5 w-3.5 text-blue-500" />
-          <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Передать клиенту</span>
+          <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Передать в Telegram</span>
         </div>
         <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
           <X className="h-3.5 w-3.5" />
@@ -219,24 +210,46 @@ function ForwardToClientDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
-          {/* Search */}
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-300 pointer-events-none" />
-            <input
-              type="text"
-              placeholder="Поиск чата по названию..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-8 pr-3 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 placeholder:text-zinc-300"
-            />
+          {/* Search + refresh */}
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-300 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Поиск чата..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-8 pr-3 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 placeholder:text-zinc-300"
+              />
+            </div>
+            <button
+              onClick={handleScan}
+              disabled={scanning}
+              title="Обновить список чатов из Telegram"
+              className="shrink-0 rounded-lg border border-zinc-200 p-2 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+            >
+              {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" /><path d="M16 21h5v-5" />
+                </svg>
+              )}
+            </button>
           </div>
 
           {/* Chat list */}
-          <div className="max-h-48 overflow-y-auto rounded-lg border border-zinc-200 bg-white divide-y divide-zinc-100">
+          <div className="max-h-52 overflow-y-auto rounded-lg border border-zinc-200 bg-white divide-y divide-zinc-100">
             {filtered.length === 0 ? (
-              <p className="text-xs text-zinc-400 py-4 text-center">
-                {allChats.length === 0 ? 'Нет известных чатов. Добавьте чат ниже.' : 'Ничего не найдено'}
-              </p>
+              <div className="py-6 text-center">
+                <p className="text-xs text-zinc-400">
+                  {allChats.length === 0 ? 'Чаты не найдены' : 'Ничего не найдено'}
+                </p>
+                {allChats.length === 0 && (
+                  <button onClick={handleScan} disabled={scanning}
+                    className="mt-2 text-xs text-blue-500 hover:text-blue-700 font-medium transition-colors">
+                    {scanning ? 'Сканирование...' : 'Загрузить чаты из Telegram'}
+                  </button>
+                )}
+              </div>
             ) : (
               filtered.map((chat) => (
                 <button
@@ -256,35 +269,12 @@ function ForwardToClientDialog({
             )}
           </div>
 
-          {/* Add new chat */}
-          {addMode ? (
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                placeholder="Chat ID (число)"
-                value={newChatId}
-                onChange={(e) => setNewChatId(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAddChat()}
-                className="flex-1 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 placeholder:text-zinc-300"
-              />
-              <button onClick={handleAddChat} disabled={adding}
-                className="rounded-lg bg-zinc-100 px-2.5 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 disabled:opacity-50 transition-colors">
-                {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Добавить'}
-              </button>
-              <button onClick={() => { setAddMode(false); setNewChatId(''); }} className="text-xs text-zinc-400 hover:text-zinc-600">Отмена</button>
-            </div>
-          ) : (
-            <button onClick={() => setAddMode(true)} className="text-xs text-blue-500 hover:text-blue-700 font-medium transition-colors">
-              + Добавить чат по ID
-            </button>
-          )}
-
           {/* Action buttons */}
           <div className="flex items-center justify-between pt-1">
             {selectedChat ? (
               <p className="text-xs text-zinc-500 truncate max-w-[60%]">→ {selectedTitle}</p>
             ) : (
-              <p className="text-xs text-zinc-400">Выберите чат</p>
+              <p className="text-xs text-zinc-400">{allChats.length} чатов</p>
             )}
             <div className="flex gap-2">
               <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
