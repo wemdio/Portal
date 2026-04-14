@@ -156,8 +156,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
 
   const isActive = ['downloading', 'converting', 'transcribing'].includes(video.phase);
 
-  const txProgressRef = useRef<TranscriptionProgress | null>(null);
-  const [, forceRender] = useState(0);
+  const [txProgress, setTxProgress] = useState<TranscriptionProgress | null>(null);
   const txPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -166,7 +165,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
         clearInterval(txPollRef.current);
         txPollRef.current = null;
       }
-      txProgressRef.current = null;
+      setTxProgress(null);
       return;
     }
 
@@ -181,8 +180,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
         if (res.ok) {
           const data = (await res.json()) as TranscriptionProgress;
           if (data.found) {
-            txProgressRef.current = data;
-            forceRender((n) => n + 1);
+            setTxProgress(data);
           }
         }
       } catch { /* ignore */ }
@@ -197,8 +195,6 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
       }
     };
   }, [isTranscribing, video.transcriptionJobId]);
-
-  const txProgress = txProgressRef.current;
 
   const txLabel = (() => {
     if (!isTranscribing || !txProgress) return null;
