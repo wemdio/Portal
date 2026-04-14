@@ -4037,6 +4037,9 @@ export function DatabaseSpreadsheet() {
             rowIndex: row.rowIndex,
             url: row.sourceValue,
           })),
+          spreadsheet_tab_id: activeTabId,
+          result_col_index: newColIndex,
+          result_col_header: newHeaderName,
         }),
         signal: enrichmentAbortRef.current?.signal,
       });
@@ -4681,6 +4684,9 @@ export function DatabaseSpreadsheet() {
           briefText: effectiveBriefText,
           total: rowsToProcess.length,
           mode: 'staged',
+          spreadsheet_tab_id: activeTabId,
+          score_col_index: scoreColIndex,
+          reason_col_index: reasonColIndex,
         }),
       });
       throwIfPayloadTooLarge(startRes.status, 'создании задачи');
@@ -5742,6 +5748,9 @@ export function DatabaseSpreadsheet() {
         body: JSON.stringify({
           rows: rowsToProcess.map((row) => ({ rowIndex: row.rowIndex, url: row.sourceValue })),
           extraction_type: 'email',
+          spreadsheet_tab_id: activeTabId,
+          result_col_index: newColIndex,
+          result_col_header: newHeaderName,
         }),
         signal: emailScrapingAbortRef.current?.signal,
       });
@@ -7615,6 +7624,22 @@ export function DatabaseSpreadsheet() {
     runBriefScoringPolling,
     tabs,
   ]);
+
+  const reconcileCalledRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !userId || reconcileCalledRef.current) return;
+    reconcileCalledRef.current = true;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token) return;
+      try {
+        await fetch('/api/spreadsheet/reconcile', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch { /* best-effort */ }
+    })();
+  }, [isHydrated, userId, getFreshToken]);
 
   const toolbarMonochromeButtonClass =
     'inline-flex items-center rounded border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';
