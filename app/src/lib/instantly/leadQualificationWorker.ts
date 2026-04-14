@@ -62,8 +62,14 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   // 2. Fetch recent reply emails for subscribed campaigns
   const replyEmails: (Email & { _campaignName?: string })[] = [];
+  const interCampaignDelay = Math.max(
+    1000,
+    Number(process.env.INSTANTLY_LEADS_INTER_CAMPAIGN_DELAY_MS ?? '3500'),
+  );
 
-  for (const campaignId of campaignIds) {
+  for (let i = 0; i < campaignIds.length; i++) {
+    const campaignId = campaignIds[i];
+    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
     try {
       const res = await instantly.listEmails({
         campaign_id: campaignId,
@@ -85,7 +91,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
 
-  // 3. Deduplicate: skip emails that already have a qualification record
+  // 3a. Deduplicate: skip reply emails that were already processed
   const emailIds = replyEmails.map((e) => e.id).filter(Boolean);
   const { data: existing } = await db
     .from('instantly_lead_qualifications')
@@ -95,7 +101,24 @@ export async function pollAndQualifyReplies(): Promise<number> {
   const existingIds = new Set(
     (existing ?? []).map((r: { instantly_email_id: string }) => r.instantly_email_id),
   );
-  const newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
+
+  let newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
+
+  // 3b. Within current batch: keep only the most recent reply per lead+campaign
+  const latestByLead = new Map<string, (typeof newReplies)[0]>();
+  for (const reply of newReplies) {
+    const leadEmail = reply.from_address_email ?? '';
+    const key = `${leadEmail}::${reply.campaign_id}`;
+    const prev = latestByLead.get(key);
+    if (!prev) {
+      latestByLead.set(key, reply);
+    } else {
+      const prevTs = new Date(prev.timestamp_email ?? prev.timestamp_created ?? 0).getTime();
+      const curTs = new Date(reply.timestamp_email ?? reply.timestamp_created ?? 0).getTime();
+      if (curTs > prevTs) latestByLead.set(key, reply);
+    }
+  }
+  newReplies = [...latestByLead.values()];
 
   if (newReplies.length === 0) return 0;
 
@@ -103,7 +126,9 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   // 4. Qualify each new reply (capped per tick to stay within rate limits)
   let processed = 0;
-  for (const reply of newReplies.slice(0, MAX_QUALIFY_PER_TICK)) {
+  for (let i = 0; i < Math.min(newReplies.length, MAX_QUALIFY_PER_TICK); i++) {
+    const reply = newReplies[i];
+    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
     try {
       await qualifyOneReply(db, reply, apiKey);
       processed++;
@@ -146,7 +171,7 @@ async function qualifyOneReply(
   let leadName: string | undefined;
   let companyName: string | undefined;
   try {
-    const leads = await instantly.getLeadsByEmail({ email: leadEmail });
+    const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId });
     const lead = leads?.[0];
     if (lead) {
       leadName =
@@ -169,6 +194,13 @@ async function qualifyOneReply(
   else if (result.isLead) status = 'lead';
   else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
+
+  // Remove any previous qualification for this lead+campaign before inserting
+  await db
+    .from('instantly_lead_qualifications')
+    .delete()
+    .eq('lead_email', leadEmail)
+    .eq('campaign_id', campaignId);
 
   await db.from('instantly_lead_qualifications').insert({
     campaign_id: campaignId,

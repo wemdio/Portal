@@ -240,37 +240,50 @@ function ListItem({
     <button
       onClick={onClick}
       className={`
-        w-full text-left border-l-[3px] transition-all duration-150
+        w-full text-left border-l-[3px] transition-all duration-150 relative
         ${m.border}
-        ${active ? 'bg-zinc-100' : isUnread ? 'bg-white hover:bg-zinc-50' : 'bg-zinc-50/40 hover:bg-zinc-50'}
+        ${active
+          ? 'bg-zinc-100'
+          : isUnread
+            ? 'bg-blue-50/60 hover:bg-blue-50'
+            : 'bg-zinc-50/40 hover:bg-zinc-50'
+        }
       `}
     >
+      {isUnread && (
+        <div className="absolute inset-y-0 right-0 w-1 bg-blue-500 rounded-l" />
+      )}
       <div className="px-4 py-3">
         <div className="flex items-center justify-between gap-2 mb-1">
           <div className="flex items-center gap-2 min-w-0">
             {isUnread && (
-              <span className="relative flex h-2 w-2 shrink-0">
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-40" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
               </span>
             )}
-            <span className={`text-sm truncate ${isUnread ? 'font-semibold text-zinc-900' : 'text-zinc-600'}`}>
+            <span className={`text-sm truncate ${isUnread ? 'font-bold text-zinc-900' : 'font-normal text-zinc-500'}`}>
               {item.lead_name || item.lead_email}
             </span>
           </div>
-          <span className="text-[10px] text-zinc-400 tabular-nums shrink-0">{formatDate(date)}</span>
+          <span className={`text-[10px] tabular-nums shrink-0 ${isUnread ? 'text-blue-500 font-semibold' : 'text-zinc-400'}`}>
+            {formatDate(date)}
+          </span>
         </div>
 
         {item.company_name && (
-          <p className="text-[11px] text-zinc-400 truncate mb-1">{item.company_name}</p>
+          <p className={`text-[11px] truncate mb-1 ${isUnread ? 'text-zinc-500' : 'text-zinc-400'}`}>{item.company_name}</p>
         )}
 
-        <p className={`text-xs truncate ${isUnread ? 'text-zinc-500' : 'text-zinc-400'}`}>
+        <p className={`text-xs truncate ${isUnread ? 'text-zinc-600 font-medium' : 'text-zinc-400'}`}>
           {item.reply_preview ?? item.reply_subject ?? ''}
         </p>
 
-        <div className="mt-1.5">
+        <div className="mt-1.5 flex items-center gap-2">
           <StatusBadge status={item.status} size="sm" />
+          {isUnread && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-blue-500">новое</span>
+          )}
         </div>
       </div>
     </button>
