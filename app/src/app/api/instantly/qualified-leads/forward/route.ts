@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 
 interface ForwardBody {
   qualification_id: string;
-  client_user_id: string;
+  client_user_id?: string | null;
   telegram_chat_id?: number | null;
 }
 
@@ -21,25 +21,49 @@ export const POST = withAuth(async (req, user) => {
   const body = (await req.json()) as ForwardBody;
   const { qualification_id, client_user_id, telegram_chat_id } = body;
 
-  if (!qualification_id || !client_user_id) {
+  if (!qualification_id) {
     return NextResponse.json(
-      { error: 'qualification_id and client_user_id are required' },
+      { error: 'qualification_id is required' },
       { status: 400 },
     );
   }
 
-  const { data: existing } = await supabaseInstantly
-    .from('client_forwarded_leads')
-    .select('id')
-    .eq('qualification_id', qualification_id)
-    .eq('client_user_id', client_user_id)
-    .maybeSingle();
-
-  if (existing) {
+  if (!client_user_id && !telegram_chat_id) {
     return NextResponse.json(
-      { error: 'Этот лид уже был передан этому клиенту' },
-      { status: 409 },
+      { error: 'Укажите client_user_id или telegram_chat_id' },
+      { status: 400 },
     );
+  }
+
+  // Deduplication: check by qualification + chat combo (or qualification + client)
+  if (telegram_chat_id) {
+    const { data: existing } = await supabaseInstantly
+      .from('client_forwarded_leads')
+      .select('id')
+      .eq('qualification_id', qualification_id)
+      .eq('telegram_chat_id', telegram_chat_id)
+      .maybeSingle();
+
+    if (existing) {
+      return NextResponse.json(
+        { error: 'Этот лид уже был передан в этот чат' },
+        { status: 409 },
+      );
+    }
+  } else if (client_user_id) {
+    const { data: existing } = await supabaseInstantly
+      .from('client_forwarded_leads')
+      .select('id')
+      .eq('qualification_id', qualification_id)
+      .eq('client_user_id', client_user_id)
+      .maybeSingle();
+
+    if (existing) {
+      return NextResponse.json(
+        { error: 'Этот лид уже был передан этому клиенту' },
+        { status: 409 },
+      );
+    }
   }
 
   const { data: qual, error: qualErr } = await supabaseInstantly
@@ -82,8 +106,8 @@ export const POST = withAuth(async (req, user) => {
     .from('client_forwarded_leads')
     .insert({
       qualification_id,
-      client_user_id,
-      forwarded_by: user.id,
+    client_user_id: client_user_id ?? null,
+    forwarded_by: user.id,
       campaign_id: qual.campaign_id,
       campaign_name: qual.campaign_name,
       lead_email: qual.lead_email,

@@ -128,44 +128,44 @@ function ConfidenceBar({ value }: { value: number | null }) {
 
 /* ─── Forward Dialog ─────────────────────────────────────────────────────────── */
 
-type ForwardClient = {
-  id: string;
-  full_name: string | null;
-  email: string | null;
-  telegram_chats: { chat_id: number; chat_title: string | null }[];
-};
+type BotChat = { chat_id: number; chat_title: string | null; chat_type: string | null };
 
 function ForwardToClientDialog({
-  qualificationId, campaignId, onClose, onForwarded,
+  qualificationId, onClose, onForwarded,
 }: {
-  qualificationId: string; campaignId: string; onClose: () => void; onForwarded: () => void;
+  qualificationId: string; onClose: () => void; onForwarded: () => void;
 }) {
-  const [clients, setClients] = useState<ForwardClient[]>([]);
+  const [allChats, setAllChats] = useState<BotChat[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [selectedClient, setSelectedClient] = useState('');
+  const [search, setSearch] = useState('');
   const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [addMode, setAddMode] = useState(false);
+  const [newChatId, setNewChatId] = useState('');
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    fetchWithAuth<{ clients: ForwardClient[] }>(`/api/instantly/forward-clients?campaign_id=${campaignId}`)
-      .then((res) => setClients(res.clients))
+    fetchWithAuth<{ chats: BotChat[] }>('/api/instantly/bot-chats')
+      .then((res) => setAllChats(res.chats ?? []))
       .catch((err) => setError(err instanceof Error ? err.message : 'Ошибка'))
       .finally(() => setLoading(false));
-  }, [campaignId]);
+  }, []);
 
-  const currentClient = clients.find((c) => c.id === selectedClient);
+  const filtered = allChats.filter((c) =>
+    !search || (c.chat_title ?? '').toLowerCase().includes(search.toLowerCase()),
+  );
 
   const handleForward = async () => {
-    if (!selectedClient) return;
+    if (!selectedChat) return;
     setSending(true);
     setError('');
     try {
       await fetchWithAuth('/api/instantly/qualified-leads/forward', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qualification_id: qualificationId, client_user_id: selectedClient, telegram_chat_id: selectedChat }),
+        body: JSON.stringify({ qualification_id: qualificationId, telegram_chat_id: selectedChat }),
       });
       setSuccess(true);
       setTimeout(() => { onForwarded(); onClose(); }, 1200);
@@ -175,6 +175,29 @@ function ForwardToClientDialog({
       setSending(false);
     }
   };
+
+  const handleAddChat = async () => {
+    const chatId = Number(newChatId.trim());
+    if (!chatId || isNaN(chatId)) { setError('Введите числовой Chat ID'); return; }
+    setAdding(true);
+    setError('');
+    try {
+      const res = await fetchWithAuth<{ chat: { chat_id: number; title: string; type: string } }>(`/api/instantly/bot-chats?verify=${chatId}`);
+      setAllChats((prev) => {
+        if (prev.some((c) => c.chat_id === res.chat.chat_id)) return prev;
+        return [...prev, { chat_id: res.chat.chat_id, chat_title: res.chat.title, chat_type: res.chat.type }];
+      });
+      setSelectedChat(res.chat.chat_id);
+      setAddMode(false);
+      setNewChatId('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Бот не найден в этом чате');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const selectedTitle = allChats.find((c) => c.chat_id === selectedChat)?.chat_title;
 
   return (
     <div className="rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 to-white p-4">
@@ -187,38 +210,90 @@ function ForwardToClientDialog({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
+
       {loading ? (
         <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-blue-400" /></div>
       ) : success ? (
-        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium"><CheckCircle2 className="h-4 w-4" />Лид успешно передан</div>
+        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium"><CheckCircle2 className="h-4 w-4" />Лид передан в Telegram</div>
       ) : (
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
-          {clients.length === 0 ? (
-            <p className="text-xs text-zinc-400 py-2">Нет клиентов с доступом к этой кампании.</p>
-          ) : (
-            <>
-              <select value={selectedClient} onChange={(e) => { setSelectedClient(e.target.value); setSelectedChat(null); }}
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100">
-                <option value="">Выберите клиента...</option>
-                {clients.map((c) => <option key={c.id} value={c.id}>{c.full_name || c.email || c.id.slice(0, 8)}</option>)}
-              </select>
-              {currentClient && currentClient.telegram_chats.length > 0 && (
-                <select value={selectedChat ?? ''} onChange={(e) => setSelectedChat(e.target.value ? Number(e.target.value) : null)}
-                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100">
-                  <option value="">Не отправлять в Telegram</option>
-                  {currentClient.telegram_chats.map((ch) => <option key={ch.chat_id} value={ch.chat_id}>{ch.chat_title || `Chat ${ch.chat_id}`}</option>)}
-                </select>
-              )}
-              <div className="flex justify-end gap-2">
-                <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
-                <button onClick={handleForward} disabled={!selectedClient || sending}
-                  className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors">
-                  {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}Передать
+
+          {/* Search */}
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-300 pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Поиск чата по названию..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-lg border border-zinc-200 bg-white py-2 pl-8 pr-3 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 placeholder:text-zinc-300"
+            />
+          </div>
+
+          {/* Chat list */}
+          <div className="max-h-48 overflow-y-auto rounded-lg border border-zinc-200 bg-white divide-y divide-zinc-100">
+            {filtered.length === 0 ? (
+              <p className="text-xs text-zinc-400 py-4 text-center">
+                {allChats.length === 0 ? 'Нет известных чатов. Добавьте чат ниже.' : 'Ничего не найдено'}
+              </p>
+            ) : (
+              filtered.map((chat) => (
+                <button
+                  key={chat.chat_id}
+                  onClick={() => setSelectedChat(chat.chat_id)}
+                  className={`w-full text-left px-3 py-2.5 text-sm transition-colors flex items-center gap-2 ${
+                    selectedChat === chat.chat_id
+                      ? 'bg-blue-50 text-blue-700 font-medium'
+                      : 'hover:bg-zinc-50 text-zinc-700'
+                  }`}
+                >
+                  <MessageSquare className={`h-3.5 w-3.5 shrink-0 ${selectedChat === chat.chat_id ? 'text-blue-500' : 'text-zinc-300'}`} />
+                  <span className="truncate">{chat.chat_title || `Chat ${chat.chat_id}`}</span>
+                  {selectedChat === chat.chat_id && <Check className="h-3.5 w-3.5 ml-auto shrink-0 text-blue-500" />}
                 </button>
-              </div>
-            </>
+              ))
+            )}
+          </div>
+
+          {/* Add new chat */}
+          {addMode ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Chat ID (число)"
+                value={newChatId}
+                onChange={(e) => setNewChatId(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleAddChat()}
+                className="flex-1 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 placeholder:text-zinc-300"
+              />
+              <button onClick={handleAddChat} disabled={adding}
+                className="rounded-lg bg-zinc-100 px-2.5 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 disabled:opacity-50 transition-colors">
+                {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Добавить'}
+              </button>
+              <button onClick={() => { setAddMode(false); setNewChatId(''); }} className="text-xs text-zinc-400 hover:text-zinc-600">Отмена</button>
+            </div>
+          ) : (
+            <button onClick={() => setAddMode(true)} className="text-xs text-blue-500 hover:text-blue-700 font-medium transition-colors">
+              + Добавить чат по ID
+            </button>
           )}
+
+          {/* Action buttons */}
+          <div className="flex items-center justify-between pt-1">
+            {selectedChat ? (
+              <p className="text-xs text-zinc-500 truncate max-w-[60%]">→ {selectedTitle}</p>
+            ) : (
+              <p className="text-xs text-zinc-400">Выберите чат</p>
+            )}
+            <div className="flex gap-2">
+              <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
+              <button onClick={handleForward} disabled={!selectedChat || sending}
+                className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors">
+                {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}Передать
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -436,7 +511,6 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         {showForward && (
           <ForwardToClientDialog
             qualificationId={item.id}
-            campaignId={item.campaign_id}
             onClose={() => setShowForward(false)}
             onForwarded={() => { setShowForward(false); onRefresh(); }}
           />
