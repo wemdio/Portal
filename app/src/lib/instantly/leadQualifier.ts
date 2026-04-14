@@ -323,7 +323,7 @@ export async function classifyWithAI(
             { role: 'user', content: userMessage },
           ],
           temperature: 0.1,
-          max_tokens: 800,
+          max_tokens: 1500,
           response_format: { type: 'json_object' },
         }),
       });
