@@ -91,17 +91,43 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
 
-  // 3. Deduplicate: skip emails that already have a qualification record
+  // 3a. Deduplicate: skip emails that already have a qualification record
   const emailIds = replyEmails.map((e) => e.id).filter(Boolean);
   const { data: existing } = await db
     .from('instantly_lead_qualifications')
-    .select('instantly_email_id')
+    .select('instantly_email_id, lead_email, campaign_id')
     .in('instantly_email_id', emailIds);
 
   const existingIds = new Set(
     (existing ?? []).map((r: { instantly_email_id: string }) => r.instantly_email_id),
   );
-  const newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
+
+  // 3b. Also skip leads that already have ANY qualification in this campaign
+  const existingLeadKeys = new Set(
+    (existing ?? []).map(
+      (r: { lead_email: string; campaign_id: string }) =>
+        `${r.lead_email}::${r.campaign_id}`,
+    ),
+  );
+
+  let newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
+
+  // 3c. Keep only the most recent reply per lead+campaign
+  const latestByLead = new Map<string, (typeof newReplies)[0]>();
+  for (const reply of newReplies) {
+    const leadEmail = reply.from_address_email ?? '';
+    const key = `${leadEmail}::${reply.campaign_id}`;
+    if (existingLeadKeys.has(key)) continue;
+    const prev = latestByLead.get(key);
+    if (!prev) {
+      latestByLead.set(key, reply);
+    } else {
+      const prevTs = new Date(prev.timestamp_email ?? prev.timestamp_created ?? 0).getTime();
+      const curTs = new Date(reply.timestamp_email ?? reply.timestamp_created ?? 0).getTime();
+      if (curTs > prevTs) latestByLead.set(key, reply);
+    }
+  }
+  newReplies = [...latestByLead.values()];
 
   if (newReplies.length === 0) return 0;
 
