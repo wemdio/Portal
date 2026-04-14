@@ -344,7 +344,9 @@ export async function smtpVerify(
   if (SMTP_PROXY_URLS.length > 0) {
     return smtpVerifyViaProxy(email, mxHost, options);
   }
-  return smtpVerifyDirect(email, mxHost, options);
+  throw new Error(
+    'SMTP_PROXY_URLS is not configured. Direct SMTP connections on port 25 are disabled to prevent IP blacklisting. Set SMTP_PROXY_URLS environment variable.',
+  );
 }
 
 // ─── 10. Smart Verify (Aggregate Signals) ───────────────────────────────────

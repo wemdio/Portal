@@ -6,11 +6,13 @@ import type { Route } from 'next';
 import {
   ChevronLeft, ChevronRight, Loader2, Search, CheckCircle2,
   XCircle, AlertCircle, Eye, Mail, Sparkles, CircleDot, MessageSquare, Copy,
-  Send, X, Check,
+  Send, X, Check, ArrowUpRight, User, Building2, Tag,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { supabase } from '@/lib/supabaseClient';
+
+/* ─── Types ──────────────────────────────────────────────────────────────────── */
 
 type LeadQualification = {
   id: string;
@@ -42,16 +44,22 @@ type QualifiedLeadsResponse = {
   total: number;
   limit: number;
   offset: number;
+  counts?: Record<string, number>;
 };
 
-const STATUS_CONFIG: Record<string, { label: string; icon: React.ElementType; color: string; bg: string; ring: string }> = {
-  lead:         { label: 'Лид',         icon: CheckCircle2,   color: 'text-emerald-600', bg: 'bg-emerald-50',  ring: 'ring-emerald-200' },
-  objection:    { label: 'Возражение',  icon: MessageSquare,  color: 'text-violet-600',  bg: 'bg-violet-50',   ring: 'ring-violet-200' },
-  not_lead:     { label: 'Не лид',      icon: XCircle,        color: 'text-zinc-400',    bg: 'bg-zinc-50',     ring: 'ring-zinc-200' },
-  needs_review: { label: 'На проверку', icon: AlertCircle,    color: 'text-amber-600',   bg: 'bg-amber-50',    ring: 'ring-amber-200' },
-  error:        { label: 'Ошибка',      icon: XCircle,        color: 'text-red-500',     bg: 'bg-red-50',      ring: 'ring-red-200' },
-  pending:      { label: 'В очереди',   icon: Loader2,        color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200' },
-  processing:   { label: 'Обработка',   icon: Loader2,        color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200' },
+/* ─── Constants ──────────────────────────────────────────────────────────────── */
+
+const STATUS_META: Record<string, {
+  label: string; icon: React.ElementType;
+  color: string; bg: string; ring: string; border: string;
+}> = {
+  lead:         { label: 'Лид',         icon: CheckCircle2,  color: 'text-emerald-600', bg: 'bg-emerald-50',  ring: 'ring-emerald-200', border: 'border-l-emerald-500' },
+  objection:    { label: 'Возражение',  icon: MessageSquare, color: 'text-violet-600',  bg: 'bg-violet-50',   ring: 'ring-violet-200',  border: 'border-l-violet-500' },
+  needs_review: { label: 'На проверку', icon: AlertCircle,   color: 'text-amber-600',   bg: 'bg-amber-50',    ring: 'ring-amber-200',   border: 'border-l-amber-400' },
+  not_lead:     { label: 'Не лид',      icon: XCircle,       color: 'text-zinc-400',    bg: 'bg-zinc-50',     ring: 'ring-zinc-200',    border: 'border-l-zinc-300' },
+  error:        { label: 'Ошибка',      icon: XCircle,       color: 'text-red-500',     bg: 'bg-red-50',      ring: 'ring-red-200',     border: 'border-l-red-400' },
+  pending:      { label: 'В очереди',   icon: Loader2,       color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200',    border: 'border-l-blue-300' },
+  processing:   { label: 'Обработка',   icon: Loader2,       color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200',    border: 'border-l-blue-300' },
 };
 
 const STATUS_FILTERS = [
@@ -61,6 +69,8 @@ const STATUS_FILTERS = [
   { value: 'needs_review', label: 'На проверку' },
   { value: 'not_lead', label: 'Не лид' },
 ];
+
+/* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
 async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -77,13 +87,27 @@ async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T>
   return (await res.json()) as T;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.error;
-  const Icon = config.icon;
+function formatDate(iso: string | null) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  if (isToday) return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+/* ─── Small Components ───────────────────────────────────────────────────────── */
+
+function StatusBadge({ status, size = 'sm' }: { status: string; size?: 'sm' | 'lg' }) {
+  const m = STATUS_META[status] ?? STATUS_META.error;
+  const Icon = m.icon;
+  const cls = size === 'lg'
+    ? `gap-1.5 px-3 py-1.5 text-xs ${m.color} ${m.bg} ring-1 ${m.ring}`
+    : `gap-1 px-2 py-0.5 text-[10px] ${m.color} ${m.bg} ring-1 ${m.ring}`;
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ${config.color} ${config.bg} ${config.ring}`}>
-      <Icon className="h-3 w-3" />
-      {config.label}
+    <span className={`inline-flex items-center rounded-full font-semibold ${cls}`}>
+      <Icon className={size === 'lg' ? 'h-3.5 w-3.5' : 'h-3 w-3'} />
+      {m.label}
     </span>
   );
 }
@@ -94,7 +118,7 @@ function ConfidenceBar({ value }: { value: number | null }) {
   const color = pct >= 80 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-400' : 'bg-zinc-300';
   return (
     <div className="flex items-center gap-2">
-      <div className="h-1.5 w-20 rounded-full bg-zinc-100 overflow-hidden">
+      <div className="h-1.5 w-16 rounded-full bg-zinc-100 overflow-hidden">
         <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-[11px] tabular-nums text-zinc-400 font-medium">{pct}%</span>
@@ -102,47 +126,7 @@ function ConfidenceBar({ value }: { value: number | null }) {
   );
 }
 
-function UnreadDot() {
-  return (
-    <span className="relative flex h-2.5 w-2.5 shrink-0" title="Новое">
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-40" />
-      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
-    </span>
-  );
-}
-
-function ObjectionDraftBlock({ draft }: { draft: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(draft);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch { /* clipboard may not be available */ }
-  };
-
-  return (
-    <div className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50 to-white p-4">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
-          <MessageSquare className="h-3.5 w-3.5 text-violet-500" />
-          <span className="text-xs font-semibold text-violet-700 tracking-wide uppercase">
-            Черновик ответа на возражение
-          </span>
-        </div>
-        <button
-          onClick={handleCopy}
-          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-violet-500 hover:bg-violet-100 transition-colors"
-        >
-          {copied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-          {copied ? 'Скопировано' : 'Копировать'}
-        </button>
-      </div>
-      <p className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">{draft}</p>
-    </div>
-  );
-}
+/* ─── Forward Dialog ─────────────────────────────────────────────────────────── */
 
 type ForwardClient = {
   id: string;
@@ -152,28 +136,20 @@ type ForwardClient = {
 };
 
 function ForwardToClientDialog({
-  qualificationId,
-  campaignId,
-  onClose,
-  onForwarded,
+  qualificationId, campaignId, onClose, onForwarded,
 }: {
-  qualificationId: string;
-  campaignId: string;
-  onClose: () => void;
-  onForwarded: () => void;
+  qualificationId: string; campaignId: string; onClose: () => void; onForwarded: () => void;
 }) {
   const [clients, setClients] = useState<ForwardClient[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [selectedClient, setSelectedClient] = useState<string>('');
+  const [selectedClient, setSelectedClient] = useState('');
   const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
-    fetchWithAuth<{ clients: ForwardClient[] }>(
-      `/api/instantly/forward-clients?campaign_id=${campaignId}`,
-    )
+    fetchWithAuth<{ clients: ForwardClient[] }>(`/api/instantly/forward-clients?campaign_id=${campaignId}`)
       .then((res) => setClients(res.clients))
       .catch((err) => setError(err instanceof Error ? err.message : 'Ошибка'))
       .finally(() => setLoading(false));
@@ -189,11 +165,7 @@ function ForwardToClientDialog({
       await fetchWithAuth('/api/instantly/qualified-leads/forward', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          qualification_id: qualificationId,
-          client_user_id: selectedClient,
-          telegram_chat_id: selectedChat,
-        }),
+        body: JSON.stringify({ qualification_id: qualificationId, client_user_id: selectedClient, telegram_chat_id: selectedChat }),
       });
       setSuccess(true);
       setTimeout(() => { onForwarded(); onClose(); }, 1200);
@@ -205,91 +177,44 @@ function ForwardToClientDialog({
   };
 
   return (
-    <div className="mt-3 rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 to-white p-4 animate-in fade-in slide-in-from-top-1 duration-200">
+    <div className="rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 to-white p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1.5">
           <Send className="h-3.5 w-3.5 text-blue-500" />
-          <span className="text-xs font-semibold text-blue-700 tracking-wide uppercase">
-            Передать клиенту
-          </span>
+          <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Передать клиенту</span>
         </div>
         <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-
       {loading ? (
-        <div className="flex items-center justify-center py-4">
-          <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
-        </div>
+        <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-blue-400" /></div>
       ) : success ? (
-        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium">
-          <CheckCircle2 className="h-4 w-4" />
-          Лид успешно передан клиенту
-        </div>
+        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium"><CheckCircle2 className="h-4 w-4" />Лид успешно передан</div>
       ) : (
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
-
           {clients.length === 0 ? (
-            <p className="text-xs text-zinc-400 py-2">
-              Нет клиентов с доступом к этой кампании. Назначьте доступ в админ-панели.
-            </p>
+            <p className="text-xs text-zinc-400 py-2">Нет клиентов с доступом к этой кампании.</p>
           ) : (
             <>
-              <div>
-                <label className="text-[11px] font-medium text-zinc-500 mb-1 block">Клиент</label>
-                <select
-                  value={selectedClient}
-                  onChange={(e) => {
-                    setSelectedClient(e.target.value);
-                    setSelectedChat(null);
-                  }}
-                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
-                >
-                  <option value="">Выберите клиента...</option>
-                  {clients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.full_name || c.email || c.id.slice(0, 8)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
+              <select value={selectedClient} onChange={(e) => { setSelectedClient(e.target.value); setSelectedChat(null); }}
+                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100">
+                <option value="">Выберите клиента...</option>
+                {clients.map((c) => <option key={c.id} value={c.id}>{c.full_name || c.email || c.id.slice(0, 8)}</option>)}
+              </select>
               {currentClient && currentClient.telegram_chats.length > 0 && (
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-500 mb-1 block">
-                    Telegram-чат (необязательно)
-                  </label>
-                  <select
-                    value={selectedChat ?? ''}
-                    onChange={(e) => setSelectedChat(e.target.value ? Number(e.target.value) : null)}
-                    className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
-                  >
-                    <option value="">Не отправлять в Telegram</option>
-                    {currentClient.telegram_chats.map((ch) => (
-                      <option key={ch.chat_id} value={ch.chat_id}>
-                        {ch.chat_title || `Chat ${ch.chat_id}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <select value={selectedChat ?? ''} onChange={(e) => setSelectedChat(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-100">
+                  <option value="">Не отправлять в Telegram</option>
+                  {currentClient.telegram_chats.map((ch) => <option key={ch.chat_id} value={ch.chat_id}>{ch.chat_title || `Chat ${ch.chat_id}`}</option>)}
+                </select>
               )}
-
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button
-                  onClick={onClose}
-                  className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors"
-                >
-                  Отмена
-                </button>
-                <button
-                  onClick={handleForward}
-                  disabled={!selectedClient || sending}
-                  className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
-                >
-                  {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                  Передать
+              <div className="flex justify-end gap-2">
+                <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
+                <button onClick={handleForward} disabled={!selectedClient || sending}
+                  className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors">
+                  {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}Передать
                 </button>
               </div>
             </>
@@ -300,173 +225,257 @@ function ForwardToClientDialog({
   );
 }
 
-function LeadRow({
-  item,
-  expanded,
-  onToggle,
-  isRead,
+/* ─── List Item (left panel) ─────────────────────────────────────────────────── */
+
+function ListItem({
+  item, active, onClick,
 }: {
-  item: LeadQualification;
-  expanded: boolean;
-  onToggle: () => void;
-  isRead: boolean;
+  item: LeadQualification; active: boolean; onClick: () => void;
 }) {
-  const [showForward, setShowForward] = useState(false);
+  const m = STATUS_META[item.status] ?? STATUS_META.error;
   const date = item.reply_timestamp ?? item.created_at;
-  const isLead = item.status === 'lead';
-  const isObjection = item.status === 'objection';
-  const canForward = isLead || isObjection || item.status === 'needs_review';
+  const isUnread = !item.read_at;
 
   return (
-    <div
+    <button
+      onClick={onClick}
       className={`
-        group transition-colors duration-200 border-b border-zinc-100 last:border-b-0
-        ${isLead && !isRead ? 'bg-emerald-50/40' : ''}
-        ${!isRead ? 'bg-white' : 'bg-zinc-50/50'}
+        w-full text-left border-l-[3px] transition-all duration-150 relative
+        ${m.border}
+        ${active
+          ? 'bg-zinc-100'
+          : isUnread
+            ? 'bg-blue-50/60 hover:bg-blue-50'
+            : 'bg-zinc-50/40 hover:bg-zinc-50'
+        }
       `}
     >
-      <button onClick={onToggle} className="w-full text-left px-5 py-4 hover:bg-zinc-50/80 transition-colors duration-150">
-        <div className="flex items-start gap-3">
-          <div className="mt-1.5 shrink-0 w-3 flex justify-center">
-            {!isRead && <UnreadDot />}
-          </div>
-
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-3 mb-1">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className={`text-sm truncate ${!isRead ? 'font-semibold text-zinc-900' : 'font-normal text-zinc-500'}`}>
-                  {item.lead_name || item.lead_email}
-                </span>
-                {item.company_name && (
-                  <span className="text-xs text-zinc-400 truncate hidden sm:inline">
-                    {item.company_name}
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-3 shrink-0">
-                <ConfidenceBar value={item.ai_confidence} />
-                <StatusBadge status={item.status} />
-                <span className="text-[11px] text-zinc-400 tabular-nums whitespace-nowrap">
-                  {date ? new Date(date).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
-                </span>
-              </div>
-            </div>
-
-            <div className={`flex items-center gap-1.5 text-xs mb-1 ${!isRead ? 'text-zinc-600' : 'text-zinc-400'}`}>
-              <Mail className="h-3 w-3 shrink-0 text-zinc-300" />
-              <span className="truncate">{item.lead_email}</span>
-              <span className="text-zinc-200 mx-0.5">·</span>
-              <span className="truncate text-zinc-400">{item.campaign_name ?? item.campaign_id.slice(0, 8)}</span>
-            </div>
-
-            {!expanded && (item.reply_subject || item.reply_preview) && (
-              <p className={`text-xs truncate mt-0.5 ${!isRead ? 'text-zinc-500' : 'text-zinc-400'}`}>
-                {item.reply_subject && <span className="font-medium">{item.reply_subject}: </span>}
-                {item.reply_preview ?? ''}
-              </p>
-            )}
-          </div>
-        </div>
-      </button>
-
-      {expanded && (
-        <div className="px-5 pb-5 pt-1 ml-8 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
-          {item.ai_reason && (
-            <div className="rounded-xl border border-zinc-200/80 bg-gradient-to-br from-zinc-50 to-white p-4">
-              <div className="flex items-center gap-1.5 mb-2">
-                <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                <span className="text-xs font-semibold text-zinc-700 tracking-wide uppercase">AI-анализ</span>
-              </div>
-              <p className="text-sm text-zinc-700 leading-relaxed">{item.ai_reason}</p>
-              {item.interest_signals && item.interest_signals.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {item.interest_signals.map((s, i) => (
-                    <span key={i} className="rounded-md bg-emerald-50 ring-1 ring-emerald-200 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                      {s}
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div className="mt-3 flex items-center gap-4 text-[11px] text-zinc-400">
-                <span className="flex items-center gap-1">
-                  <CircleDot className="h-3 w-3" />
-                  Предложение: {item.proposal_seen ? 'видели' : 'не видели'}
-                </span>
-                {item.ai_confidence !== null && (
-                  <span>Уверенность: {Math.round(item.ai_confidence * 100)}%</span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {item.objection_handleable && item.objection_draft && (
-            <ObjectionDraftBlock draft={item.objection_draft} />
-          )}
-
-          {item.error_message && (
-            <div className="rounded-xl border border-red-200 bg-red-50/50 p-4">
-              <p className="text-xs font-semibold text-red-600 mb-1">Ошибка квалификации</p>
-              <p className="text-sm text-red-700">{item.error_message}</p>
-            </div>
-          )}
-
-          {item.last_outbound_preview && (
-            <div>
-              <p className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-1.5">Наше последнее письмо</p>
-              <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 text-sm text-zinc-600 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
-                {item.last_outbound_preview}
-              </div>
-            </div>
-          )}
-
-          <div>
-            <p className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-1.5">
-              Ответ{item.reply_subject ? `: ${item.reply_subject}` : ''}
-            </p>
-            <div className="rounded-xl border border-zinc-200/80 bg-white p-4 text-sm text-zinc-700 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed shadow-sm">
-              {item.reply_body ?? item.reply_preview ?? '(пусто)'}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3 pt-1">
-            <Link
-              href={`/instantly/emails?campaign_id=${item.campaign_id}` as Route}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-700 transition-colors"
-            >
-              <Mail className="h-3.5 w-3.5" />
-              Перейти к письмам
-            </Link>
-            {canForward && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowForward(!showForward); }}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-500 hover:text-blue-700 transition-colors"
-              >
-                <Send className="h-3.5 w-3.5" />
-                Передать клиенту
-              </button>
-            )}
-          </div>
-
-          {showForward && (
-            <ForwardToClientDialog
-              qualificationId={item.id}
-              campaignId={item.campaign_id}
-              onClose={() => setShowForward(false)}
-              onForwarded={() => setShowForward(false)}
-            />
-          )}
-        </div>
+      {isUnread && (
+        <div className="absolute inset-y-0 right-0 w-1 bg-blue-500 rounded-l" />
       )}
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center gap-2 min-w-0">
+            {isUnread && (
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-40" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
+              </span>
+            )}
+            <span className={`text-sm truncate ${isUnread ? 'font-bold text-zinc-900' : 'font-normal text-zinc-500'}`}>
+              {item.lead_name || item.lead_email}
+            </span>
+          </div>
+          <span className={`text-[10px] tabular-nums shrink-0 ${isUnread ? 'text-blue-500 font-semibold' : 'text-zinc-400'}`}>
+            {formatDate(date)}
+          </span>
+        </div>
+
+        {item.company_name && (
+          <p className={`text-[11px] truncate mb-1 ${isUnread ? 'text-zinc-500' : 'text-zinc-400'}`}>{item.company_name}</p>
+        )}
+
+        <p className={`text-xs truncate ${isUnread ? 'text-zinc-600 font-medium' : 'text-zinc-400'}`}>
+          {item.reply_preview ?? item.reply_subject ?? ''}
+        </p>
+
+        <div className="mt-1.5 flex items-center gap-2">
+          <StatusBadge status={item.status} size="sm" />
+          {isUnread && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-blue-500">новое</span>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ─── Detail Panel (right panel) ─────────────────────────────────────────────── */
+
+function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: () => void }) {
+  const [showForward, setShowForward] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const m = STATUS_META[item.status] ?? STATUS_META.error;
+  const canForward = item.status === 'lead' || item.status === 'objection' || item.status === 'needs_review';
+
+  const handleCopyDraft = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* noop */ }
+  };
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="shrink-0 border-b border-zinc-200 px-6 py-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 mb-2">
+              <h2 className="text-lg font-bold text-zinc-900 truncate">
+                {item.lead_name || item.lead_email}
+              </h2>
+              <StatusBadge status={item.status} size="lg" />
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
+              <span className="inline-flex items-center gap-1.5">
+                <Mail className="h-3.5 w-3.5 text-zinc-400" />
+                {item.lead_email}
+              </span>
+              {item.company_name && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-zinc-400" />
+                  {item.company_name}
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1.5">
+                <Tag className="h-3.5 w-3.5 text-zinc-400" />
+                {item.campaign_name ?? item.campaign_id.slice(0, 8)}
+              </span>
+            </div>
+          </div>
+          {item.ai_confidence !== null && (
+            <div className="shrink-0 text-right">
+              <ConfidenceBar value={item.ai_confidence} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+
+        {/* AI Analysis */}
+        {item.ai_reason && (
+          <section className="rounded-xl border border-zinc-200/80 bg-gradient-to-br from-zinc-50 to-white p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles className="h-4 w-4 text-amber-500" />
+              <span className="text-sm font-bold text-zinc-700">AI-анализ</span>
+            </div>
+            <p className="text-sm text-zinc-700 leading-relaxed">{item.ai_reason}</p>
+            {item.interest_signals && item.interest_signals.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {item.interest_signals.map((s, i) => (
+                  <span key={i} className="rounded-md bg-emerald-50 ring-1 ring-emerald-200 px-2 py-0.5 text-[11px] font-medium text-emerald-700">{s}</span>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 flex items-center gap-4 text-[11px] text-zinc-400">
+              <span className="inline-flex items-center gap-1">
+                <CircleDot className="h-3 w-3" />
+                Предложение: {item.proposal_seen ? 'видели' : 'не видели'}
+              </span>
+            </div>
+          </section>
+        )}
+
+        {/* Error */}
+        {item.error_message && (
+          <section className="rounded-xl border border-red-200 bg-red-50/50 p-4">
+            <p className="text-xs font-semibold text-red-600 mb-1">Ошибка квалификации</p>
+            <p className="text-sm text-red-700">{item.error_message}</p>
+          </section>
+        )}
+
+        {/* Conversation (chat bubbles) */}
+        <section>
+          <p className="text-xs font-bold text-zinc-500 uppercase tracking-wide mb-3">Переписка</p>
+          <div className="space-y-3">
+            {item.last_outbound_preview && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%]">
+                  <p className="text-[10px] text-zinc-400 mb-1 ml-1">Наше письмо</p>
+                  <div className="rounded-2xl rounded-tl-md bg-zinc-100 px-4 py-3 text-sm text-zinc-600 leading-relaxed whitespace-pre-wrap max-h-[400px] overflow-y-auto">
+                    {item.last_outbound_preview}
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end">
+              <div className="max-w-[85%]">
+                <p className="text-[10px] text-zinc-400 mb-1 mr-1 text-right">
+                  Ответ{item.reply_subject ? ` · ${item.reply_subject}` : ''}
+                  {item.reply_timestamp && (
+                    <span className="ml-2 tabular-nums">
+                      {new Date(item.reply_timestamp).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  )}
+                </p>
+                <div className={`rounded-2xl rounded-tr-md px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap max-h-[500px] overflow-y-auto ${
+                  item.status === 'lead' ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200/60' :
+                  item.status === 'objection' ? 'bg-violet-50 text-violet-900 ring-1 ring-violet-200/60' :
+                  'bg-blue-50 text-zinc-800 ring-1 ring-blue-200/60'
+                }`}>
+                  {item.reply_body ?? item.reply_preview ?? '(пусто)'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Objection draft */}
+        {item.objection_handleable && item.objection_draft && (
+          <section className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50 to-white p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-1.5">
+                <MessageSquare className="h-4 w-4 text-violet-500" />
+                <span className="text-sm font-bold text-violet-700">Черновик ответа на возражение</span>
+              </div>
+              <button onClick={() => handleCopyDraft(item.objection_draft!)}
+                className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium text-violet-500 hover:bg-violet-100 transition-colors">
+                {copied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                {copied ? 'Скопировано' : 'Копировать'}
+              </button>
+            </div>
+            <p className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">{item.objection_draft}</p>
+          </section>
+        )}
+
+        {/* Forward dialog */}
+        {showForward && (
+          <ForwardToClientDialog
+            qualificationId={item.id}
+            campaignId={item.campaign_id}
+            onClose={() => setShowForward(false)}
+            onForwarded={() => { setShowForward(false); onRefresh(); }}
+          />
+        )}
+      </div>
+
+      {/* Actions footer */}
+      <div className="shrink-0 border-t border-zinc-200 px-6 py-3 flex items-center gap-3">
+        <Link
+          href={`/instantly/emails?campaign_id=${item.campaign_id}` as Route}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+        >
+          <Mail className="h-3.5 w-3.5" />
+          Все письма
+          <ArrowUpRight className="h-3 w-3 text-zinc-400" />
+        </Link>
+        {canForward && (
+          <button
+            onClick={() => setShowForward(!showForward)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+          >
+            <Send className="h-3.5 w-3.5" />
+            Передать клиенту
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
+/* ─── Main Page ──────────────────────────────────────────────────────────────── */
+
 export default function IncomingLeadsPage() {
   const [items, setItems] = useState<LeadQualification[]>([]);
   const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const readIdsRef = useRef<Set<string>>(new Set());
 
   const [statusFilter, setStatusFilter] = useState('all');
@@ -489,20 +498,15 @@ export default function IncomingLeadsPage() {
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams({
-        status: statusFilter,
-        limit: String(LIMIT),
-        offset: String(offset),
-      });
+      const params = new URLSearchParams({ status: statusFilter, limit: String(LIMIT), offset: String(offset) });
       if (campaignId) params.set('campaign_id', campaignId);
       if (search) params.set('search', search);
       if (!campaignId) params.set('use_preferences', 'true');
 
-      const data = await fetchWithAuth<QualifiedLeadsResponse>(
-        `/api/instantly/qualified-leads?${params.toString()}`,
-      );
+      const data = await fetchWithAuth<QualifiedLeadsResponse>(`/api/instantly/qualified-leads?${params.toString()}`);
       setItems(data.items);
       setTotal(data.total);
+      if (data.counts) setCounts(data.counts);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
     } finally {
@@ -510,180 +514,169 @@ export default function IncomingLeadsPage() {
     }
   }, [statusFilter, campaignId, search, offset]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData]);
 
   const markAsRead = useCallback(async (id: string) => {
     if (readIdsRef.current.has(id)) return;
     readIdsRef.current.add(id);
-
-    setItems(prev => prev.map(item =>
-      item.id === id ? { ...item, read_at: new Date().toISOString() } : item
-    ));
-
+    setItems(prev => prev.map(item => item.id === id ? { ...item, read_at: new Date().toISOString() } : item));
     try {
       await fetchWithAuth('/api/instantly/qualified-leads', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: [id] }),
       });
-    } catch {
-      readIdsRef.current.delete(id);
-    }
+    } catch { readIdsRef.current.delete(id); }
   }, []);
 
-  const handleToggle = useCallback((id: string) => {
-    const isOpening = expandedId !== id;
-    setExpandedId(isOpening ? id : null);
-    if (isOpening) {
-      const item = items.find(i => i.id === id);
-      if (item && !item.read_at) {
-        markAsRead(id);
-      }
-    }
-  }, [expandedId, items, markAsRead]);
+  const handleSelect = useCallback((id: string) => {
+    setSelectedId(id);
+    const item = items.find(i => i.id === id);
+    if (item && !item.read_at) markAsRead(id);
+  }, [items, markAsRead]);
 
-  const handleSearch = () => {
-    setOffset(0);
-    loadData();
-  };
+  const handleSearch = () => { setOffset(0); loadData(); };
 
+  const selectedItem = items.find(i => i.id === selectedId) ?? null;
   const hasMore = offset + LIMIT < total;
   const unreadCount = items.filter(i => !i.read_at).length;
+  const totalAll = Object.values(counts).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
-      <Link
-        href={'/instantly' as Route}
-        className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 mb-4 transition-colors"
-      >
-        <ChevronLeft className="h-3 w-3" /> Instantly
-      </Link>
+    <div className="flex flex-col h-screen">
+      {/* Top bar */}
+      <div className="shrink-0 border-b border-zinc-200 bg-white px-6 pt-5 pb-4">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-4">
+            <Link href={'/instantly' as Route} className="text-xs text-zinc-400 hover:text-zinc-600 transition-colors">
+              <ChevronLeft className="h-4 w-4" />
+            </Link>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold text-zinc-900">Входящие лиды</h1>
+                {unreadCount > 0 && (
+                  <span className="inline-flex items-center justify-center h-5 min-w-5 px-1.5 rounded-full bg-blue-500 text-[10px] font-bold text-white tabular-nums">
+                    {unreadCount}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-zinc-400 mt-0.5">AI-квалификация ответов по кампаниям Instantly</p>
+            </div>
+          </div>
+        </div>
 
-      <div className="mb-8">
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold text-zinc-900 tracking-tight">Входящие лиды</h1>
-          {unreadCount > 0 && (
-            <span className="inline-flex items-center justify-center h-5 min-w-5 px-1.5 rounded-full bg-blue-500 text-[10px] font-bold text-white tabular-nums">
-              {unreadCount}
-            </span>
+        {/* Filters row */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Status tabs with counters */}
+          <div className="flex rounded-lg border border-zinc-200 bg-white overflow-hidden">
+            {STATUS_FILTERS.map((f) => {
+              const cnt = f.value === 'all' ? totalAll : (counts[f.value] ?? 0);
+              return (
+                <button
+                  key={f.value}
+                  onClick={() => { setStatusFilter(f.value); setOffset(0); setSelectedId(null); }}
+                  className={`px-3 py-1.5 text-xs font-semibold transition-all duration-150 ${
+                    statusFilter === f.value
+                      ? 'bg-zinc-900 text-white'
+                      : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700'
+                  }`}
+                >
+                  {f.label}
+                  {cnt > 0 && <span className="ml-1 opacity-70">({cnt})</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          <select
+            value={campaignId}
+            onChange={(e) => { setCampaignId(e.target.value); setOffset(0); setSelectedId(null); }}
+            className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs focus:border-zinc-400 focus:outline-none max-w-[220px]"
+            disabled={campaignsLoading}
+          >
+            <option value="">Мои кампании</option>
+            {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+
+          <div className="relative min-w-[160px] max-w-[240px]">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-300" />
+            <input
+              type="text"
+              placeholder="Поиск..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              className="w-full rounded-lg border border-zinc-200 bg-white py-1.5 pl-8 pr-3 text-xs focus:border-zinc-400 focus:outline-none placeholder:text-zinc-300"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="shrink-0 mx-6 mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600 font-medium">{error}</div>
+      )}
+
+      {/* Main content: split pane */}
+      <div className="flex-1 min-h-0 grid grid-cols-[minmax(320px,2fr)_3fr]">
+        {/* Left: list */}
+        <div className="border-r border-zinc-200 flex flex-col bg-white">
+          <div className="flex-1 overflow-y-auto divide-y divide-zinc-100">
+            {loading && items.length === 0 ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-300" />
+              </div>
+            ) : items.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
+                <Eye className="h-8 w-8 text-zinc-200 mb-3" />
+                <p className="text-sm text-zinc-500">Ничего не найдено</p>
+                <p className="text-xs text-zinc-400 mt-1">Воркер проверяет новые ответы каждые 30 сек</p>
+              </div>
+            ) : (
+              items.map((item) => (
+                <ListItem
+                  key={item.id}
+                  item={item}
+                  active={selectedId === item.id}
+                  onClick={() => handleSelect(item.id)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Pagination */}
+          {items.length > 0 && (
+            <div className="shrink-0 border-t border-zinc-100 px-4 py-2 flex items-center justify-between">
+              <button onClick={() => setOffset(Math.max(0, offset - LIMIT))} disabled={offset === 0}
+                className="text-[11px] font-medium text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors inline-flex items-center gap-0.5">
+                <ChevronLeft className="h-3 w-3" />Назад
+              </button>
+              <span className="text-[10px] text-zinc-400 tabular-nums">{offset + 1}–{Math.min(offset + LIMIT, total)} / {total}</span>
+              <button onClick={() => hasMore && setOffset(offset + LIMIT)} disabled={!hasMore}
+                className="text-[11px] font-medium text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors inline-flex items-center gap-0.5">
+                Далее<ChevronRight className="h-3 w-3" />
+              </button>
+            </div>
           )}
         </div>
-        <p className="mt-1 text-sm text-zinc-500">
-          AI-квалификация ответов по кампаниям Instantly
-        </p>
-      </div>
 
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        <div className="flex rounded-xl border border-zinc-200 bg-white overflow-hidden shadow-sm">
-          {STATUS_FILTERS.map((f) => (
-            <button
-              key={f.value}
-              onClick={() => { setStatusFilter(f.value); setOffset(0); }}
-              className={`px-4 py-2 text-xs font-semibold transition-all duration-150 ${
-                statusFilter === f.value
-                  ? 'bg-zinc-900 text-white shadow-inner'
-                  : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700'
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        <select
-          value={campaignId}
-          onChange={(e) => { setCampaignId(e.target.value); setOffset(0); }}
-          className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-100 max-w-[260px] transition-all"
-          disabled={campaignsLoading}
-        >
-          <option value="">Мои кампании</option>
-          {campaigns.map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
-
-        <div className="relative flex-1 min-w-[160px] max-w-xs">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-300" />
-          <input
-            type="text"
-            placeholder="Поиск по email, имени, компании..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            className="w-full rounded-xl border border-zinc-200 bg-white py-2 pl-10 pr-3 text-sm shadow-sm focus:border-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-100 transition-all placeholder:text-zinc-300"
-          />
+        {/* Right: detail */}
+        <div className="bg-white">
+          {selectedItem ? (
+            <DetailPanel item={selectedItem} onRefresh={loadData} />
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-center px-8">
+              <div className="h-16 w-16 rounded-2xl bg-zinc-100 flex items-center justify-center mb-4">
+                <User className="h-7 w-7 text-zinc-300" />
+              </div>
+              <p className="text-sm font-medium text-zinc-500">Выберите лид из списка</p>
+              <p className="text-xs text-zinc-400 mt-1 max-w-xs">
+                Кликните на строку слева, чтобы увидеть AI-анализ, переписку и действия
+              </p>
+            </div>
+          )}
         </div>
       </div>
-
-      {error && (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-600 font-medium">
-          {error}
-        </div>
-      )}
-
-      {loading && items.length === 0 ? (
-        <div className="flex items-center justify-center py-24">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-300" />
-        </div>
-      ) : items.length === 0 ? (
-        <div className="rounded-2xl border border-zinc-200 bg-white py-20 text-center shadow-sm">
-          <div className="mx-auto h-12 w-12 rounded-full bg-zinc-100 flex items-center justify-center mb-4">
-            <Eye className="h-6 w-6 text-zinc-300" />
-          </div>
-          <p className="text-sm font-medium text-zinc-600">
-            {statusFilter === 'lead'
-              ? 'Квалифицированных лидов пока нет'
-              : 'Ничего не найдено'}
-          </p>
-          <p className="mt-1.5 text-xs text-zinc-400 max-w-sm mx-auto">
-            Лиды появятся автоматически — воркер проверяет новые ответы в выбранных кампаниях каждые 30 секунд
-          </p>
-        </div>
-      ) : (
-        <>
-          <div className="mb-3 flex items-center justify-between text-xs text-zinc-400">
-            <span className="font-medium">
-              {total} {total === 1 ? 'результат' : total < 5 ? 'результата' : 'результатов'}
-              {unreadCount > 0 && <span className="text-blue-500 ml-1.5">· {unreadCount} новых</span>}
-            </span>
-            {loading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          </div>
-
-          <div className="rounded-2xl border border-zinc-200 bg-white overflow-hidden shadow-sm">
-            {items.map((item) => (
-              <LeadRow
-                key={item.id}
-                item={item}
-                expanded={expandedId === item.id}
-                onToggle={() => handleToggle(item.id)}
-                isRead={!!item.read_at}
-              />
-            ))}
-          </div>
-
-          <div className="mt-5 flex items-center justify-between">
-            <button
-              onClick={() => setOffset(Math.max(0, offset - LIMIT))}
-              disabled={offset === 0}
-              className="inline-flex items-center gap-1 text-xs font-medium text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" /> Назад
-            </button>
-            <span className="text-xs text-zinc-400 tabular-nums">
-              {offset + 1}–{Math.min(offset + LIMIT, total)} из {total}
-            </span>
-            <button
-              onClick={() => hasMore && setOffset(offset + LIMIT)}
-              disabled={!hasMore}
-              className="inline-flex items-center gap-1 text-xs font-medium text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors"
-            >
-              Далее <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </>
-      )}
     </div>
   );
 }

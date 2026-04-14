@@ -266,7 +266,12 @@ function extractHhEmployerKey(url: string | null | undefined): string | null {
   }
 }
 
-export function HHParserView() {
+type HHParserViewProps = {
+  /** Hides staff-only features like "Add to Database" (uses /tools/databases) */
+  clientMode?: boolean;
+};
+
+export function HHParserView({ clientMode }: HHParserViewProps = {}) {
   const [jobs, setJobs] = useState<ParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -783,7 +788,7 @@ export function HHParserView() {
           onExportCsv={exportCsv}
           onExportExcel={exportExcel}
           onCopy={copyResults}
-          onAddToDatabase={() => void addCompaniesToDatabase()}
+          onAddToDatabase={clientMode ? undefined : () => void addCompaniesToDatabase()}
           onStopJob={activeJob?.id ? () => stopJob(activeJob.id) : undefined}
           onDeleteJob={activeJob?.id ? () => deleteJob(activeJob.id) : undefined}
         />
