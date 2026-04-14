@@ -62,8 +62,14 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   // 2. Fetch recent reply emails for subscribed campaigns
   const replyEmails: (Email & { _campaignName?: string })[] = [];
+  const interCampaignDelay = Math.max(
+    1000,
+    Number(process.env.INSTANTLY_LEADS_INTER_CAMPAIGN_DELAY_MS ?? '3500'),
+  );
 
-  for (const campaignId of campaignIds) {
+  for (let i = 0; i < campaignIds.length; i++) {
+    const campaignId = campaignIds[i];
+    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
     try {
       const res = await instantly.listEmails({
         campaign_id: campaignId,
@@ -103,7 +109,9 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   // 4. Qualify each new reply (capped per tick to stay within rate limits)
   let processed = 0;
-  for (const reply of newReplies.slice(0, MAX_QUALIFY_PER_TICK)) {
+  for (let i = 0; i < Math.min(newReplies.length, MAX_QUALIFY_PER_TICK); i++) {
+    const reply = newReplies[i];
+    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
     try {
       await qualifyOneReply(db, reply, apiKey);
       processed++;
@@ -146,7 +154,7 @@ async function qualifyOneReply(
   let leadName: string | undefined;
   let companyName: string | undefined;
   try {
-    const leads = await instantly.getLeadsByEmail({ email: leadEmail });
+    const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId });
     const lead = leads?.[0];
     if (lead) {
       leadName =

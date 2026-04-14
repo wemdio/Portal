@@ -43,6 +43,9 @@ function getApiKey(): string {
   return key;
 }
 
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
 async function request<T>(
   path: string,
   options: { method?: string; body?: unknown; params?: Record<string, string | number | boolean | undefined> } = {},
@@ -56,32 +59,42 @@ async function request<T>(
     }
   }
 
-  const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90_000);
-  const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
+  for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+    const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90_000);
+    const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
 
-  if (options.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    init.body = JSON.stringify(options.body);
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(options.body);
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(url.toString(), init);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+      const delay = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
+    if (!res.ok) {
+      const raw = await res.text().catch(() => '');
+      const isHtml = raw.trimStart().startsWith('<');
+      const detail = isHtml ? res.statusText || 'Service unavailable' : raw.slice(0, 300);
+      throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
+    }
+
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
   }
 
-  let res: Response;
-  try {
-    res = await fetch(url.toString(), init);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!res.ok) {
-    const raw = await res.text().catch(() => '');
-    const isHtml = raw.trimStart().startsWith('<');
-    const detail = isHtml ? res.statusText || 'Service unavailable' : raw.slice(0, 300);
-    throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
-  }
-
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  throw new InstantlyApiError('Instantly API 429: Rate limit exceeded after retries', 429);
 }
 
 /**
@@ -258,8 +271,11 @@ export async function moveLeads(body: { lead_ids: string[]; to_campaign_id?: str
   return request<unknown>('/leads/move', { method: 'POST', body });
 }
 
-export async function getLeadsByEmail(params: { email: string }) {
-  return request<Lead[]>('/leads/by-email', { params: params as Record<string, string> });
+export async function getLeadsByEmail(params: { email: string; campaign_id?: string }) {
+  const body: Record<string, unknown> = { search: params.email, limit: 10 };
+  if (params.campaign_id) body.campaign = params.campaign_id;
+  const res = await request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
+  return res.items ?? [];
 }
 
 export async function deleteLeadsByCampaign(campaignId: string): Promise<{ count: number }> {
@@ -402,7 +418,7 @@ export async function resumeSubsequence(id: string) {
 
 // ─── Emails ───────────────────────────────────────────────────────────────────
 
-export async function listEmails(params?: PaginationParams & { campaign_id?: string; lead_id?: string }) {
+export async function listEmails(params?: PaginationParams & { campaign_id?: string; lead_id?: string; search?: string; ue_type?: number }) {
   return request<PaginatedResponse<Email>>('/emails', { params: params as Record<string, string | number> });
 }
 
