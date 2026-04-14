@@ -3,6 +3,7 @@ import { StringSession } from 'telegram/sessions';
 import bigInt from 'big-integer';
 import { decodeFileId } from 'tg-file-id';
 import { createWriteStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { logInfo } from '@/lib/loggerServer';
 
 const API_ID = Number(process.env.TELEGRAM_API_ID || '0');
@@ -11,6 +12,24 @@ const BOT_TOKEN = process.env.TG_TRANSCRIBE_BOT_TOKEN || '';
 
 let client: TelegramClient | null = null;
 let connecting: Promise<TelegramClient> | null = null;
+const MT_RETRY_ATTEMPTS = 3;
+const MT_RETRY_DELAY_MS = 1500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableMtprotoError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = `${err.message} ${String((err as { cause?: unknown }).cause ?? '')}`.toLowerCase();
+  return (
+    msg.includes('not connected') ||
+    msg.includes('connection closed') ||
+    msg.includes('timeout') ||
+    msg.includes('hanging states') ||
+    msg.includes('socket hang up')
+  );
+}
 
 async function getClient(): Promise<TelegramClient> {
   if (client?.connected) return client;
@@ -44,7 +63,6 @@ export async function downloadFileByFileId(
   fileSize?: number,
 ): Promise<Buffer> {
   const decoded = decodeFileId(fileId);
-  const c = await getClient();
 
   const fileRef = decoded.fileReference
     ? Buffer.from(decoded.fileReference, 'hex')
@@ -61,24 +79,42 @@ export async function downloadFileByFileId(
     dcId: decoded.dcId, fileSize,
   });
 
-  const startTime = Date.now();
-  const buf = await c.downloadFile(inputLocation, {
-    dcId: decoded.dcId,
-    fileSize: fileSize ? bigInt(fileSize) : undefined,
-  });
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MT_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const c = await getClient();
+      const startTime = Date.now();
+      const buf = await c.downloadFile(inputLocation, {
+        dcId: decoded.dcId,
+        fileSize: fileSize ? bigInt(fileSize) : undefined,
+      });
 
-  if (!buf) {
-    throw new Error('MTProto downloadFile returned empty result');
+      if (!buf) {
+        throw new Error('MTProto downloadFile returned empty result');
+      }
+
+      const result = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as string);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const sizeMb = (result.byteLength / (1024 * 1024)).toFixed(1);
+      await logInfo('mtproto.download.done', `Downloaded ${sizeMb} MB in ${elapsed}s`, {
+        bytes: result.byteLength, elapsed,
+      });
+
+      return result;
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableMtprotoError(err) || attempt >= MT_RETRY_ATTEMPTS) {
+        throw err;
+      }
+      await logInfo('mtproto.download.retry', `Retrying MTProto buffer download (${attempt}/${MT_RETRY_ATTEMPTS})`, {
+        attempt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await disconnectMtproto();
+      await sleep(MT_RETRY_DELAY_MS);
+    }
   }
-
-  const result = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as string);
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  const sizeMb = (result.byteLength / (1024 * 1024)).toFixed(1);
-  await logInfo('mtproto.download.done', `Downloaded ${sizeMb} MB in ${elapsed}s`, {
-    bytes: result.byteLength, elapsed,
-  });
-
-  return result;
+  throw lastError instanceof Error ? lastError : new Error('MTProto download failed');
 }
 
 /**
@@ -92,7 +128,6 @@ export async function downloadFileByFileIdToPath(
   onProgress?: (downloaded: number, total: number | undefined) => void,
 ): Promise<void> {
   const decoded = decodeFileId(fileId);
-  const c = await getClient();
 
   const fileRef = decoded.fileReference
     ? Buffer.from(decoded.fileReference, 'hex')
@@ -109,49 +144,75 @@ export async function downloadFileByFileIdToPath(
     dcId: decoded.dcId, fileSize, destPath,
   });
 
-  const startTime = Date.now();
-  const writeStream = createWriteStream(destPath);
+  let lastError: unknown;
+  let resumeOffset = 0;
+  for (let attempt = 1; attempt <= MT_RETRY_ATTEMPTS; attempt += 1) {
+    const c = await getClient();
+    const startTime = Date.now();
+    const writeStream = createWriteStream(destPath, { flags: resumeOffset > 0 ? 'a' : 'w' });
+    try {
+      const iterDownload = c.iterDownload({
+        file: inputLocation,
+        dcId: decoded.dcId,
+        offset: bigInt(resumeOffset),
+        requestSize: 512 * 1024,
+      });
 
-  try {
-    const iterDownload = c.iterDownload({
-      file: inputLocation,
-      dcId: decoded.dcId,
-      requestSize: 512 * 1024,
-    });
-
-    let totalBytes = 0;
-    let lastProgressAt = 0;
-    for await (const chunk of iterDownload) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      const canContinue = writeStream.write(buf);
-      totalBytes += buf.byteLength;
-      if (onProgress) {
-        const now = Date.now();
-        if (now - lastProgressAt >= 2000) {
-          lastProgressAt = now;
-          onProgress(totalBytes, fileSize);
+      let totalBytes = resumeOffset;
+      let lastProgressAt = 0;
+      for await (const chunk of iterDownload) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const canContinue = writeStream.write(buf);
+        totalBytes += buf.byteLength;
+        if (onProgress) {
+          const now = Date.now();
+          if (now - lastProgressAt >= 2000) {
+            lastProgressAt = now;
+            onProgress(totalBytes, fileSize);
+          }
+        }
+        if (!canContinue) {
+          await new Promise<void>((resolve) => writeStream.once('drain', resolve));
         }
       }
-      if (!canContinue) {
-        await new Promise<void>((resolve) => writeStream.once('drain', resolve));
+      onProgress?.(totalBytes, fileSize);
+
+      await new Promise<void>((resolve, reject) => {
+        writeStream.end(() => resolve());
+        writeStream.on('error', reject);
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1);
+      await logInfo('mtproto.download.done', `Downloaded ${sizeMb} MB to disk in ${elapsed}s`, {
+        bytes: totalBytes, elapsed, destPath,
+      });
+      return;
+    } catch (err) {
+      writeStream.destroy();
+      lastError = err;
+      // Continue from already written bytes instead of restarting from zero.
+      if (isRetryableMtprotoError(err) && attempt < MT_RETRY_ATTEMPTS) {
+        try {
+          const current = await stat(destPath);
+          resumeOffset = Number(current.size);
+        } catch {
+          resumeOffset = 0;
+        }
       }
+      if (!isRetryableMtprotoError(err) || attempt >= MT_RETRY_ATTEMPTS) {
+        throw err;
+      }
+      await logInfo('mtproto.download.retry', `Retrying MTProto disk download (${attempt}/${MT_RETRY_ATTEMPTS})`, {
+        attempt,
+        resumeOffset,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await disconnectMtproto();
+      await sleep(MT_RETRY_DELAY_MS);
     }
-    onProgress?.(totalBytes, fileSize);
-
-    await new Promise<void>((resolve, reject) => {
-      writeStream.end(() => resolve());
-      writeStream.on('error', reject);
-    });
-
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1);
-    await logInfo('mtproto.download.done', `Downloaded ${sizeMb} MB to disk in ${elapsed}s`, {
-      bytes: totalBytes, elapsed, destPath,
-    });
-  } catch (err) {
-    writeStream.destroy();
-    throw err;
   }
+  throw lastError instanceof Error ? lastError : new Error('MTProto download to disk failed');
 }
 
 export interface MtprotoForumTopic {
