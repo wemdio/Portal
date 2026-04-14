@@ -702,12 +702,19 @@ export default function TgTranscribePage() {
     void fetchItems(activeSender, offset);
   }, [activeSender, offset, fetchItems]);
 
-  // Refresh transcript list when a job finishes
+  // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
+  const prevCompletedRef = useRef<number>(0);
   useEffect(() => {
     if (activeJob) {
       prevJobRef.current = activeJob.id;
+      if (activeJob.completed > prevCompletedRef.current) {
+        prevCompletedRef.current = activeJob.completed;
+        void fetchItems(activeSender, offset);
+        void fetchSenders();
+      }
     } else if (prevJobRef.current && scanResult) {
+      prevCompletedRef.current = 0;
       void fetchItems(activeSender, offset);
       void fetchSenders();
       prevJobRef.current = null;
