@@ -35,6 +35,7 @@ interface TranscriptItem {
   length: number;
   status: string;
   error_text: string | null;
+  hasFullText?: boolean;
 }
 
 interface BotChat {
@@ -350,6 +351,8 @@ export default function TgTranscribePage() {
   const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const fullTextCache = useRef<Record<string, string>>({});
+  const [loadingTextId, setLoadingTextId] = useState<string | null>(null);
 
   const [botChats, setBotChats] = useState<BotChat[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
@@ -654,8 +657,9 @@ export default function TgTranscribePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) { setAllItems([]); return; }
-      const json = (await res.json()) as { items: TranscriptItem[]; total: number };
+      const json = (await res.json()) as { items: TranscriptItem[] };
       setAllItems(json.items ?? []);
+      fullTextCache.current = {};
     } catch {
       setAllItems([]);
     } finally {
@@ -1159,7 +1163,24 @@ export default function TgTranscribePage() {
                 >
                   <button
                     type="button"
-                    onClick={() => setExpandedId(isExpanded ? null : item.id)}
+                    onClick={() => {
+                      if (isExpanded) { setExpandedId(null); return; }
+                      setExpandedId(item.id);
+                      if (item.hasFullText && !fullTextCache.current[item.id]) {
+                        setLoadingTextId(item.id);
+                        getToken().then((token) => {
+                          if (!token) return;
+                          return fetch(`/api/tools/tg-transcribe?id=${encodeURIComponent(item.id)}`, {
+                            headers: { Authorization: `Bearer ${token}` },
+                          });
+                        })
+                          .then((res) => res?.ok ? res.json() : null)
+                          .then((json: { text?: string } | null) => {
+                            if (json?.text) fullTextCache.current[item.id] = json.text;
+                          })
+                          .finally(() => setLoadingTextId(null));
+                      }
+                    }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50/50 transition-colors rounded-xl"
                   >
                     <div className="flex-1 min-w-0">
@@ -1217,48 +1238,61 @@ export default function TgTranscribePage() {
                         </div>
                       )}
 
-                      {item.text && (
-                        <>
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void onCopy(item.text, item.id);
-                              }}
-                              className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition"
-                            >
-                              {copiedId === item.id ? (
-                                <>
-                                  <Check className="h-3.5 w-3.5" />
-                                  Скопировано
-                                </>
+                      {item.text && (() => {
+                        const displayText = fullTextCache.current[item.id] || item.text;
+                        const isLoadingFull = loadingTextId === item.id;
+                        return (
+                          <>
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                disabled={isLoadingFull}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void onCopy(displayText, item.id);
+                                }}
+                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50"
+                              >
+                                {copiedId === item.id ? (
+                                  <>
+                                    <Check className="h-3.5 w-3.5" />
+                                    Скопировано
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3.5 w-3.5" />
+                                    Копировать
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isLoadingFull}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onDownloadTxt(displayText, item.filename);
+                                }}
+                                className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                TXT
+                              </button>
+                            </div>
+                            <div className="max-h-96 overflow-auto rounded-xl bg-gray-50 px-3 py-2">
+                              {isLoadingFull ? (
+                                <div className="flex items-center gap-2 py-2 text-xs text-gray-400">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Загрузка полного текста…
+                                </div>
                               ) : (
-                                <>
-                                  <Copy className="h-3.5 w-3.5" />
-                                  Копировать
-                                </>
+                                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-800">
+                                  {displayText}
+                                </pre>
                               )}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDownloadTxt(item.text, item.filename);
-                              }}
-                              className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition"
-                            >
-                              <Download className="h-3.5 w-3.5" />
-                              TXT
-                            </button>
-                          </div>
-                          <div className="max-h-96 overflow-auto rounded-xl bg-gray-50 px-3 py-2">
-                            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-800">
-                              {item.text}
-                            </pre>
-                          </div>
-                        </>
-                      )}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>

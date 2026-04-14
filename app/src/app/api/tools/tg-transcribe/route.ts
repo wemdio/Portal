@@ -1,52 +1,70 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
+
+const TEXT_PREVIEW_LEN = 200;
+const admin = supabaseAdmin!;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
+async function requireUser(req: NextRequest) {
+  const token = getBearerToken(req.headers.get('authorization'));
+  if (!token) return null;
+  const supabase = createAuthedSupabaseClient(token);
+  const { data: { user } } = await supabase.auth.getUser();
+  return user;
+}
+
+/**
+ * GET /api/tools/tg-transcribe
+ * List transcripts. Returns truncated text preview; use ?id=... for full text.
+ */
 export async function GET(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.tg-transcribe.get' },
     async () => {
-      
-        const token = getBearerToken(req.headers.get('authorization'));
-        if (!token) return jsonError('Необходима авторизация', 401);
-      
-        const supabase = createAuthedSupabaseClient(token);
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
+        const user = await requireUser(req);
         if (!user) return jsonError('Необходима авторизация', 401);
-      
+
         const url = new URL(req.url);
-        const sender = url.searchParams.get('sender')?.trim() || null;
-        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 200);
-        const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
-      
-        let query = supabase
+
+        // Single item full text
+        const id = url.searchParams.get('id')?.trim();
+        if (id) {
+          const { data, error } = await admin
+            .from('tg_video_transcripts')
+            .select('id, text')
+            .eq('id', id)
+            .maybeSingle();
+          if (error) return jsonError(error.message, 500);
+          if (!data) return jsonError('Не найдено', 404);
+          return NextResponse.json({ id: data.id, text: data.text });
+        }
+
+        // List: lightweight — no full text, no count
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '200', 10) || 200, 1), 500);
+        const { data, error } = await admin
           .from('tg_video_transcripts')
-          .select('id, created_at, tg_chat_id, tg_message_id, tg_sender_id, sender_name, filename, file_size_bytes, duration_seconds, text, length, status, error_text', { count: 'exact' })
+          .select('id, created_at, tg_chat_id, tg_message_id, tg_sender_id, sender_name, filename, file_size_bytes, duration_seconds, text, length, status, error_text')
           .order('created_at', { ascending: false })
-          .range(offset, offset + limit - 1);
-      
-        if (sender) {
-          query = query.eq('sender_name', sender);
-        }
-      
-        const { data, error, count } = await query;
-      
-        if (error) {
-          return jsonError(error.message, 500);
-        }
-      
-        return NextResponse.json({
-          items: data ?? [],
-          total: count ?? 0,
-        });
+          .limit(limit);
+
+        if (error) return jsonError(error.message, 500);
+
+        const items = (data ?? []).map((row) => ({
+          ...row,
+          text: row.text?.length > TEXT_PREVIEW_LEN
+            ? row.text.slice(0, TEXT_PREVIEW_LEN) + '…'
+            : row.text,
+          hasFullText: (row.text?.length ?? 0) > TEXT_PREVIEW_LEN,
+        }));
+
+        return NextResponse.json({ items });
     },
   );
 }
