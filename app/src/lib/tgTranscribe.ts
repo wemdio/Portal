@@ -268,15 +268,39 @@ export interface VideoProgressEvent {
   downloadedBytes?: number;
   totalBytes?: number;
   error?: string;
+  transcriptionJobId?: string;
+}
+
+async function hasSuccessfulTranscript(chatId: number, messageId: number): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('tg_video_transcripts')
+      .select('id')
+      .eq('tg_chat_id', chatId)
+      .eq('tg_message_id', messageId)
+      .eq('status', 'completed')
+      .is('error_text', null)
+      .limit(1);
+    if (error) return false;
+    return (data?.length ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function processVideoMessage(
   msg: TgMessage,
   videoInfo: VideoInfo,
   onProgress?: (event: VideoProgressEvent) => void,
-): Promise<{ status: 'completed' | 'error' | 'skipped_size'; text?: string; error?: string }> {
+): Promise<{ status: 'completed' | 'error' | 'skipped_size' | 'skipped_exists'; text?: string; error?: string }> {
   if (!supabaseAdmin) {
     throw new Error('Supabase admin client not configured');
+  }
+
+  if (await hasSuccessfulTranscript(msg.chat.id, msg.message_id)) {
+    console.log(`[tg-transcribe] Skipping ${videoInfo.filename} (msgId=${msg.message_id}) — already transcribed`);
+    return { status: 'skipped_exists' };
   }
 
   const senderName = getSenderName(msg);
@@ -354,8 +378,9 @@ export async function processVideoMessage(
   }
 
   console.log(`[tg-transcribe] Converted ${videoInfo.filename} → MP3 (${(mp3.byteLength / 1e6).toFixed(1)} MB), sending to transcriber...`);
-  onProgress?.({ phase: 'transcribing' });
-  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename });
+  const transcriptionJobId = crypto.randomUUID();
+  onProgress?.({ phase: 'transcribing', transcriptionJobId });
+  const text = await transcribeAudio({ audioMp3: mp3, filename: videoInfo.filename, jobId: transcriptionJobId });
   console.log(`[tg-transcribe] Transcribed ${videoInfo.filename}, text length: ${text.length}`);
 
   await safeInsertTranscript({

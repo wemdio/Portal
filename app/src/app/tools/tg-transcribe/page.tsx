@@ -57,6 +57,15 @@ interface ScanVideoInfo {
   downloadedBytes?: number;
   totalBytes?: number;
   error?: string;
+  transcriptionJobId?: string;
+}
+
+interface TranscriptionProgress {
+  found: boolean;
+  stage?: string;
+  progressPercent?: number;
+  processedSeconds?: number | null;
+  audioDurationSeconds?: number | null;
 }
 
 interface ScanJob {
@@ -128,15 +137,77 @@ function phaseLabel(phase: string): { text: string; color: string } {
   }
 }
 
+function formatMmSs(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = Math.floor(totalSec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
   const { text: statusText, color: statusColor } = phaseLabel(video.phase);
   const isDownloading = video.phase === 'downloading';
+  const isTranscribing = video.phase === 'transcribing';
   const dlPercent =
     isDownloading && video.totalBytes && video.totalBytes > 0
       ? Math.round(((video.downloadedBytes ?? 0) / video.totalBytes) * 100)
       : null;
 
   const isActive = ['downloading', 'converting', 'transcribing'].includes(video.phase);
+
+  const [txProgress, setTxProgress] = useState<TranscriptionProgress | null>(null);
+  const txPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isTranscribing || !video.transcriptionJobId) {
+      if (txPollRef.current) {
+        clearInterval(txPollRef.current);
+        txPollRef.current = null;
+      }
+      if (!isTranscribing) setTxProgress(null);
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const res = await fetch(
+          `/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(video.transcriptionJobId!)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (res.ok) {
+          const data = (await res.json()) as TranscriptionProgress;
+          if (data.found) setTxProgress(data);
+        }
+      } catch { /* ignore */ }
+    };
+
+    void poll();
+    txPollRef.current = setInterval(poll, 4000);
+    return () => {
+      if (txPollRef.current) {
+        clearInterval(txPollRef.current);
+        txPollRef.current = null;
+      }
+    };
+  }, [isTranscribing, video.transcriptionJobId]);
+
+  const txLabel = (() => {
+    if (!isTranscribing || !txProgress) return null;
+    const { processedSeconds, audioDurationSeconds, progressPercent } = txProgress;
+    if (processedSeconds != null && audioDurationSeconds != null && audioDurationSeconds > 0) {
+      return `${formatMmSs(processedSeconds)} / ${formatMmSs(audioDurationSeconds)}`;
+    }
+    if (progressPercent != null && progressPercent > 0) {
+      return `${Math.round(progressPercent)}%`;
+    }
+    return null;
+  })();
+
+  const txPercent =
+    txProgress?.processedSeconds != null && txProgress?.audioDurationSeconds != null && txProgress.audioDurationSeconds > 0
+      ? Math.round((txProgress.processedSeconds / txProgress.audioDurationSeconds) * 100)
+      : txProgress?.progressPercent ?? null;
 
   return (
     <div
@@ -167,6 +238,7 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <span className={`font-medium ${statusColor}`}>
             {statusText}
             {dlPercent != null && ` ${dlPercent}%`}
+            {txLabel != null && ` ${txLabel}`}
           </span>
         </div>
       </div>
@@ -175,6 +247,14 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
           <div
             className="h-full rounded-full bg-blue-500 transition-all duration-500"
             style={{ width: dlPercent != null ? `${dlPercent}%` : '0%' }}
+          />
+        </div>
+      )}
+      {isTranscribing && txPercent != null && txPercent > 0 && (
+        <div className="mt-1.5 h-1 w-full rounded-full bg-gray-200 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-violet-500 transition-all duration-500"
+            style={{ width: `${Math.min(txPercent, 100)}%` }}
           />
         </div>
       )}
