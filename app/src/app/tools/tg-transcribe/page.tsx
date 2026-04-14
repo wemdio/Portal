@@ -344,12 +344,10 @@ function StopConfirmDialog({
 }
 
 export default function TgTranscribePage() {
-  const [items, setItems] = useState<TranscriptItem[]>([]);
-  const [senders, setSenders] = useState<string[]>([]);
+  const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [total, setTotal] = useState(0);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -645,62 +643,49 @@ export default function TgTranscribePage() {
     }
   };
 
-  const limit = 50;
+  const PAGE_SIZE = 50;
 
-  const fetchSenders = useCallback(async () => {
+  const fetchAllItems = useCallback(async () => {
+    setLoading(true);
     try {
       const token = await getToken();
-      if (!token) return;
-      const res = await fetch('/api/tools/tg-transcribe/senders', {
+      if (!token) { setAllItems([]); return; }
+      const res = await fetch('/api/tools/tg-transcribe?limit=200&offset=0', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) return;
-      const json = (await res.json()) as { senders: string[] };
-      setSenders(json.senders ?? []);
+      if (!res.ok) { setAllItems([]); return; }
+      const json = (await res.json()) as { items: TranscriptItem[]; total: number };
+      setAllItems(json.items ?? []);
     } catch {
-      /* ignore */
+      setAllItems([]);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  const fetchItems = useCallback(
-    async (sender: string | null, pageOffset: number) => {
-      setLoading(true);
-      try {
-        const token = await getToken();
-        if (!token) {
-          setItems([]);
-          return;
-        }
-        const params = new URLSearchParams({ limit: String(limit), offset: String(pageOffset) });
-        if (sender) params.set('sender', sender);
+  const senders = React.useMemo(() => {
+    const names = new Set<string>();
+    for (const item of allItems) {
+      if (item.sender_name) names.add(item.sender_name);
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [allItems]);
 
-        const res = await fetch(`/api/tools/tg-transcribe?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          setItems([]);
-          return;
-        }
-        const json = (await res.json()) as { items: TranscriptItem[]; total: number };
-        setItems(json.items ?? []);
-        setTotal(json.total ?? 0);
-      } catch {
-        setItems([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [limit],
+  const filteredItems = React.useMemo(
+    () => activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems,
+    [allItems, activeSender],
+  );
+
+  const total = filteredItems.length;
+  const items = React.useMemo(
+    () => filteredItems.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    [filteredItems, page],
   );
 
   useEffect(() => {
-    void fetchSenders();
+    void fetchAllItems();
     void fetchChats();
-  }, [fetchSenders, fetchChats]);
-
-  useEffect(() => {
-    void fetchItems(activeSender, offset);
-  }, [activeSender, offset, fetchItems]);
+  }, [fetchAllItems, fetchChats]);
 
   // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
@@ -710,20 +695,18 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchItems(activeSender, offset);
-        void fetchSenders();
+        void fetchAllItems();
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchItems(activeSender, offset);
-      void fetchSenders();
+      void fetchAllItems();
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, activeSender, offset, fetchItems, fetchSenders]);
+  }, [activeJob, scanResult, fetchAllItems]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
-    setOffset(0);
+    setPage(0);
     setExpandedId(null);
   };
 
@@ -749,8 +732,8 @@ export default function TgTranscribePage() {
     URL.revokeObjectURL(url);
   };
 
-  const totalPages = Math.ceil(total / limit);
-  const currentPage = Math.floor(offset / limit) + 1;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const currentPage = page + 1;
 
   return (
     <div className="flex gap-6 text-left max-w-full">
@@ -1290,7 +1273,7 @@ export default function TgTranscribePage() {
             <button
               type="button"
               disabled={currentPage <= 1}
-              onClick={() => setOffset(Math.max(0, offset - limit))}
+              onClick={() => setPage(Math.max(0, page - 1))}
               className={[
                 'rounded-full px-3 py-1.5 text-xs font-medium border transition',
                 currentPage <= 1
@@ -1306,7 +1289,7 @@ export default function TgTranscribePage() {
             <button
               type="button"
               disabled={currentPage >= totalPages}
-              onClick={() => setOffset(offset + limit)}
+              onClick={() => setPage(page + 1)}
               className={[
                 'rounded-full px-3 py-1.5 text-xs font-medium border transition',
                 currentPage >= totalPages
