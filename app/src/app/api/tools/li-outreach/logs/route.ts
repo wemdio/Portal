@@ -4,30 +4,36 @@ import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  return withToolTrace({ request: req, operation: 'tools.li-outreach.campaigns.logs' }, async () => {
+export async function GET(req: NextRequest) {
+  return withToolTrace({ request: req, operation: 'tools.li-outreach.logs' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
-    const { id } = await ctx.params;
-
-    // Verify ownership
-    const { data: campaign } = await auth.supabase
-      .from('li_campaigns')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', auth.user.id)
-      .maybeSingle();
-    if (!campaign) return jsonError('Campaign not found', 404);
 
     const url = new URL(req.url);
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '200', 10) || 200, 1), 1000);
     const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
+    const campaignId = url.searchParams.get('campaign_id');
     const level = url.searchParams.get('level');
+
+    const { data: userCampaigns } = await auth.supabase
+      .from('li_campaigns')
+      .select('id')
+      .eq('user_id', auth.user.id);
+    const campaignIds = (userCampaigns ?? []).map((c) => c.id);
+    if (campaignIds.length === 0) {
+      return NextResponse.json({ items: [], total: 0 });
+    }
 
     let query = auth.supabase
       .from('li_campaign_logs')
-      .select('*', { count: 'exact' })
-      .eq('campaign_id', id);
+      .select('*, campaign:li_campaigns!inner(name)', { count: 'exact' });
+
+    if (campaignId) {
+      if (!campaignIds.includes(campaignId)) return jsonError('Campaign not found', 404);
+      query = query.eq('campaign_id', campaignId);
+    } else {
+      query = query.in('campaign_id', campaignIds);
+    }
 
     if (level && ['info', 'warning', 'error'].includes(level)) {
       query = query.eq('level', level);

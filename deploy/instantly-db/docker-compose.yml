@@ -1,9 +1,10 @@
-# Instantly DB infrastructure: prod + dev instances
+# DB infrastructure: Instantly (prod/dev) + Main Portal DB
 # Deploy on a dedicated DB server, separate from the Portal app server.
 #
 # Host ports (avoid 5432/3000/3001 defaults on shared servers):
-#   prod: PG 35432, PostgREST 35401, pgAdmin 127.0.0.1:35410
-#   dev:  PG 35433, PostgREST 35402, pgAdmin 127.0.0.1:35411
+#   instantly prod: PG 35432, PostgREST 35401, pgAdmin 127.0.0.1:35410
+#   instantly dev:  PG 35433, PostgREST 35402, pgAdmin 127.0.0.1:35411
+#   main portal:    PG 35434, pgAdmin 127.0.0.1:35412
 #
 # Usage:
 #   cp .env.example .env   # fill in passwords
@@ -187,6 +188,67 @@ services:
     networks:
       - instantly-network
 
+  # ─── MAIN PORTAL DB ───────────────────────────────────────────────────────────
+
+  main-postgres:
+    image: postgres:16-alpine
+    container_name: main-postgres
+    command:
+      - postgres
+      - -c
+      - max_connections=80
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+    environment:
+      POSTGRES_DB: portal
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD: ${MAIN_PG_PASSWORD}
+    volumes:
+      - main-pg-data:/var/lib/postgresql/data
+    ports:
+      - "0.0.0.0:35434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal -d portal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '2.0'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
+  main-pgadmin:
+    image: dpage/pgadmin4:9.3
+    container_name: main-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${MAIN_PGADMIN_EMAIL:-admin@portal.com}
+      PGADMIN_DEFAULT_PASSWORD: ${MAIN_PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 5050
+    depends_on:
+      main-postgres:
+        condition: service_healthy
+    volumes:
+      - main-pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "127.0.0.1:35412:5050"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - instantly-network
+
   # ─── MIGRATOR ──────────────────────────────────────────────────────────────────
   # Applies pending SQL migrations to both prod and dev databases on every `up`.
 
@@ -237,6 +299,11 @@ services:
       DEV_PG_USER: instantly
       DEV_PG_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
       DEV_PG_DB: instantly
+      MAIN_PG_HOST: main-postgres
+      MAIN_PG_PORT: "5432"
+      MAIN_PG_USER: portal
+      MAIN_PG_PASSWORD: ${MAIN_PG_PASSWORD}
+      MAIN_PG_DB: portal
       BACKUP_SUPABASE_URL: ${BACKUP_SUPABASE_URL}
       BACKUP_SUPABASE_KEY: ${BACKUP_SUPABASE_KEY}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
@@ -246,6 +313,8 @@ services:
       instantly-postgres-prod:
         condition: service_healthy
       instantly-postgres-dev:
+        condition: service_healthy
+      main-postgres:
         condition: service_healthy
     deploy:
       resources:
@@ -261,6 +330,8 @@ volumes:
   prod-pgadmin-data:
   dev-pg-data:
   dev-pgadmin-data:
+  main-pg-data:
+  main-pgadmin-data:
   backup-data:
 
 networks:
