@@ -567,9 +567,6 @@ export async function stepValidateEmails(
       newBody[item.i][statusIdx] = result.result;
       const domain = email.split('@')[1] || '';
       newBody[item.i][providerIdx] = result.is_free ? 'free' : result.is_catch_all ? 'catch-all' : domain;
-      if (result.result === 'invalid' || result.result === 'disposable') {
-        newBody[item.i][emailIdx] = '';
-      }
     } catch {
       newBody[item.i][statusIdx] = 'error';
     }
@@ -579,8 +576,13 @@ export async function stepValidateEmails(
     }
   });
 
+  const filtered = newBody.filter((row) => {
+    const status = row[statusIdx];
+    return status !== 'invalid' && status !== 'disposable';
+  });
+
   await onProgress(100);
-  return [newHeader, ...newBody];
+  return [newHeader, ...filtered];
 }
 
 /* ═══════════════════════════════════════════
