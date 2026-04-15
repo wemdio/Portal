@@ -584,7 +584,7 @@ export async function stepValidateEmails(
 
   const filtered = newBody.filter((row) => {
     const status = row[statusIdx];
-    return status !== 'invalid' && status !== 'disposable';
+    return status === 'ok' || status === 'catch_all' || status === '';
   });
 
   await onProgress(100);
