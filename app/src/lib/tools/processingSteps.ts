@@ -370,8 +370,14 @@ export async function stepTAScore(
     await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
   }
 
+  const TA_MIN_SCORE = 7;
+  const filtered = scored.filter((row) => {
+    const score = parseInt(row[newHeader.length - 2], 10);
+    return !isNaN(score) && score >= TA_MIN_SCORE;
+  });
+
   await onProgress(100);
-  return [newHeader, ...scored];
+  return [newHeader, ...filtered];
 }
 
 /* ═══════════════════════════════════════════
