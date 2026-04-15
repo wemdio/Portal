@@ -27,6 +27,10 @@ case "$INSTANCE" in
     PREFIX="instantly"
     ;;
   main)
+    if [ "${MAIN_PG_ENABLED:-false}" != "true" ]; then
+      echo "[backup] MAIN_PG_ENABLED is not true, skipping main backup."
+      exit 0
+    fi
     PG_HOST="$MAIN_PG_HOST"
     PG_PORT="$MAIN_PG_PORT"
     PG_USER="$MAIN_PG_USER"
@@ -39,6 +43,11 @@ case "$INSTANCE" in
     exit 1
     ;;
 esac
+
+if [ -z "$PG_HOST" ] || [ -z "$PG_PORT" ] || [ -z "$PG_USER" ] || [ -z "$PG_PASSWORD" ] || [ -z "$PG_DB" ]; then
+  echo "[backup] Missing PG connection env for ${INSTANCE}; skipping."
+  exit 0
+fi
 
 DUMP_FILE="${DUMP_DIR}/${PREFIX}-${INSTANCE}-${TS}.dump"
 echo "[backup] Starting pg_dump for ${INSTANCE} -> ${DUMP_FILE}"
