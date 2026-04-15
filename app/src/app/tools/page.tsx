@@ -22,6 +22,7 @@ import {
   Bot,
   BookOpen,
   ShieldAlert,
+  Blocks,
   type LucideIcon,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
@@ -32,6 +33,7 @@ import { useUser } from '@/lib/UserProvider';
 
 const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'done-for-you': Sparkles,
+  'base-constructor': Blocks,
   'ai-caller': PhoneCall,
   'ai-caller-v2': AudioLines,
   databases: Database,

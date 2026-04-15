@@ -1,0 +1,1016 @@
+'use client';
+
+import { useState, useEffect, useRef, useCallback, type DragEvent } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
+import {
+  Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
+  Globe, FileText, Target, PenLine, Upload, Play, X, Check,
+  Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
+  AlertTriangle, Zap, CircleDollarSign, Brain, Split,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+
+/* ═══════════════════════════════════════════
+   TYPES
+   ═══════════════════════════════════════════ */
+
+type StepKey =
+  | 'remove_empty' | 'dedup_full' | 'dedup_email' | 'clean_names'
+  | 'find_emails' | 'split_emails' | 'validate_emails' | 'check_sites'
+  | 'enrich_descriptions' | 'ta_scoring' | 'personalization';
+
+type CostTier = 'free' | 'cheap' | 'api' | 'ai';
+
+interface StepDef {
+  key: StepKey;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+  needsConfig?: 'brief' | 'prompt';
+  category: 'clean' | 'enrich' | 'ai';
+  cost: CostTier;
+  priority: number;
+  requiresColumns?: string[][];
+  recommendedAfter?: StepKey[];
+}
+
+interface ConstructorJob {
+  id: string;
+  status: string;
+  file_name: string | null;
+  selected_steps: StepKey[];
+  current_step: number;
+  current_step_key: string;
+  current_step_progress: number;
+  total_steps: number;
+  initial_row_count: number;
+  result_stats?: { total_rows: number; emails_found: number; avg_ta_score: number; columns: number };
+  error_message?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+/* ═══════════════════════════════════════════
+   CONSTANTS
+   ═══════════════════════════════════════════ */
+
+const STEPS: StepDef[] = [
+  { key: 'remove_empty', label: 'Удалить пустые', description: 'Удаляет пустые строки и столбцы', icon: Eraser, category: 'clean', cost: 'free', priority: 10 },
+  { key: 'dedup_full', label: 'Убрать дубликаты', description: 'Удаляет полностью идентичные строки', icon: CopyMinus, category: 'clean', cost: 'free', priority: 20 },
+  { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
+  { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['email'], ['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
+  { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email']], recommendedAfter: ['find_emails'] },
+  { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email']], recommendedAfter: ['split_emails'] },
+  { key: 'validate_emails', label: 'Валидация Email', description: 'Проверяет доставляемость, убирает невалидные', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email']], recommendedAfter: ['split_emails', 'dedup_email'] },
+  { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
+  { key: 'enrich_descriptions', label: 'Обогатить описаниями', description: 'Парсит описание компании с сайта', icon: FileText, category: 'enrich', cost: 'cheap', priority: 65, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
+  { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'] },
+  { key: 'personalization', label: 'Персонализация', description: 'AI пишет персональное предложение', icon: PenLine, needsConfig: 'prompt', category: 'ai', cost: 'ai', priority: 90, recommendedAfter: ['enrich_descriptions', 'clean_names'] },
+];
+
+const STEP_MAP = new Map(STEPS.map((s) => [s.key, s]));
+
+const CATEGORIES: { key: string; label: string; color: string }[] = [
+  { key: 'clean', label: 'Очистка', color: 'bg-amber-50 text-amber-700 border-amber-200' },
+  { key: 'enrich', label: 'Обогащение', color: 'bg-blue-50 text-blue-700 border-blue-200' },
+  { key: 'ai', label: 'AI Обработка', color: 'bg-violet-50 text-violet-700 border-violet-200' },
+];
+
+const COST_BADGES: Record<CostTier, { label: string; color: string; icon: LucideIcon }> = {
+  free: { label: 'Бесплатно', color: 'bg-emerald-50 text-emerald-600 border-emerald-200', icon: Zap },
+  cheap: { label: 'Дёшево', color: 'bg-sky-50 text-sky-600 border-sky-200', icon: Globe },
+  api: { label: 'API', color: 'bg-amber-50 text-amber-600 border-amber-200', icon: CircleDollarSign },
+  ai: { label: 'AI', color: 'bg-violet-50 text-violet-600 border-violet-200', icon: Brain },
+};
+
+/**
+ * Topological sort respecting both priority and recommendedAfter constraints.
+ * Guarantees that if step A recommends running after step B,
+ * B will always come before A (when both are selected).
+ */
+function sortByPriority(steps: StepKey[]): StepKey[] {
+  const selected = new Set(steps);
+  const stepMap = new Map(STEPS.map((s) => [s.key, s]));
+
+  const effectivePriority = new Map<StepKey, number>();
+  for (const key of steps) {
+    effectivePriority.set(key, stepMap.get(key)?.priority ?? 999);
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const key of steps) {
+      const def = stepMap.get(key);
+      if (!def?.recommendedAfter) continue;
+      for (const dep of def.recommendedAfter) {
+        if (!selected.has(dep)) continue;
+        const depPri = effectivePriority.get(dep) ?? 0;
+        const myPri = effectivePriority.get(key) ?? 999;
+        if (myPri <= depPri) {
+          effectivePriority.set(key, depPri + 1);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return [...steps].sort((a, b) =>
+    (effectivePriority.get(a) ?? 999) - (effectivePriority.get(b) ?? 999),
+  );
+}
+
+function getColumnWarnings(steps: StepKey[], header: string[]): Map<StepKey, string> {
+  const lower = header.map((h) => h.trim().toLowerCase());
+  const warnings = new Map<StepKey, string>();
+  for (const key of steps) {
+    const def = STEP_MAP.get(key);
+    if (!def?.requiresColumns) continue;
+    for (const colGroup of def.requiresColumns) {
+      if (!colGroup.some((name) => lower.includes(name.toLowerCase()))) {
+        warnings.set(key, `Нужна колонка «${colGroup[0]}»`);
+        break;
+      }
+    }
+  }
+  return warnings;
+}
+
+/* ═══════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════ */
+
+async function getToken(): Promise<string> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token || '';
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let current: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; }
+        else inQuotes = false;
+      } else { cell += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',' || ch === ';' || ch === '\t') { current.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        current.push(cell);
+        cell = '';
+        if (current.some((c) => c.trim())) rows.push(current);
+        current = [];
+      } else { cell += ch; }
+    }
+  }
+  current.push(cell);
+  if (current.some((c) => c.trim())) rows.push(current);
+  return rows;
+}
+
+/* ═══════════════════════════════════════════
+   COMPONENT
+   ═══════════════════════════════════════════ */
+
+export default function BaseConstructorPage() {
+  const [fileData, setFileData] = useState<string[][] | null>(null);
+  const [fileName, setFileName] = useState('');
+  const [parsing, setParsing] = useState(false);
+  const [parseError, setParseError] = useState('');
+
+  const [selectedSteps, setSelectedSteps] = useState<StepKey[]>([]);
+  const [brief, setBrief] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [showPreview, setShowPreview] = useState(true);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
+  const [jobData, setJobData] = useState<string[][] | null>(null);
+  const [history, setHistory] = useState<ConstructorJob[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  /* ─── Load history ─── */
+
+  const loadHistory = useCallback(async () => {
+    const token = await getToken();
+    if (!token) return;
+    const res = await fetch('/api/tools/base-constructor', { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return;
+    const { jobs } = await res.json();
+    setHistory(jobs || []);
+    const running = (jobs || []).find(
+      (j: ConstructorJob) => ['pending', 'processing'].includes(j.status),
+    );
+    if (running) setActiveJob(running);
+  }, []);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  /* ─── Polling ─── */
+
+  useEffect(() => {
+    if (!activeJob || ['completed', 'failed', 'cancelled'].includes(activeJob.status)) {
+      if (pollRef.current) clearInterval(pollRef.current);
+      return;
+    }
+
+    async function poll() {
+      const token = await getToken();
+      if (!token || !activeJob) return;
+      const res = await fetch(`/api/tools/base-constructor/${activeJob.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const { job } = await res.json();
+      setActiveJob(job);
+
+      if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        loadHistory();
+        if (job.status === 'completed') loadJobData(job.id);
+      }
+    }
+
+    pollRef.current = setInterval(poll, 3000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [activeJob, loadHistory]);
+
+  /* ─── Load job result data ─── */
+
+  async function loadJobData(jobId: string) {
+    const token = await getToken();
+    const res = await fetch(`/api/tools/base-constructor/${jobId}/data`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return;
+    const { data } = await res.json();
+    setJobData(data || null);
+  }
+
+  /* ─── File handling ─── */
+
+  async function handleFile(file: File) {
+    setParsing(true);
+    setParseError('');
+    setFileName(file.name);
+
+    try {
+      const ext = file.name.split('.').pop()?.toLowerCase();
+
+      if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
+        const text = await file.text();
+        const rows = parseCSV(text);
+        if (rows.length < 2) { setParseError('Файл пустой или содержит только заголовок'); return; }
+        setFileData(rows);
+      } else if (ext === 'xlsx' || ext === 'xls') {
+        const { read, utils } = await import('xlsx');
+        const buffer = await file.arrayBuffer();
+        const wb = read(buffer, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows: string[][] = utils.sheet_to_json(ws, { header: 1, defval: '' });
+        if (rows.length < 2) { setParseError('Файл пустой или содержит только заголовок'); return; }
+        setFileData(rows.map((r) => r.map(String)));
+      } else {
+        setParseError('Поддерживаются форматы: CSV, TSV, XLSX, XLS');
+      }
+    } catch (err) {
+      setParseError(err instanceof Error ? err.message : 'Ошибка при чтении файла');
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  function handleDragOver(e: DragEvent) { e.preventDefault(); setIsDragOver(true); }
+  function handleDragLeave() { setIsDragOver(false); }
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) void handleFile(file);
+  }
+
+  /* ─── Step toggling (auto-sorted by optimal order) ─── */
+
+  function toggleStep(key: StepKey) {
+    setSelectedSteps((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
+      return sortByPriority(next);
+    });
+  }
+
+  function selectPreset(preset: 'clean' | 'full') {
+    if (preset === 'clean') {
+      setSelectedSteps(sortByPriority(['remove_empty', 'dedup_full', 'clean_names']));
+    } else {
+      setSelectedSteps(sortByPriority([
+        'remove_empty', 'dedup_full', 'check_sites', 'find_emails',
+        'split_emails', 'dedup_email', 'clean_names', 'enrich_descriptions',
+      ]));
+    }
+  }
+
+  const columnWarnings = fileData ? getColumnWarnings(selectedSteps, fileData[0] || []) : new Map();
+
+  /* ─── Submit ─── */
+
+  async function handleSubmit() {
+    if (!fileData || selectedSteps.length === 0) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const token = await getToken();
+      const stepConfig: Record<string, string> = {};
+      if (selectedSteps.includes('ta_scoring') && brief.trim()) stepConfig.brief = brief.trim();
+      if (selectedSteps.includes('personalization') && prompt.trim()) stepConfig.prompt = prompt.trim();
+
+      const res = await fetch('/api/tools/base-constructor', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: fileData,
+          selected_steps: selectedSteps,
+          step_config: stepConfig,
+          file_name: fileName,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { setError(json.error || 'Ошибка'); return; }
+      setActiveJob(json.job);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка сети');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /* ─── Cancel ─── */
+
+  async function handleCancel() {
+    if (!activeJob) return;
+    const token = await getToken();
+    await fetch(`/api/tools/base-constructor/${activeJob.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'cancel' }),
+    });
+    setActiveJob((j) => j ? { ...j, status: 'cancelled' } : null);
+  }
+
+  /* ─── Download CSV ─── */
+
+  function downloadCSV() {
+    if (!jobData) return;
+    const csv = jobData.map((row) => row.map((c) => `"${(c || '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /* ─── Load to spreadsheet ─── */
+
+  function loadToSpreadsheet() {
+    if (!jobData) return;
+    try {
+      const { id } = writePendingDbImport({
+        title: `Конструктор ${new Date().toLocaleDateString('ru-RU')}`,
+        rows: jobData,
+      });
+      window.open(buildDatabasesImportUrl(id), '_blank');
+    } catch (err) {
+      console.error('Failed to load to spreadsheet:', err);
+    }
+  }
+
+  /* ─── Reset ─── */
+
+  function resetForm() {
+    setActiveJob(null);
+    setJobData(null);
+    setFileData(null);
+    setFileName('');
+    setSelectedSteps([]);
+    setBrief('');
+    setPrompt('');
+    setError('');
+  }
+
+  /* ═══════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════ */
+
+  const isRunning = activeJob && ['pending', 'processing'].includes(activeJob.status);
+  const isComplete = activeJob?.status === 'completed';
+  const isFailed = activeJob?.status === 'failed';
+
+  const overallProgress = activeJob && activeJob.total_steps > 0
+    ? Math.round(((activeJob.current_step - 1 + activeJob.current_step_progress / 100) / activeJob.total_steps) * 100)
+    : 0;
+
+  const needsBrief = selectedSteps.includes('ta_scoring');
+  const needsPrompt = selectedSteps.includes('personalization');
+  const canSubmit = fileData && selectedSteps.length > 0 && !submitting
+    && (!needsBrief || brief.trim())
+    && (!needsPrompt || prompt.trim());
+
+  return (
+    <div className="min-h-screen bg-gray-50/60 px-4 py-6 sm:px-6 lg:px-8">
+      <div className="max-w-[1000px] mx-auto space-y-6">
+        {/* Header */}
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-gray-900">Конструктор баз</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Загрузите базу, выберите шаги обработки — всё выполнится автоматически
+          </p>
+        </div>
+
+        {/* ═══════════ UPLOAD + CONSTRUCTOR ═══════════ */}
+        {!isRunning && !isComplete && !isFailed && (
+          <>
+            {/* File Upload */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+                <h2 className="text-base font-bold text-gray-900">1. Загрузите базу</h2>
+              </div>
+              <div className="px-6 py-5">
+                {!fileData ? (
+                  <label
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={`flex flex-col items-center justify-center w-full py-10 border-2 border-dashed rounded-xl cursor-pointer transition ${
+                      isDragOver
+                        ? 'border-blue-400 bg-blue-50/60 scale-[1.01]'
+                        : parsing
+                          ? 'border-blue-300 bg-blue-50/50'
+                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100 hover:border-gray-300'
+                    }`}
+                  >
+                    {parsing ? (
+                      <div className="text-center">
+                        <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-3" />
+                        <p className="text-sm text-blue-600 font-medium">Разбор файла...</p>
+                      </div>
+                    ) : (
+                      <div className="text-center">
+                        <Upload className="w-8 h-8 text-gray-400 mx-auto mb-3" />
+                        <p className="text-sm font-medium text-gray-600">Перетащите файл или нажмите для выбора</p>
+                        <p className="text-xs text-gray-400 mt-1">CSV, TSV, XLSX, XLS</p>
+                      </div>
+                    )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".csv,.tsv,.txt,.xlsx,.xls"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void handleFile(file);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
+                          <Check className="w-5 h-5 text-emerald-600" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">{fileName}</p>
+                          <p className="text-xs text-gray-500">
+                            {fileData.length - 1} строк, {fileData[0]?.length || 0} колонок
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => { setFileData(null); setFileName(''); }}
+                        className="p-2 rounded-lg hover:bg-gray-100 transition text-gray-400 hover:text-gray-600"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Preview toggle */}
+                    <button
+                      onClick={() => setShowPreview(!showPreview)}
+                      className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 transition"
+                    >
+                      {showPreview ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      Предпросмотр
+                    </button>
+
+                    {showPreview && (
+                      <div className="overflow-x-auto rounded-lg border border-gray-100">
+                        <table className="min-w-full divide-y divide-gray-100 text-xs">
+                          <thead className="bg-gray-50/80">
+                            <tr>
+                              {fileData[0]?.map((h, i) => (
+                                <th key={i} className="px-3 py-2 text-left font-semibold text-gray-500 whitespace-nowrap">
+                                  {h || `Col ${i + 1}`}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-50">
+                            {fileData.slice(1, 6).map((row, rIdx) => (
+                              <tr key={rIdx} className="hover:bg-gray-50/50">
+                                {row.map((cell, cIdx) => (
+                                  <td key={cIdx} className="px-3 py-1.5 text-gray-600 max-w-[160px] truncate" title={cell}>
+                                    {cell}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {fileData.length > 6 && (
+                          <div className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50/50 text-center">
+                            ... ещё {fileData.length - 6} строк
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {parseError && <p className="mt-3 text-sm text-red-600">{parseError}</p>}
+              </div>
+            </div>
+
+            {/* Step Constructor */}
+            {fileData && (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+                  <h2 className="text-base font-bold text-gray-900">2. Выберите шаги обработки</h2>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => selectPreset('clean')}
+                      className="px-3 py-1 text-xs font-medium rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 transition border border-amber-200"
+                    >
+                      Быстрая очистка
+                    </button>
+                    <button
+                      onClick={() => selectPreset('full')}
+                      className="px-3 py-1 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition border border-blue-200"
+                    >
+                      Полная обработка
+                    </button>
+                  </div>
+                </div>
+                <div className="px-6 py-5 space-y-5">
+                  {CATEGORIES.map((cat) => (
+                    <div key={cat.key}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-md border ${cat.color}`}>
+                          {cat.label}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {STEPS.filter((s) => s.category === cat.key).map((step) => {
+                          const isSelected = selectedSteps.includes(step.key);
+                          const Icon = step.icon;
+                          return (
+                            <button
+                              key={step.key}
+                              onClick={() => toggleStep(step.key)}
+                              className={`group relative flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
+                                isSelected
+                                  ? 'border-gray-900 bg-gray-50 shadow-sm'
+                                  : 'border-gray-100 bg-white hover:border-gray-300 hover:shadow-sm'
+                              }`}
+                            >
+                              <div className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition ${
+                                isSelected ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-400 group-hover:bg-gray-200 group-hover:text-gray-600'
+                              }`}>
+                                <Icon className="w-4.5 h-4.5" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <p className={`text-sm font-semibold transition ${isSelected ? 'text-gray-900' : 'text-gray-700'}`}>
+                                    {step.label}
+                                  </p>
+                                  {(() => {
+                                    const badge = COST_BADGES[step.cost];
+                                    const CostIcon = badge.icon;
+                                    return (
+                                      <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${badge.color}`}>
+                                        <CostIcon className="w-2.5 h-2.5" />
+                                        {badge.label}
+                                      </span>
+                                    );
+                                  })()}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{step.description}</p>
+                                {isSelected && columnWarnings.has(step.key) && (
+                                  <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1">
+                                    <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                    {columnWarnings.get(step.key)}
+                                  </p>
+                                )}
+                              </div>
+                              {isSelected && (
+                                <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-gray-900 flex items-center justify-center">
+                                  <Check className="w-3 h-3 text-white" />
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Selected order */}
+                  {selectedSteps.length > 0 && (
+                    <div className="pt-3 border-t border-gray-100">
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Порядок выполнения</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedSteps.map((key, idx) => {
+                          const step = STEP_MAP.get(key);
+                          if (!step) return null;
+                          const hasWarning = columnWarnings.has(key);
+                          return (
+                            <span
+                              key={key}
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg ${
+                                hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-gray-100 text-gray-700'
+                              }`}
+                            >
+                              <span className="w-4 h-4 rounded-full bg-gray-900 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0">
+                                {idx + 1}
+                              </span>
+                              {step.label}
+                              {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
+                              <button
+                                onClick={(e) => { e.stopPropagation(); toggleStep(key); }}
+                                className="ml-0.5 text-gray-400 hover:text-gray-600"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                      {columnWarnings.size > 0 && (
+                        <p className="text-[11px] text-amber-600 mt-2 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3" />
+                          Некоторые шаги могут быть пропущены — в файле нет нужных колонок
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Config inputs for steps that need them */}
+            {fileData && (needsBrief || needsPrompt) && (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+                  <h2 className="text-base font-bold text-gray-900">3. Настройки</h2>
+                </div>
+                <div className="px-6 py-5 space-y-4">
+                  {needsBrief && (
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+                        Бриф для оценки ЦА
+                      </label>
+                      <textarea
+                        value={brief}
+                        onChange={(e) => setBrief(e.target.value)}
+                        rows={4}
+                        placeholder="Опишите вашу целевую аудиторию, продукт, идеального клиента..."
+                        className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
+                      />
+                    </div>
+                  )}
+                  {needsPrompt && (
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+                        Промпт для персонализации
+                      </label>
+                      <textarea
+                        value={prompt}
+                        onChange={(e) => setPrompt(e.target.value)}
+                        rows={3}
+                        placeholder="Что AI должен написать? Например: 'Напиши приветствие с упоминанием деятельности компании'"
+                        className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Submit */}
+            {fileData && selectedSteps.length > 0 && (
+              <div className="space-y-3">
+                {error && <p className="text-sm text-red-600">{error}</p>}
+                <button
+                  onClick={() => void handleSubmit()}
+                  disabled={!canSubmit}
+                  className="w-full py-3 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {submitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Запуск...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4" />
+                      Запустить обработку ({selectedSteps.length} {selectedSteps.length === 1 ? 'шаг' : selectedSteps.length < 5 ? 'шага' : 'шагов'})
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ═══════════ PROGRESS ═══════════ */}
+        {isRunning && activeJob && (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">Обработка базы</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {activeJob.file_name || 'Файл'} — {activeJob.initial_row_count} строк
+                </p>
+              </div>
+              <button
+                onClick={() => void handleCancel()}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition"
+              >
+                Отменить
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-5">
+              {/* Overall progress bar */}
+              <div>
+                <div className="flex items-center justify-between text-sm mb-2">
+                  <span className="font-medium text-gray-900">
+                    {STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
+                  </span>
+                  <span className="text-gray-500 tabular-nums">{Math.max(0, overallProgress)}%</span>
+                </div>
+                <div className="w-full bg-gray-100 rounded-full h-2.5">
+                  <div
+                    className="bg-gray-900 h-2.5 rounded-full transition-all duration-700 ease-out"
+                    style={{ width: `${Math.max(0, overallProgress)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Step-by-step indicators */}
+              <div className="space-y-2">
+                {activeJob.selected_steps.map((stepKey, idx) => {
+                  const step = STEP_MAP.get(stepKey);
+                  if (!step) return null;
+                  const Icon = step.icon;
+                  const stepNum = idx + 1;
+                  const isCurrent = activeJob.current_step === stepNum;
+                  const isDone = activeJob.current_step > stepNum || activeJob.status === 'completed';
+                  const isPending = !isCurrent && !isDone;
+
+                  return (
+                    <div
+                      key={stepKey}
+                      className={`flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all ${
+                        isCurrent
+                          ? 'bg-blue-50 border border-blue-200'
+                          : isDone
+                            ? 'bg-emerald-50/50 border border-emerald-100'
+                            : 'bg-gray-50/50 border border-transparent'
+                      }`}
+                    >
+                      <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center ${
+                        isDone
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : isCurrent
+                            ? 'bg-blue-500 text-white animate-pulse'
+                            : 'bg-gray-100 text-gray-400'
+                      }`}>
+                        {isDone ? <Check className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-medium ${
+                          isDone ? 'text-emerald-700' : isCurrent ? 'text-blue-700' : 'text-gray-400'
+                        }`}>
+                          {step.label}
+                        </p>
+                      </div>
+                      {isCurrent && activeJob.current_step_progress > 0 && (
+                        <span className="text-xs font-medium text-blue-600 tabular-nums">
+                          {activeJob.current_step_progress}%
+                        </span>
+                      )}
+                      {isDone && (
+                        <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                      )}
+                      {isPending && (
+                        <span className="text-xs text-gray-300">ожидание</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════ FAILED ═══════════ */}
+        {isFailed && activeJob && (
+          <div className="bg-white rounded-2xl border border-red-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-red-100 bg-red-50/50">
+              <h2 className="text-base font-bold text-red-700">Ошибка</h2>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-sm text-red-600">{activeJob.error_message || 'Неизвестная ошибка'}</p>
+              <button
+                onClick={resetForm}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Попробовать снова
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════ RESULTS ═══════════ */}
+        {isComplete && activeJob && (
+          <div className="space-y-4">
+            {/* Stats */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Строк</p>
+                <p className="mt-2 text-2xl font-bold text-gray-900">
+                  {activeJob.result_stats?.total_rows ?? 0}
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">из {activeJob.initial_row_count}</p>
+              </div>
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>
+                <p className="mt-2 text-2xl font-bold text-emerald-600">
+                  {activeJob.result_stats?.emails_found ?? 0}
+                </p>
+              </div>
+              {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
+                  <p className="mt-2 text-2xl font-bold text-blue-600">
+                    {activeJob.result_stats?.avg_ta_score ?? 0}
+                  </p>
+                </div>
+              )}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Колонок</p>
+                <p className="mt-2 text-2xl font-bold text-gray-700">
+                  {activeJob.result_stats?.columns ?? 0}
+                </p>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                onClick={downloadCSV}
+                disabled={!jobData}
+                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-gray-900 text-white shadow-sm transition hover:bg-gray-800 disabled:bg-gray-300 inline-flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                Скачать CSV
+              </button>
+              <button
+                onClick={loadToSpreadsheet}
+                disabled={!jobData}
+                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-blue-600 text-white shadow-sm transition hover:bg-blue-700 disabled:bg-gray-300 inline-flex items-center gap-2"
+              >
+                <ArrowRight className="w-4 h-4" />
+                Открыть в базах
+              </button>
+              <button
+                onClick={resetForm}
+                className="px-4 py-2.5 text-sm font-medium rounded-xl bg-white text-gray-700 border border-gray-200 transition hover:bg-gray-50 inline-flex items-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Новая обработка
+              </button>
+            </div>
+
+            {/* Preview table */}
+            {jobData && jobData.length > 1 && (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+                  <h3 className="text-base font-bold text-gray-900">
+                    Результат <span className="text-gray-400 font-normal text-sm">(первые 20 строк)</span>
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-100 text-sm">
+                    <thead className="bg-gray-50/50">
+                      <tr>
+                        {jobData[0].map((h, i) => (
+                          <th key={i} className="px-3 py-2 text-left font-semibold text-gray-500 whitespace-nowrap">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {jobData.slice(1, 21).map((row, rIdx) => (
+                        <tr key={rIdx} className="hover:bg-gray-50/50">
+                          {row.map((cell, cIdx) => (
+                            <td key={cIdx} className="px-3 py-2 text-gray-600 max-w-[200px] truncate" title={cell}>
+                              {cell}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══════════ HISTORY ═══════════ */}
+        {!isRunning && history.length > 0 && (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+              <h3 className="text-base font-bold text-gray-900">История</h3>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {history.map((j) => (
+                <div
+                  key={j.id}
+                  className="px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50/50 transition"
+                  onClick={() => {
+                    setActiveJob(j);
+                    if (j.status === 'completed') loadJobData(j.id);
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    <div>
+                      <span className="text-sm font-medium text-gray-900">
+                        {j.file_name || 'Без имени'}
+                      </span>
+                      <span className="text-xs text-gray-400 ml-2">{formatDate(j.created_at)}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-400">
+                      {j.selected_steps?.length || 0} шагов
+                    </span>
+                    <span
+                      className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                        j.status === 'completed'
+                          ? 'bg-emerald-50 text-emerald-700'
+                          : j.status === 'failed'
+                            ? 'bg-red-50 text-red-700'
+                            : j.status === 'cancelled'
+                              ? 'bg-gray-100 text-gray-500'
+                              : 'bg-amber-50 text-amber-700'
+                      }`}
+                    >
+                      {j.status === 'completed'
+                        ? `${j.result_stats?.total_rows ?? 0} строк`
+                        : j.status === 'failed'
+                          ? 'Ошибка'
+                          : j.status === 'cancelled'
+                            ? 'Отменена'
+                            : 'В работе'}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
