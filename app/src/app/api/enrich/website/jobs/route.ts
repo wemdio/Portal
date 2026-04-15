@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
 
     const { data: jobs } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, status, extraction_type, total, processed, created_at')
+      .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header')
       .eq('user_id', user.id)
       .in('status', ['pending', 'running'])
       .order('created_at', { ascending: false })
@@ -33,6 +33,9 @@ export async function GET(req: NextRequest) {
     const activeJob = (jobs ?? [])[0] as {
       id: string; status: string; extraction_type: string;
       total: number; processed: number;
+      spreadsheet_tab_id: string | null;
+      result_col_index: number | null;
+      result_col_header: string | null;
     } | undefined;
 
     if (!activeJob) {
@@ -50,6 +53,9 @@ export async function GET(req: NextRequest) {
         total: activeJob.total,
         processed: activeJob.processed,
         progress,
+        spreadsheet_tab_id: activeJob.spreadsheet_tab_id,
+        result_col_index: activeJob.result_col_index,
+        result_col_header: activeJob.result_col_header,
       },
     });
   } catch (err) {

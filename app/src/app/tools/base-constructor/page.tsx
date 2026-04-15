@@ -7,7 +7,7 @@ import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
   Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
-  AlertTriangle, Zap, CircleDollarSign, Brain, Split,
+  AlertTriangle, Zap, CircleDollarSign, Brain, Split, FileUp,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -22,6 +22,12 @@ type StepKey =
 
 type CostTier = 'free' | 'cheap' | 'api' | 'ai';
 
+interface BenefitsFrom {
+  step: StepKey;
+  columns: string[];
+  hint: string;
+}
+
 interface StepDef {
   key: StepKey;
   label: string;
@@ -32,7 +38,9 @@ interface StepDef {
   cost: CostTier;
   priority: number;
   requiresColumns?: string[][];
+  producesColumns?: string[];
   recommendedAfter?: StepKey[];
+  benefitsFrom?: BenefitsFrom[];
 }
 
 interface ConstructorJob {
@@ -59,14 +67,14 @@ const STEPS: StepDef[] = [
   { key: 'remove_empty', label: 'Удалить пустые', description: 'Удаляет пустые строки и столбцы', icon: Eraser, category: 'clean', cost: 'free', priority: 10 },
   { key: 'dedup_full', label: 'Убрать дубликаты', description: 'Удаляет полностью идентичные строки', icon: CopyMinus, category: 'clean', cost: 'free', priority: 20 },
   { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
-  { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['email'], ['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
-  { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email']], recommendedAfter: ['find_emails'] },
-  { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email']], recommendedAfter: ['split_emails'] },
-  { key: 'validate_emails', label: 'Валидация Email', description: 'Проверяет доставляемость, убирает невалидные', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email']], recommendedAfter: ['split_emails', 'dedup_email'] },
+  { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
+  { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['find_emails'] },
+  { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'] },
+  { key: 'validate_emails', label: 'Валидация Email', description: 'Проверяет доставляемость, убирает невалидные', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'] },
   { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
   { key: 'enrich_descriptions', label: 'Обогатить описаниями', description: 'Парсит описание компании с сайта', icon: FileText, category: 'enrich', cost: 'cheap', priority: 65, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
-  { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'] },
-  { key: 'personalization', label: 'Персонализация', description: 'AI пишет персональное предложение', icon: PenLine, needsConfig: 'prompt', category: 'ai', cost: 'ai', priority: 90, recommendedAfter: ['enrich_descriptions', 'clean_names'] },
+  { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'], benefitsFrom: [{ step: 'enrich_descriptions', columns: ['описание', 'description', 'about'], hint: 'Добавьте «Обогатить описаниями» — оценка будет точнее' }] },
+  { key: 'personalization', label: 'Персонализация', description: 'AI пишет персональное предложение', icon: PenLine, needsConfig: 'prompt', category: 'ai', cost: 'ai', priority: 90, recommendedAfter: ['enrich_descriptions', 'clean_names'], benefitsFrom: [{ step: 'enrich_descriptions', columns: ['описание', 'description', 'about'], hint: 'Добавьте «Обогатить описаниями» — персонализация будет лучше' }] },
 ];
 
 const STEP_MAP = new Map(STEPS.map((s) => [s.key, s]));
@@ -122,19 +130,44 @@ function sortByPriority(steps: StepKey[]): StepKey[] {
 }
 
 function getColumnWarnings(steps: StepKey[], header: string[]): Map<StepKey, string> {
-  const lower = header.map((h) => h.trim().toLowerCase());
+  const available = new Set(header.map((h) => h.trim().toLowerCase()));
   const warnings = new Map<StepKey, string>();
   for (const key of steps) {
     const def = STEP_MAP.get(key);
-    if (!def?.requiresColumns) continue;
-    for (const colGroup of def.requiresColumns) {
-      if (!colGroup.some((name) => lower.includes(name.toLowerCase()))) {
-        warnings.set(key, `Нужна колонка «${colGroup[0]}»`);
+    if (def?.requiresColumns) {
+      for (const colGroup of def.requiresColumns) {
+        if (!colGroup.some((name) => available.has(name.toLowerCase()))) {
+          warnings.set(key, `Нужна колонка «${colGroup[0]}»`);
+          break;
+        }
+      }
+    }
+    if (def?.producesColumns) {
+      for (const col of def.producesColumns) available.add(col.toLowerCase());
+    }
+  }
+  return warnings;
+}
+
+function getStepHints(steps: StepKey[], header: string[]): Map<StepKey, string> {
+  const lowerHeader = new Set(header.map((h) => h.trim().toLowerCase()));
+  const stepSet = new Set(steps);
+  const hints = new Map<StepKey, string>();
+
+  for (const key of steps) {
+    const def = STEP_MAP.get(key);
+    if (!def?.benefitsFrom) continue;
+    for (const bf of def.benefitsFrom) {
+      const hasStep = stepSet.has(bf.step);
+      const hasCol = bf.columns.some((c) => lowerHeader.has(c.toLowerCase()));
+      if (!hasStep && !hasCol) {
+        hints.set(key, bf.hint);
         break;
       }
     }
   }
-  return warnings;
+
+  return hints;
 }
 
 /* ═══════════════════════════════════════════
@@ -192,8 +225,12 @@ export default function BaseConstructorPage() {
 
   const [selectedSteps, setSelectedSteps] = useState<StepKey[]>([]);
   const [brief, setBrief] = useState('');
+  const [briefInputMode, setBriefInputMode] = useState<'pdf' | 'text'>('pdf');
+  const [briefFileName, setBriefFileName] = useState('');
+  const [briefUploading, setBriefUploading] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [showPreview, setShowPreview] = useState(true);
+  const briefFileRef = useRef<HTMLInputElement | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -326,6 +363,51 @@ export default function BaseConstructorPage() {
   }
 
   const columnWarnings = fileData ? getColumnWarnings(selectedSteps, fileData[0] || []) : new Map();
+  const stepHints = fileData ? getStepHints(selectedSteps, fileData[0] || []) : new Map();
+
+  /* ─── Brief PDF upload ─── */
+
+  const BRIEF_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
+  const MAX_BRIEF_FILE = 20 * 1024 * 1024;
+
+  async function handleBriefPdfUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setBriefUploading(true);
+
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Бриф должен быть в формате PDF');
+      setBriefUploading(false);
+      return;
+    }
+    if (file.size > MAX_BRIEF_FILE) {
+      setError('Файл брифа слишком большой (макс. 20MB)');
+      setBriefUploading(false);
+      return;
+    }
+
+    try {
+      const token = await getToken();
+      const uploadPath = `brief-scoring/${Date.now()}_${file.name}`;
+      const { error: upErr } = await supabase.storage.from(BRIEF_BUCKET).upload(uploadPath, file);
+      if (upErr) throw upErr;
+
+      const res = await fetch('/api/brief-scoring/parse-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ bucket: BRIEF_BUCKET, path: uploadPath, fileName: file.name }),
+      });
+      if (!res.ok) throw new Error(`Ошибка обработки PDF (${res.status})`);
+      const data = await res.json();
+      setBrief(data.text ?? '');
+      setBriefFileName(file.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки PDF');
+    } finally {
+      setBriefUploading(false);
+    }
+  }
 
   /* ─── Submit ─── */
 
@@ -628,6 +710,12 @@ export default function BaseConstructorPage() {
                                     {columnWarnings.get(step.key)}
                                   </p>
                                 )}
+                                {isSelected && !columnWarnings.has(step.key) && stepHints.has(step.key) && (
+                                  <p className="text-[11px] text-blue-500 mt-1 flex items-center gap-1">
+                                    <Zap className="w-3 h-3 flex-shrink-0" />
+                                    {stepHints.get(step.key)}
+                                  </p>
+                                )}
                               </div>
                               {isSelected && (
                                 <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-gray-900 flex items-center justify-center">
@@ -650,11 +738,14 @@ export default function BaseConstructorPage() {
                           const step = STEP_MAP.get(key);
                           if (!step) return null;
                           const hasWarning = columnWarnings.has(key);
+                          const hasHint = !hasWarning && stepHints.has(key);
                           return (
                             <span
                               key={key}
                               className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg ${
-                                hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-gray-100 text-gray-700'
+                                hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                : hasHint ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                : 'bg-gray-100 text-gray-700'
                               }`}
                             >
                               <span className="w-4 h-4 rounded-full bg-gray-900 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0">
@@ -662,6 +753,7 @@ export default function BaseConstructorPage() {
                               </span>
                               {step.label}
                               {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
+                              {hasHint && <Zap className="w-3 h-3 text-blue-500" />}
                               <button
                                 onClick={(e) => { e.stopPropagation(); toggleStep(key); }}
                                 className="ml-0.5 text-gray-400 hover:text-gray-600"
@@ -678,6 +770,16 @@ export default function BaseConstructorPage() {
                           Некоторые шаги могут быть пропущены — в файле нет нужных колонок
                         </p>
                       )}
+                      {stepHints.size > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {[...stepHints.entries()].map(([key, hint]) => (
+                            <p key={key} className="text-[11px] text-blue-500 flex items-center gap-1">
+                              <Zap className="w-3 h-3 flex-shrink-0" />
+                              {hint}
+                            </p>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -693,16 +795,78 @@ export default function BaseConstructorPage() {
                 <div className="px-6 py-5 space-y-4">
                   {needsBrief && (
                     <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">
                         Бриф для оценки ЦА
                       </label>
-                      <textarea
-                        value={brief}
-                        onChange={(e) => setBrief(e.target.value)}
-                        rows={4}
-                        placeholder="Опишите вашу целевую аудиторию, продукт, идеального клиента..."
-                        className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
-                      />
+                      <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-3 w-fit">
+                        <button
+                          type="button"
+                          onClick={() => setBriefInputMode('pdf')}
+                          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                            briefInputMode === 'pdf'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-500 hover:text-gray-700'
+                          }`}
+                        >
+                          PDF файл
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBriefInputMode('text')}
+                          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                            briefInputMode === 'text'
+                              ? 'bg-white text-gray-900 shadow-sm'
+                              : 'text-gray-500 hover:text-gray-700'
+                          }`}
+                        >
+                          Текст
+                        </button>
+                      </div>
+                      {briefInputMode === 'pdf' ? (
+                        <div>
+                          <input
+                            ref={briefFileRef}
+                            type="file"
+                            accept=".pdf"
+                            className="hidden"
+                            onChange={(e) => void handleBriefPdfUpload(e)}
+                          />
+                          {briefFileName && brief ? (
+                            <div className="flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl">
+                              <Check size={14} className="text-emerald-600 shrink-0" />
+                              <span className="text-emerald-800 truncate">{briefFileName}</span>
+                              <button
+                                type="button"
+                                onClick={() => { setBrief(''); setBriefFileName(''); }}
+                                className="ml-auto text-gray-400 hover:text-gray-600"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={briefUploading}
+                              onClick={() => briefFileRef.current?.click()}
+                              className="w-full flex items-center justify-center gap-2 px-3 py-3 text-sm border-2 border-dashed border-gray-200 rounded-xl text-gray-500 transition hover:border-gray-400 hover:text-gray-700 disabled:opacity-50"
+                            >
+                              {briefUploading ? (
+                                <><Loader2 size={16} className="animate-spin" /> Обработка PDF…</>
+                              ) : (
+                                <><FileUp size={16} /> Загрузить PDF бриф</>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <textarea
+                          value={brief}
+                          onChange={(e) => setBrief(e.target.value)}
+                          rows={4}
+                          placeholder="Опишите вашу целевую аудиторию, продукт, идеального клиента..."
+                          className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
+                        />
+                      )}
                     </div>
                   )}
                   {needsPrompt && (
@@ -710,6 +874,9 @@ export default function BaseConstructorPage() {
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">
                         Промпт для персонализации
                       </label>
+                      <p className="text-xs text-gray-500 mb-2">
+                        AI будет использовать все данные из каждой строки (название, сайт, описание и т.д.) для генерации.
+                      </p>
                       <textarea
                         value={prompt}
                         onChange={(e) => setPrompt(e.target.value)}

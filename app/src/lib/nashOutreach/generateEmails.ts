@@ -175,7 +175,8 @@ function buildSystemPrompt(sender: SenderConfig, segment: Segment, signalType?: 
   const senderTitle = isPartnership ? 'Директор' : 'Руководитель отдела продаж';
   const senderTg = isPartnership ? 'http://t.me/sorichev' : '';
   const phone = '+7 (495) 120-29-71';
-  const site = 'https://polzaagency.ru//?utm_source=polzaagency&utm_medium=outreach&utm_campaign=hh';
+  const siteUrl = 'https://polzaagency.ru/?utm_source=polzaagency&utm_medium=outreach&utm_campaign=hh';
+  const site = `<a href="${siteUrl}">polzaagency.ru</a>`;
 
   const segmentRefs = SEGMENT_REFS[segment]
     .replace(/\{\{senderName\}\}/g, senderName)
@@ -224,7 +225,7 @@ ${refs}
 6. Всегда заканчивай подписью: ${signatureLines}
 7. Тема: только для ПЕРВОГО письма (3-7 слов, без кликбейта). Шаги 2 и 3 идут как Re: к первому — тему НЕ генерируй, поставь пустую строку.${isPartnership ? ' Тема первого письма: "Идея для партнёрства".' : ''}
 8. НЕ вставляй ссылки на новостные статьи или источники.
-9. Персонализируй — используй название компании, сигнал, нишу. Замени {{companyName}} на реальное название.
+9. Персонализируй — используй название компании, сигнал, нишу. Замени {{companyName}} на реальное название. Если есть "Контекст компании" — упомяни их конкретный продукт/услугу, покажи что ты понимаешь чем они занимаются и кто их клиенты.
 10. ${segment === 'it' ? 'Используй ТОЛЬКО реальные кейсы из референсов (Okdesk, Ланит, Первая Форма, MMVS). Можешь выбрать 1-2 наиболее релевантных. НЕ выдумывай другие кейсы.' : 'НИКОГДА не выдумывай кейсы, названия клиентов, статистику. Описывай процесс и предлагай показать примеры на звонке.'}
 ${isPartnership ? '11. Это предложение ПАРТНЁРСТВА, не продажа услуги. Тон партнёрский. НЕ конкурируем с ними.' : ''}
 
@@ -244,13 +245,17 @@ interface LLMResponse {
   choices?: Array<{ message?: { content?: string } }>;
 }
 
-async function generateForOne(lead: NashLead, sender: SenderConfig): Promise<EmailStep[] | null> {
+async function generateForOne(lead: NashLead, sender: SenderConfig, companyContext?: string | null): Promise<EmailStep[] | null> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
 
   const segment = detectSegment(lead.niche, lead.description);
   const isIntlHiring = lead.signal_type === 'Hiring_Sales' && isInternationalHiring(lead.signal_detail, lead.hh_vacancy_name);
-  console.log(`[nash-genEmails] ${lead.company_name} → segment: ${segment}${isIntlHiring ? ' (international)' : ''}`);
+  console.log(`[nash-genEmails] ${lead.company_name} → segment: ${segment}${isIntlHiring ? ' (international)' : ''}${companyContext ? ' (with context)' : ''}`);
+
+  const contextBlock = companyContext
+    ? `\nКонтекст компании (с их сайта — используй для персонализации!):\n${companyContext}`
+    : '';
 
   const userPrompt = `Сгенерируй цепочку из 3 писем для этого лида:
 
@@ -262,7 +267,7 @@ async function generateForOne(lead: NashLead, sender: SenderConfig): Promise<Ema
 Тип сигнала: ${lead.signal_type}
 Детали сигнала: ${lead.signal_detail}
 Intent Score: ${lead.intent_score}
-Приоритет: ${lead.priority}`;
+Приоритет: ${lead.priority}${contextBlock}`;
 
   try {
     const res = await fetch(LLM_URL, {
@@ -318,6 +323,7 @@ export interface GenerateResult {
 export async function generateEmailSequences(
   leads: NashLead[],
   sender: SenderConfig,
+  companyContexts?: Map<string, string>,
 ): Promise<GenerateResult[]> {
   const results: GenerateResult[] = [];
   let generated = 0;
@@ -327,8 +333,9 @@ export async function generateEmailSequences(
     const batch = leads.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.allSettled(
       batch.map(async (lead) => {
-        console.log(`[nash-genEmails] Generating for ${lead.company_name}...`);
-        const sequence = await generateForOne(lead, sender);
+        const ctx = companyContexts?.get(lead.id) ?? null;
+        console.log(`[nash-genEmails] Generating for ${lead.company_name}${ctx ? ' (with context)' : ''}...`);
+        const sequence = await generateForOne(lead, sender, ctx);
         return { id: lead.id, sequence };
       }),
     );
