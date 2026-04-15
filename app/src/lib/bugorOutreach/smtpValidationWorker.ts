@@ -9,6 +9,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { generateEmailSequences } from './generateEmails';
+import { scrapeCompanyContext } from './scrapeCompanyContext';
 import { uploadToInstantly } from './uploadToInstantly';
 import type { BugorLead, SenderConfig } from './types';
 
@@ -157,9 +158,28 @@ export async function runBugorSmtpValidation(): Promise<number> {
   const needSequences = validLeads.filter((l) => !l.email_sequence || l.email_sequence.length < 3);
   if (needSequences.length > 0) {
     try {
+      // Scrape company websites for personalization context
+      console.log(`[bugor-smtp] Scraping company context for ${needSequences.length} leads...`);
+      const companyContexts = new Map<string, string>();
+      const contextResults = await Promise.allSettled(
+        needSequences.map(async (lead) => {
+          const ctx = await scrapeCompanyContext(lead.website, lead.company_name);
+          if (ctx) {
+            companyContexts.set(lead.id, ctx);
+            if (supabaseAdmin) {
+              const existing = (lead.raw_data as Record<string, unknown>) ?? {};
+              await supabaseAdmin.from('bugor_outreach_leads')
+                .update({ raw_data: { ...existing, company_context: ctx } })
+                .eq('id', lead.id);
+            }
+          }
+        }),
+      );
+      console.log(`[bugor-smtp] Company context: ${companyContexts.size}/${needSequences.length} scraped`);
+
       console.log(`[bugor-smtp] Generating sequences for ${needSequences.length} leads...`);
       const senderConfig = await loadSenderConfig();
-      const genResults = await generateEmailSequences(needSequences, senderConfig);
+      const genResults = await generateEmailSequences(needSequences, senderConfig, companyContexts);
 
       for (const gr of genResults) {
         if (gr.sequence) {
