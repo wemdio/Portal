@@ -92,6 +92,92 @@ const COST_BADGES: Record<CostTier, { label: string; color: string; icon: Lucide
   ai: { label: 'AI', color: 'bg-violet-50 text-violet-600 border-violet-200', icon: Brain },
 };
 
+/* ═══════════════════════════════════════════
+   COLUMN MAPPING
+   ═══════════════════════════════════════════ */
+
+interface ColumnRole {
+  key: string;
+  label: string;
+  canonical: string;
+  aliases: string[];
+  neededBy: StepKey[];
+}
+
+const COLUMN_ROLES: ColumnRole[] = [
+  {
+    key: 'company',
+    label: 'Название компании',
+    canonical: 'компания',
+    aliases: ['компания', 'company', 'name', 'название', 'наименование', 'организация', 'фирма', 'компании'],
+    neededBy: ['clean_names'],
+  },
+  {
+    key: 'site',
+    label: 'Сайт / домен',
+    canonical: 'сайт',
+    aliases: ['сайт', 'site', 'website', 'url', 'домен', 'domain', 'web', 'www', 'сайты', 'веб-сайт'],
+    neededBy: ['check_sites', 'find_emails', 'enrich_descriptions'],
+  },
+  {
+    key: 'email',
+    label: 'Email',
+    canonical: 'email',
+    aliases: ['email', 'e-mail', 'почта', 'mail', 'электронная почта', 'емейл', 'имейл'],
+    neededBy: ['split_emails', 'dedup_email', 'validate_emails'],
+  },
+];
+
+const ROLE_MAP = new Map(COLUMN_ROLES.map((r) => [r.key, r]));
+
+function autoDetectMapping(header: string[]): Record<string, string> {
+  const mapping: Record<string, string> = {};
+  const lower = header.map((h) => h.trim().toLowerCase());
+  const used = new Set<number>();
+
+  for (const role of COLUMN_ROLES) {
+    let found = -1;
+    for (const alias of role.aliases) {
+      const idx = lower.indexOf(alias.toLowerCase());
+      if (idx >= 0 && !used.has(idx)) { found = idx; break; }
+    }
+    if (found < 0) {
+      for (const alias of role.aliases) {
+        const idx = lower.findIndex((h, i) => !used.has(i) && h.includes(alias.toLowerCase()));
+        if (idx >= 0) { found = idx; break; }
+      }
+    }
+    if (found >= 0) {
+      mapping[role.key] = header[found];
+      used.add(found);
+    }
+  }
+
+  return mapping;
+}
+
+function getNeededRoles(steps: StepKey[]): ColumnRole[] {
+  const stepSet = new Set(steps);
+  const producedCols = new Set<string>();
+  for (const key of steps) {
+    const def = STEP_MAP.get(key);
+    if (def?.producesColumns) {
+      for (const c of def.producesColumns) producedCols.add(c.toLowerCase());
+    }
+  }
+
+  return COLUMN_ROLES.filter((role) => {
+    const isNeeded = role.neededBy.some((s) => stepSet.has(s));
+    if (!isNeeded) return false;
+    const isProduced = producedCols.has(role.canonical.toLowerCase());
+    const producerSelected = STEPS.some(
+      (s) => s.producesColumns?.some((c) => c.toLowerCase() === role.canonical.toLowerCase()) && stepSet.has(s.key),
+    );
+    if (isProduced && producerSelected) return false;
+    return true;
+  });
+}
+
 /**
  * Topological sort respecting both priority and recommendedAfter constraints.
  * Guarantees that if step A recommends running after step B,
@@ -129,8 +215,11 @@ function sortByPriority(steps: StepKey[]): StepKey[] {
   );
 }
 
-function getColumnWarnings(steps: StepKey[], header: string[]): Map<StepKey, string> {
+function getColumnWarnings(steps: StepKey[], header: string[], mapping: Record<string, string>): Map<StepKey, string> {
   const available = new Set(header.map((h) => h.trim().toLowerCase()));
+  for (const role of COLUMN_ROLES) {
+    if (mapping[role.key]) available.add(role.canonical.toLowerCase());
+  }
   const warnings = new Map<StepKey, string>();
   for (const key of steps) {
     const def = STEP_MAP.get(key);
@@ -229,6 +318,7 @@ export default function BaseConstructorPage() {
   const [briefFileName, setBriefFileName] = useState('');
   const [briefUploading, setBriefUploading] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [showPreview, setShowPreview] = useState(true);
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
@@ -315,6 +405,7 @@ export default function BaseConstructorPage() {
         const rows = parseCSV(text);
         if (rows.length < 2) { setParseError('Файл пустой или содержит только заголовок'); return; }
         setFileData(rows);
+        setColumnMapping(autoDetectMapping(rows[0]));
       } else if (ext === 'xlsx' || ext === 'xls') {
         const { read, utils } = await import('xlsx');
         const buffer = await file.arrayBuffer();
@@ -323,6 +414,7 @@ export default function BaseConstructorPage() {
         const rows: string[][] = utils.sheet_to_json(ws, { header: 1, defval: '' });
         if (rows.length < 2) { setParseError('Файл пустой или содержит только заголовок'); return; }
         setFileData(rows.map((r) => r.map(String)));
+        setColumnMapping(autoDetectMapping(rows[0].map(String)));
       } else {
         setParseError('Поддерживаются форматы: CSV, TSV, XLSX, XLS');
       }
@@ -362,7 +454,7 @@ export default function BaseConstructorPage() {
     }
   }
 
-  const columnWarnings = fileData ? getColumnWarnings(selectedSteps, fileData[0] || []) : new Map();
+  const columnWarnings = fileData ? getColumnWarnings(selectedSteps, fileData[0] || [], columnMapping) : new Map();
   const stepHints = fileData ? getStepHints(selectedSteps, fileData[0] || []) : new Map();
 
   /* ─── Brief PDF upload ─── */
@@ -420,6 +512,7 @@ export default function BaseConstructorPage() {
       const stepConfig: Record<string, string> = {};
       if (selectedSteps.includes('ta_scoring') && brief.trim()) stepConfig.brief = brief.trim();
       if (selectedSteps.includes('personalization') && prompt.trim()) stepConfig.prompt = prompt.trim();
+      if (Object.keys(columnMapping).length > 0) stepConfig.column_mapping = JSON.stringify(columnMapping);
 
       const res = await fetch('/api/tools/base-constructor', {
         method: 'POST',
@@ -510,7 +603,10 @@ export default function BaseConstructorPage() {
 
   const needsBrief = selectedSteps.includes('ta_scoring');
   const needsPrompt = selectedSteps.includes('personalization');
+  const neededRoles = fileData ? getNeededRoles(selectedSteps) : [];
+  const unmappedRoles = neededRoles.filter((r) => !columnMapping[r.key]);
   const canSubmit = fileData && selectedSteps.length > 0 && !submitting
+    && unmappedRoles.length === 0
     && (!needsBrief || brief.trim())
     && (!needsPrompt || prompt.trim());
 
@@ -586,7 +682,7 @@ export default function BaseConstructorPage() {
                         </div>
                       </div>
                       <button
-                        onClick={() => { setFileData(null); setFileName(''); }}
+                        onClick={() => { setFileData(null); setFileName(''); setColumnMapping({}); }}
                         className="p-2 rounded-lg hover:bg-gray-100 transition text-gray-400 hover:text-gray-600"
                       >
                         <X className="w-4 h-4" />
@@ -786,11 +882,64 @@ export default function BaseConstructorPage() {
               </div>
             )}
 
+            {/* Column mapping */}
+            {fileData && selectedSteps.length > 0 && neededRoles.length > 0 && (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+                  <h2 className="text-base font-bold text-gray-900">3. Укажите колонки</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">Выберите, какая колонка в файле соответствует каждому полю</p>
+                </div>
+                <div className="px-6 py-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {neededRoles.map((role) => {
+                    const mapped = columnMapping[role.key] || '';
+                    return (
+                      <div key={role.key}>
+                        <label className="block text-sm font-semibold text-gray-700 mb-1.5">
+                          {role.label}
+                          {!mapped && <span className="text-red-400 ml-1">*</span>}
+                        </label>
+                        <select
+                          value={mapped}
+                          onChange={(e) => setColumnMapping((prev) => {
+                            const next = { ...prev };
+                            if (e.target.value) next[role.key] = e.target.value;
+                            else delete next[role.key];
+                            return next;
+                          })}
+                          className={`w-full px-3 py-2 text-sm border rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white ${
+                            !mapped ? 'border-red-300' : 'border-gray-200'
+                          }`}
+                        >
+                          <option value="">— Не выбрано —</option>
+                          {(fileData[0] || []).map((col, idx) => (
+                            <option key={idx} value={col}>{col}</option>
+                          ))}
+                        </select>
+                        {mapped && (
+                          <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
+                            <Check className="w-3 h-3" /> {mapped}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {unmappedRoles.length > 0 && (
+                  <div className="px-6 pb-4">
+                    <p className="text-[11px] text-red-500 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      Укажите все обязательные колонки для запуска
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Config inputs for steps that need them */}
             {fileData && (needsBrief || needsPrompt) && (
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-                  <h2 className="text-base font-bold text-gray-900">3. Настройки</h2>
+                  <h2 className="text-base font-bold text-gray-900">{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
                 </div>
                 <div className="px-6 py-5 space-y-4">
                   {needsBrief && (
