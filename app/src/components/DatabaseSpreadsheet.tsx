@@ -367,6 +367,24 @@ const SITE_AVAILABILITY_HIGHLIGHT_DURATION = 2500;
 const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+const EMAIL_PROVIDER_MAP: Record<string, string> = {
+  'gmail.com': 'Google', 'googlemail.com': 'Google',
+  'yandex.ru': 'Яндекс', 'yandex.com': 'Яндекс', 'ya.ru': 'Яндекс', 'yandex.by': 'Яндекс', 'yandex.kz': 'Яндекс', 'yandex.ua': 'Яндекс',
+  'mail.ru': 'Mail.ru', 'inbox.ru': 'Mail.ru', 'list.ru': 'Mail.ru', 'bk.ru': 'Mail.ru', 'internet.ru': 'Mail.ru',
+  'rambler.ru': 'Rambler', 'lenta.ru': 'Rambler', 'autorambler.ru': 'Rambler', 'myrambler.ru': 'Rambler', 'ro.ru': 'Rambler',
+  'outlook.com': 'Microsoft', 'hotmail.com': 'Microsoft', 'live.com': 'Microsoft', 'live.ru': 'Microsoft', 'msn.com': 'Microsoft',
+  'icloud.com': 'Apple', 'me.com': 'Apple', 'mac.com': 'Apple',
+  'yahoo.com': 'Yahoo', 'yahoo.co.uk': 'Yahoo', 'yahoo.fr': 'Yahoo',
+  'protonmail.com': 'Proton', 'proton.me': 'Proton', 'pm.me': 'Proton',
+  'aol.com': 'AOL',
+  'zoho.com': 'Zoho',
+};
+const getEmailProvider = (email: string): string => {
+  const domain = email.split('@')[1]?.toLowerCase().trim();
+  if (!domain) return '';
+  return EMAIL_PROVIDER_MAP[domain] ?? domain;
+};
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 22;
 const VIRTUAL_OVERSCAN = 10;
@@ -5992,7 +6010,13 @@ export function DatabaseSpreadsheet() {
     let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
     if (resultColIndex < 0) resultColIndex = headerRow.length;
     const qualityColIndex = resultColIndex + 1;
-    const detailsColIndex = resultColIndex + 2;
+    const providerColIndex = resultColIndex + 2;
+    const detailsColIndex = resultColIndex + 3;
+
+    const emailSourceCol = headerRow.findIndex((h) => {
+      const label = String(h).toLowerCase();
+      return label.includes('email') || label.includes('почт') || label.includes('e-mail');
+    });
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -6000,7 +6024,11 @@ export function DatabaseSpreadsheet() {
       if (rowIdx === 0 && !String(extended[resultColIndex]).startsWith('Результат')) {
         extended[resultColIndex] = 'Результат (email)';
         extended[qualityColIndex] = 'Качество';
+        extended[providerColIndex] = 'Провайдер';
         extended[detailsColIndex] = 'Детали';
+      } else if (rowIdx > 0 && !String(extended[providerColIndex]).trim() && emailSourceCol >= 0) {
+        const email = String(row[emailSourceCol] ?? '').trim();
+        if (email) extended[providerColIndex] = getEmailProvider(email);
       }
       return extended;
     });
@@ -6166,7 +6194,8 @@ export function DatabaseSpreadsheet() {
     let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
     if (resultColIndex < 0) resultColIndex = headerRow.length;
     const qualityColIndex = resultColIndex + 1;
-    const detailsColIndex = resultColIndex + 2;
+    const providerColIndex = resultColIndex + 2;
+    const detailsColIndex = resultColIndex + 3;
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -6174,10 +6203,13 @@ export function DatabaseSpreadsheet() {
       if (rowIdx === 0) {
         extended[resultColIndex] = `Результат (${sourceLabel})`;
         extended[qualityColIndex] = `Качество`;
+        extended[providerColIndex] = `Провайдер`;
         extended[detailsColIndex] = `Детали`;
       } else {
         extended[resultColIndex] = '';
         extended[qualityColIndex] = '';
+        const email = String(row[emailValidation.sourceCol] ?? '').trim();
+        extended[providerColIndex] = getEmailProvider(email);
         extended[detailsColIndex] = '';
       }
       return extended;
@@ -7624,6 +7656,94 @@ export function DatabaseSpreadsheet() {
     runBriefScoringPolling,
     tabs,
   ]);
+
+  // Server-side auto-detect: resume running brief scoring job even without localStorage
+  const serverBriefDetectRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !activeTab || briefScoring.isScoring || serverBriefDetectRef.current) return;
+    const runFromStorage = getBriefScoringRunForTab(activeTabId);
+    if (runFromStorage) return; // localStorage already has it — the other effect handles resume
+    serverBriefDetectRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/brief-scoring/jobs?active=1', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as {
+          jobs?: Array<{
+            id: string; status: string; total: number; processed: number;
+            spreadsheet_tab_id?: string | null; score_col_index?: number | null; reason_col_index?: number | null;
+          }>;
+        };
+        const job = data.jobs?.[0];
+        if (!job || cancelled) return;
+        const tabId = job.spreadsheet_tab_id;
+        const scoreCol = job.score_col_index;
+        const reasonCol = job.reason_col_index;
+        if (!tabId || scoreCol == null || reasonCol == null) return;
+        const tabExists = tabs.some((t) => t.id === tabId);
+        if (!tabExists) return;
+        const total = job.total > 0 ? job.total : Math.max(0, (activeTab?.data.length ?? 1) - 1);
+        ensureBriefScoringColumns(tabId, scoreCol, reasonCol);
+        setBriefScoring((prev) => ({
+          ...prev,
+          isOpen: false,
+          isScoring: true,
+          error: null,
+          jobId: job.id,
+          totalRows: total,
+          currentRow: job.processed,
+          progress: total > 0 ? Math.round((job.processed / total) * 100) : 0,
+        }));
+        void runBriefScoringPolling({ jobId: job.id, tabId, scoreColIndex: scoreCol, reasonColIndex: reasonCol, totalRowsFallback: total });
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, activeTab, activeTabId, briefScoring.isScoring, tabs]);
+
+  // Server-side auto-detect: resume running text enrichment job even without localStorage
+  const serverEnrichDetectRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !activeTab || websiteEnrichment.isGenerating || serverEnrichDetectRef.current) return;
+    const runFromStorage = getEnrichmentRunForTab(activeTabId);
+    if (runFromStorage) return;
+    serverEnrichDetectRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/enrich/website/jobs', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as {
+          active_job?: {
+            id: string; extraction_type: string; total: number; processed: number; progress: number;
+            spreadsheet_tab_id?: string | null; result_col_index?: number | null; result_col_header?: string | null;
+          } | null;
+        };
+        const job = data.active_job;
+        if (!job || cancelled) return;
+        if (job.extraction_type !== 'text') return; // email scraping has its own handler
+        const tabId = job.spreadsheet_tab_id;
+        const targetCol = job.result_col_index;
+        if (!tabId || targetCol == null) return;
+        const tabExists = tabs.some((t) => t.id === tabId);
+        if (!tabExists) return;
+        const total = job.total > 0 ? job.total : Math.max(0, (activeTab?.data.length ?? 1) - 1);
+        const headerLabel = job.result_col_header ?? '';
+        setEnrichmentTargetOverride(targetCol);
+        void runWebsiteEnrichmentPolling({
+          jobId: job.id, tabId, sourceCol: 0, targetColIndex: targetCol,
+          totalRowsFallback: total, headerLabel, applyOnlyEmpty: true,
+        });
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, activeTab, activeTabId, websiteEnrichment.isGenerating, tabs]);
 
   const reconcileCalledRef = useRef(false);
   useEffect(() => {
