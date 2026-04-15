@@ -139,17 +139,23 @@ export async function stepFindEmails(
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
 ): Promise<string[][]> {
-  const header = data[0];
-  const body = data.slice(1);
-  const emailIdx = findColumnIndex(header, 'email');
+  let header = [...data[0]];
+  let body = data.slice(1).map((r) => [...r]);
   const siteIdx = findColumnIndex(header, 'сайт', 'site', 'website', 'url', 'домен', 'domain');
-  if (emailIdx < 0 || siteIdx < 0) { await onProgress(100); return data; }
+  if (siteIdx < 0) { await onProgress(100); return data; }
+
+  let emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
+  if (emailIdx < 0) {
+    emailIdx = header.length;
+    header = [...header, 'Email'];
+    body = body.map((row) => [...row, '']);
+  }
 
   const toProcess = body
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
     .filter((r) => r.url && !extractEmail(r.row[emailIdx] || ''));
 
-  if (toProcess.length === 0) { await onProgress(100); return data; }
+  if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
   let done = 0;
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
@@ -182,7 +188,7 @@ export async function stepSplitEmails(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const emailIdx = findColumnIndex(header, 'email');
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   if (emailIdx < 0) { await onProgress(100); return data; }
 
   await onProgress(10);
@@ -532,7 +538,7 @@ export async function stepValidateEmails(
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
-  const emailIdx = findColumnIndex(header, 'email');
+  const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   if (emailIdx < 0) { await onProgress(100); return data; }
 
   const newHeader = [...header, 'Email Статус'];
@@ -611,8 +617,10 @@ export interface StepDefinition {
    * Free row-reducing steps should be lowest, expensive AI steps highest.
    */
   priority: number;
-  /** Column headers that must be present for this step to work (any match). */
+  /** Column headers that must be present for this step to work (any match within each group). */
   requiresColumns?: string[][];
+  /** Column name aliases this step will create if missing. */
+  producesColumns?: string[];
   /** Which other steps should ideally run before this one. */
   recommendedAfter?: StepKey[];
 }
@@ -655,9 +663,9 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     cost: 'cheap',
     priority: 40,
     requiresColumns: [
-      ['email'],
       ['сайт', 'site', 'website', 'url', 'домен', 'domain'],
     ],
+    producesColumns: ['email'],
     recommendedAfter: ['check_sites'],
   },
   {
@@ -668,7 +676,7 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     category: 'clean',
     cost: 'free',
     priority: 45,
-    requiresColumns: [['email']],
+    requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
     recommendedAfter: ['find_emails'],
   },
   {
@@ -679,7 +687,7 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     category: 'clean',
     cost: 'free',
     priority: 50,
-    requiresColumns: [['email']],
+    requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
     recommendedAfter: ['split_emails'],
   },
   {
@@ -690,7 +698,7 @@ export const AVAILABLE_STEPS: StepDefinition[] = [
     category: 'enrich',
     cost: 'api',
     priority: 55,
-    requiresColumns: [['email']],
+    requiresColumns: [['email', 'e-mail', 'почта', 'mail']],
     recommendedAfter: ['split_emails', 'dedup_email'],
   },
   {
@@ -754,23 +762,30 @@ const STEP_DEF_MAP = new Map(AVAILABLE_STEPS.map((s) => [s.key, s]));
 
 /**
  * Check which columns are present in the header (case-insensitive).
- * Returns warnings for steps whose required columns are missing.
+ * Accounts for columns produced by earlier steps in the pipeline.
+ * Returns warnings only for genuinely missing columns.
  */
 export function getStepWarnings(
   steps: StepKey[],
   header: string[],
 ): Map<StepKey, string> {
-  const lowerHeader = header.map((h) => h.trim().toLowerCase());
+  const availableCols = new Set(header.map((h) => h.trim().toLowerCase()));
   const warnings = new Map<StepKey, string>();
 
   for (const key of steps) {
     const def = STEP_DEF_MAP.get(key);
-    if (!def?.requiresColumns) continue;
-    for (const colGroup of def.requiresColumns) {
-      const found = colGroup.some((name) => lowerHeader.includes(name.toLowerCase()));
-      if (!found) {
-        warnings.set(key, `Нужна колонка: ${colGroup[0]}`);
-        break;
+    if (def?.requiresColumns) {
+      for (const colGroup of def.requiresColumns) {
+        const found = colGroup.some((name) => availableCols.has(name.toLowerCase()));
+        if (!found) {
+          warnings.set(key, `Нужна колонка «${colGroup[0]}»`);
+          break;
+        }
+      }
+    }
+    if (def?.producesColumns) {
+      for (const col of def.producesColumns) {
+        availableCols.add(col.toLowerCase());
       }
     }
   }

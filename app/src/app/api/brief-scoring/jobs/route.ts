@@ -104,11 +104,13 @@ export async function GET(req: NextRequest) {
     if (!user) return jsonError('Unauthorized', 401);
 
     const activeOnly = new URL(req.url).searchParams.get('active') === '1';
+    const fields = activeOnly
+      ? 'id, status, total, processed, success_count, error_count, error_message, created_at, started_at, completed_at, spreadsheet_tab_id, score_col_index, reason_col_index'
+      : 'id, status, total, processed, success_count, error_count, error_message, created_at, started_at, completed_at';
+
     let query = supabase
       .from('brief_scoring_jobs')
-      .select(
-        'id, status, total, processed, success_count, error_count, error_message, created_at, started_at, completed_at',
-      )
+      .select(fields)
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(activeOnly ? 1 : 20);
