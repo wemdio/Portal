@@ -2,3 +2,5 @@
 0 */6 * * * /backup.sh prod >> /var/log/cron.log 2>&1
 # Dev: once a day at 03:00 UTC
 0 3 * * * /backup.sh dev >> /var/log/cron.log 2>&1
+# Main portal DB: every 4 hours
+0 1,5,9,13,17,21 * * * /backup.sh main >> /var/log/cron.log 2>&1

@@ -1,15 +1,31 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 // ---- Types ------------------------------------------------------------------
 
-type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'settings';
+type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs' | 'settings';
 
 type LiAccount = { id: string; unipile_account_id: string; name: string | null; is_active: boolean; profile_url: string | null; headline: string | null; last_synced_at: string | null; created_at: string };
 type LiLeadList = { id: string; name: string; description: string | null; created_at: string; leads_count?: number };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; created_at: string };
+
+type DashboardCompanyRow = { company: string; total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number };
+type DashboardCampaignStat = {
+  id: string; name: string; status: string; daily_invite_limit: number; invites_sent_today: number;
+  leads_total: number; pending: number; in_progress: number; waiting: number; completed: number;
+  error: number; skipped: number; replied: number; accepted: number; reply_rate: number; accept_rate: number;
+};
+type DashboardTimeline = { date: string; actions: number; errors: number };
+type DashboardFunnel = { new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
+type DashboardData = {
+  funnel: DashboardFunnel;
+  by_company: DashboardCompanyRow[];
+  campaign_stats: DashboardCampaignStat[];
+  timeline: DashboardTimeline[];
+};
+
 type LiCampaign = {
   id: string;
   name: string;
@@ -116,6 +132,12 @@ export default function LiOutreachPage() {
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null);
   const [cf, setCf] = useState(DEFAULT_CAMPAIGN_FORM);
 
+  // Dashboard data
+  const [dashData, setDashData] = useState<DashboardData | null>(null);
+  const [dashLoading, setDashLoading] = useState(false);
+  const [companySearch, setCompanySearch] = useState('');
+  const [companySortKey, setCompanySortKey] = useState<'total' | 'replied' | 'connected' | 'invited'>('total');
+
   // CSV import
   const [importing, setImporting] = useState(false);
   const [importListId, setImportListId] = useState('');
@@ -160,6 +182,10 @@ export default function LiOutreachPage() {
   const loadCampaignLogs = useCallback(async (id: string) => {
     try { const d = await api<{ logs: LiCampaignLog[] }>(`/campaigns/${id}/logs`); setCampaignLogs(d.logs); } catch (e) { console.error('[li-outreach] loadCampaignLogs failed', e); }
   }, []);
+  const loadDashboard = useCallback(async () => {
+    setDashLoading(true);
+    try { const d = await api<DashboardData>('/dashboard'); setDashData(d); } catch (e) { console.error('[li-outreach] loadDashboard failed', e); } finally { setDashLoading(false); }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -190,7 +216,7 @@ export default function LiOutreachPage() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'dashboard') { void loadLeads(); void loadCampaigns(); }
+    if (tab === 'dashboard') { void loadDashboard(); void loadLeads(); void loadCampaigns(); }
     if (tab === 'campaigns') void loadCampaigns();
     if (tab === 'leads') void loadLeads(leadListFilterId || undefined);
     if (tab === 'scraper' || tab === 'dashboard') void loadTasks();
@@ -440,6 +466,7 @@ export default function LiOutreachPage() {
     { key: 'leads', label: 'Лиды' },
     { key: 'scraper', label: 'Скрапер' },
     { key: 'accounts', label: 'Аккаунты' },
+    { key: 'logs', label: 'Логи' },
     { key: 'settings', label: 'Настройки' },
   ];
 
@@ -468,46 +495,135 @@ export default function LiOutreachPage() {
       {/* Dashboard */}
       {tab === 'dashboard' && (
         <div className="space-y-5">
+          {dashLoading && !dashData && <div className="text-center py-8 text-sm text-gray-400">Загрузка статистики…</div>}
+
           {/* Top stats row */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
-            <StatCard label="Лиды" value={leadsTotal} accent="violet" />
-            <StatCard label="Списки" value={leadLists.length} accent="gray" />
+            <StatCard label="Лиды" value={dashData?.funnel.total ?? leadsTotal} accent="violet" />
+            <StatCard label="Ответили" value={dashData?.funnel.replied ?? 0} total={dashData?.funnel.total} accent="green" />
           </div>
 
-          {/* Lead funnel */}
-          <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">Воронка лидов</h3>
-            <LeadFunnel leads={leads} total={leadsTotal} />
-          </div>
+          {/* Lead funnel (visual) */}
+          {dashData && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Воронка лидов</h3>
+              <FunnelChart funnel={dashData.funnel} />
+            </div>
+          )}
 
-          {/* Two-column: campaigns + tasks */}
+          {/* Activity timeline (30 days) */}
+          {dashData && dashData.timeline.length > 0 && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Активность за 30 дней</h3>
+              <ActivityTimeline timeline={dashData.timeline} />
+            </div>
+          )}
+
+          {/* Campaign performance */}
+          {dashData && dashData.campaign_stats.length > 0 && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Кампании — эффективность</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100">
+                      <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Кампания</th>
+                      <th className="text-center px-2 py-2 text-xs text-gray-500 font-medium">Статус</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Лидов</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Принято</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Accept %</th>
+                      <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Reply %</th>
+                      <th className="px-2 py-2 text-xs text-gray-500 font-medium w-32">Прогресс</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dashData.campaign_stats.map((cs) => {
+                      const doneRatio = cs.leads_total > 0 ? Math.round(((cs.completed + cs.error + cs.skipped) / cs.leads_total) * 100) : 0;
+                      return (
+                        <tr key={cs.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                          <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[200px] truncate">{cs.name}</td>
+                          <td className="px-2 py-2.5 text-center">
+                            <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${cs.status === 'running' ? 'bg-green-100 text-green-700' : cs.status === 'draft' ? 'bg-gray-100 text-gray-600' : cs.status === 'paused' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>
+                              {cs.status === 'running' ? '● Активна' : cs.status === 'draft' ? 'Черновик' : cs.status}
+                            </span>
+                          </td>
+                          <td className="px-2 py-2.5 text-right tabular-nums text-gray-700">{cs.leads_total}</td>
+                          <td className="px-2 py-2.5 text-right tabular-nums text-blue-700 font-medium">{cs.accepted}</td>
+                          <td className="px-2 py-2.5 text-right tabular-nums text-green-700 font-medium">{cs.replied}</td>
+                          <td className="px-2 py-2.5 text-right tabular-nums">{cs.accept_rate}%</td>
+                          <td className="px-2 py-2.5 text-right tabular-nums">{cs.reply_rate}%</td>
+                          <td className="px-2 py-2.5">
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden">
+                                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${doneRatio}%` }} />
+                              </div>
+                              <span className="text-xs tabular-nums text-gray-500 w-8 text-right">{doneRatio}%</span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* By company */}
+          {dashData && dashData.by_company.length > 0 && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+                <h3 className="text-sm font-semibold text-gray-900">Статистика по компаниям</h3>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Поиск компании…"
+                    value={companySearch}
+                    onChange={(e) => setCompanySearch(e.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs w-48"
+                  />
+                  <select
+                    value={companySortKey}
+                    onChange={(e) => setCompanySortKey(e.target.value as typeof companySortKey)}
+                    className="rounded-lg border border-gray-200 px-2 py-1.5 text-xs"
+                  >
+                    <option value="total">По кол-ву лидов</option>
+                    <option value="replied">По ответам</option>
+                    <option value="connected">По подключениям</option>
+                    <option value="invited">По приглашениям</option>
+                  </select>
+                </div>
+              </div>
+              <CompanyTable rows={dashData.by_company} search={companySearch} sortKey={companySortKey} />
+            </div>
+          )}
+
+          {/* Accounts health + tasks */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* Active campaigns */}
             <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Кампании</h3>
-              {campaigns.length === 0 ? (
-                <p className="text-xs text-gray-400">Нет кампаний</p>
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
+              {accounts.length === 0 ? (
+                <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
               ) : (
                 <div className="space-y-2">
-                  {campaigns.slice(0, 5).map((c) => (
-                    <div key={c.id} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                  {accounts.map((a) => (
+                    <div key={a.id} className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
+                      <span className={`shrink-0 w-2 h-2 rounded-full ${a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
                       <div className="min-w-0 flex-1">
-                        <span className="font-medium text-gray-900 truncate block">{c.name}</span>
-                        <span className="text-xs text-gray-500">{(c.steps ?? []).length} шагов · AI {c.use_ai ? 'вкл' : 'выкл'} · {c.daily_invite_limit}/день</span>
+                        <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
+                        {a.headline && <span className="text-xs text-gray-500 truncate block">{a.headline}</span>}
                       </div>
-                      <span className={`ml-2 shrink-0 text-xs px-2 py-0.5 rounded-md font-medium ${c.status === 'running' ? 'bg-green-100 text-green-700' : c.status === 'draft' ? 'bg-gray-200 text-gray-600' : 'bg-amber-100 text-amber-700'}`}>
-                        {c.status === 'running' ? '● Активна' : c.status === 'draft' ? 'Черновик' : c.status === 'paused' ? 'Пауза' : c.status}
+                      <span className="text-[10px] text-gray-400 shrink-0">
+                        {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
                       </span>
                     </div>
                   ))}
-                  {campaigns.length > 5 && <p className="text-xs text-gray-400 text-center">ещё {campaigns.length - 5}…</p>}
                 </div>
               )}
             </div>
-
-            {/* Scraper tasks */}
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Скрапер задачи</h3>
               {tasks.length === 0 ? (
@@ -537,29 +653,6 @@ export default function LiOutreachPage() {
                 </div>
               )}
             </div>
-          </div>
-
-          {/* Accounts health */}
-          <div className="rounded-xl border border-gray-200 bg-white p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты</h3>
-            {accounts.length === 0 ? (
-              <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {accounts.map((a) => (
-                  <div key={a.id} className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
-                    <span className={`shrink-0 w-2 h-2 rounded-full ${a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
-                    <div className="min-w-0 flex-1">
-                      <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
-                      {a.headline && <span className="text-xs text-gray-500 truncate block">{a.headline}</span>}
-                    </div>
-                    <span className="text-[10px] text-gray-400 shrink-0">
-                      {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -1000,6 +1093,9 @@ export default function LiOutreachPage() {
         </div>
       )}
 
+      {/* Logs */}
+      {tab === 'logs' && <LiLogsTab campaigns={campaigns} />}
+
       {/* Settings */}
       {tab === 'settings' && (
         <div className="rounded-xl border border-gray-200 p-4 space-y-4 max-w-lg">
@@ -1026,6 +1122,155 @@ export default function LiOutreachPage() {
     </div>
   );
 }
+
+// ---- Logs tab ---------------------------------------------------------------
+
+type LiLogEntry = {
+  id: number;
+  campaign_id: string;
+  level: string;
+  message: string;
+  lead_name: string | null;
+  step_index: number | null;
+  created_at: string;
+  campaign?: { name: string } | null;
+};
+
+function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
+  const [logs, setLogs] = useState<LiLogEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filterCampaignId, setFilterCampaignId] = useState('');
+  const [filterLevel, setFilterLevel] = useState('');
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isAutoScroll = useRef(true);
+
+  const fetchLogs = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: '300' });
+      if (filterCampaignId) params.set('campaign_id', filterCampaignId);
+      if (filterLevel) params.set('level', filterLevel);
+      const d = await api<{ items: LiLogEntry[]; total: number }>(`/logs?${params.toString()}`);
+      setLogs(d.items.slice().reverse());
+      setTotal(d.total);
+    } catch (e) {
+      console.error('[li-outreach] fetchLogs failed', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [filterCampaignId, filterLevel]);
+
+  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => void fetchLogs(), 5000);
+    return () => clearInterval(interval);
+  }, [fetchLogs, autoRefresh]);
+
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    isAutoScroll.current = scrollHeight - scrollTop - clientHeight < 50;
+  }, []);
+
+  useEffect(() => {
+    if (isAutoScroll.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
+
+  const levelColor = (l: string) => {
+    switch (l) {
+      case 'error': return 'text-rose-400';
+      case 'warning': return 'text-amber-400';
+      default: return 'text-emerald-400';
+    }
+  };
+
+  const levelBadge = (l: string) => {
+    switch (l) {
+      case 'error': return 'ERR ';
+      case 'warning': return 'WARN';
+      default: return 'INFO';
+    }
+  };
+
+  const errorCount = logs.filter((l) => l.level === 'error').length;
+  const warnCount = logs.filter((l) => l.level === 'warning').length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            value={filterCampaignId}
+            onChange={(e) => { setFilterCampaignId(e.target.value); setLoading(true); }}
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs"
+          >
+            <option value="">Все кампании</option>
+            {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select
+            value={filterLevel}
+            onChange={(e) => { setFilterLevel(e.target.value); setLoading(true); }}
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs"
+          >
+            <option value="">Все уровни</option>
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+          </select>
+          <span className="text-xs text-gray-500">
+            {total} записей
+            {errorCount > 0 && <span className="ml-1.5 text-red-600">{errorCount} ошибок</span>}
+            {warnCount > 0 && <span className="ml-1.5 text-amber-600">{warnCount} предупреждений</span>}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="rounded"
+            />
+            Автообновление
+          </label>
+          <button onClick={() => { setLoading(true); void fetchLogs(); }} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+            Обновить
+          </button>
+        </div>
+      </div>
+
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[540px] overflow-auto"
+      >
+        {loading && logs.length === 0 && <p className="text-gray-500">Загрузка логов...</p>}
+        {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
+        {logs.map((log) => (
+          <div key={log.id} className="flex gap-2 py-[1px] hover:bg-gray-900/50">
+            <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+            <span className={`shrink-0 font-bold w-10 ${levelColor(log.level)}`}>{levelBadge(log.level)}</span>
+            {!filterCampaignId && log.campaign && (
+              <span className="shrink-0 text-blue-400 max-w-[140px] truncate">[{log.campaign.name}]</span>
+            )}
+            {log.lead_name && <span className="shrink-0 text-violet-400">{log.lead_name}</span>}
+            {log.step_index != null && <span className="shrink-0 text-gray-600">step:{log.step_index}</span>}
+            <span className="text-gray-300 break-all">{log.message}</span>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
+// ---- Helper components ------------------------------------------------------
 
 const ACCENT_STYLES: Record<string, { dot: string; bar: string }> = {
   green:  { dot: 'bg-green-500',  bar: 'bg-green-500' },
@@ -1055,31 +1300,154 @@ function StatCard({ label, value, total, accent = 'gray' }: { label: string; val
   );
 }
 
-const LEAD_STAGES: { key: string; label: string; color: string; bg: string }[] = [
-  { key: 'new',       label: 'Новые',       color: 'text-gray-700',  bg: 'bg-gray-400' },
-  { key: 'invited',   label: 'Приглашены',   color: 'text-amber-700', bg: 'bg-amber-400' },
-  { key: 'connected', label: 'Подключены',   color: 'text-blue-700',  bg: 'bg-blue-500' },
-  { key: 'replied',   label: 'Ответили',     color: 'text-green-700', bg: 'bg-green-500' },
+// ---- Funnel Chart (visual horizontal bars) ---------------------------------
+
+const FUNNEL_STAGES: { key: keyof DashboardFunnel; label: string; color: string }[] = [
+  { key: 'new',       label: 'Новые',       color: '#9ca3af' },
+  { key: 'invited',   label: 'Приглашены',   color: '#f59e0b' },
+  { key: 'connected', label: 'Подключены',   color: '#3b82f6' },
+  { key: 'messaged',  label: 'Написано',     color: '#8b5cf6' },
+  { key: 'replied',   label: 'Ответили',     color: '#10b981' },
+  { key: 'completed', label: 'Завершено',    color: '#06b6d4' },
 ];
 
-function LeadFunnel({ leads, total }: { leads: LiLead[]; total: number }) {
-  const counts = LEAD_STAGES.map(({ key }) => leads.filter((l) => l.status === key).length);
-  const max = Math.max(total, 1);
-  if (total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
+function FunnelChart({ funnel }: { funnel: DashboardFunnel }) {
+  const max = Math.max(funnel.total, 1);
+  if (funnel.total === 0) return <p className="text-xs text-gray-400">Нет лидов</p>;
   return (
-    <div className="space-y-2">
-      {LEAD_STAGES.map((stage, i) => {
-        const pct = Math.round((counts[i] / max) * 100);
+    <div className="space-y-3">
+      {FUNNEL_STAGES.map((stage) => {
+        const count = funnel[stage.key] as number;
+        const pct = Math.round((count / max) * 100);
         return (
           <div key={stage.key} className="flex items-center gap-3">
-            <span className={`w-24 text-xs font-medium ${stage.color}`}>{stage.label}</span>
-            <div className="flex-1 h-4 rounded bg-gray-100 overflow-hidden">
-              <div className={`h-full rounded ${stage.bg} transition-all`} style={{ width: `${Math.max(pct, counts[i] > 0 ? 2 : 0)}%` }} />
+            <span className="w-28 text-xs font-medium text-gray-700 text-right">{stage.label}</span>
+            <div className="flex-1 h-7 rounded-lg bg-gray-50 overflow-hidden relative">
+              <div
+                className="h-full rounded-lg transition-all duration-500"
+                style={{ width: `${Math.max(pct, count > 0 ? 2 : 0)}%`, backgroundColor: stage.color }}
+              />
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-medium text-gray-700 tabular-nums">
+                {count}
+              </span>
             </div>
-            <span className="w-16 text-right text-xs tabular-nums text-gray-600">{counts[i]} <span className="text-gray-400">({pct}%)</span></span>
+            <span className="w-12 text-right text-xs tabular-nums text-gray-400">{pct}%</span>
           </div>
         );
       })}
+      <div className="flex items-center gap-3 pt-1 border-t border-gray-100">
+        <span className="w-28 text-xs font-semibold text-gray-900 text-right">Всего</span>
+        <span className="text-sm font-bold text-gray-900 tabular-nums">{funnel.total}</span>
+        {funnel.total > 0 && (
+          <span className="text-xs text-gray-500">
+            · конверсия в ответ: <span className="font-medium text-green-700">{Math.round((funnel.replied / funnel.total) * 100)}%</span>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- Activity Timeline (CSS-only bar chart) --------------------------------
+
+function ActivityTimeline({ timeline }: { timeline: DashboardTimeline[] }) {
+  const maxActions = Math.max(...timeline.map((d) => d.actions), 1);
+  return (
+    <div>
+      <div className="flex items-end gap-[3px] h-28">
+        {timeline.map((day) => {
+          const h = Math.round((day.actions / maxActions) * 100);
+          const hasError = day.errors > 0;
+          const dateObj = new Date(day.date);
+          const label = `${dateObj.getDate()}.${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+          return (
+            <div key={day.date} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+              <div
+                className={`w-full rounded-t transition-all ${hasError ? 'bg-red-400' : 'bg-blue-400'} group-hover:opacity-80`}
+                style={{ height: `${Math.max(h, day.actions > 0 ? 3 : 0)}%`, minHeight: day.actions > 0 ? 2 : 0 }}
+              />
+              <div className="absolute -top-8 bg-gray-900 text-white text-[10px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 transition-opacity">
+                {label}: {day.actions} действий{hasError ? `, ${day.errors} ошибок` : ''}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-between mt-1.5 text-[10px] text-gray-400">
+        <span>{formatShortDate(timeline[0]?.date)}</span>
+        <span>{formatShortDate(timeline[timeline.length - 1]?.date)}</span>
+      </div>
+      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-blue-400" /> Действия</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> С ошибками</span>
+        <span className="ml-auto tabular-nums">{timeline.reduce((s, d) => s + d.actions, 0)} всего за 30 дней</span>
+      </div>
+    </div>
+  );
+}
+
+function formatShortDate(dateStr?: string): string {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  return `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// ---- Company Table ---------------------------------------------------------
+
+function CompanyTable({ rows, search, sortKey }: { rows: DashboardCompanyRow[]; search: string; sortKey: string }) {
+  const filtered = rows
+    .filter((r) => !search || r.company.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      const key = sortKey as keyof DashboardCompanyRow;
+      return (b[key] as number) - (a[key] as number);
+    });
+
+  if (filtered.length === 0) return <p className="text-xs text-gray-400 py-4">Нет данных по компаниям</p>;
+
+  const maxTotal = Math.max(...filtered.map((r) => r.total), 1);
+
+  return (
+    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-white">
+          <tr className="border-b border-gray-100">
+            <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Компания</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Всего</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Новые</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Инвайты</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Подключ.</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Написано</th>
+            <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
+            <th className="px-2 py-2 text-xs text-gray-500 font-medium w-28">Воронка</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.slice(0, 50).map((row) => {
+            const replyRate = row.total > 0 ? Math.round((row.replied / row.total) * 100) : 0;
+            const barW = Math.round((row.total / maxTotal) * 100);
+            return (
+              <tr key={row.company} className="border-b border-gray-50 hover:bg-gray-50/50">
+                <td className="px-3 py-2 font-medium text-gray-900 max-w-[220px] truncate">{row.company}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-gray-700">{row.total}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-gray-500">{row.new}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-amber-700">{row.invited}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-blue-700">{row.connected}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-violet-700">{row.messaged}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-green-700 font-medium">{row.replied} <span className="text-gray-400 font-normal">({replyRate}%)</span></td>
+                <td className="px-2 py-2">
+                  <div className="h-2.5 rounded-full bg-gray-100 overflow-hidden flex">
+                    {row.replied > 0 && <div className="h-full bg-green-500" style={{ width: `${Math.round((row.replied / row.total) * barW)}%` }} />}
+                    {row.connected > 0 && <div className="h-full bg-blue-400" style={{ width: `${Math.round((row.connected / row.total) * barW)}%` }} />}
+                    {row.invited > 0 && <div className="h-full bg-amber-400" style={{ width: `${Math.round((row.invited / row.total) * barW)}%` }} />}
+                    {row.new > 0 && <div className="h-full bg-gray-300" style={{ width: `${Math.round((row.new / row.total) * barW)}%` }} />}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {filtered.length > 50 && <p className="text-xs text-gray-400 text-center py-2">Показаны первые 50 из {filtered.length}</p>}
     </div>
   );
 }

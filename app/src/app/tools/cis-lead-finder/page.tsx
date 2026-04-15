@@ -55,17 +55,6 @@ type ContactRow = {
   created_at: string;
 };
 
-type ReviewQueueItem = {
-  id: string;
-  company_id: string;
-  company_name: string;
-  full_name: string;
-  title: string | null;
-  candidates: Array<{ url: string; score: number; source?: string; query?: string }>;
-  reason: string;
-  created_at: string;
-};
-
 async function getToken(): Promise<string | null> {
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token ?? null;
@@ -157,14 +146,6 @@ export default function CisLeadFinderPage() {
   const [companySearch, setCompanySearch] = useState('');
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [contacts, setContacts] = useState<ContactRow[]>([]);
-  const [activeView, setActiveView] = useState<'companies' | 'review'>('companies');
-  const [reviewQueue, setReviewQueue] = useState<ReviewQueueItem[]>([]);
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewSubmittingId, setReviewSubmittingId] = useState<string | null>(null);
-  const [reviewSort, setReviewSort] = useState<'score_desc' | 'score_asc' | 'newest' | 'oldest'>('score_desc');
-  const [approveThreshold, setApproveThreshold] = useState(80);
-  const [rejectThreshold, setRejectThreshold] = useState(40);
-  const [bulkReviewRunning, setBulkReviewRunning] = useState(false);
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
 
   const selectedJob = useMemo(() => jobs.find((j) => j.id === selectedJobId) ?? null, [jobs, selectedJobId]);
@@ -248,89 +229,6 @@ export default function CisLeadFinderPage() {
     if (!res.ok) return;
     const data = (await res.json()) as { contacts?: ContactRow[] };
     setContacts(Array.isArray(data.contacts) ? data.contacts : []);
-  }
-
-  async function loadReviewQueue(jobId: string) {
-    const token = await getToken();
-    if (!token) return;
-    setReviewLoading(true);
-    try {
-      const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/review-queue`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as { queue?: ReviewQueueItem[] };
-      setReviewQueue(Array.isArray(data.queue) ? data.queue : []);
-    } finally {
-      setReviewLoading(false);
-    }
-  }
-
-  async function reviewDecision(jobId: string, contactId: string, action: 'approve' | 'reject', candidateUrl?: string) {
-    const token = await getToken();
-    if (!token) return;
-    setReviewSubmittingId(contactId);
-    try {
-      const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/review-queue`, {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contact_id: contactId, action, candidate_url: candidateUrl }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        alert(data.error ?? 'Не удалось обновить review');
-        return;
-      }
-      await loadReviewQueue(jobId);
-      if (selectedCompanyId) await loadContacts(selectedCompanyId);
-    } finally {
-      setReviewSubmittingId(null);
-    }
-  }
-
-  function topCandidateScore(item: ReviewQueueItem): number {
-    const top = item.candidates
-      .map((c) => Number(c.score) || 0)
-      .sort((a, b) => b - a)[0];
-    return top ?? 0;
-  }
-
-  const sortedReviewQueue = useMemo(() => {
-    const arr = [...reviewQueue];
-    if (reviewSort === 'score_desc') return arr.sort((a, b) => topCandidateScore(b) - topCandidateScore(a));
-    if (reviewSort === 'score_asc') return arr.sort((a, b) => topCandidateScore(a) - topCandidateScore(b));
-    if (reviewSort === 'oldest') return arr.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-    return arr.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  }, [reviewQueue, reviewSort]);
-
-  async function bulkReview(jobId: string, mode: 'approve' | 'reject') {
-    const token = await getToken();
-    if (!token) return;
-    setBulkReviewRunning(true);
-    try {
-      const targets = mode === 'approve'
-        ? sortedReviewQueue.filter((item) => topCandidateScore(item) >= approveThreshold && item.candidates[0]?.url)
-        : sortedReviewQueue.filter((item) => topCandidateScore(item) <= rejectThreshold);
-      for (const item of targets) {
-        const payload = mode === 'approve'
-          ? { contact_id: item.id, action: 'approve', candidate_url: item.candidates[0]!.url }
-          : { contact_id: item.id, action: 'reject' };
-        const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/review-queue`, {
-          method: 'PATCH',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          const data = (await res.json().catch(() => ({}))) as { error?: string };
-          alert(data.error ?? 'Ошибка массового review');
-          break;
-        }
-      }
-      await loadReviewQueue(jobId);
-      if (selectedCompanyId) await loadContacts(selectedCompanyId);
-    } finally {
-      setBulkReviewRunning(false);
-    }
   }
 
   async function handleUpload() {
@@ -437,7 +335,7 @@ export default function CisLeadFinderPage() {
 
   useEffect(() => {
     void refreshJobs();
-    const t = setInterval(() => void refreshJobs(), hasActiveJob ? 5000 : 30000);
+    const t = setInterval(() => void refreshJobs(), hasActiveJob ? 15_000 : 30_000);
     return () => clearInterval(t);
   }, [hasActiveJob]);
 
@@ -445,7 +343,7 @@ export default function CisLeadFinderPage() {
     if (!selectedJobId) return;
     void loadCompanies(selectedJobId, true);
     if (!hasActiveJob) return;
-    const t = setInterval(() => void loadCompanies(selectedJobId), 10000);
+    const t = setInterval(() => void loadCompanies(selectedJobId), 15_000);
     return () => clearInterval(t);
   }, [selectedJobId, hasActiveJob]);
 
@@ -453,17 +351,9 @@ export default function CisLeadFinderPage() {
     if (!selectedCompanyId) return;
     void loadContacts(selectedCompanyId);
     if (!hasActiveJob) return;
-    const t = setInterval(() => void loadContacts(selectedCompanyId), 10000);
+    const t = setInterval(() => void loadContacts(selectedCompanyId), 15_000);
     return () => clearInterval(t);
   }, [selectedCompanyId, hasActiveJob]);
-
-  useEffect(() => {
-    if (!selectedJobId || activeView !== 'review') return;
-    void loadReviewQueue(selectedJobId);
-    if (!hasActiveJob) return;
-    const t = setInterval(() => void loadReviewQueue(selectedJobId), 10000);
-    return () => clearInterval(t);
-  }, [selectedJobId, hasActiveJob, activeView]);
 
   const roleLabel = (role: string | null): { text: string; color: string } => {
     switch (role) {
@@ -804,27 +694,6 @@ export default function CisLeadFinderPage() {
               <div className="text-xs text-gray-500">
                 {selectedJob ? `Импорт: ${selectedJob.source_filename}` : 'Выберите импорт'}
               </div>
-              <div className="mt-2 inline-flex rounded-lg border border-gray-200 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setActiveView('companies')}
-                  className={`px-2.5 py-1 text-xs rounded-md ${activeView === 'companies' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-600 hover:bg-gray-50'}`}
-                >
-                  Компании
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveView('review')}
-                  className={`px-2.5 py-1 text-xs rounded-md ${activeView === 'review' ? 'bg-amber-50 text-amber-700' : 'text-gray-600 hover:bg-gray-50'}`}
-                >
-                  Проверка профилей
-                </button>
-              </div>
-              {activeView === 'review' ? (
-                <div className="mt-1 text-[11px] text-gray-500">
-                  Сомнительные совпадения профилей для ручной проверки специалистом.
-                </div>
-              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <div className="text-xs text-gray-500">{companies.length > 0 ? `${filteredCompanies.length} из ${companies.length}` : ''}</div>
@@ -849,7 +718,7 @@ export default function CisLeadFinderPage() {
             </div>
           </div>
 
-          {activeView === 'companies' && selectedJobId && companies.length === 0 ? (
+          {selectedJobId && companies.length === 0 ? (
             selectedJob && (getDisplayStatus(selectedJob) === 'pending' || getDisplayStatus(selectedJob) === 'running') ? (
               <div className="text-sm text-gray-500">Компании появятся после завершения импорта и нормализации. Сейчас задача в работе.</div>
             ) : (
@@ -859,7 +728,7 @@ export default function CisLeadFinderPage() {
             )
           ) : null}
 
-          {activeView === 'companies' && companies.length > 0 ? (
+          {companies.length > 0 ? (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               <div className="space-y-2">
                 {companies.length > 10 ? (
@@ -928,8 +797,6 @@ export default function CisLeadFinderPage() {
                       const role = roleLabel(p.role_guess);
                       const tgProfileLink = getTgProfileLink(p);
                       const profileLinks = (p.profile_links && typeof p.profile_links === 'object' ? p.profile_links : {}) as Record<string, string>;
-                      const details = (p.source_details && typeof p.source_details === 'object' ? p.source_details : {}) as Record<string, string>;
-                      const needsReview = details.linkedin_review_needed === '1';
                       const hasChannels = p.channel_phone || p.channel_tg_username || p.channel_email || profileLinks.linkedin;
                       const hasProfileLinks = Object.keys(profileLinks).length > 0;
                       return (
@@ -941,12 +808,7 @@ export default function CisLeadFinderPage() {
                                 <div className="text-xs text-gray-600 mt-0.5">{p.title}</div>
                               ) : null}
                             </div>
-                            <div className="shrink-0 flex items-center gap-1.5">
-                              {needsReview ? (
-                                <span className="rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                                  Нужна проверка
-                                </span>
-                              ) : null}
+                            <div className="shrink-0">
                               <span className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${role.color}`}>
                                 {role.text}
                               </span>
@@ -1094,109 +956,6 @@ export default function CisLeadFinderPage() {
             </div>
           ) : null}
 
-          {activeView === 'review' ? (
-            !selectedJobId ? (
-              <div className="text-sm text-gray-500">Выберите импорт, чтобы открыть очередь проверки профилей.</div>
-            ) : reviewLoading ? (
-              <div className="text-sm text-gray-500">Загружаем очередь проверки…</div>
-            ) : reviewQueue.length === 0 ? (
-              <div className="text-sm text-gray-500">Очередь проверки пуста.</div>
-            ) : (
-              <div className="space-y-2">
-                <div className="rounded-xl border border-gray-200 bg-gray-50 p-2.5 flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-gray-600">В очереди: {sortedReviewQueue.length}</span>
-                  <span className="text-xs text-gray-400">•</span>
-                  <label className="text-xs text-gray-600">Сортировка:</label>
-                  <select
-                    value={reviewSort}
-                    onChange={(e) => setReviewSort(e.target.value as 'score_desc' | 'score_asc' | 'newest' | 'oldest')}
-                    className="text-xs rounded-md border border-gray-300 bg-white px-2 py-1"
-                  >
-                    <option value="score_desc">score: max → min</option>
-                    <option value="score_asc">score: min → max</option>
-                    <option value="newest">новые сначала</option>
-                    <option value="oldest">старые сначала</option>
-                  </select>
-                  <span className="text-xs text-gray-400">•</span>
-                  <label className="text-xs text-gray-600">Подтвердить &gt;=</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={approveThreshold}
-                    onChange={(e) => setApproveThreshold(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                    className="w-16 text-xs rounded-md border border-gray-300 bg-white px-2 py-1"
-                  />
-                  <button
-                    type="button"
-                    disabled={bulkReviewRunning}
-                    onClick={() => void bulkReview(selectedJobId, 'approve')}
-                    className="rounded-md bg-emerald-600 text-white px-2.5 py-1 text-[11px] hover:bg-emerald-700 disabled:opacity-50"
-                  >
-                    Подтвердить все &gt;= X
-                  </button>
-                  <label className="text-xs text-gray-600">Отклонить &lt;=</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={rejectThreshold}
-                    onChange={(e) => setRejectThreshold(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                    className="w-16 text-xs rounded-md border border-gray-300 bg-white px-2 py-1"
-                  />
-                  <button
-                    type="button"
-                    disabled={bulkReviewRunning}
-                    onClick={() => void bulkReview(selectedJobId, 'reject')}
-                    className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-[11px] text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-                  >
-                    Отклонить все &lt;= Y
-                  </button>
-                </div>
-                {sortedReviewQueue.map((item) => (
-                  <div key={item.id} className="rounded-xl border border-amber-200 bg-amber-50/40 p-3 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="font-semibold text-gray-900 truncate">{item.full_name}</div>
-                        <div className="text-xs text-gray-600 truncate">{item.company_name}{item.title ? ` · ${item.title}` : ''}</div>
-                      </div>
-                      <span className="text-[10px] rounded-md bg-amber-100 text-amber-700 px-2 py-0.5">Требует проверки</span>
-                    </div>
-                    <div className="space-y-1">
-                      {item.candidates.slice(0, 3).map((cand, idx) => (
-                        <div key={`${item.id}-${idx}`} className="flex items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5">
-                          <a href={cand.url} target="_blank" rel="noopener noreferrer" className="text-xs text-[#0A66C2] hover:underline truncate">
-                            {cand.url}
-                          </a>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-[10px] text-gray-500">score {Math.round(cand.score)}</span>
-                            <button
-                              type="button"
-                              disabled={reviewSubmittingId === item.id || bulkReviewRunning}
-                              onClick={() => void reviewDecision(selectedJobId, item.id, 'approve', cand.url)}
-                              className="rounded-md bg-emerald-600 text-white px-2 py-0.5 text-[10px] hover:bg-emerald-700 disabled:opacity-50"
-                            >
-                              Подтвердить
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        disabled={reviewSubmittingId === item.id || bulkReviewRunning}
-                        onClick={() => void reviewDecision(selectedJobId, item.id, 'reject')}
-                        className="rounded-md border border-gray-300 px-2.5 py-1 text-[11px] text-gray-700 hover:bg-white disabled:opacity-50"
-                      >
-                        Отклонить
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )
-          ) : null}
         </div>
       </div>
 

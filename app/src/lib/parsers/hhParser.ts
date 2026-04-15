@@ -111,46 +111,26 @@ export type ParserProgressStage =
 
 const HH_API_BASE = 'https://api.hh.ru';
 const FOUND_LIMIT = 2000;
-const MIN_REQUEST_INTERVAL_MS = (() => {
-  const raw = Number(process.env.HH_REQUEST_INTERVAL_MS ?? '250');
-  return Number.isFinite(raw) ? Math.max(100, raw) : 250;
-})();
-const MAX_CONCURRENCY = (() => {
-  const raw = Number(process.env.HH_MAX_CONCURRENCY ?? '2');
-  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
-})();
-const PARTITION_CONCURRENCY = (() => {
-  const raw = Number(process.env.HH_PARTITION_CONCURRENCY ?? '2');
-  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 2;
-})();
-const PARTITION_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_PARTITION_TIMEOUT_MS ?? '300000');
-  return Number.isFinite(raw) ? Math.max(30_000, Math.floor(raw)) : 300000;
-})();
-const EMPLOYER_CONCURRENCY = (() => {
-  const raw = Number(process.env.HH_EMPLOYER_CONCURRENCY ?? String(MAX_CONCURRENCY));
-  return Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : MAX_CONCURRENCY;
-})();
-const PAGE_DELAY_MS = (() => {
-  const raw = Number(process.env.HH_PAGE_DELAY_MS ?? '0');
-  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
-})();
-const MAX_RETRIES = (() => {
-  const raw = Number(process.env.HH_MAX_RETRIES ?? '7');
-  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 7;
-})();
-const REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_REQUEST_TIMEOUT_MS ?? '30000');
-  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 30000;
-})();
-const VACANCY_REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_VACANCY_REQUEST_TIMEOUT_MS ?? String(REQUEST_TIMEOUT_MS));
-  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : REQUEST_TIMEOUT_MS;
-})();
-const EMPLOYER_REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.HH_EMPLOYER_REQUEST_TIMEOUT_MS ?? '30000');
-  return Number.isFinite(raw) ? Math.max(1000, Math.floor(raw)) : 30000;
-})();
+
+/** Parse env var as number; treats empty string the same as missing (falls back to default). */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+const MIN_REQUEST_INTERVAL_MS = Math.max(100, envInt('HH_REQUEST_INTERVAL_MS', 350));
+const MAX_CONCURRENCY = Math.max(1, envInt('HH_MAX_CONCURRENCY', 2));
+const PARTITION_CONCURRENCY = Math.max(1, envInt('HH_PARTITION_CONCURRENCY', 2));
+const PARTITION_TIMEOUT_MS = Math.max(30_000, envInt('HH_PARTITION_TIMEOUT_MS', 300_000));
+const EMPLOYER_CONCURRENCY = Math.max(1, envInt('HH_EMPLOYER_CONCURRENCY', MAX_CONCURRENCY));
+const PAGE_DELAY_MS = Math.max(0, envInt('HH_PAGE_DELAY_MS', 200));
+const MAX_RETRIES = Math.max(0, envInt('HH_MAX_RETRIES', 5));
+const REQUEST_TIMEOUT_MS = Math.max(1000, envInt('HH_REQUEST_TIMEOUT_MS', 30_000));
+const VACANCY_REQUEST_TIMEOUT_MS = Math.max(1000, envInt('HH_VACANCY_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS));
+const EMPLOYER_REQUEST_TIMEOUT_MS = Math.max(1000, envInt('HH_EMPLOYER_REQUEST_TIMEOUT_MS', 30_000));
+const EMPLOYER_DELAY_MS = Math.max(0, envInt('HH_EMPLOYER_DELAY_MS', 100));
 const PROXY_URLS = (() => {
   const urls: string[] = [];
   if (process.env.PROXY_URLS) {
@@ -638,6 +618,16 @@ export async function fetchWithRetry<T>(
   let lastError: unknown;
   let lastProxyEntry: ProxyEntry | undefined;
 
+  // Diagnostic counters for clear error messages
+  let count403 = 0;
+  let count429 = 0;
+  let count5xx = 0;
+  let countTimeout = 0;
+  let countProxyFail = 0;
+  let countCaptcha = 0;
+  let lastStatus = 0;
+  let lastCaptchaUrl: string | undefined;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let release: (() => void) | null = null;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -675,6 +665,7 @@ export async function fetchWithRetry<T>(
         });
       }
 
+      lastStatus = res.status;
       const retryAfter = res.headers.get('retry-after');
       const retryAfterMsRaw = retryAfter ? Number(retryAfter) * 1000 : null;
       const retryAfterMs = retryAfterMsRaw != null && Number.isFinite(retryAfterMsRaw)
@@ -694,12 +685,31 @@ export async function fetchWithRetry<T>(
         });
       }
 
+      // Track retryable failures for diagnostics
+      if (res.status === 403) {
+        const bodyText = await res.text().catch(() => '');
+        const details = parseHhError(bodyText);
+        if (details.type === 'captcha_required' || details.captchaUrl) {
+          countCaptcha += 1;
+          lastCaptchaUrl = details.captchaUrl;
+        }
+        count403 += 1;
+      } else if (res.status === 429) {
+        count429 += 1;
+      } else {
+        count5xx += 1;
+      }
+
       if (res.status === 429 || res.status === 403) {
         const backoff = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** (attempt + 2));
         setGlobalBackoff(backoff);
       }
 
       lastProxyEntry = currentProxy;
+      lastError = new HHApiError(
+        `HH API HTTP ${res.status}`,
+        { status: res.status, type: res.status === 403 ? 'forbidden' : 'retryable' },
+      );
       const base = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(base + jitter);
@@ -707,6 +717,7 @@ export async function fetchWithRetry<T>(
     } catch (err) {
       const isProxyConnErr = currentProxy && isProxyConnectionError(err);
       if (isProxyConnErr && currentProxy) {
+        countProxyFail += 1;
         markProxyFailed(currentProxy);
         lastProxyEntry = currentProxy;
         const reason = getFetchFailureReason(err);
@@ -718,7 +729,7 @@ export async function fetchWithRetry<T>(
           maxRetries,
           consecutiveFailures: currentProxy.consecutiveFailures,
         });
-        lastError = new Error(`fetch failed: ${reason}`);
+        lastError = new Error(`Прокси недоступен: ${reason}`);
         if (attempt < maxRetries) {
           await sleep(Math.min(500, minDelayMs));
           continue;
@@ -727,7 +738,8 @@ export async function fetchWithRetry<T>(
       }
 
       if (err instanceof Error && err.name === 'AbortError') {
-        lastError = new Error('HH API request timed out');
+        countTimeout += 1;
+        lastError = new Error('HH API: таймаут запроса');
       } else if (err instanceof HHApiError) {
         lastError = err;
         throw err;
@@ -735,7 +747,7 @@ export async function fetchWithRetry<T>(
         const reason = getFetchFailureReason(err);
         const isGenericFetchFailed = err instanceof Error && err.message === 'fetch failed';
         if (isGenericFetchFailed && reason) {
-          lastError = new Error(`fetch failed: ${reason}`);
+          lastError = new Error(`Ошибка сети: ${reason}`);
           logError('hh.fetch_failed', err as Error, { url, reason, attempt: attempt + 1, maxRetries });
         } else {
           lastError = err;
@@ -752,7 +764,60 @@ export async function fetchWithRetry<T>(
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('HH API request failed');
+  // Build a diagnostic error message so it's immediately clear what happened
+  const totalAttempts = maxRetries + 1;
+  const errMsg = buildRetryExhaustedMessage({
+    totalAttempts, count403, count429, count5xx, countTimeout, countProxyFail, countCaptcha,
+    lastStatus, lastCaptchaUrl, proxyCount: PROXY_ENTRIES.length,
+  });
+
+  if (lastError instanceof HHApiError) {
+    lastError.message = errMsg;
+    throw lastError;
+  }
+  throw new HHApiError(errMsg, { status: lastStatus, type: 'retries_exhausted' });
+}
+
+function buildRetryExhaustedMessage(stats: {
+  totalAttempts: number;
+  count403: number;
+  count429: number;
+  count5xx: number;
+  countTimeout: number;
+  countProxyFail: number;
+  countCaptcha: number;
+  lastStatus: number;
+  lastCaptchaUrl?: string;
+  proxyCount: number;
+}): string {
+  const parts: string[] = [];
+
+  if (stats.countCaptcha > 0) {
+    parts.push(`HH API требует капчу (${stats.countCaptcha}×)${stats.lastCaptchaUrl ? ` — ${stats.lastCaptchaUrl}` : ''}`);
+  } else if (stats.count403 > 0 && stats.count403 === stats.totalAttempts) {
+    parts.push(
+      stats.proxyCount > 0
+        ? `Все прокси заблокированы HH API (403 Forbidden × ${stats.count403}). Замените PROXY_URLS на новые IP.`
+        : `HH API заблокировал IP сервера (403 Forbidden × ${stats.count403}). Настройте прокси в PROXY_URLS.`,
+    );
+  } else if (stats.count429 > 0 && stats.count429 === stats.totalAttempts) {
+    parts.push(`HH API: превышен лимит запросов (429 × ${stats.count429}). Подождите и повторите.`);
+  } else if (stats.countProxyFail > 0 && stats.countProxyFail === stats.totalAttempts) {
+    parts.push(`Все прокси недоступны (${stats.countProxyFail} попыток). Проверьте PROXY_URLS — возможно, прокси истекли.`);
+  } else if (stats.countTimeout > 0 && stats.countTimeout === stats.totalAttempts) {
+    parts.push(`HH API не отвечает (таймаут × ${stats.countTimeout}).`);
+  } else {
+    // Mixed failures
+    const details: string[] = [];
+    if (stats.count403) details.push(`403 Forbidden × ${stats.count403}`);
+    if (stats.count429) details.push(`429 Rate Limit × ${stats.count429}`);
+    if (stats.count5xx) details.push(`5xx × ${stats.count5xx}`);
+    if (stats.countTimeout) details.push(`таймаут × ${stats.countTimeout}`);
+    if (stats.countProxyFail) details.push(`прокси недоступен × ${stats.countProxyFail}`);
+    parts.push(`HH API: ${stats.totalAttempts} попыток неуспешны (${details.join(', ')})`);
+  }
+
+  return parts.join('. ');
 }
 
 async function fetchFound(config: HHSearchConfig, trace?: Span | null, label?: string): Promise<number> {
@@ -1328,6 +1393,7 @@ export async function fetchVacancies(
       EMPLOYER_CONCURRENCY,
       async (employerId) => {
         await checkCancelled();
+        if (EMPLOYER_DELAY_MS > 0) await sleep(EMPLOYER_DELAY_MS);
         try {
           const info = await fetchEmployerDetails(employerId);
           employerCache.set(employerId, info);
