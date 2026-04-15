@@ -22,6 +22,32 @@ const admin = supabaseAdmin!;
 interface StepConfig {
   brief?: string;
   prompt?: string;
+  column_mapping?: string;
+}
+
+const CANONICAL_NAMES: Record<string, string> = {
+  company: 'компания',
+  site: 'сайт',
+  email: 'email',
+};
+
+function applyColumnMapping(data: string[][], rawMapping?: string): string[][] {
+  if (!rawMapping) return data;
+  let mapping: Record<string, string>;
+  try { mapping = JSON.parse(rawMapping); } catch { return data; }
+  if (!mapping || Object.keys(mapping).length === 0) return data;
+
+  const header = [...data[0]];
+  for (const [role, originalHeader] of Object.entries(mapping)) {
+    const canonical = CANONICAL_NAMES[role];
+    if (!canonical) continue;
+    const idx = header.findIndex((h) => h.trim() === originalHeader.trim());
+    if (idx >= 0 && header[idx].trim().toLowerCase() !== canonical.toLowerCase()) {
+      header[idx] = canonical;
+    }
+  }
+
+  return [header, ...data.slice(1)];
 }
 
 async function updateJobProgress(
@@ -88,7 +114,7 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       total_steps: selectedSteps.length,
     }).eq('id', jobId);
 
-    let data: string[][] = job.data || [];
+    let data: string[][] = applyColumnMapping(job.data || [], stepConfig.column_mapping);
     if (data.length === 0) throw new Error('Нет данных для обработки');
 
     const cancelCheck: CancelCheckFn = () => isCancelled(jobId);

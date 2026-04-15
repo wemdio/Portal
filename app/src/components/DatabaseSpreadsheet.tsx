@@ -443,10 +443,9 @@ const safeMaxCols = (rows: string[][]) =>
 
 const normalizeRows = (rows: string[][]) => {
   const maxCols = safeMaxCols(rows);
-  return rows.map((row) => {
-    if (row.length >= maxCols) return row;
-    return [...row, ...Array.from({ length: maxCols - row.length }, () => '')];
-  });
+  return rows.map((row) =>
+    Array.from({ length: maxCols }, (_, i) => `${row[i] ?? ''}`),
+  );
 };
 
 const normalizeClipboardCell = (value: unknown) =>
@@ -549,17 +548,11 @@ const buildEnrichmentStorageKey = (userId: string | null) =>
 const buildBriefScoringStorageKey = (userId: string | null) =>
   `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
-const isStringArray = (arr: unknown[]): arr is string[] =>
-  arr.length === 0 || typeof arr[0] === 'string';
-
-const coerceRows = (rows: unknown) => {
+const coerceRows = (rows: unknown): string[][] => {
   if (!Array.isArray(rows)) return [];
-  if (rows.length > 0 && Array.isArray(rows[0]) && isStringArray(rows[0])) {
-    return rows as string[][];
-  }
   return rows.map((row) => {
     if (!Array.isArray(row)) return [''];
-    return row.map((cell) => `${cell ?? ''}`);
+    return Array.from({ length: row.length }, (_, i) => `${row[i] ?? ''}`);
   });
 };
 
@@ -576,9 +569,7 @@ const coerceTabs = (value: unknown) => {
       if (rows.length === 0) {
         return { id: safeId, name: safeName, data: [Array.from({ length: DEFAULT_COLS }, () => '')] };
       }
-      const maxCols = safeMaxCols(rows);
-      const needsNormalization = rows.some((row) => row.length !== maxCols);
-      return { id: safeId, name: safeName, data: needsNormalization ? normalizeRows(rows) : rows };
+      return { id: safeId, name: safeName, data: normalizeRows(rows) };
     })
     .filter((tab): tab is Sheet => tab !== null);
 };
@@ -2284,6 +2275,7 @@ export function DatabaseSpreadsheet() {
           header: 1,
           raw: false,
           blankrows: true,
+          defval: '',
         });
         const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
         setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
