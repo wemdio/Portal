@@ -193,6 +193,8 @@ services:
   main-postgres:
     image: postgres:16-alpine
     container_name: main-postgres
+    profiles:
+      - main-db
     command:
       - postgres
       - -c
@@ -229,6 +231,8 @@ services:
   main-pgadmin:
     image: dpage/pgadmin4:9.3
     container_name: main-pgadmin
+    profiles:
+      - main-db
     environment:
       PGADMIN_DEFAULT_EMAIL: ${MAIN_PGADMIN_EMAIL:-admin@portal.com}
       PGADMIN_DEFAULT_PASSWORD: ${MAIN_PGADMIN_PASSWORD}
@@ -304,6 +308,7 @@ services:
       MAIN_PG_USER: portal
       MAIN_PG_PASSWORD: ${MAIN_PG_PASSWORD}
       MAIN_PG_DB: portal
+      MAIN_PG_ENABLED: ${MAIN_PG_ENABLED:-false}
       BACKUP_SUPABASE_URL: ${BACKUP_SUPABASE_URL}
       BACKUP_SUPABASE_KEY: ${BACKUP_SUPABASE_KEY}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
@@ -313,8 +318,6 @@ services:
       instantly-postgres-prod:
         condition: service_healthy
       instantly-postgres-dev:
-        condition: service_healthy
-      main-postgres:
         condition: service_healthy
     deploy:
       resources:
