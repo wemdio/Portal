@@ -6,6 +6,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { generateEmailSequences } from './generateEmails';
+import { scrapeCompanyContext } from '@/lib/bugorOutreach/scrapeCompanyContext';
 import { uploadNashToInstantly } from './uploadToInstantly';
 import type { NashLead, SenderConfig } from './types';
 
@@ -133,9 +134,27 @@ export async function runNashSmtpValidation(): Promise<number> {
   const needSequences = validLeads.filter((l) => !l.email_sequence || l.email_sequence.length < 3);
   if (needSequences.length > 0) {
     try {
+      console.log(`[nash-smtp] Scraping company context for ${needSequences.length} leads...`);
+      const companyContexts = new Map<string, string>();
+      await Promise.allSettled(
+        needSequences.map(async (lead) => {
+          const ctx = await scrapeCompanyContext(lead.website, lead.company_name);
+          if (ctx) {
+            companyContexts.set(lead.id, ctx);
+            if (supabaseAdmin) {
+              const existing = (lead.raw_data as Record<string, unknown>) ?? {};
+              await supabaseAdmin.from('nash_outreach_leads')
+                .update({ raw_data: { ...existing, company_context: ctx } })
+                .eq('id', lead.id);
+            }
+          }
+        }),
+      );
+      console.log(`[nash-smtp] Company context: ${companyContexts.size}/${needSequences.length} scraped`);
+
       console.log(`[nash-smtp] Generating sequences for ${needSequences.length} leads...`);
       const senderConfig = await loadSenderConfig();
-      const genResults = await generateEmailSequences(needSequences, senderConfig);
+      const genResults = await generateEmailSequences(needSequences, senderConfig, companyContexts);
 
       for (const gr of genResults) {
         if (gr.sequence) {

@@ -20,6 +20,47 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+let _proxyUrls: string[] | null = null;
+function getProxyUrls(): string[] {
+  if (_proxyUrls) return _proxyUrls;
+  try {
+    const raw = (process.env.PROXY_URLS ?? '').trim();
+    if (raw.startsWith('[')) {
+      _proxyUrls = (JSON.parse(raw) as string[]).map((s) => s.trim()).filter(Boolean);
+    } else {
+      _proxyUrls = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+    }
+  } catch {
+    _proxyUrls = [];
+  }
+  return _proxyUrls;
+}
+
+let _proxyRR = 0;
+function pickProxyUrl(): string {
+  const urls = getProxyUrls();
+  if (!urls.length) return '';
+  _proxyRR = (_proxyRR + 1) % urls.length;
+  return urls[_proxyRR];
+}
+
+type Dispatcher = import('undici').Dispatcher;
+const _proxyDispatchers = new Map<string, Dispatcher>();
+async function getProxyDispatcher(): Promise<Dispatcher | undefined> {
+  const url = pickProxyUrl();
+  if (!url) return undefined;
+  const existing = _proxyDispatchers.get(url);
+  if (existing) return existing;
+  try {
+    const mod = await import('undici');
+    const d = new mod.ProxyAgent(url) as unknown as Dispatcher;
+    _proxyDispatchers.set(url, d);
+    return d;
+  } catch {
+    return undefined;
+  }
+}
+
 const ABOUT_PATHS = [
   '/about',
   '/about-us',
@@ -745,13 +786,13 @@ async function fetchHtml(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
-  // If the caller provides an external signal, abort our controller when it fires
   const externalSignal = options?.signal;
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   try {
-    const res = await fetch(url, {
+    const dispatcher = await getProxyDispatcher();
+    const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
       method: 'GET',
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
@@ -760,7 +801,10 @@ async function fetchHtml(
       },
       signal: controller.signal,
       redirect: 'follow',
-    });
+    };
+    if (dispatcher) (fetchOpts as Record<string, unknown>).dispatcher = dispatcher;
+
+    const res = await fetch(url, fetchOpts);
 
     if (!options?.allowHttpErrors && res.status >= 400) return null;
     if (res.status >= 500) return null;

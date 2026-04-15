@@ -10,6 +10,7 @@ self.onmessage = (e: MessageEvent<ArrayBuffer>) => {
       header: 1,
       raw: false,
       blankrows: true,
+      defval: '',
     });
     const normalized = rows.map((row) =>
       row.map((cell) => `${cell ?? ''}`),

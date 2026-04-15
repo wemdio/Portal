@@ -22,6 +22,7 @@ export const NAV_TABS_CONFIG: Record<NavTabId, NavTabConfig> = {
 
 export const ALL_TOOL_IDS = [
   'done-for-you',
+  'base-constructor',
   'ai-caller',
   'ai-caller-v2',
   'databases',
@@ -77,6 +78,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badgeVariant: 'amber',
     accentColor: 'blue',
     disabled: true,
+  },
+  'base-constructor': {
+    id: 'base-constructor',
+    title: 'Конструктор баз',
+    title_en: 'Base Constructor',
+    description: 'Загрузите CSV/Excel, выберите шаги обработки — очистка, обогащение, оценка ЦА — всё автоматически.',
+    description_en: 'Upload CSV/Excel, pick processing steps — cleanup, enrichment, ICP scoring — all automated.',
+    href: '/tools/base-constructor',
+    accentColor: 'blue',
   },
   'ai-caller': {
     id: 'ai-caller',
@@ -284,7 +294,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Базы и данные',
     label_en: 'Databases and data',
-    toolIds: ['done-for-you', 'databases', 'database-review'],
+    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review'],
   },
   {
     label: 'Парсеры и поиск лидов',

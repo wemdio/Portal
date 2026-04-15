@@ -367,6 +367,24 @@ const SITE_AVAILABILITY_HIGHLIGHT_DURATION = 2500;
 const EMAIL_VALIDATION_PROGRESS_INTERVAL_MS = 500;
 const EMAIL_VALIDATION_MAX_CONSECUTIVE_FAILURES = 10;
 const EMAIL_VALIDATION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+const EMAIL_PROVIDER_MAP: Record<string, string> = {
+  'gmail.com': 'Google', 'googlemail.com': 'Google',
+  'yandex.ru': 'Яндекс', 'yandex.com': 'Яндекс', 'ya.ru': 'Яндекс', 'yandex.by': 'Яндекс', 'yandex.kz': 'Яндекс', 'yandex.ua': 'Яндекс',
+  'mail.ru': 'Mail.ru', 'inbox.ru': 'Mail.ru', 'list.ru': 'Mail.ru', 'bk.ru': 'Mail.ru', 'internet.ru': 'Mail.ru',
+  'rambler.ru': 'Rambler', 'lenta.ru': 'Rambler', 'autorambler.ru': 'Rambler', 'myrambler.ru': 'Rambler', 'ro.ru': 'Rambler',
+  'outlook.com': 'Microsoft', 'hotmail.com': 'Microsoft', 'live.com': 'Microsoft', 'live.ru': 'Microsoft', 'msn.com': 'Microsoft',
+  'icloud.com': 'Apple', 'me.com': 'Apple', 'mac.com': 'Apple',
+  'yahoo.com': 'Yahoo', 'yahoo.co.uk': 'Yahoo', 'yahoo.fr': 'Yahoo',
+  'protonmail.com': 'Proton', 'proton.me': 'Proton', 'pm.me': 'Proton',
+  'aol.com': 'AOL',
+  'zoho.com': 'Zoho',
+};
+const getEmailProvider = (email: string): string => {
+  const domain = email.split('@')[1]?.toLowerCase().trim();
+  if (!domain) return '';
+  return EMAIL_PROVIDER_MAP[domain] ?? domain;
+};
 const VIRTUALIZATION_THRESHOLD = 1500;
 const VIRTUAL_ROW_HEIGHT = 22;
 const VIRTUAL_OVERSCAN = 10;
@@ -425,10 +443,9 @@ const safeMaxCols = (rows: string[][]) =>
 
 const normalizeRows = (rows: string[][]) => {
   const maxCols = safeMaxCols(rows);
-  return rows.map((row) => {
-    if (row.length >= maxCols) return row;
-    return [...row, ...Array.from({ length: maxCols - row.length }, () => '')];
-  });
+  return rows.map((row) =>
+    Array.from({ length: maxCols }, (_, i) => `${row[i] ?? ''}`),
+  );
 };
 
 const normalizeClipboardCell = (value: unknown) =>
@@ -531,17 +548,11 @@ const buildEnrichmentStorageKey = (userId: string | null) =>
 const buildBriefScoringStorageKey = (userId: string | null) =>
   `${BRIEF_SCORING_STORAGE_KEY_PREFIX}:${userId ?? 'anonymous'}`;
 
-const isStringArray = (arr: unknown[]): arr is string[] =>
-  arr.length === 0 || typeof arr[0] === 'string';
-
-const coerceRows = (rows: unknown) => {
+const coerceRows = (rows: unknown): string[][] => {
   if (!Array.isArray(rows)) return [];
-  if (rows.length > 0 && Array.isArray(rows[0]) && isStringArray(rows[0])) {
-    return rows as string[][];
-  }
   return rows.map((row) => {
     if (!Array.isArray(row)) return [''];
-    return row.map((cell) => `${cell ?? ''}`);
+    return Array.from({ length: row.length }, (_, i) => `${row[i] ?? ''}`);
   });
 };
 
@@ -558,9 +569,7 @@ const coerceTabs = (value: unknown) => {
       if (rows.length === 0) {
         return { id: safeId, name: safeName, data: [Array.from({ length: DEFAULT_COLS }, () => '')] };
       }
-      const maxCols = safeMaxCols(rows);
-      const needsNormalization = rows.some((row) => row.length !== maxCols);
-      return { id: safeId, name: safeName, data: needsNormalization ? normalizeRows(rows) : rows };
+      return { id: safeId, name: safeName, data: normalizeRows(rows) };
     })
     .filter((tab): tab is Sheet => tab !== null);
 };
@@ -2266,6 +2275,7 @@ export function DatabaseSpreadsheet() {
           header: 1,
           raw: false,
           blankrows: true,
+          defval: '',
         });
         const normalizedRows = rows.map((row) => row.map((cell) => `${cell ?? ''}`));
         setImportStatus({ status: 'parsing', progress: 95, filename: file.name });
@@ -4037,6 +4047,9 @@ export function DatabaseSpreadsheet() {
             rowIndex: row.rowIndex,
             url: row.sourceValue,
           })),
+          spreadsheet_tab_id: activeTabId,
+          result_col_index: newColIndex,
+          result_col_header: newHeaderName,
         }),
         signal: enrichmentAbortRef.current?.signal,
       });
@@ -4681,6 +4694,9 @@ export function DatabaseSpreadsheet() {
           briefText: effectiveBriefText,
           total: rowsToProcess.length,
           mode: 'staged',
+          spreadsheet_tab_id: activeTabId,
+          score_col_index: scoreColIndex,
+          reason_col_index: reasonColIndex,
         }),
       });
       throwIfPayloadTooLarge(startRes.status, 'создании задачи');
@@ -5742,6 +5758,9 @@ export function DatabaseSpreadsheet() {
         body: JSON.stringify({
           rows: rowsToProcess.map((row) => ({ rowIndex: row.rowIndex, url: row.sourceValue })),
           extraction_type: 'email',
+          spreadsheet_tab_id: activeTabId,
+          result_col_index: newColIndex,
+          result_col_header: newHeaderName,
         }),
         signal: emailScrapingAbortRef.current?.signal,
       });
@@ -5983,7 +6002,13 @@ export function DatabaseSpreadsheet() {
     let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
     if (resultColIndex < 0) resultColIndex = headerRow.length;
     const qualityColIndex = resultColIndex + 1;
-    const detailsColIndex = resultColIndex + 2;
+    const providerColIndex = resultColIndex + 2;
+    const detailsColIndex = resultColIndex + 3;
+
+    const emailSourceCol = headerRow.findIndex((h) => {
+      const label = String(h).toLowerCase();
+      return label.includes('email') || label.includes('почт') || label.includes('e-mail');
+    });
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -5991,7 +6016,11 @@ export function DatabaseSpreadsheet() {
       if (rowIdx === 0 && !String(extended[resultColIndex]).startsWith('Результат')) {
         extended[resultColIndex] = 'Результат (email)';
         extended[qualityColIndex] = 'Качество';
+        extended[providerColIndex] = 'Провайдер';
         extended[detailsColIndex] = 'Детали';
+      } else if (rowIdx > 0 && !String(extended[providerColIndex]).trim() && emailSourceCol >= 0) {
+        const email = String(row[emailSourceCol] ?? '').trim();
+        if (email) extended[providerColIndex] = getEmailProvider(email);
       }
       return extended;
     });
@@ -6157,7 +6186,8 @@ export function DatabaseSpreadsheet() {
     let resultColIndex = headerRow.findIndex((h) => String(h).startsWith('Результат ('));
     if (resultColIndex < 0) resultColIndex = headerRow.length;
     const qualityColIndex = resultColIndex + 1;
-    const detailsColIndex = resultColIndex + 2;
+    const providerColIndex = resultColIndex + 2;
+    const detailsColIndex = resultColIndex + 3;
 
     const baseData = activeTab.data.map((row, rowIdx) => {
       const extended = [...row];
@@ -6165,10 +6195,13 @@ export function DatabaseSpreadsheet() {
       if (rowIdx === 0) {
         extended[resultColIndex] = `Результат (${sourceLabel})`;
         extended[qualityColIndex] = `Качество`;
+        extended[providerColIndex] = `Провайдер`;
         extended[detailsColIndex] = `Детали`;
       } else {
         extended[resultColIndex] = '';
         extended[qualityColIndex] = '';
+        const email = String(row[emailValidation.sourceCol] ?? '').trim();
+        extended[providerColIndex] = getEmailProvider(email);
         extended[detailsColIndex] = '';
       }
       return extended;
@@ -7615,6 +7648,110 @@ export function DatabaseSpreadsheet() {
     runBriefScoringPolling,
     tabs,
   ]);
+
+  // Server-side auto-detect: resume running brief scoring job even without localStorage
+  const serverBriefDetectRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !activeTab || briefScoring.isScoring || serverBriefDetectRef.current) return;
+    const runFromStorage = getBriefScoringRunForTab(activeTabId);
+    if (runFromStorage) return; // localStorage already has it — the other effect handles resume
+    serverBriefDetectRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/brief-scoring/jobs?active=1', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as {
+          jobs?: Array<{
+            id: string; status: string; total: number; processed: number;
+            spreadsheet_tab_id?: string | null; score_col_index?: number | null; reason_col_index?: number | null;
+          }>;
+        };
+        const job = data.jobs?.[0];
+        if (!job || cancelled) return;
+        const tabId = job.spreadsheet_tab_id;
+        const scoreCol = job.score_col_index;
+        const reasonCol = job.reason_col_index;
+        if (!tabId || scoreCol == null || reasonCol == null) return;
+        const tabExists = tabs.some((t) => t.id === tabId);
+        if (!tabExists) return;
+        const total = job.total > 0 ? job.total : Math.max(0, (activeTab?.data.length ?? 1) - 1);
+        ensureBriefScoringColumns(tabId, scoreCol, reasonCol);
+        setBriefScoring((prev) => ({
+          ...prev,
+          isOpen: false,
+          isScoring: true,
+          error: null,
+          jobId: job.id,
+          totalRows: total,
+          currentRow: job.processed,
+          progress: total > 0 ? Math.round((job.processed / total) * 100) : 0,
+        }));
+        void runBriefScoringPolling({ jobId: job.id, tabId, scoreColIndex: scoreCol, reasonColIndex: reasonCol, totalRowsFallback: total });
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, activeTab, activeTabId, briefScoring.isScoring, tabs]);
+
+  // Server-side auto-detect: resume running text enrichment job even without localStorage
+  const serverEnrichDetectRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !activeTab || websiteEnrichment.isGenerating || serverEnrichDetectRef.current) return;
+    const runFromStorage = getEnrichmentRunForTab(activeTabId);
+    if (runFromStorage) return;
+    serverEnrichDetectRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/enrich/website/jobs', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as {
+          active_job?: {
+            id: string; extraction_type: string; total: number; processed: number; progress: number;
+            spreadsheet_tab_id?: string | null; result_col_index?: number | null; result_col_header?: string | null;
+          } | null;
+        };
+        const job = data.active_job;
+        if (!job || cancelled) return;
+        if (job.extraction_type !== 'text') return; // email scraping has its own handler
+        const tabId = job.spreadsheet_tab_id;
+        const targetCol = job.result_col_index;
+        if (!tabId || targetCol == null) return;
+        const tabExists = tabs.some((t) => t.id === tabId);
+        if (!tabExists) return;
+        const total = job.total > 0 ? job.total : Math.max(0, (activeTab?.data.length ?? 1) - 1);
+        const headerLabel = job.result_col_header ?? '';
+        setEnrichmentTargetOverride(targetCol);
+        void runWebsiteEnrichmentPolling({
+          jobId: job.id, tabId, sourceCol: 0, targetColIndex: targetCol,
+          totalRowsFallback: total, headerLabel, applyOnlyEmpty: true,
+        });
+      } catch { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, activeTab, activeTabId, websiteEnrichment.isGenerating, tabs]);
+
+  const reconcileCalledRef = useRef(false);
+  useEffect(() => {
+    if (!isHydrated || !userId || reconcileCalledRef.current) return;
+    reconcileCalledRef.current = true;
+    void (async () => {
+      const token = await getFreshToken();
+      if (!token) return;
+      try {
+        await fetch('/api/spreadsheet/reconcile', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch { /* best-effort */ }
+    })();
+  }, [isHydrated, userId, getFreshToken]);
 
   const toolbarMonochromeButtonClass =
     'inline-flex items-center rounded border border-gray-300 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-900 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-400';

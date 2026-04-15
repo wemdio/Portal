@@ -63,8 +63,9 @@ RULES:
 6. Always end with: "Best Regards,\\n${sender.sender_name}\\n${sender.sender_calendly}"
 7. Subject lines: short (3-7 words), lowercase-friendly, no clickbait. Different for each step.
 8. DO NOT include links to news articles, press releases, or any source URLs in the email body.
-9. Personalize heavily — use company name, signal details, niche, and founder name when available.
+9. Personalize heavily — use company name, signal details, niche, and founder name when available. If "Company Context" is provided, reference their SPECIFIC product/service and how outreach can help THEIR particular use case. Mention what they do or who their customers are to show you've done your homework.
 10. NEVER invent case studies, client names, statistics, or specific results (e.g. "we helped X book 40 calls"). You don't have this data. Instead, describe your process and offer to show examples on a call.
+11. When Company Context is available, tailor your outreach angle to their specific product. For example: if they sell a DevOps tool, mention reaching engineering leaders; if they sell HR software, mention reaching HR directors at mid-market companies. Be specific about WHO you can help them reach.
 
 OUTPUT: Return ONLY a JSON array of 3 objects (no markdown, no explanation):
 [
@@ -78,9 +79,13 @@ interface LLMResponse {
   choices?: Array<{ message?: { content?: string } }>;
 }
 
-async function generateForOne(lead: BugorLead, sender: SenderConfig): Promise<EmailStep[] | null> {
+async function generateForOne(lead: BugorLead, sender: SenderConfig, companyContext?: string | null): Promise<EmailStep[] | null> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
+
+  const contextBlock = companyContext
+    ? `\nCompany Context (from their website — use this to personalize!):\n${companyContext}`
+    : '';
 
   const userPrompt = `Generate a 3-email sequence for this lead:
 
@@ -93,7 +98,7 @@ Signal Type: ${lead.signal_type}
 Signal Detail: ${lead.signal_detail}
 Intent Score: ${lead.intent_score}
 Priority: ${lead.priority}
-Timing: ${lead.timing}`;
+Timing: ${lead.timing}${contextBlock}`;
 
   try {
     const res = await fetch(LLM_URL, {
@@ -145,6 +150,7 @@ export interface GenerateResult {
 export async function generateEmailSequences(
   leads: BugorLead[],
   sender: SenderConfig,
+  companyContexts?: Map<string, string>,
 ): Promise<GenerateResult[]> {
   const results: GenerateResult[] = [];
   let generated = 0;
@@ -154,8 +160,9 @@ export async function generateEmailSequences(
     const batch = leads.slice(i, i + CONCURRENCY);
     const batchResults = await Promise.allSettled(
       batch.map(async (lead) => {
-        console.log(`[bugor-genEmails] Generating for ${lead.company_name}...`);
-        const sequence = await generateForOne(lead, sender);
+        const ctx = companyContexts?.get(lead.id) ?? null;
+        console.log(`[bugor-genEmails] Generating for ${lead.company_name}${ctx ? ' (with context)' : ''}...`);
+        const sequence = await generateForOne(lead, sender, ctx);
         return { id: lead.id, sequence };
       }),
     );
