@@ -28,7 +28,7 @@ cd /opt/instantly-db
 #   docker-compose.yml, backup.sh, crontab, Dockerfile.backup
 
 # Поднять только новый контейнер (instantly не трогается):
-docker compose -p instantly-db --env-file .env up -d main-postgres main-pgadmin
+docker compose -p instantly-db --profile main-db --env-file .env up -d main-postgres main-pgadmin
 
 # Проверить:
 docker ps --filter name=main-postgres --format "table {{.Names}}\t{{.Status}}"
