@@ -75,11 +75,15 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
     })
     .catch((err) => {
       log('error', `Campaign ${campaignId} loop error: ${err instanceof Error ? err.message : String(err)}`);
-      void db.from('ai_campaigns').update({ status: 'paused', updated_at: new Date().toISOString() }).eq('id', campaignId);
+      db.from('ai_campaigns').update({ status: 'paused', updated_at: new Date().toISOString() }).eq('id', campaignId).then(({ error }) => {
+        if (error) log('error', `Failed to pause ai campaign ${campaignId}: ${error.message}`);
+      }, () => {});
     })
     .finally(() => {
       runningCampaigns.delete(campaignId);
-      void db.from('ai_caller_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+      db.from('ai_caller_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
+        if (error) log('error', `Failed to mark ai-caller job ${job.id} completed: ${error.message}`);
+      }, () => {});
     });
 
   runningCampaigns.set(campaignId, { stop: stopFn, promise });

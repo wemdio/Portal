@@ -182,6 +182,10 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en: 'Finds decision makers by tax ID and phone numbers: normalizes companies and contacts.',
     href: '/tools/cis-lead-finder',
     accentColor: 'blue',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
+    disabled: true,
   },
   'li-outreach': {
     id: 'li-outreach',

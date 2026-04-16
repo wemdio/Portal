@@ -47,7 +47,8 @@ function isRetryableDbError(err) {
     code === 'ENETUNREACH' ||
     msg.includes('Connection terminated') ||
     msg.includes('MaxClientsInSessionMode') ||
-    msg.includes('max clients reached')
+    msg.includes('max clients reached') ||
+    msg.includes('Tenant or user not found')
   );
 }
 
