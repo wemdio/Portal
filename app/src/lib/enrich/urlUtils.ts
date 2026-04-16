@@ -1,5 +1,7 @@
-const URL_TOKEN_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/i;
-const URL_TOKEN_GLOBAL_REGEX = /(https?:\/\/[^\s]+|[\w.-]+\.[a-z]{2,}[^\s]*)/gi;
+// Supports Unicode/IDN hostnames (e.g. партизанскиймаркетинг.рф, münchen.de).
+// Node's URL constructor converts these to Punycode automatically.
+const URL_TOKEN_REGEX = /(https?:\/\/[^\s]+|[\p{L}\p{N}.\-_]+\.[\p{L}]{2,}[^\s]*)/iu;
+const URL_TOKEN_GLOBAL_REGEX = /(https?:\/\/[^\s]+|[\p{L}\p{N}.\-_]+\.[\p{L}]{2,}[^\s]*)/giu;
 
 function normalizeUrlCandidate(candidate: string, rawForError: string): string {
   const cleaned = candidate.replace(/[),.;]+$/g, '');

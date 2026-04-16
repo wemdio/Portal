@@ -8,14 +8,26 @@ const MAX_EMAILS_PER_LEAD = 3;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 
+// Hard junk: technical / automated addresses that are NEVER a real contact.
+// Keep this minimal — data shows role-based addresses like support@, hr@, billing@
+// are real working channels for small Russian B2B companies.
 const JUNK_PREFIXES = [
-  'noreply', 'no-reply', 'no_reply', 'donotreply', 'mailer-daemon',
-  'unsubscribe', 'support', 'help', 'abuse', 'postmaster', 'webmaster',
-  'privacy', 'legal', 'compliance', 'newsletter', 'notifications',
-  'updates', 'feedback', 'automated', 'system', 'admin',
-  'billing', 'security', 'accounting', 'hr', 'recruitment', 'careers',
-  'jobs', 'spam', 'bounce', 'returns', 'orders', 'invoices', 'receipts',
+  'noreply', 'no-reply', 'no_reply', 'donotreply', 'do-not-reply',
+  'mailer-daemon', 'mailer_daemon', 'postmaster', 'hostmaster',
+  'unsubscribe', 'subscribe', 'abuse', 'bounce', 'spam',
+  'notifications', 'newsletter', 'updates', 'automated', 'system',
+  'webmaster', 'daemon', 'root', 'devnull', 'null',
 ];
+
+// Free / public email providers — acceptable if found on company website
+// (many Russian SMBs use yandex/mail.ru as primary corporate contact),
+// but ranked lower than own-domain and other-corporate addresses.
+const FREE_PROVIDERS = new Set([
+  'gmail.com', 'yandex.ru', 'yandex.com', 'ya.ru', 'mail.ru', 'bk.ru',
+  'list.ru', 'inbox.ru', 'internet.ru', 'rambler.ru', 'outlook.com',
+  'hotmail.com', 'live.com', 'icloud.com', 'me.com', 'protonmail.com',
+  'yahoo.com', 'fastmail.com',
+]);
 
 const PLACEHOLDER_EMAILS = new Set([
   'your@email.com', 'name@example.com', 'email@domain.com',
@@ -69,11 +81,37 @@ function emailMatchesDomain(email: string, companyDomain: string | null): boolea
   return emailDomain === companyDomain || emailDomain.endsWith(`.${companyDomain}`);
 }
 
-function rankEmail(email: string): number {
+/** Role score: personal > sales/business > info/contact > hr/careers > support/help. */
+function roleScore(email: string): number {
   const local = email.split('@')[0].toLowerCase();
-  if (/^(info|contact|hello|hi|hey)$/i.test(local)) return 1;
-  if (/^(sales|business|partnerships|press|media)$/i.test(local)) return 2;
-  return 3; // personal-looking emails rank highest
+  if (/^(support|help|care|tech|service)$/i.test(local)) return 1;
+  if (/^(hr|recruitment|careers|jobs|vacancy|работа)$/i.test(local)) return 2;
+  if (/^(billing|accounting|finance|buh|legal|privacy|compliance|security|order|orders|invoice|invoices)$/i.test(local)) return 2;
+  if (/^(info|contact|hello|hi|hey|office|client|clients|mail|email)$/i.test(local)) return 3;
+  if (/^(sales|sale|business|partnerships|partner|press|media|zakaz|manager)$/i.test(local)) return 4;
+  return 5; // personal-looking name-based emails
+}
+
+/** Domain score: own corporate > other corporate > free provider. */
+function domainScore(email: string, companyDomain: string | null): number {
+  const d = email.split('@')[1]?.toLowerCase() ?? '';
+  if (!d) return 0;
+  if (companyDomain) {
+    if (d === companyDomain || d.endsWith(`.${companyDomain}`)) return 100;
+    // Handle sister-brand domains (e.g. 4dev-tech.ru → 4dev.su, tdglobaldent.ru → global-dent.ru)
+    const companyRoot = companyDomain.split('.')[0];
+    const emailRoot = d.split('.')[0];
+    if (companyRoot && emailRoot && (companyRoot.includes(emailRoot) || emailRoot.includes(companyRoot))) {
+      return 70;
+    }
+  }
+  if (FREE_PROVIDERS.has(d)) return 40;
+  return 50; // unrelated corporate domain — still a real business contact
+}
+
+/** Combined rank: prefer own-domain + personal/sales local parts. */
+function rankEmail(email: string, companyDomain: string | null): number {
+  return domainScore(email, companyDomain) * 10 + roleScore(email);
 }
 
 function dedup(emails: string[]): string[] {
@@ -86,10 +124,10 @@ function dedup(emails: string[]): string[] {
   });
 }
 
-function filterAndRank(raw: string[]): string[] {
+function filterAndRank(raw: string[], companyDomain: string | null): string[] {
   return dedup(raw)
     .filter((e) => !isJunkEmail(e))
-    .sort((a, b) => rankEmail(b) - rankEmail(a))
+    .sort((a, b) => rankEmail(b, companyDomain) - rankEmail(a, companyDomain))
     .slice(0, MAX_EMAILS_PER_LEAD);
 }
 
@@ -99,9 +137,11 @@ function filterAndRank(raw: string[]): string[] {
 
 async function tier1_scrapeWebsite(website: string): Promise<string[]> {
   try {
-    const result = await scrapeEmails(website, { timeout: FETCH_TIMEOUT, maxPages: 6 });
-    const companyDomain = extractDomain(website);
-    return result.emails.filter((e) => emailMatchesDomain(e, companyDomain));
+    const result = await scrapeEmails(website, { timeout: FETCH_TIMEOUT, maxPages: 8 });
+    // Return everything the scraper found — domain-match ranking happens in filterAndRank.
+    // This accepts emails on free providers (info@company → info@yandex.ru) and sister
+    // brand domains (company-tech.ru → sales@company.su), which are common for Russian SMBs.
+    return result.emails;
   } catch {
     return [];
   }
@@ -240,24 +280,27 @@ function isJobBoardUrl(url: string): boolean {
 async function findForOne(lead: FindEmailsInput): Promise<FindEmailsResult> {
   const companyDomain = lead.website ? extractDomain(lead.website) : null;
 
-  // Tier 1: company website — strict domain match
+  // Tier 1: company website — accept anything found, rank by domain proximity.
+  // This catches cases like info@yandex.ru on a Russian SMB site, or sister-brand
+  // addresses like sale@4dev.su on the 4dev-tech.ru website.
   if (lead.website) {
     const emails = await tier1_scrapeWebsite(lead.website);
-    const ranked = filterAndRank(emails);
+    const ranked = filterAndRank(emails, companyDomain);
     if (ranked.length > 0) return { id: lead.id, emails: ranked, tier: 1 };
   }
 
   // Tier 2: source article — skip job board pages (they contain job board emails, not company emails)
   if (lead.source_url && !isJobBoardUrl(lead.source_url)) {
     const emails = await tier2_parseArticle(lead.source_url);
+    // Prefer same-domain matches when available, otherwise fall back to all article emails.
     const onDomain = companyDomain ? emails.filter((e) => emailMatchesDomain(e, companyDomain)) : emails;
-    const ranked = filterAndRank(onDomain.length > 0 ? onDomain : emails);
+    const ranked = filterAndRank(onDomain.length > 0 ? onDomain : emails, companyDomain);
     if (ranked.length > 0) return { id: lead.id, emails: ranked, tier: 2 };
   }
 
   // Tier 3: Google search — already domain-filtered inside
   const emails = await tier3_googleSearch(lead.company_name, companyDomain ?? undefined);
-  const ranked = filterAndRank(emails);
+  const ranked = filterAndRank(emails, companyDomain);
   if (ranked.length > 0) return { id: lead.id, emails: ranked, tier: 3 };
 
   // Tier 4: Pattern guess from founder name + MX-validated domain

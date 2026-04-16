@@ -48,7 +48,22 @@ const LEGAL_PATHS = [
   '/imprint', '/impressum', '/legal', '/privacy', '/datenschutz',
 ];
 
-const ALL_STATIC_PATHS = [...CONTACT_PATHS, ...ABOUT_PATHS, ...TEAM_PATHS, ...LEGAL_PATHS];
+// Russian B2B sites often keep company emails on pages with bank/payment requisites
+// or delivery terms (юр. отдел, согласование договоров), not on /contacts.
+const BUSINESS_PATHS = [
+  '/rekvizity', '/реквизиты', '/requisites',
+  '/oplata', '/payment', '/payments', '/pay',
+  '/dostavka', '/delivery', '/shipping',
+  '/dogovor', '/договор',
+];
+
+const ALL_STATIC_PATHS = [
+  ...CONTACT_PATHS,
+  ...ABOUT_PATHS,
+  ...TEAM_PATHS,
+  ...LEGAL_PATHS,
+  ...BUSINESS_PATHS,
+];
 
 // ── Link discovery patterns ────────────────────────────────────
 
