@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -26,37 +27,27 @@ export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.dashboard' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
-    const uid = auth.user.id;
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
+    const db = supabaseAdmin;
+
+    const campaignIdsRes = await db.from('li_campaigns').select('id');
+    const campaignIds = (campaignIdsRes.data ?? []).map((c: { id: string }) => c.id);
 
     const [leadsRes, campaignsRes, campaignLeadsRes, logsRes] = await Promise.all([
-      auth.supabase
-        .from('li_leads')
-        .select('company, status')
-        .eq('user_id', uid),
-      auth.supabase
-        .from('li_campaigns')
-        .select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id')
-        .eq('user_id', uid),
-      auth.supabase
-        .from('li_campaign_leads')
-        .select('status, user_replied, invite_accepted, created_at, lead_id, campaign_id')
-        .in('campaign_id', (
-          await auth.supabase
-            .from('li_campaigns')
-            .select('id')
-            .eq('user_id', uid)
-        ).data?.map((c: { id: string }) => c.id) ?? []),
-      auth.supabase
-        .from('li_campaign_logs')
-        .select('campaign_id, level, created_at')
-        .in('campaign_id', (
-          await auth.supabase
-            .from('li_campaigns')
-            .select('id')
-            .eq('user_id', uid)
-        ).data?.map((c: { id: string }) => c.id) ?? [])
-        .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
-        .order('created_at', { ascending: true }),
+      db.from('li_leads').select('company, status'),
+      db.from('li_campaigns').select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id'),
+      campaignIds.length > 0
+        ? db.from('li_campaign_leads')
+            .select('status, user_replied, invite_accepted, created_at, lead_id, campaign_id')
+            .in('campaign_id', campaignIds)
+        : Promise.resolve({ data: [], error: null }),
+      campaignIds.length > 0
+        ? db.from('li_campaign_logs')
+            .select('campaign_id, level, created_at')
+            .in('campaign_id', campaignIds)
+            .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
+            .order('created_at', { ascending: true })
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (leadsRes.error) return jsonError(leadsRes.error.message, 500);
