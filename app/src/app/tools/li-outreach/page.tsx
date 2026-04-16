@@ -1193,6 +1193,7 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
   const [logs, setLogs] = useState<LiLogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filterCampaignId, setFilterCampaignId] = useState('');
   const [filterLevel, setFilterLevel] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -1206,10 +1207,13 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
       if (filterCampaignId) params.set('campaign_id', filterCampaignId);
       if (filterLevel) params.set('level', filterLevel);
       const d = await api<{ items: LiLogEntry[]; total: number }>(`/logs?${params.toString()}`);
-      setLogs(d.items.slice().reverse());
-      setTotal(d.total);
+      const items = Array.isArray(d?.items) ? d.items : [];
+      setLogs(items.slice().reverse());
+      setTotal(typeof d?.total === 'number' ? d.total : items.length);
+      setLoadError(null);
     } catch (e) {
       console.error('[li-outreach] fetchLogs failed', e);
+      setLoadError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
     } finally {
       setLoading(false);
     }
@@ -1303,8 +1307,14 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
         onScroll={handleScroll}
         className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[540px] overflow-auto"
       >
-        {loading && logs.length === 0 && <p className="text-gray-500">Загрузка логов...</p>}
-        {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
+        {loading && logs.length === 0 && !loadError && <p className="text-gray-500">Загрузка логов...</p>}
+        {loadError && (
+          <div className="text-rose-400">
+            <div className="font-bold">Ошибка загрузки логов</div>
+            <div className="text-gray-400 mt-1 break-all">{loadError}</div>
+          </div>
+        )}
+        {!loading && !loadError && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
         {logs.map((log) => (
           <div key={log.id} className="flex gap-2 py-[1px] hover:bg-gray-900/50">
             <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
