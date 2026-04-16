@@ -92,15 +92,22 @@ export async function pollAndQualifyReplies(): Promise<number> {
   }
 
   // 3a. Deduplicate: skip reply emails that were already processed
-  const emailIds = replyEmails.map((e) => e.id).filter(Boolean);
-  const { data: existing } = await db
-    .from('instantly_lead_qualifications')
-    .select('instantly_email_id')
-    .in('instantly_email_id', emailIds);
-
-  const existingIds = new Set(
-    (existing ?? []).map((r: { instantly_email_id: string }) => r.instantly_email_id),
-  );
+  // Batch .in() queries to avoid PostgREST URL length limits
+  const emailIds = replyEmails.map((e) => e.id).filter(Boolean) as string[];
+  const existingIds = new Set<string>();
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < emailIds.length; i += BATCH_SIZE) {
+    const batch = emailIds.slice(i, i + BATCH_SIZE);
+    const { data: existing } = await db
+      .from('instantly_lead_qualifications')
+      .select('instantly_email_id')
+      .in('instantly_email_id', batch);
+    if (existing) {
+      for (const r of existing) {
+        existingIds.add((r as { instantly_email_id: string }).instantly_email_id);
+      }
+    }
+  }
 
   let newReplies = replyEmails.filter((e) => e.id && !existingIds.has(e.id));
 
@@ -195,14 +202,7 @@ async function qualifyOneReply(
   else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
 
-  // Remove any previous qualification for this lead+campaign before inserting
-  await db
-    .from('instantly_lead_qualifications')
-    .delete()
-    .eq('lead_email', leadEmail)
-    .eq('campaign_id', campaignId);
-
-  await db.from('instantly_lead_qualifications').insert({
+  await db.from('instantly_lead_qualifications').upsert({
     campaign_id: campaignId,
     campaign_name: campaignName,
     lead_email: leadEmail,
@@ -224,7 +224,7 @@ async function qualifyOneReply(
     reply_timestamp: reply.timestamp_email ?? null,
     objection_handleable: result.objectionHandleable,
     objection_draft: result.objectionDraft,
-  });
+  }, { onConflict: 'instantly_email_id', ignoreDuplicates: true });
 
   workerLog(
     'info',

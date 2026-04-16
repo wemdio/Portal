@@ -173,11 +173,18 @@ function buildSystemPrompt(briefText?: string | null): string {
 - Ответ содержит возражение/сомнение, но НЕ категоричный отказ
 - Можно сформулировать аргумент на основе предложения${briefText ? ' и контекста брифа' : ''}
 
+ВАЖНО — как определить что клиент ВИДЕЛ предложение (proposal_seen=true):
+- Наше последнее исходящее письмо содержит развёрнутое предложение (не просто запрос контакта)
+- ИЛИ в ответе клиента ЦИТИРУЕТСЯ наше предложение (текст после ">" или ниже строки "On ... wrote:" / даты отправки)
+- ИЛИ клиент ссылается на содержание предложения (цены, услуги, условия)
+- Если клиент спрашивает "сколько стоит?", "пришлите КП", запрашивает цены/условия — он ВИДЕЛ предложение и проявил ИНТЕРЕС, это ЛИД
+- Запрос контакта ответственного — это НЕ предложение. Но если после запроса контакта было отправлено предложение — смотри на последнее письмо
+
 НЕ является лидом и НЕ возражение:
-- Ответ на письмо-запрос контакта ответственного (даже если дали телефон/email)
 - Автоответ/отпуск
 - Отписка/категоричный отказ ("нас это не интересует", "не пишите больше")
 - Пересылка контакта без ознакомления с предложением
+- Ответ ТОЛЬКО на запрос контакта (без предложения) с просто контактными данными
 
 ФОРМАТ ОТВЕТА (только валидный JSON, без markdown):
 {
@@ -221,6 +228,26 @@ export async function fetchBriefByCampaign(campaignId: string): Promise<string |
   return briefs?.brief_text ?? null;
 }
 
+function extractQuotedText(replyText: string): string | null {
+  const lines = replyText.split('\n');
+  const quotedLines: string[] = [];
+  let inQuote = false;
+
+  for (const line of lines) {
+    if (line.startsWith('>')) {
+      inQuote = true;
+      quotedLines.push(line.replace(/^>\s*/, ''));
+    } else if (inQuote && line.trim() === '') {
+      quotedLines.push('');
+    } else if (inQuote) {
+      break;
+    }
+  }
+
+  const quoted = quotedLines.join('\n').trim();
+  return quoted.length > 50 ? quoted : null;
+}
+
 function buildUserMessage(ctx: ThreadContext): string {
   const lastOutText = ctx.lastOutbound
     ? getBodyText(ctx.lastOutbound.body).slice(0, 3000)
@@ -228,18 +255,42 @@ function buildUserMessage(ctx: ThreadContext): string {
   const replyText = getBodyText(ctx.replyEmail.body).slice(0, 3000);
   const stepCount = ctx.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length;
 
-  return `НАШЕ ПОСЛЕДНЕЕ ИСХОДЯЩЕЕ ПИСЬМО (шаг ${stepCount} кампании):
+  const hasQuotedContent = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
+  const quotedText = hasQuotedContent ? extractQuotedText(replyText) : null;
+
+  let outboundSection: string;
+  if (ctx.lastOutbound) {
+    outboundSection = `НАШЕ ПОСЛЕДНЕЕ ИСХОДЯЩЕЕ ПИСЬМО (шаг ${stepCount} кампании):
 ---
 ${lastOutText}
+---`;
+  } else if (quotedText) {
+    outboundSection = `НАШЕ ПОСЛЕДНЕЕ ИСХОДЯЩЕЕ ПИСЬМО (извлечено из цитаты в ответе клиента):
 ---
+${quotedText.slice(0, 3000)}
+---
+ВАЖНО: Исходящее письмо не найдено в API, но клиент процитировал его в ответе — значит он его ПОЛУЧИЛ и ВИДЕЛ (proposal_seen=true).`;
+  } else {
+    outboundSection = `НАШЕ ПОСЛЕДНЕЕ ИСХОДЯЩЕЕ ПИСЬМО (шаг ${stepCount} кампании):
+---
+(не найдено)
+---`;
+  }
+
+  let quotedHint = '';
+  if (hasQuotedContent) {
+    quotedHint = '\nОБРАТИ ВНИМАНИЕ: В ответе клиента есть цитированный текст (строки с ">" или блок ниже разделителя). Если цитируется наше предложение — клиент его ВИДЕЛ (proposal_seen=true).';
+  }
+
+  return `${outboundSection}
 
 ОТВЕТ ПОТЕНЦИАЛЬНОГО КЛИЕНТА:
 Тема: ${ctx.replyEmail.subject ?? '(без темы)'}
 ---
 ${replyText}
 ---
-
-Определи, является ли этот ответ квалифицированным лидом.`;
+${quotedHint}
+Определи категорию ответа, учитывая ВСЁ содержание письма, включая цитированный текст.`;
 }
 
 function parseAIResult(content: string): QualificationResult {
@@ -405,7 +456,8 @@ export async function qualifyReply(
 
   if (ctx.lastOutbound) {
     const outboundText = getBodyText(ctx.lastOutbound.body);
-    if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText)) {
+    const replyHasQuotes = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
+    if (isContactRequestOnly(outboundText) && !isProposalMessage(outboundText) && !replyHasQuotes) {
       return {
         isLead: false,
         proposalSeen: false,
