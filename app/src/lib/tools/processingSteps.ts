@@ -14,6 +14,7 @@ import {
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
+import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 
 export type ProgressFn = (progress: number) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
@@ -369,8 +370,14 @@ export async function stepTAScore(
     await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
   }
 
+  const TA_MIN_SCORE = 7;
+  const filtered = scored.filter((row) => {
+    const score = parseInt(row[newHeader.length - 2], 10);
+    return !isNaN(score) && score >= TA_MIN_SCORE;
+  });
+
   await onProgress(100);
-  return [newHeader, ...scored];
+  return [newHeader, ...filtered];
 }
 
 /* ═══════════════════════════════════════════
@@ -532,49 +539,56 @@ export async function stepPersonalize(
    STEP: Email validation (uses external API)
    ═══════════════════════════════════════════ */
 
+const VALIDATION_CONCURRENCY = 10;
+
 export async function stepValidateEmails(
   data: string[][],
   onProgress: ProgressFn,
+  isCancelled?: CancelCheckFn,
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
   const emailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   if (emailIdx < 0) { await onProgress(100); return data; }
 
-  const newHeader = [...header, 'Email Статус'];
-  const newBody = body.map((row) => [...row, '']);
+  const newHeader = [...header, 'Email Статус', 'Email Провайдер'];
+  const newBody = body.map((row) => [...row, '', '']);
 
+  const toValidate = newBody
+    .map((row, i) => ({ row, i, email: extractEmail(row[emailIdx] || '') }))
+    .filter((item) => item.email);
+
+  if (toValidate.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
+
+  const statusIdx = newHeader.length - 2;
+  const providerIdx = newHeader.length - 1;
+  const domainCache = new Map<string, DomainInfo>();
   let done = 0;
-  const total = newBody.filter((row) => extractEmail(row[emailIdx] || '')).length;
-  if (total === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
-  const statusIdx = newHeader.length - 1;
-  await processInPool(
-    newBody.map((row, i) => ({ row, i })).filter((item) => extractEmail(item.row[emailIdx] || '')),
-    5,
-    async (item) => {
-      const email = extractEmail(item.row[emailIdx] || '');
-      if (!email) return;
-      try {
-        const res = await fetch(`https://api.reacher.email/v0/check_email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.REACHER_API_KEY || ''}` },
-          body: JSON.stringify({ to_email: email }),
-        });
-        if (res.ok) {
-          const json = await res.json();
-          newBody[item.i][statusIdx] = json.is_reachable || 'unknown';
-        }
-      } catch { /* skip */ }
-      done++;
-      if (done % 10 === 0 || done === total) {
-        await onProgress(Math.round((done / total) * 100));
-      }
-    },
-  );
+  await processInPool(toValidate, VALIDATION_CONCURRENCY, async (item) => {
+    if (isCancelled && await isCancelled()) return;
+    const email = item.email!;
+    try {
+      const result = await validateEmail(email, domainCache);
+      newBody[item.i][statusIdx] = result.result;
+      const domain = email.split('@')[1] || '';
+      newBody[item.i][providerIdx] = result.is_free ? 'free' : result.is_catch_all ? 'catch-all' : domain;
+    } catch {
+      newBody[item.i][statusIdx] = 'error';
+    }
+    done++;
+    if (done % 5 === 0 || done === toValidate.length) {
+      await onProgress(Math.round((done / toValidate.length) * 100));
+    }
+  });
+
+  const filtered = newBody.filter((row) => {
+    const status = row[statusIdx];
+    return status === 'ok' || status === 'catch_all' || status === '';
+  });
 
   await onProgress(100);
-  return [newHeader, ...newBody];
+  return [newHeader, ...filtered];
 }
 
 /* ═══════════════════════════════════════════

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import * as instantly from '@/lib/instantly/client';
 import { sendLeadNotification } from '@/lib/instantly/leadNotifier';
 import type { LeadNotificationData } from '@/lib/instantly/leadNotifier';
@@ -98,6 +99,28 @@ export const POST = withAuth(async (req, user) => {
     }
   } catch {
     // enrichment is best-effort
+  }
+
+  if ((!website || !companyName) && supabaseAdmin) {
+    try {
+      const { data: synced } = await supabaseAdmin
+        .from('client_campaign_leads')
+        .select('first_name, last_name, company_name, website, linkedin_url')
+        .eq('email', qual.lead_email)
+        .limit(1)
+        .maybeSingle();
+
+      if (synced) {
+        if (!website && synced.website) website = synced.website;
+        if (!linkedinUrl && synced.linkedin_url) linkedinUrl = synced.linkedin_url;
+        if (!leadName && (synced.first_name || synced.last_name)) {
+          leadName = [synced.first_name, synced.last_name].filter(Boolean).join(' ') || null;
+        }
+        if (!companyName && synced.company_name) companyName = synced.company_name;
+      }
+    } catch {
+      // fallback enrichment is best-effort
+    }
   }
 
   const effectiveChatId = telegram_chat_id ?? null;
