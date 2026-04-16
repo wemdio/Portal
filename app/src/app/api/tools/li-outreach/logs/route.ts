@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
 
     let query = supabaseAdmin
       .from('li_campaign_logs')
-      .select('*, campaign:li_campaigns!inner(name)', { count: 'exact' });
+      .select('*', { count: 'exact' });
 
     if (campaignId) {
       query = query.eq('campaign_id', campaignId);
@@ -34,6 +34,22 @@ export async function GET(req: NextRequest) {
       .range(offset, offset + limit - 1);
 
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ items: data ?? [], total: count ?? 0 });
+
+    const logs = data ?? [];
+    const campaignIds = Array.from(new Set(logs.map((l) => (l as { campaign_id: string }).campaign_id).filter(Boolean)));
+    let campaignNames = new Map<string, string>();
+    if (campaignIds.length > 0) {
+      const { data: campaignsData } = await supabaseAdmin
+        .from('li_campaigns')
+        .select('id, name')
+        .in('id', campaignIds);
+      campaignNames = new Map((campaignsData ?? []).map((c: { id: string; name: string }) => [c.id, c.name]));
+    }
+    const items = logs.map((l) => {
+      const row = l as { campaign_id: string } & Record<string, unknown>;
+      return { ...row, campaign: { name: campaignNames.get(row.campaign_id) ?? 'Unknown' } };
+    });
+
+    return NextResponse.json({ items, total: count ?? 0 });
   });
 }

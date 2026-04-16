@@ -34,6 +34,9 @@ export const commonDictionary = {
   projects: { ru: 'Проекты', en: 'Projects' },
   settings: { ru: 'Настройки', en: 'Settings' },
   regulation: { ru: 'Регламент', en: 'Regulation' },
+  notifications: { ru: 'Уведомления', en: 'Notifications' },
+  noNotifications: { ru: 'Уведомлений пока нет', en: 'No notifications yet' },
+  noNotificationsHint: { ru: 'Здесь будут появляться уведомления о задачах, кампаниях и событиях.', en: 'Notifications about tasks, campaigns, and events will appear here.' },
 } as const;
 
 type DictEntry = (typeof commonDictionary)[keyof typeof commonDictionary];

@@ -454,6 +454,7 @@ export default function TasksPage() {
   const [editingTitleValue, setEditingTitleValue] = useState('');
   const [editingProjectId, setEditingProjectId] = useState('');
   const [editingSpecialists, setEditingSpecialists] = useState<string[]>([]);
+  const [editingDeadlineValue, setEditingDeadlineValue] = useState('');
   const [assigneeFilterModal, setAssigneeFilterModal] = useState('');
   const [showDeleteTaskConfirm, setShowDeleteTaskConfirm] = useState(false);
   const [deadlineDefaultEnabled, setDeadlineDefaultEnabled] = useState(false);
@@ -1942,6 +1943,36 @@ export default function TasksPage() {
                                 <p className={`mt-1 break-words text-sm font-semibold leading-snug ${displayDone ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                                   {task.title}
                                 </p>
+                                {!displayDone && task.deadline && (() => {
+                                  const now = new Date();
+                                  const dl = new Date(task.deadline);
+                                  const diffMs = dl.getTime() - now.getTime();
+                                  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                                  const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short' });
+                                  const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
+                                  const hasTime = !/^[\d-]+$/.test(task.deadline!) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+                                  const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+                                  const cls = diffMs < 0
+                                    ? 'text-red-600 bg-red-50'
+                                    : diffDays === 0
+                                      ? 'text-amber-700 bg-amber-50'
+                                      : diffDays <= 2
+                                        ? 'text-amber-600 bg-amber-50'
+                                        : 'text-gray-500 bg-gray-100';
+                                  const suffix = diffMs < 0
+                                    ? (isEn ? ' !' : ' !')
+                                    : diffDays === 0
+                                      ? (isEn ? ' today' : ' сегодня')
+                                      : '';
+                                  return (
+                                    <div className="mt-1.5">
+                                      <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
+                                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                                        {label}{suffix}
+                                      </span>
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             </div>
                           </DraggableTaskCard>
@@ -1969,6 +2000,22 @@ export default function TasksPage() {
                   <p className="mt-1 break-words text-sm font-semibold leading-snug text-gray-900">
                     {activeTask.title}
                   </p>
+                  {activeTask.deadline && activeTask.status !== 'done' && (() => {
+                    const dl = new Date(activeTask.deadline);
+                    const diffMs = dl.getTime() - Date.now();
+                    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                    const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short' });
+                    const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
+                    const hasTime = !/^[\d-]+$/.test(activeTask.deadline!) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+                    const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+                    const cls = diffMs < 0 ? 'text-red-600 bg-red-50' : diffDays === 0 ? 'text-amber-700 bg-amber-50' : diffDays <= 2 ? 'text-amber-600 bg-amber-50' : 'text-gray-500 bg-gray-100';
+                    return (
+                      <span className={`mt-1 inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>
+                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                        {label}
+                      </span>
+                    );
+                  })()}
                   {activeTask.description && <p className="mt-1 line-clamp-2 text-xs text-gray-600">{activeTask.description}</p>}
                   {activeTask.image_url && <img src={activeTask.image_url} alt="" className="mt-1.5 max-h-20 w-full rounded-lg object-cover" />}
                   {activeTask.result && (
@@ -2514,6 +2561,61 @@ export default function TasksPage() {
               </div>
 
               <div>
+                <p className="text-xs font-medium text-gray-500 mb-1">{isEn ? 'Deadline' : 'Дедлайн'}</p>
+                {isModalInEditMode ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="datetime-local"
+                      lang={isEn ? 'en-GB' : 'ru-RU'}
+                      value={editingDeadlineValue}
+                      onChange={(e) => setEditingDeadlineValue(e.target.value)}
+                      onClick={(e) => openNativePicker(e.currentTarget)}
+                      onFocus={(e) => openNativePicker(e.currentTarget)}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+                      style={{ colorScheme: 'light' }}
+                    />
+                    {editingDeadlineValue && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingDeadlineValue('')}
+                        className="shrink-0 text-xs text-gray-400 hover:text-red-500 transition-colors"
+                        title={isEn ? 'Remove deadline' : 'Убрать дедлайн'}
+                      >✕</button>
+                    )}
+                  </div>
+                ) : modalTask.deadline ? (() => {
+                  const now = new Date();
+                  const dl = new Date(modalTask.deadline);
+                  const diffMs = dl.getTime() - now.getTime();
+                  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                  const dateFmt = dl.toLocaleDateString(uiDateLocale, { day: 'numeric', month: 'short', year: 'numeric' });
+                  const timeFmt = dl.toLocaleTimeString(uiDateLocale, { hour: '2-digit', minute: '2-digit' });
+                  const hasTime = !/^[\d-]+$/.test(modalTask.deadline!) && (dl.getHours() !== 0 || dl.getMinutes() !== 0);
+                  const label = hasTime ? `${dateFmt}, ${timeFmt}` : dateFmt;
+                  const cls = modalTask.status === 'done'
+                    ? 'text-gray-400 bg-gray-50'
+                    : diffMs < 0
+                      ? 'text-red-600 bg-red-50'
+                      : diffDays === 0
+                        ? 'text-amber-700 bg-amber-50'
+                        : diffDays <= 2
+                          ? 'text-amber-600 bg-amber-50'
+                          : 'text-gray-600 bg-gray-100';
+                  const suffix = modalTask.status !== 'done'
+                    ? (diffMs < 0 ? (isEn ? ' (overdue)' : ' (просрочено)') : diffDays === 0 ? (isEn ? ' (today)' : ' (сегодня)') : '')
+                    : '';
+                  return (
+                    <span className={`inline-flex items-center gap-1 text-sm font-medium px-2 py-1 rounded-lg ${cls}`}>
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12 2H4a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2zM2 6h12M5 1v2M11 1v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                      {label}{suffix}
+                    </span>
+                  );
+                })() : (
+                  <p className="text-sm text-gray-400">—</p>
+                )}
+              </div>
+
+              <div>
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100">
                   <div className="flex flex-wrap items-center gap-2">
                     {isModalInEditMode ? (
@@ -2525,6 +2627,7 @@ export default function TasksPage() {
                             await updateTaskProject(modalTask.id, editingProjectId || null);
                             await updateTaskSpecialist(modalTask.id, editingSpecialists.join(', ').trim() || '');
                             await updateTaskDescriptionAndImage(modalTask.id, editingDescriptionValue, editingImageUrlValue);
+                            await updateTaskDeadline(modalTask.id, editingDeadlineValue ? new Date(editingDeadlineValue).toISOString() : null);
                             setIsModalInEditMode(false);
                           }}
                           className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
@@ -2549,6 +2652,7 @@ export default function TasksPage() {
                           setEditingSpecialists((modalTask.specialist ?? '').split(',').map((s) => s.trim()).filter(Boolean));
                           setEditingDescriptionValue(modalTask.description || '');
                           setEditingImageUrlValue(modalTask.image_url || '');
+                          setEditingDeadlineValue(modalTask.deadline ? (() => { const d = new Date(modalTask.deadline); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; })() : '');
                         }}
                         className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
                       >

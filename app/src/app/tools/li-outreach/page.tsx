@@ -532,16 +532,41 @@ export default function LiOutreachPage() {
                       <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Кампания</th>
                       <th className="text-center px-2 py-2 text-xs text-gray-500 font-medium">Статус</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Лидов</th>
+                      <th
+                        className="text-right px-2 py-2 text-xs text-gray-500 font-medium"
+                        title="Сколько инвайтов отправлено сегодня из дневного лимита. Счётчик сбрасывается в полночь."
+                      >
+                        Инвайтов сегодня
+                      </th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Принято</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Accept %</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Reply %</th>
-                      <th className="px-2 py-2 text-xs text-gray-500 font-medium w-32">Прогресс</th>
+                      <th
+                        className="px-2 py-2 text-xs text-gray-500 font-medium w-56"
+                        title="Обработано = Завершено + Ошибки + Пропущено от общего числа лидов в кампании"
+                      >
+                        Обработано
+                        <span className="ml-1 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-200 text-gray-500 text-[9px] cursor-help" title="Доля лидов, по которым кампания уже отработала все шаги либо остановилась (успех / ошибка / пропуск). Остальные — в работе или ждут очереди.">?</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {dashData.campaign_stats.map((cs) => {
-                      const doneRatio = cs.leads_total > 0 ? Math.round(((cs.completed + cs.error + cs.skipped) / cs.leads_total) * 100) : 0;
+                      const processed = cs.completed + cs.error + cs.skipped;
+                      const doneRatio = cs.leads_total > 0 ? Math.round((processed / cs.leads_total) * 100) : 0;
+                      const pendingActive = cs.pending + cs.in_progress + cs.waiting;
+                      const pctCompleted = cs.leads_total > 0 ? (cs.completed / cs.leads_total) * 100 : 0;
+                      const pctError = cs.leads_total > 0 ? (cs.error / cs.leads_total) * 100 : 0;
+                      const pctSkipped = cs.leads_total > 0 ? (cs.skipped / cs.leads_total) * 100 : 0;
+                      const tooltip = `Обработано ${processed} из ${cs.leads_total} лидов (${doneRatio}%)\n` +
+                        `  ✓ Завершено: ${cs.completed}\n` +
+                        `  ✗ Ошибки: ${cs.error}\n` +
+                        `  ⤼ Пропущено: ${cs.skipped}\n` +
+                        `Осталось: ${pendingActive}\n` +
+                        `  • В очереди: ${cs.pending}\n` +
+                        `  • Сейчас обрабатываются: ${cs.in_progress}\n` +
+                        `  • Ждут следующего шага: ${cs.waiting}`;
                       return (
                         <tr key={cs.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                           <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[200px] truncate">{cs.name}</td>
@@ -551,16 +576,37 @@ export default function LiOutreachPage() {
                             </span>
                           </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-gray-700">{cs.leads_total}</td>
+                          <td
+                            className="px-2 py-2.5 text-right tabular-nums"
+                            title={`Отправлено сегодня ${cs.invites_sent_today} из ${cs.daily_invite_limit} (дневной лимит). Счётчик сбросится в 00:00.`}
+                          >
+                            <div className="flex items-center justify-end gap-2">
+                              <div className="w-12 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${cs.invites_sent_today >= cs.daily_invite_limit ? 'bg-amber-500' : 'bg-blue-500'}`}
+                                  style={{ width: `${cs.daily_invite_limit > 0 ? Math.min(100, Math.round((cs.invites_sent_today / cs.daily_invite_limit) * 100)) : 0}%` }}
+                                />
+                              </div>
+                              <span className={cs.invites_sent_today >= cs.daily_invite_limit ? 'text-amber-700 font-medium' : 'text-gray-700'}>
+                                {cs.invites_sent_today} / {cs.daily_invite_limit}
+                              </span>
+                            </div>
+                          </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-blue-700 font-medium">{cs.accepted}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-green-700 font-medium">{cs.replied}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums">{cs.accept_rate}%</td>
                           <td className="px-2 py-2.5 text-right tabular-nums">{cs.reply_rate}%</td>
-                          <td className="px-2 py-2.5">
+                          <td className="px-2 py-2.5" title={tooltip}>
                             <div className="flex items-center gap-2">
-                              <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden">
-                                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${doneRatio}%` }} />
+                              <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden flex">
+                                {pctCompleted > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${pctCompleted}%` }} />}
+                                {pctError > 0 && <div className="h-full bg-red-400 transition-all" style={{ width: `${pctError}%` }} />}
+                                {pctSkipped > 0 && <div className="h-full bg-gray-400 transition-all" style={{ width: `${pctSkipped}%` }} />}
                               </div>
-                              <span className="text-xs tabular-nums text-gray-500 w-8 text-right">{doneRatio}%</span>
+                              <span className="text-xs tabular-nums text-gray-700 font-medium w-10 text-right">{doneRatio}%</span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-0.5 tabular-nums">
+                              {processed} из {cs.leads_total} · осталось {pendingActive}
                             </div>
                           </td>
                         </tr>
@@ -568,6 +614,13 @@ export default function LiOutreachPage() {
                     })}
                   </tbody>
                 </table>
+                <div className="mt-3 flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
+                  <span className="font-medium text-gray-600">Легенда:</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
+                </div>
               </div>
             </div>
           )}
@@ -1140,6 +1193,7 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
   const [logs, setLogs] = useState<LiLogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filterCampaignId, setFilterCampaignId] = useState('');
   const [filterLevel, setFilterLevel] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -1153,10 +1207,13 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
       if (filterCampaignId) params.set('campaign_id', filterCampaignId);
       if (filterLevel) params.set('level', filterLevel);
       const d = await api<{ items: LiLogEntry[]; total: number }>(`/logs?${params.toString()}`);
-      setLogs(d.items.slice().reverse());
-      setTotal(d.total);
+      const items = Array.isArray(d?.items) ? d.items : [];
+      setLogs(items.slice().reverse());
+      setTotal(typeof d?.total === 'number' ? d.total : items.length);
+      setLoadError(null);
     } catch (e) {
       console.error('[li-outreach] fetchLogs failed', e);
+      setLoadError(e instanceof Error ? e.message : 'Не удалось загрузить логи');
     } finally {
       setLoading(false);
     }
@@ -1250,8 +1307,14 @@ function LiLogsTab({ campaigns }: { campaigns: LiCampaign[] }) {
         onScroll={handleScroll}
         className="rounded-lg border border-gray-800 bg-gray-950 p-3 font-mono text-[11px] leading-relaxed h-[540px] overflow-auto"
       >
-        {loading && logs.length === 0 && <p className="text-gray-500">Загрузка логов...</p>}
-        {!loading && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
+        {loading && logs.length === 0 && !loadError && <p className="text-gray-500">Загрузка логов...</p>}
+        {loadError && (
+          <div className="text-rose-400">
+            <div className="font-bold">Ошибка загрузки логов</div>
+            <div className="text-gray-400 mt-1 break-all">{loadError}</div>
+          </div>
+        )}
+        {!loading && !loadError && logs.length === 0 && <p className="text-gray-600">Нет логов. Запустите кампанию — здесь появятся записи.</p>}
         {logs.map((log) => (
           <div key={log.id} className="flex gap-2 py-[1px] hover:bg-gray-900/50">
             <span className="text-gray-600 shrink-0">{new Date(log.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>

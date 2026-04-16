@@ -65,11 +65,15 @@ async function handleStartJob(job: { id: string; config_id: string }) {
     })
     .catch((err) => {
       log('error', `Copilot ${configId} loop error: ${err instanceof Error ? err.message : String(err)}`);
-      void db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId);
+      db.from('sales_copilot_configs').update({ is_enabled: false }).eq('id', configId).then(({ error }) => {
+        if (error) log('error', `Failed to disable copilot config ${configId}: ${error.message}`);
+      }, () => {});
     })
     .finally(() => {
       runningConfigs.delete(configId);
-      void db.from('sales_copilot_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+      db.from('sales_copilot_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
+        if (error) log('error', `Failed to mark sales-copilot job ${job.id} completed: ${error.message}`);
+      }, () => {});
     });
 
   runningConfigs.set(configId, { stop: stopFn, promise });
