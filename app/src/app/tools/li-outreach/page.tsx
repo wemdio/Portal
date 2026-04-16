@@ -536,12 +536,31 @@ export default function LiOutreachPage() {
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Accept %</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Reply %</th>
-                      <th className="px-2 py-2 text-xs text-gray-500 font-medium w-32">Прогресс</th>
+                      <th
+                        className="px-2 py-2 text-xs text-gray-500 font-medium w-56"
+                        title="Обработано = Завершено + Ошибки + Пропущено от общего числа лидов в кампании"
+                      >
+                        Обработано
+                        <span className="ml-1 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-200 text-gray-500 text-[9px] cursor-help" title="Доля лидов, по которым кампания уже отработала все шаги либо остановилась (успех / ошибка / пропуск). Остальные — в работе или ждут очереди.">?</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {dashData.campaign_stats.map((cs) => {
-                      const doneRatio = cs.leads_total > 0 ? Math.round(((cs.completed + cs.error + cs.skipped) / cs.leads_total) * 100) : 0;
+                      const processed = cs.completed + cs.error + cs.skipped;
+                      const doneRatio = cs.leads_total > 0 ? Math.round((processed / cs.leads_total) * 100) : 0;
+                      const pendingActive = cs.pending + cs.in_progress + cs.waiting;
+                      const pctCompleted = cs.leads_total > 0 ? (cs.completed / cs.leads_total) * 100 : 0;
+                      const pctError = cs.leads_total > 0 ? (cs.error / cs.leads_total) * 100 : 0;
+                      const pctSkipped = cs.leads_total > 0 ? (cs.skipped / cs.leads_total) * 100 : 0;
+                      const tooltip = `Обработано ${processed} из ${cs.leads_total} лидов (${doneRatio}%)\n` +
+                        `  ✓ Завершено: ${cs.completed}\n` +
+                        `  ✗ Ошибки: ${cs.error}\n` +
+                        `  ⤼ Пропущено: ${cs.skipped}\n` +
+                        `Осталось: ${pendingActive}\n` +
+                        `  • В очереди: ${cs.pending}\n` +
+                        `  • Сейчас обрабатываются: ${cs.in_progress}\n` +
+                        `  • Ждут следующего шага: ${cs.waiting}`;
                       return (
                         <tr key={cs.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                           <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[200px] truncate">{cs.name}</td>
@@ -555,12 +574,17 @@ export default function LiOutreachPage() {
                           <td className="px-2 py-2.5 text-right tabular-nums text-green-700 font-medium">{cs.replied}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums">{cs.accept_rate}%</td>
                           <td className="px-2 py-2.5 text-right tabular-nums">{cs.reply_rate}%</td>
-                          <td className="px-2 py-2.5">
+                          <td className="px-2 py-2.5" title={tooltip}>
                             <div className="flex items-center gap-2">
-                              <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden">
-                                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${doneRatio}%` }} />
+                              <div className="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden flex">
+                                {pctCompleted > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${pctCompleted}%` }} />}
+                                {pctError > 0 && <div className="h-full bg-red-400 transition-all" style={{ width: `${pctError}%` }} />}
+                                {pctSkipped > 0 && <div className="h-full bg-gray-400 transition-all" style={{ width: `${pctSkipped}%` }} />}
                               </div>
-                              <span className="text-xs tabular-nums text-gray-500 w-8 text-right">{doneRatio}%</span>
+                              <span className="text-xs tabular-nums text-gray-700 font-medium w-10 text-right">{doneRatio}%</span>
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-0.5 tabular-nums">
+                              {processed} из {cs.leads_total} · осталось {pendingActive}
                             </div>
                           </td>
                         </tr>
@@ -568,6 +592,13 @@ export default function LiOutreachPage() {
                     })}
                   </tbody>
                 </table>
+                <div className="mt-3 flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
+                  <span className="font-medium text-gray-600">Легенда:</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-green-500" /> Завершено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-400" /> Ошибка</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-400" /> Пропущено</span>
+                  <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-gray-100 border border-gray-200" /> В работе / ожидают</span>
+                </div>
               </div>
             </div>
           )}
