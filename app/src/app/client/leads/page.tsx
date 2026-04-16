@@ -200,7 +200,6 @@ function LeadDetail({
             onClick={handleSubmit}
             disabled={!newComment.trim() || submitting}
             className="neu-btn rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40 transition-opacity"
-            style={{ color: 'var(--cp-accent)' }}
           >
             {submitting ? '...' : 'Отправить'}
           </button>

@@ -1,7 +1,10 @@
 import * as net from 'node:net';
+import * as os from 'node:os';
 
 const SMTP_CONNECT_TIMEOUT_MS = 8_000;
 const SMTP_COMMAND_TIMEOUT_MS = 8_000;
+
+const DEFAULT_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
 
 type SmtpResponse = { code: number; text: string };
 
@@ -82,8 +85,13 @@ function waitForGreeting(socket: net.Socket, timeoutMs: number): Promise<SmtpRes
 export interface SmtpCheckRequest {
   email: string;
   mxHost: string;
-  heloDomain: string;
-  heloFrom: string;
+  /**
+   * Optional. If omitted, the proxy fills it from EMAIL_VALIDATION_HELO_DOMAIN
+   * env var or os.hostname(). HELO/PTR must match the proxy's outbound IP.
+   */
+  heloDomain?: string;
+  /** Optional. Defaults to `verify@<heloDomain>`. */
+  heloFrom?: string;
   checkCatchAll?: boolean;
   timeout?: number;
 }
@@ -91,6 +99,9 @@ export interface SmtpCheckRequest {
 export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult> {
   const timeout = req.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
+
+  const heloDomain = req.heloDomain ?? DEFAULT_HELO_DOMAIN;
+  const heloFrom = req.heloFrom ?? `verify@${heloDomain}`;
 
   let socket: net.Socket | null = null;
 
@@ -113,16 +124,16 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
       return result;
     }
 
-    const ehloResp = await smtpCommand(socket, `EHLO ${req.heloDomain}`, SMTP_COMMAND_TIMEOUT_MS);
+    const ehloResp = await smtpCommand(socket, `EHLO ${heloDomain}`, SMTP_COMMAND_TIMEOUT_MS);
     if (ehloResp.code !== 250) {
-      const heloResp = await smtpCommand(socket, `HELO ${req.heloDomain}`, SMTP_COMMAND_TIMEOUT_MS);
+      const heloResp = await smtpCommand(socket, `HELO ${heloDomain}`, SMTP_COMMAND_TIMEOUT_MS);
       if (heloResp.code !== 250) {
         result.error = `EHLO/HELO rejected: ${heloResp.code}`;
         return result;
       }
     }
 
-    const mailFrom = await smtpCommand(socket, `MAIL FROM:<${req.heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
+    const mailFrom = await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
     if (mailFrom.code !== 250) {
       result.error = `MAIL FROM rejected: ${mailFrom.code}`;
       return result;
@@ -149,7 +160,7 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
       const randomEmail = `${randomLocal}@${domain}`;
 
       await smtpCommand(socket, 'RSET', SMTP_COMMAND_TIMEOUT_MS);
-      await smtpCommand(socket, `MAIL FROM:<${req.heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
+      await smtpCommand(socket, `MAIL FROM:<${heloFrom}>`, SMTP_COMMAND_TIMEOUT_MS);
       const catchAllRcpt = await smtpCommand(socket, `RCPT TO:<${randomEmail}>`, SMTP_COMMAND_TIMEOUT_MS);
 
       if (catchAllRcpt.code === 250) {
