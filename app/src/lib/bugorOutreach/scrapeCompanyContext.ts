@@ -81,10 +81,10 @@ ${pageText.slice(0, 3000)}
 Reply in English. Be specific about the product, not generic. If the content is unclear or not enough, say "unclear".`,
         },
       ],
-      max_tokens: 300,
+      max_tokens: 1500,
       temperature: 0.2,
     }),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!res.ok) return null;
