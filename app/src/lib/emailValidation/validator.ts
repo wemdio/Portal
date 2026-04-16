@@ -10,6 +10,7 @@
 
 import * as dns from 'dns';
 import * as net from 'net';
+import * as os from 'os';
 import {
   checkSyntax,
   isDisposable,
@@ -70,21 +71,14 @@ export async function checkDomain(domain: string): Promise<boolean> {
 const SMTP_CONNECT_TIMEOUT_MS = 8_000;
 const SMTP_COMMAND_TIMEOUT_MS = 8_000;
 
-import { HELO_DOMAINS } from './heloDomains';
-
-const HELO_POOL: string[] = (() => {
-  const env = process.env.EMAIL_VALIDATION_HELO_DOMAINS ?? process.env.EMAIL_VALIDATION_HELO_DOMAIN;
-  if (env) return env.split(',').map((d) => d.trim()).filter(Boolean);
-  return HELO_DOMAINS;
-})();
-
-let heloIndex = Math.floor(Math.random() * HELO_POOL.length);
-
-function nextHelo(): { domain: string; from: string } {
-  const domain = HELO_POOL[heloIndex % HELO_POOL.length];
-  heloIndex = (heloIndex + 1) % HELO_POOL.length;
-  return { domain, from: `verify@${domain}` };
-}
+/**
+ * HELO domain for the local-dev direct SMTP fallback. In production all
+ * traffic goes through the smtp-proxy, which picks its own HELO based on
+ * the proxy VPS's hostname/PTR. This is used only when SMTP_PROXY_URLS is
+ * empty (local dev).
+ */
+const LOCAL_HELO_DOMAIN = process.env.EMAIL_VALIDATION_HELO_DOMAIN ?? os.hostname();
+const LOCAL_HELO_FROM = `verify@${LOCAL_HELO_DOMAIN}`;
 
 export type SmtpCheckResult = {
   code: number;
@@ -120,12 +114,11 @@ async function smtpVerifyViaProxy(
   mxHost: string,
   options?: { checkCatchAll?: boolean; timeout?: number },
 ): Promise<SmtpCheckResult> {
-  const helo = nextHelo();
+  // HELO is picked by the proxy itself (from EMAIL_VALIDATION_HELO_DOMAIN
+  // env var or os.hostname() on the proxy VPS), so it matches the IP's PTR.
   const body = {
     email,
     mxHost,
-    heloDomain: helo.domain,
-    heloFrom: helo.from,
     checkCatchAll: options?.checkCatchAll ?? false,
     timeout: options?.timeout ?? SMTP_CONNECT_TIMEOUT_MS,
   };
@@ -244,7 +237,7 @@ async function smtpVerifyDirect(
 ): Promise<SmtpCheckResult> {
   const timeout = options?.timeout ?? SMTP_CONNECT_TIMEOUT_MS;
   const result: SmtpCheckResult = { code: 0, exists: null, isCatchAll: null, greylist: false };
-  const helo = nextHelo();
+  const helo = { domain: LOCAL_HELO_DOMAIN, from: LOCAL_HELO_FROM };
 
   let socket: net.Socket | null = null;
 
