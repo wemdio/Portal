@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -8,13 +9,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   return withToolTrace({ request: req, operation: 'tools.li-outreach.campaigns.getOne' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
 
-    const { data, error } = await auth.supabase
+    const { data, error } = await supabaseAdmin
       .from('li_campaigns')
       .select('*')
       .eq('id', id)
-      .eq('user_id', auth.user.id)
       .single();
     if (error) return jsonError('Campaign not found', 404);
     return NextResponse.json({ campaign: data });
@@ -36,7 +37,8 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const key of allowed) { if (key in body) patch[key] = body[key]; }
 
-    const { error } = await auth.supabase.from('li_campaigns').update(patch).eq('id', id).eq('user_id', auth.user.id);
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
+    const { error } = await supabaseAdmin.from('li_campaigns').update(patch).eq('id', id);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ ok: true });
   });
@@ -46,9 +48,10 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   return withToolTrace({ request: req, operation: 'tools.li-outreach.campaigns.delete' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const { id } = await ctx.params;
 
-    const { error } = await auth.supabase.from('li_campaigns').delete().eq('id', id).eq('user_id', auth.user.id);
+    const { error } = await supabaseAdmin.from('li_campaigns').delete().eq('id', id);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ ok: true });
   });
