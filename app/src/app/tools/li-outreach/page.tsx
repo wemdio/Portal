@@ -532,6 +532,12 @@ export default function LiOutreachPage() {
                       <th className="text-left px-3 py-2 text-xs text-gray-500 font-medium">Кампания</th>
                       <th className="text-center px-2 py-2 text-xs text-gray-500 font-medium">Статус</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Лидов</th>
+                      <th
+                        className="text-right px-2 py-2 text-xs text-gray-500 font-medium"
+                        title="Сколько инвайтов отправлено сегодня из дневного лимита. Счётчик сбрасывается в полночь."
+                      >
+                        Инвайтов сегодня
+                      </th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Принято</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Ответили</th>
                       <th className="text-right px-2 py-2 text-xs text-gray-500 font-medium">Accept %</th>
@@ -570,6 +576,22 @@ export default function LiOutreachPage() {
                             </span>
                           </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-gray-700">{cs.leads_total}</td>
+                          <td
+                            className="px-2 py-2.5 text-right tabular-nums"
+                            title={`Отправлено сегодня ${cs.invites_sent_today} из ${cs.daily_invite_limit} (дневной лимит). Счётчик сбросится в 00:00.`}
+                          >
+                            <div className="flex items-center justify-end gap-2">
+                              <div className="w-12 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${cs.invites_sent_today >= cs.daily_invite_limit ? 'bg-amber-500' : 'bg-blue-500'}`}
+                                  style={{ width: `${cs.daily_invite_limit > 0 ? Math.min(100, Math.round((cs.invites_sent_today / cs.daily_invite_limit) * 100)) : 0}%` }}
+                                />
+                              </div>
+                              <span className={cs.invites_sent_today >= cs.daily_invite_limit ? 'text-amber-700 font-medium' : 'text-gray-700'}>
+                                {cs.invites_sent_today} / {cs.daily_invite_limit}
+                              </span>
+                            </div>
+                          </td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-blue-700 font-medium">{cs.accepted}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums text-green-700 font-medium">{cs.replied}</td>
                           <td className="px-2 py-2.5 text-right tabular-nums">{cs.accept_rate}%</td>
