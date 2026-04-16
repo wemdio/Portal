@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,8 +28,34 @@ export async function GET(req: NextRequest) {
     return jsonError(error.message, 500);
   }
 
+  const items = data ?? [];
+
+  if (items.length > 0 && supabaseAdmin) {
+    const emails = items.map((l) => l.lead_email as string).filter(Boolean);
+    const { data: synced } = await supabaseAdmin
+      .from('client_campaign_leads')
+      .select('email, first_name, last_name, company_name, website, linkedin_url')
+      .eq('client_user_id', userId)
+      .in('email', emails);
+
+    if (synced?.length) {
+      const byEmail = new Map(synced.map((s) => [s.email, s]));
+
+      for (const item of items) {
+        const match = byEmail.get(item.lead_email);
+        if (!match) continue;
+        if (!item.lead_name && (match.first_name || match.last_name)) {
+          item.lead_name = [match.first_name, match.last_name].filter(Boolean).join(' ');
+        }
+        if (!item.company_name && match.company_name) item.company_name = match.company_name;
+        if (!item.website && match.website) item.website = match.website;
+        if (!item.linkedin_url && match.linkedin_url) item.linkedin_url = match.linkedin_url;
+      }
+    }
+  }
+
   return NextResponse.json({
-    items: data ?? [],
+    items,
     total: count ?? 0,
     limit,
     offset,
