@@ -17,11 +17,13 @@ interface UserContextValue {
   navTabVisibility: Record<string, boolean>;
   visibleTools: string[] | null;
   badges: Record<string, number>;
+  unreadNotifications: number;
   locale: Locale;
   localeSaving: boolean;
   handleAvatarError: () => void;
   handleSignOut: () => Promise<void>;
   setLocale: (nextLocale: Locale) => Promise<void>;
+  refreshNotifications: () => void;
 }
 
 const UserContext = createContext<UserContextValue | null>(null);
@@ -48,6 +50,7 @@ export function UserProvider({
   const [navTabVisibility, setNavTabVisibility] = useState<Record<string, boolean>>({});
   const [visibleTools, setVisibleTools] = useState<string[] | null>(null);
   const [badges, setBadges] = useState<Record<string, number>>({});
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [locale, setLocaleState] = useState<Locale>(normalizeLocale(initialLocale));
   const [localeSaving, setLocaleSaving] = useState(false);
   const localeHydratedRef = useRef(false);
@@ -152,14 +155,16 @@ export function UserProvider({
         if (!token || cancelled) return;
         const headers = { Authorization: `Bearer ${token}` };
 
-        const [toolsRes, submittedRes, reworkRes] = await Promise.all([
+        const [toolsRes, submittedRes, reworkRes, notifRes] = await Promise.all([
           fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ toolIds: [] })),
           fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
           fetch('/api/database-review/requests', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
+          fetch('/api/notifications', { headers }).then((r) => r.json()).catch(() => ({ unread_count: 0 })),
         ]);
         if (cancelled) return;
         const tools = (toolsRes.toolIds ?? []) as string[];
         setVisibleTools(tools);
+        setUnreadNotifications(notifRes.unread_count ?? 0);
         const reworkStatuses = new Set(['needs_rework', 'client_requested_changes']);
         const reworkCount = ((reworkRes.requests ?? []) as Array<{ status: string }>).filter(
           (r) => reworkStatuses.has(r.status),
@@ -203,6 +208,21 @@ export function UserProvider({
     await supabase.auth.signOut();
   }, []);
 
+  const refreshNotifications = useCallback(() => {
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const res = await fetch('/api/notifications', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        setUnreadNotifications(data.unread_count ?? 0);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
   const setLocale = useCallback(async (nextLocale: Locale) => {
     const normalized = normalizeLocale(nextLocale);
     setLocaleState(normalized);
@@ -237,12 +257,14 @@ export function UserProvider({
     navTabVisibility,
     visibleTools,
     badges,
+    unreadNotifications,
     locale,
     localeSaving,
     handleAvatarError,
     handleSignOut,
     setLocale,
-  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, locale, localeSaving, handleAvatarError, handleSignOut, setLocale]);
+    refreshNotifications,
+  }), [userId, userRole, userEmail, userFullName, userAvatarUrl, navTabVisibility, visibleTools, badges, unreadNotifications, locale, localeSaving, handleAvatarError, handleSignOut, setLocale, refreshNotifications]);
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 }

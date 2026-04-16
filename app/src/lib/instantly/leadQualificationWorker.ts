@@ -1,4 +1,5 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
+import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { qualifyReply, getBodyText } from './leadQualifier';
 import * as instantly from './client';
 import type { Email } from './types';
@@ -202,7 +203,7 @@ async function qualifyOneReply(
     .eq('lead_email', leadEmail)
     .eq('campaign_id', campaignId);
 
-  await db.from('instantly_lead_qualifications').insert({
+  const { data: inserted } = await db.from('instantly_lead_qualifications').insert({
     campaign_id: campaignId,
     campaign_name: campaignName,
     lead_email: leadEmail,
@@ -224,10 +225,90 @@ async function qualifyOneReply(
     reply_timestamp: reply.timestamp_email ?? null,
     objection_handleable: result.objectionHandleable,
     objection_draft: result.objectionDraft,
-  });
+  }).select('id').single();
 
   workerLog(
     'info',
     `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})`,
   );
+
+  if (status === 'lead' && inserted?.id && supabaseMain) {
+    await notifySpecialistsAboutLead(
+      db,
+      inserted.id,
+      campaignId,
+      leadEmail,
+      leadName ?? null,
+      companyName ?? null,
+      campaignName,
+    );
+  }
+}
+
+/**
+ * Create in-app notifications for specialists subscribed to the campaign.
+ * Also logs the 'specialist' level in deadline_notification_log for dedup/escalation.
+ */
+async function notifySpecialistsAboutLead(
+  instantlyDb: NonNullable<typeof supabaseAdmin>,
+  qualificationId: string,
+  campaignId: string,
+  leadEmail: string,
+  leadName: string | null,
+  companyName: string | null,
+  campaignName: string | null,
+): Promise<void> {
+  if (!supabaseMain) return;
+
+  try {
+    // Find users subscribed to this campaign
+    const { data: prefs } = await instantlyDb
+      .from('user_instantly_campaign_preferences')
+      .select('user_id')
+      .eq('campaign_id', campaignId);
+
+    if (!prefs?.length) {
+      workerLog('warn', `No users subscribed to campaign ${campaignId} — no lead notification sent`);
+      return;
+    }
+
+    const userIds = [...new Set(prefs.map((p: { user_id: string }) => p.user_id))];
+
+    const contactLabel = leadName ?? leadEmail;
+    const campaignLabel = campaignName ? ` (${campaignName})` : '';
+
+    const rows = userIds.map((uid) => ({
+      user_id: uid,
+      type: 'lead_new',
+      title: 'Новый квалифицированный лид',
+      body: `${contactLabel}${companyName ? ` — ${companyName}` : ''}${campaignLabel}`,
+      entity_type: 'lead_qualification',
+      entity_id: qualificationId,
+    }));
+
+    const { error: notifErr } = await supabaseMain
+      .from('notifications')
+      .insert(rows);
+
+    if (notifErr) {
+      workerLog('error', 'Failed to create lead notifications', notifErr.message);
+      return;
+    }
+
+    // Log for escalation dedup
+    await supabaseMain
+      .from('deadline_notification_log')
+      .upsert(
+        {
+          entity_type: 'lead_qualification',
+          entity_id: qualificationId,
+          level: 'specialist',
+        },
+        { onConflict: 'entity_type,entity_id,level' },
+      );
+
+    workerLog('info', `Created lead notifications for ${userIds.length} specialist(s)`);
+  } catch (err) {
+    workerLog('error', 'Error creating lead notifications', err);
+  }
 }

@@ -142,14 +142,16 @@ export async function PATCH(
         return NextResponse.json({ error: 'Задача уже завершилась' }, { status: 409 });
       }
 
-      void supabase.from('tg_parser_logs').insert({
+      supabase.from('tg_parser_logs').insert({
         job_id: id,
         job_user_id: user.id,
         is_target: Boolean((row.config as { is_target?: boolean } | null)?.is_target),
         account_label: (row.config as { account_label?: string } | null)?.account_label ?? null,
         level: 'warning',
         message: 'Остановлено вручную пользователем',
-      });
+      }).then(({ error }) => {
+        if (error) console.warn('[tg-parser] stop log insert failed:', error.message);
+      }, () => {});
 
       return NextResponse.json({ ok: true, job: updated });
     },

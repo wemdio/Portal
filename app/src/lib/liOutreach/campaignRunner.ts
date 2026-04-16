@@ -82,15 +82,27 @@ export async function runCampaignTick(
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
   if (steps.length === 0) return { processed: 0, errors: 0 };
 
-  // Log helper — writes to DB so the UI logs tab can display entries
+  // Log helper — writes to DB so the UI logs tab can display entries.
+  // IMPORTANT: supabase-js PostgrestBuilder is lazy — it only fires the HTTP
+  // request when `.then()` / `await` is called. Using `void builder` does NOT
+  // trigger execution, so we must invoke `.then()` (fire-and-forget, but still
+  // actually fire). Errors are logged to stderr so they're visible in worker logs.
   const log: LogFn = (level, message, leadName, stepIndex) => {
-    void db.from('li_campaign_logs').insert({
-      campaign_id: campaignId,
-      level,
-      message,
-      lead_name: leadName ?? null,
-      step_index: stepIndex ?? null,
-    });
+    db.from('li_campaign_logs')
+      .insert({
+        campaign_id: campaignId,
+        level,
+        message,
+        lead_name: leadName ?? null,
+        step_index: stepIndex ?? null,
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.warn(`[li-outreach] log insert failed for campaign ${campaignId}:`, error.message);
+        }
+      }, (err) => {
+        console.warn(`[li-outreach] log insert threw for campaign ${campaignId}:`, err);
+      });
   };
 
   log('info', `Тик запущен — кампания «${campaign.name}», аккаунт ${account?.unipile_account_id ?? 'N/A'}`);

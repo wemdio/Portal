@@ -7,7 +7,6 @@ import type { Route } from 'next';
 import { navItems } from '@/lib/navigation';
 import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
-import { LanguageToggle } from '@/components/LanguageToggle';
 import { commonDictionary, dict } from '@/lib/i18n';
 
 export function TmaHeader() {
@@ -59,7 +58,16 @@ export function TmaHeader() {
             {activeItem ? (locale === 'en' ? activeItem.nameEn : activeItem.name) : dict(commonDictionary.portal, locale)}
           </h1>
         </div>
-        <LanguageToggle compact />
+        <Link
+          href={'/notifications' as Route}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-full transition tma-chip"
+          aria-label={dict(commonDictionary.notifications, locale)}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5.333a4 4 0 1 0-8 0c0 4.667-2 6-2 6h12s-2-1.333-2-6Z" />
+            <path d="M9.153 13.333a1.333 1.333 0 0 1-2.306 0" />
+          </svg>
+        </Link>
         <Link
           href={'/profile' as Route}
           className="flex items-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition tma-chip"

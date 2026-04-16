@@ -8,7 +8,6 @@ import { getRoleLabel, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict } from '@/lib/i18n';
-import { LanguageToggle } from '@/components/LanguageToggle';
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -36,6 +35,7 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
     navTabVisibility,
     visibleTools,
     badges,
+    unreadNotifications,
     locale,
     handleAvatarError,
     handleSignOut,
@@ -175,9 +175,28 @@ export function Sidebar({ collapsed = false, isTma = false, mobileOpen = false, 
             </p>
           </div>
         </Link>
-        <div className="mb-2">
-          <LanguageToggle className="w-full justify-center" />
-        </div>
+        <Link
+          href={'/notifications' as Route}
+          prefetch={false}
+          onClick={() => onMobileClose?.()}
+          className={`mb-2 flex w-full items-center justify-center gap-1.5 rounded-md px-1.5 py-1.5 text-[11px] transition-colors ${
+            isTma ? 'tma-nav-item' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+          }`}
+          aria-label={dict(commonDictionary.notifications, locale)}
+        >
+          <span className="relative">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5.333a4 4 0 1 0-8 0c0 4.667-2 6-2 6h12s-2-1.333-2-6Z" />
+              <path d="M9.153 13.333a1.333 1.333 0 0 1-2.306 0" />
+            </svg>
+            {unreadNotifications > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 inline-flex items-center justify-center min-w-[14px] h-[14px] px-0.5 text-[8px] font-bold rounded-full bg-red-500 text-white">
+                {unreadNotifications > 99 ? '99+' : unreadNotifications}
+              </span>
+            )}
+          </span>
+          {dict(commonDictionary.notifications, locale)}
+        </Link>
         {isTma && (
           <div
             className="mb-3 rounded-xl border p-2"

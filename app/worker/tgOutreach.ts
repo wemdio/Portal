@@ -101,12 +101,16 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
     })
     .catch((err) => {
       log('error', `Campaign ${campaignId} loop error: ${err instanceof Error ? err.message : String(err)}`);
-      void db.from('tg_outreach_campaigns').update({ status: 'error', updated_at: new Date().toISOString() }).eq('id', campaignId);
+      db.from('tg_outreach_campaigns').update({ status: 'error', updated_at: new Date().toISOString() }).eq('id', campaignId).then(({ error }) => {
+        if (error) log('error', `Failed to mark tg campaign ${campaignId} as error: ${error.message}`);
+      }, () => {});
       void trace?.fail(err);
     })
     .finally(() => {
       runningCampaigns.delete(campaignId);
-      void db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+      db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
+        if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
+      }, () => {});
     });
 
   runningCampaigns.set(campaignId, { stop: stopFn, promise });
