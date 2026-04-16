@@ -6,7 +6,6 @@ import type { Route } from 'next';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
 import { getRoleLabel, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
-import { LanguageToggle } from '@/components/LanguageToggle';
 import { commonDictionary, dict } from '@/lib/i18n';
 
 export function TopNav() {
@@ -20,6 +19,7 @@ export function TopNav() {
     navTabVisibility,
     visibleTools,
     badges,
+    unreadNotifications,
     locale,
     handleAvatarError,
     handleSignOut,
@@ -78,7 +78,23 @@ export function TopNav() {
         </nav>
 
         <div className="flex items-center gap-2 flex-shrink-0">
-          <LanguageToggle />
+          <Link
+            href={'/notifications' as Route}
+            prefetch={false}
+            className="relative inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 transition-colors"
+            title={dict(commonDictionary.notifications, locale)}
+            aria-label={dict(commonDictionary.notifications, locale)}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5.333a4 4 0 1 0-8 0c0 4.667-2 6-2 6h12s-2-1.333-2-6Z" />
+              <path d="M9.153 13.333a1.333 1.333 0 0 1-2.306 0" />
+            </svg>
+            {unreadNotifications > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 text-[9px] font-bold rounded-full bg-red-500 text-white ring-2 ring-white">
+                {unreadNotifications > 99 ? '99+' : unreadNotifications}
+              </span>
+            )}
+          </Link>
           <Link
             href={'/profile' as Route}
             prefetch={false}

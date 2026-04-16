@@ -65,7 +65,9 @@ type HHApiVacanciesResponse = {
 };
 
 type HHApiErrorPayload = {
+  description?: string;
   errors?: Array<{
+    description?: string;
     value?: string;
     type?: string;
     captcha_url?: string;
@@ -263,28 +265,50 @@ function safeJsonParse<T>(text: string): T | null {
   }
 }
 
-function parseHhError(bodyText: string): { type?: string; captchaUrl?: string; requestId?: string } {
+function parseHhError(bodyText: string): {
+  type?: string;
+  value?: string;
+  description?: string;
+  captchaUrl?: string;
+  requestId?: string;
+} {
   const payload = safeJsonParse<HHApiErrorPayload>(bodyText);
   const entry =
     payload?.errors?.find((item) => item.type === 'captcha_required' || item.value === 'captcha_required') ??
     payload?.errors?.[0];
   return {
-    type: entry?.type ?? entry?.value,
+    type: entry?.type,
+    value: entry?.value,
+    description: entry?.description ?? payload?.description,
     captchaUrl: entry?.captcha_url,
     requestId: payload?.request_id,
   };
 }
 
+function extractRequestId(headers: Headers, fallback?: string): string | undefined {
+  return fallback ?? headers.get('x-request-id') ?? headers.get('x-hh-request-id') ?? undefined;
+}
+
 function buildHhErrorMessage(
   status: number,
-  details: { type?: string; captchaUrl?: string },
+  details: { type?: string; value?: string; captchaUrl?: string; requestId?: string; description?: string },
   bodyText: string,
 ) {
+  const requestSuffix = details.requestId ? ` (request_id: ${details.requestId})` : '';
+
   if (details.type === 'captcha_required' || details.captchaUrl) {
     const link = details.captchaUrl ? ` ${details.captchaUrl}` : '';
-    return `HH API требует капчу.${link}`;
+    return `HH API требует капчу.${link}${requestSuffix}`;
   }
-  if (details.type) return `HH API error ${status}: ${details.type}`;
+  if (status === 403 && details.type === 'oauth') {
+    const oauthReason = details.value ? ` (${details.value})` : '';
+    return `HH API OAuth ошибка 403${oauthReason}${requestSuffix}`;
+  }
+  if (status === 403 && (details.type === 'forbidden' || !details.type)) {
+    return `HH API отклонил запрос (403 forbidden, вероятен anti-bot/IP блок)${requestSuffix}`;
+  }
+  if (details.type || details.value) return `HH API error ${status}: ${details.type ?? details.value}${requestSuffix}`;
+  if (details.description) return `HH API error ${status}: ${details.description}${requestSuffix}`;
   if (bodyText) return `HH API error ${status}: ${bodyText}`;
   return `HH API error ${status}`;
 }
@@ -625,8 +649,11 @@ export async function fetchWithRetry<T>(
   let countTimeout = 0;
   let countProxyFail = 0;
   let countCaptcha = 0;
+  let countOauth403 = 0;
+  let countAntiBot403 = 0;
   let lastStatus = 0;
   let lastCaptchaUrl: string | undefined;
+  let lastRequestId: string | undefined;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let release: (() => void) | null = null;
@@ -657,7 +684,7 @@ export async function fetchWithRetry<T>(
         const bodyText = await res.text().catch(() => '');
         const parsed = safeJsonParse<T>(bodyText);
         if (parsed) return parsed;
-        const requestId = res.headers.get('x-request-id') ?? res.headers.get('x-hh-request-id') ?? undefined;
+        const requestId = extractRequestId(res.headers);
         throw new HHApiError('HH API returned non-JSON response', {
           status: res.status,
           type: 'invalid_response',
@@ -676,10 +703,11 @@ export async function fetchWithRetry<T>(
       if (!shouldRetry) {
         const bodyText = await res.text().catch(() => '');
         const details = parseHhError(bodyText);
+        details.requestId = extractRequestId(res.headers, details.requestId);
         const message = buildHhErrorMessage(res.status, details, bodyText);
         throw new HHApiError(message, {
           status: res.status,
-          type: details.type,
+          type: details.type ?? details.value,
           captchaUrl: details.captchaUrl,
           requestId: details.requestId,
         });
@@ -689,9 +717,15 @@ export async function fetchWithRetry<T>(
       if (res.status === 403) {
         const bodyText = await res.text().catch(() => '');
         const details = parseHhError(bodyText);
+        details.requestId = extractRequestId(res.headers, details.requestId);
+        lastRequestId = details.requestId;
         if (details.type === 'captcha_required' || details.captchaUrl) {
           countCaptcha += 1;
           lastCaptchaUrl = details.captchaUrl;
+        } else if (details.type === 'oauth') {
+          countOauth403 += 1;
+        } else if (details.type === 'forbidden' || !details.type) {
+          countAntiBot403 += 1;
         }
         count403 += 1;
       } else if (res.status === 429) {
@@ -708,7 +742,12 @@ export async function fetchWithRetry<T>(
       lastProxyEntry = currentProxy;
       lastError = new HHApiError(
         `HH API HTTP ${res.status}`,
-        { status: res.status, type: res.status === 403 ? 'forbidden' : 'retryable' },
+        {
+          status: res.status,
+          type: res.status === 403 ? 'forbidden' : 'retryable',
+          requestId: lastRequestId,
+          captchaUrl: lastCaptchaUrl,
+        },
       );
       const base = retryAfterMs ?? Math.min(maxDelayMs, minDelayMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * 250);
@@ -767,8 +806,19 @@ export async function fetchWithRetry<T>(
   // Build a diagnostic error message so it's immediately clear what happened
   const totalAttempts = maxRetries + 1;
   const errMsg = buildRetryExhaustedMessage({
-    totalAttempts, count403, count429, count5xx, countTimeout, countProxyFail, countCaptcha,
-    lastStatus, lastCaptchaUrl, proxyCount: PROXY_ENTRIES.length,
+    totalAttempts,
+    count403,
+    count429,
+    count5xx,
+    countTimeout,
+    countProxyFail,
+    countCaptcha,
+    countOauth403,
+    countAntiBot403,
+    lastStatus,
+    lastCaptchaUrl,
+    lastRequestId,
+    proxyCount: PROXY_ENTRIES.length,
   });
 
   if (lastError instanceof HHApiError) {
@@ -786,15 +836,20 @@ function buildRetryExhaustedMessage(stats: {
   countTimeout: number;
   countProxyFail: number;
   countCaptcha: number;
+  countOauth403: number;
+  countAntiBot403: number;
   lastStatus: number;
   lastCaptchaUrl?: string;
+  lastRequestId?: string;
   proxyCount: number;
 }): string {
   const parts: string[] = [];
 
   if (stats.countCaptcha > 0) {
     parts.push(`HH API требует капчу (${stats.countCaptcha}×)${stats.lastCaptchaUrl ? ` — ${stats.lastCaptchaUrl}` : ''}`);
-  } else if (stats.count403 > 0 && stats.count403 === stats.totalAttempts) {
+  } else if (stats.countOauth403 > 0 && stats.countOauth403 === stats.totalAttempts) {
+    parts.push('HH API вернул OAuth-ошибку (403). Проверьте access_token/refresh_token и авторизацию приложения.');
+  } else if (stats.countAntiBot403 > 0 && stats.countAntiBot403 === stats.totalAttempts) {
     parts.push(
       stats.proxyCount > 0
         ? `Все прокси заблокированы HH API (403 Forbidden × ${stats.count403}). Замените PROXY_URLS на новые IP.`
@@ -815,6 +870,10 @@ function buildRetryExhaustedMessage(stats: {
     if (stats.countTimeout) details.push(`таймаут × ${stats.countTimeout}`);
     if (stats.countProxyFail) details.push(`прокси недоступен × ${stats.countProxyFail}`);
     parts.push(`HH API: ${stats.totalAttempts} попыток неуспешны (${details.join(', ')})`);
+  }
+
+  if (stats.lastRequestId) {
+    parts.push(`request_id: ${stats.lastRequestId}`);
   }
 
   return parts.join('. ');

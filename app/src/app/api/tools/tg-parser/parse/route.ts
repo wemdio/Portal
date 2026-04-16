@@ -156,14 +156,16 @@ export async function POST(req: NextRequest) {
         return jsonError(insErr?.message ?? 'Не удалось создать задачу', 500);
       }
 
-      void supabaseAdmin.from('tg_parser_logs').insert({
+      supabaseAdmin.from('tg_parser_logs').insert({
         job_id: row.id,
         job_user_id: user.id,
         is_target: is_target,
         account_label: accountLabel,
         level: 'info',
         message: 'Задача добавлена в очередь',
-      });
+      }).then(({ error }) => {
+        if (error) console.warn('[tg-parser] queue log insert failed:', error.message);
+      }, () => {});
 
       return NextResponse.json({ job_id: row.id, status: 'pending' as const });
     },
