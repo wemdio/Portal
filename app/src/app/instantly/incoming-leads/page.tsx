@@ -406,6 +406,26 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
             </div>
           )}
         </div>
+        {/* Action buttons */}
+        <div className="flex items-center gap-2 mt-3">
+          <Link
+            href={`/instantly/emails?campaign_id=${item.campaign_id}` as Route}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
+          >
+            <Mail className="h-3.5 w-3.5" />
+            Все письма
+            <ArrowUpRight className="h-3 w-3 text-zinc-400" />
+          </Link>
+          {canForward && (
+            <button
+              onClick={() => setShowForward(!showForward)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+            >
+              <Send className="h-3.5 w-3.5" />
+              Передать клиенту
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Scrollable content */}
@@ -443,20 +463,10 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           </section>
         )}
 
-        {/* Conversation (chat bubbles) */}
+        {/* Conversation (newest first) */}
         <section>
           <p className="text-xs font-bold text-zinc-500 uppercase tracking-wide mb-3">Переписка</p>
           <div className="space-y-3">
-            {item.last_outbound_preview && (
-              <div className="flex justify-start">
-                <div className="max-w-[85%]">
-                  <p className="text-[10px] text-zinc-400 mb-1 ml-1">Наше письмо</p>
-                  <div className="rounded-2xl rounded-tl-md bg-zinc-100 px-4 py-3 text-sm text-zinc-600 leading-relaxed whitespace-pre-wrap max-h-[400px] overflow-y-auto">
-                    {item.last_outbound_preview}
-                  </div>
-                </div>
-              </div>
-            )}
             <div className="flex justify-end">
               <div className="max-w-[85%]">
                 <p className="text-[10px] text-zinc-400 mb-1 mr-1 text-right">
@@ -476,6 +486,16 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
                 </div>
               </div>
             </div>
+            {item.last_outbound_preview && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%]">
+                  <p className="text-[10px] text-zinc-400 mb-1 ml-1">Наше письмо</p>
+                  <div className="rounded-2xl rounded-tl-md bg-zinc-100 px-4 py-3 text-sm text-zinc-600 leading-relaxed whitespace-pre-wrap max-h-[400px] overflow-y-auto">
+                    {item.last_outbound_preview}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </section>
 
@@ -507,26 +527,6 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         )}
       </div>
 
-      {/* Actions footer */}
-      <div className="sticky bottom-0 z-10 border-t border-zinc-200 bg-white px-6 py-3 flex items-center gap-3">
-        <Link
-          href={`/instantly/emails?campaign_id=${item.campaign_id}` as Route}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors"
-        >
-          <Mail className="h-3.5 w-3.5" />
-          Все письма
-          <ArrowUpRight className="h-3 w-3 text-zinc-400" />
-        </Link>
-        {canForward && (
-          <button
-            onClick={() => setShowForward(!showForward)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
-          >
-            <Send className="h-3.5 w-3.5" />
-            Передать клиенту
-          </button>
-        )}
-      </div>
     </div>
   );
 }
