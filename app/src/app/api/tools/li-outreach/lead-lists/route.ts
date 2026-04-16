@@ -10,8 +10,9 @@ export async function GET(req: NextRequest) {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
+    const admin = supabaseAdmin;
 
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await admin
       .from('li_lead_lists')
       .select('*')
       .order('created_at', { ascending: false });
@@ -21,7 +22,7 @@ export async function GET(req: NextRequest) {
 
     const withCounts = await Promise.all(
       lists.map(async (list) => {
-        const { count } = await supabaseAdmin
+        const { count } = await admin
           .from('li_leads')
           .select('*', { head: true, count: 'exact' })
           .eq('lead_list_id', list.id);
