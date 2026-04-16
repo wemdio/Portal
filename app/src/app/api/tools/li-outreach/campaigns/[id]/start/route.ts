@@ -12,22 +12,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
     const { id } = await ctx.params;
 
-    // Verify ownership
-    const { data: campaign } = await auth.supabase
+    const { data: campaign } = await supabaseAdmin
       .from('li_campaigns')
       .select('id,status,lead_list_id')
       .eq('id', id)
-      .eq('user_id', auth.user.id)
       .single<{ id: string; status: string; lead_list_id: string | null }>();
     if (!campaign) return jsonError('Campaign not found', 404);
     if (campaign.status === 'running') return jsonError('Already running', 400);
 
-    // Populate campaign_leads from lead_list
     if (campaign.lead_list_id) {
-      const { data: leads } = await auth.supabase
+      const { data: leads } = await supabaseAdmin
         .from('li_leads')
         .select('id')
-        .eq('user_id', auth.user.id)
         .eq('lead_list_id', campaign.lead_list_id)
         .limit(5000);
 

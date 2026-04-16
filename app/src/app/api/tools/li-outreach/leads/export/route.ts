@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -8,14 +9,14 @@ export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.leads.export' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
 
     const url = new URL(req.url);
     const listId = url.searchParams.get('lead_list_id');
 
-    let q = auth.supabase
+    let q = supabaseAdmin
       .from('li_leads')
       .select('name,first_name,last_name,position,company,profile_url,public_identifier,status')
-      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false })
       .limit(10000);
 
