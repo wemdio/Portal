@@ -25,7 +25,7 @@ app.get('/health', async () => ({ status: 'ok' }));
 app.post<{ Body: SmtpCheckRequest; Reply: SmtpCheckResult }>('/smtp-check', async (req) => {
   const { email, mxHost, heloDomain, heloFrom, checkCatchAll, timeout } = req.body;
 
-  if (!email || !mxHost || !heloDomain || !heloFrom) {
+  if (!email || !mxHost) {
     return { code: 0, exists: null, isCatchAll: null, greylist: false, error: 'Missing required fields' } as SmtpCheckResult;
   }
 
