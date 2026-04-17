@@ -16,7 +16,7 @@ import type { BugorLead, SenderConfig } from './types';
 const BATCH_SIZE = 20;
 const SMTP_CONCURRENCY = 5;
 
-const BUGOR_LEAD_SELECT = 'id, company_name, website, founder_name, description, niche, signal_type, signal_detail, intent_score, priority, outreach_angle, timing, delay_days, send_after, region, source_url, email_guess, founder_linkedin, batch_date, raw_data, created_at, emails_found, emails_validated, email_sequence, instantly_uploaded, instantly_lead_id, smtp_status, smtp_tier';
+const BUGOR_LEAD_SELECT = 'id, company_name, website, founder_name, description, niche, signal_type, signal_detail, intent_score, priority, outreach_angle, timing, delay_days, send_after, region, source_url, email_guess, founder_linkedin, batch_date, raw_data, created_at, emails_found, emails_validated, email_sequence, instantly_uploaded, instantly_lead_id, smtp_status, smtp_tier, smtp_retry_count';
 
 async function loadSenderConfig(): Promise<SenderConfig> {
   const defaults: SenderConfig = {
@@ -127,11 +127,19 @@ export async function runBugorSmtpValidation(): Promise<number> {
         else if (status === 'invalid') report.smtpInvalid++;
         else report.smtpUnknown++;
 
+        // Track when this lead was last probed and whether to bump retry_count.
+        // The retry scheduler (worker/outreach.ts) uses these to give one more
+        // chance to leads that landed in 'unknown' (proxy timeout / tarpit / blacklist).
+        const prevRetryCount = lead.smtp_retry_count ?? 0;
+        const nextRetryCount = status === 'unknown' ? prevRetryCount + 1 : prevRetryCount;
+
         await supabaseAdmin!
           .from('bugor_outreach_leads')
           .update({
             smtp_status: status,
             emails_validated: acceptedEmails,
+            smtp_last_attempt_at: new Date().toISOString(),
+            smtp_retry_count: nextRetryCount,
           })
           .eq('id', lead.id);
 
@@ -232,4 +240,57 @@ export async function runBugorSmtpValidation(): Promise<number> {
   }
 
   return report.processed;
+}
+
+/**
+ * Retry SMTP validation for leads that landed in 'unknown' on the first pass.
+ *
+ * See nashOutreach/smtpValidationWorker.retryUnknownNashLeads for the full
+ * rationale — same logic, separate table.
+ *
+ * Called by bugorRetryScheduler() in worker/outreach.ts roughly 4 hours after
+ * the daily Bugor collection (BUGOR_COLLECT_HOUR_UTC + 4).
+ */
+export async function retryUnknownBugorLeads(): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  const cutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+
+  const { data: candidates, error } = await supabaseAdmin
+    .from('bugor_outreach_leads')
+    .select('id, company_name, emails_found')
+    .eq('smtp_status', 'unknown')
+    .eq('smtp_retry_count', 0)
+    .lt('smtp_last_attempt_at', cutoff)
+    .not('smtp_last_attempt_at', 'is', null);
+
+  if (error) {
+    console.error('[bugor-retry] Query failed:', error.message);
+    return 0;
+  }
+  if (!candidates || candidates.length === 0) {
+    console.log('[bugor-retry] No unknown leads to retry');
+    return 0;
+  }
+
+  let resetCount = 0;
+  for (const c of candidates as Array<{ id: string; company_name: string; emails_found: string[] | null }>) {
+    const emails = Array.isArray(c.emails_found) ? c.emails_found : [];
+    if (emails.length === 0) continue;
+
+    const { error: updErr } = await supabaseAdmin
+      .from('bugor_outreach_leads')
+      .update({ smtp_status: 'pending', emails_validated: emails })
+      .eq('id', c.id);
+
+    if (updErr) {
+      console.error(`[bugor-retry] Failed to reset lead ${c.id} (${c.company_name}):`, updErr.message);
+      continue;
+    }
+    resetCount++;
+    console.log(`[bugor-retry] Queued for retry: ${c.company_name} (${emails.length} emails)`);
+  }
+
+  console.log(`[bugor-retry] Reset ${resetCount}/${candidates.length} unknown leads to pending`);
+  return resetCount;
 }

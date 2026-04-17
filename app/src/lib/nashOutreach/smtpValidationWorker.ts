@@ -13,7 +13,7 @@ import type { NashLead, SenderConfig } from './types';
 const BATCH_SIZE = 20;
 const SMTP_CONCURRENCY = 5;
 
-const LEAD_SELECT = 'id, company_name, website, city, employee_count, description, niche, signal_type, signal_detail, intent_score, priority, outreach_angle, source_url, hh_employer_id, hh_vacancy_name, inn, batch_date, raw_data, created_at, emails_found, emails_validated, email_sequence, instantly_uploaded, instantly_lead_id, smtp_status, smtp_tier';
+const LEAD_SELECT = 'id, company_name, website, city, employee_count, description, niche, signal_type, signal_detail, intent_score, priority, outreach_angle, source_url, hh_employer_id, hh_vacancy_name, inn, batch_date, raw_data, created_at, emails_found, emails_validated, email_sequence, instantly_uploaded, instantly_lead_id, smtp_status, smtp_tier, smtp_retry_count';
 
 async function loadSenderConfig(): Promise<SenderConfig> {
   const defaults: SenderConfig = {
@@ -107,9 +107,20 @@ export async function runNashSmtpValidation(): Promise<number> {
         else if (status === 'invalid') report.smtpInvalid++;
         else report.smtpUnknown++;
 
+        // Track when this lead was last probed and whether to bump retry_count.
+        // The retry scheduler (worker/outreach.ts) uses these to give one more
+        // chance to leads that landed in 'unknown' (proxy timeout / tarpit / blacklist).
+        const prevRetryCount = lead.smtp_retry_count ?? 0;
+        const nextRetryCount = status === 'unknown' ? prevRetryCount + 1 : prevRetryCount;
+
         await supabaseAdmin!
           .from('nash_outreach_leads')
-          .update({ smtp_status: status, emails_validated: acceptedEmails })
+          .update({
+            smtp_status: status,
+            emails_validated: acceptedEmails,
+            smtp_last_attempt_at: new Date().toISOString(),
+            smtp_retry_count: nextRetryCount,
+          })
           .eq('id', lead.id);
 
         if (acceptedEmails.length > 0) {
@@ -201,4 +212,68 @@ export async function runNashSmtpValidation(): Promise<number> {
   }
 
   return report.processed;
+}
+
+/**
+ * Retry SMTP validation for leads that landed in 'unknown' on the first pass.
+ *
+ * Why: ~15% of high-priority leads end up unknown because of transient issues
+ * on the recipient MX side — proxy connect timeouts, anti-harvest tarpits
+ * (e.g. itadvisor.ru), or temporary IP blacklisting (554 from ritso.ru). Most
+ * of these clear within a few hours.
+ *
+ * Strategy:
+ *   - Pick unknown leads where retry_count = 0 AND last_attempt_at is at least
+ *     4 hours old. This guarantees exactly one retry per lead per day.
+ *   - Restore emails_validated from emails_found (the SMTP worker zeros out
+ *     emails_validated on a fail, so we need the original list back).
+ *   - Reset smtp_status to 'pending' so the regular SMTP worker poll picks them
+ *     up on the next tick. Worker bumps retry_count to 1 on the next attempt,
+ *     so they will not loop a third time.
+ *
+ * Called by nashRetryScheduler() in worker/outreach.ts roughly 4 hours after
+ * the daily Nash collection (NASH_COLLECT_HOUR_UTC + 4).
+ */
+export async function retryUnknownNashLeads(): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  const cutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+
+  const { data: candidates, error } = await supabaseAdmin
+    .from('nash_outreach_leads')
+    .select('id, company_name, emails_found')
+    .eq('smtp_status', 'unknown')
+    .eq('smtp_retry_count', 0)
+    .lt('smtp_last_attempt_at', cutoff)
+    .not('smtp_last_attempt_at', 'is', null);
+
+  if (error) {
+    console.error('[nash-retry] Query failed:', error.message);
+    return 0;
+  }
+  if (!candidates || candidates.length === 0) {
+    console.log('[nash-retry] No unknown leads to retry');
+    return 0;
+  }
+
+  let resetCount = 0;
+  for (const c of candidates as Array<{ id: string; company_name: string; emails_found: string[] | null }>) {
+    const emails = Array.isArray(c.emails_found) ? c.emails_found : [];
+    if (emails.length === 0) continue;
+
+    const { error: updErr } = await supabaseAdmin
+      .from('nash_outreach_leads')
+      .update({ smtp_status: 'pending', emails_validated: emails })
+      .eq('id', c.id);
+
+    if (updErr) {
+      console.error(`[nash-retry] Failed to reset lead ${c.id} (${c.company_name}):`, updErr.message);
+      continue;
+    }
+    resetCount++;
+    console.log(`[nash-retry] Queued for retry: ${c.company_name} (${emails.length} emails)`);
+  }
+
+  console.log(`[nash-retry] Reset ${resetCount}/${candidates.length} unknown leads to pending`);
+  return resetCount;
 }
