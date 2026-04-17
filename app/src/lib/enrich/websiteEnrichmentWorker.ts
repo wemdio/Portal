@@ -2,9 +2,11 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { extractNormalizedUrls, fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
 import { applyEnrichmentResults } from '@/lib/spreadsheet/applyJobResults';
+import { applySignalJobResults } from '@/lib/spreadsheet/applySignalJobResults';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
 
@@ -17,7 +19,7 @@ type QueueItem = {
   attempt_count: number;
 };
 
-type ExtractionType = 'text' | 'email';
+type ExtractionType = 'text' | 'email' | 'signals';
 
 type JobRow = {
   id: string;
@@ -31,6 +33,8 @@ type JobRow = {
   spreadsheet_tab_id: string | null;
   result_col_index: number | null;
   result_col_header: string | null;
+  result_col_index_2: number | null;
+  result_col_header_2: string | null;
 };
 
 type FetchResult = { text?: string; error?: string };
@@ -347,6 +351,54 @@ async function fetchEmailsForUrl(
   }
 }
 
+/**
+ * Signal detection: in-memory dedup only (no cross-job DB cache).
+ * Worker writes JSON {"stack":"...","profile":"..."} into queue.result_text.
+ * Applier later parses this and writes to two spreadsheet columns.
+ */
+async function fetchSignalsForUrl(
+  item: QueueItem,
+  inflight: Map<string, Promise<FetchResult>>,
+): Promise<FetchResult> {
+  const key = `signals:${item.url_normalized || item.url_raw}`;
+  if (inflight.has(key)) return inflight.get(key)!;
+
+  const promise = (async () => {
+    try {
+      const abortController = new AbortController();
+      const result = await runWithTimeout(
+        processSignalsForUrl(item.url_raw, {
+          timeout: FETCH_TIMEOUT_MS,
+          signal: abortController.signal,
+        }),
+        {
+          timeoutMs: FETCH_HARD_TIMEOUT_MS,
+          timeoutMessage: `Превышено время ожидания сайта (${Math.round(FETCH_HARD_TIMEOUT_MS / 1000)}с)`,
+          onTimeout: () => abortController.abort(),
+        },
+      );
+      if ('error' in result) {
+        return { error: result.error };
+      }
+      const payload = JSON.stringify({
+        stack: result.stack,
+        profile: result.profile,
+      });
+      return { text: payload };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Ошибка анализа сигналов';
+      return { error: message };
+    }
+  })();
+
+  inflight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inflight.delete(key);
+  }
+}
+
 async function fetchEmailsWithCache(
   item: QueueItem,
   inflight: Map<string, Promise<FetchResult>>,
@@ -489,7 +541,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count, spreadsheet_tab_id, result_col_index, result_col_header')
+      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2')
       .eq('id', jobId)
       .single<JobRow>();
 
@@ -501,10 +553,21 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
     if (['failed', 'cancelled'].includes(job.status)) return;
 
     const isEmail = job.extraction_type === 'email';
+    const isSignals = job.extraction_type === 'signals';
+    const traceName = isSignals
+      ? 'database.website_signals'
+      : isEmail
+        ? 'database.email_scraping'
+        : 'database.website_enrichment';
+    const traceMessage = isSignals
+      ? `Анализ сигналов (${job.total} сайтов)`
+      : isEmail
+        ? `Поиск почт (${job.total} сайтов)`
+        : `Обогащение сайтов (${job.total} строк)`;
     trace = await startTrace({
-      name: isEmail ? 'database.email_scraping' : 'database.website_enrichment',
+      name: traceName,
       input: { jobId, total: job.total, extraction_type: job.extraction_type },
-      message: isEmail ? `Поиск почт (${job.total} сайтов)` : `Обогащение сайтов (${job.total} строк)`,
+      message: traceMessage,
       userId: job.user_id,
       jobId,
     });
@@ -658,9 +721,14 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
               return;
             }
             const extractionType: ExtractionType = job.extraction_type ?? 'text';
-            const result = extractionType === 'email'
-              ? await fetchEmailsWithCache(item, inflight)
-              : await fetchWithCache(item, inflight);
+            let result: FetchResult;
+            if (extractionType === 'email') {
+              result = await fetchEmailsWithCache(item, inflight);
+            } else if (extractionType === 'signals') {
+              result = await fetchSignalsForUrl(item, inflight);
+            } else {
+              result = await fetchWithCache(item, inflight);
+            }
             if (result.error && !result.text) {
               if (shouldRetryEnrichmentItem(result.error, item.attempt_count, MAX_ATTEMPTS)) {
                 const requeued = await updateQueueItem(item, { error: result.error }, 'pending');
@@ -798,13 +866,28 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
       job.spreadsheet_tab_id &&
       job.result_col_index != null
     ) {
-      await applyEnrichmentResults(
-        job.user_id,
-        jobId,
-        job.spreadsheet_tab_id,
-        job.result_col_index,
-        job.result_col_header ?? undefined,
-      );
+      if (job.extraction_type === 'signals' && job.result_col_index_2 != null) {
+        await applySignalJobResults(
+          job.user_id,
+          jobId,
+          job.spreadsheet_tab_id,
+          {
+            stackColIndex: job.result_col_index,
+            profileColIndex: job.result_col_index_2,
+            stackHeader: job.result_col_header ?? 'Стек',
+            profileHeader: job.result_col_header_2 ?? 'Профиль',
+            applyOnlyEmpty: true,
+          },
+        );
+      } else {
+        await applyEnrichmentResults(
+          job.user_id,
+          jobId,
+          job.spreadsheet_tab_id,
+          job.result_col_index,
+          job.result_col_header ?? undefined,
+        );
+      }
     }
 
     await trace?.end({ processed: processedTotal, success: finalSuccess, errors: finalErrors, status: finalStatus });

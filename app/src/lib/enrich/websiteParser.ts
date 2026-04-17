@@ -141,7 +141,7 @@ for (const signal of ['exit', 'SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => { void closePlaywrightBrowser(); });
 }
 
-async function fetchHtmlWithPlaywright(
+export async function fetchHtmlWithPlaywright(
   url: string,
   options?: { timeout?: number; signal?: AbortSignal },
 ): Promise<string | null> {
@@ -825,7 +825,7 @@ async function fetchHtml(
   }
 }
 
-async function fetchHtmlWithRetry(
+export async function fetchHtmlWithRetry(
   url: string,
   options?: { timeout?: number; signal?: AbortSignal; allowHttpErrors?: boolean },
 ): Promise<{ html: string; status: number } | null> {
