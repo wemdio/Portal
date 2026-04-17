@@ -38,6 +38,8 @@ export interface NashLead extends EnrichedLead {
   inn: string | null;
   smtp_status: 'pending' | 'valid' | 'invalid' | 'catch_all' | 'unknown' | 'skipped';
   smtp_tier: number | null;
+  smtp_retry_count: number;
+  smtp_last_attempt_at: string | null;
   emails_found: string[];
   emails_validated: string[];
   email_sequence: EmailStep[] | null;
