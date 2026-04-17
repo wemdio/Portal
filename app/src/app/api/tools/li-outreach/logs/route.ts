@@ -17,13 +17,25 @@ export async function GET(req: NextRequest) {
     const campaignId = url.searchParams.get('campaign_id');
     const level = url.searchParams.get('level');
 
+    const ownedCampaignsRes = await supabaseAdmin
+      .from('li_campaigns')
+      .select('id, name')
+      .eq('user_id', auth.user.id);
+    if (ownedCampaignsRes.error) return jsonError(ownedCampaignsRes.error.message, 500);
+    const ownedCampaigns = (ownedCampaignsRes.data ?? []) as Array<{ id: string; name: string }>;
+    const ownedCampaignIds = ownedCampaigns.map((c) => c.id);
+
+    if (campaignId && !ownedCampaignIds.includes(campaignId)) {
+      return NextResponse.json({ items: [], total: 0 });
+    }
+    if (ownedCampaignIds.length === 0) {
+      return NextResponse.json({ items: [], total: 0 });
+    }
+
     let query = supabaseAdmin
       .from('li_campaign_logs')
-      .select('*', { count: 'exact' });
-
-    if (campaignId) {
-      query = query.eq('campaign_id', campaignId);
-    }
+      .select('*', { count: 'exact' })
+      .in('campaign_id', campaignId ? [campaignId] : ownedCampaignIds);
 
     if (level && ['info', 'warning', 'error'].includes(level)) {
       query = query.eq('level', level);
@@ -36,15 +48,7 @@ export async function GET(req: NextRequest) {
     if (error) return jsonError(error.message, 500);
 
     const logs = data ?? [];
-    const campaignIds = Array.from(new Set(logs.map((l) => (l as { campaign_id: string }).campaign_id).filter(Boolean)));
-    let campaignNames = new Map<string, string>();
-    if (campaignIds.length > 0) {
-      const { data: campaignsData } = await supabaseAdmin
-        .from('li_campaigns')
-        .select('id, name')
-        .in('id', campaignIds);
-      campaignNames = new Map((campaignsData ?? []).map((c: { id: string; name: string }) => [c.id, c.name]));
-    }
+    const campaignNames = new Map(ownedCampaigns.map((c) => [c.id, c.name]));
     const items = logs.map((l) => {
       const row = l as { campaign_id: string } & Record<string, unknown>;
       return { ...row, campaign: { name: campaignNames.get(row.campaign_id) ?? 'Unknown' } };

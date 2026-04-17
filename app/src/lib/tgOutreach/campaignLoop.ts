@@ -15,6 +15,7 @@ import type {
 import { DEFAULT_FOLLOW_UP } from './types';
 import { buildClients, disconnectAll, getUpdatedSessionString } from './gramClient';
 import { openaiGenerate, detectTrigger } from './openaiChat';
+import { loadBlockedUserIds } from './blockedUsers';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
 
@@ -393,6 +394,15 @@ interface HandleChatResult {
   triggerType: 'positive' | 'negative' | null;
 }
 
+export interface HandleChatOptions {
+  /**
+   * Set of `tg_user_id`s globally blocked by the campaign owner. When the chat's user is
+   * in this set, we early-return without creating a dialog row and without touching OpenAI,
+   * so spammers (especially ones without a username) can't keep poking through.
+   */
+  blockedUserIds?: Set<number>;
+}
+
 export async function handleChat(
   client: TelegramClient,
   account: OutreachAccount,
@@ -401,6 +411,7 @@ export async function handleChat(
   db: SupabaseClient,
   log: LogFn,
   shouldStop?: () => boolean,
+  options?: HandleChatOptions,
 ): Promise<HandleChatResult> {
   const oai = campaign.openai_settings as OpenAISettings;
   const tg = campaign.telegram_settings as TelegramSettings;
@@ -414,6 +425,11 @@ export async function handleChat(
   const tgUsername = entity.username ?? null;
   const tgIsBot = Boolean(entity.bot);
   const displayName = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
+
+  if (options?.blockedUserIds?.has(tgUserId)) {
+    log('info', `${displayName}: в глобальном чёрном списке (ID)`);
+    return { replied: false, triggerType: null };
+  }
 
   const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
   if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) {
@@ -819,6 +835,14 @@ export async function runCampaignLoop(
         continue;
       }
 
+      let blockedUserIds: Set<number>;
+      try {
+        blockedUserIds = await loadBlockedUserIds(db, campaign.user_id);
+      } catch (err) {
+        log('warning', `Не удалось загрузить глобальный чёрный список: ${err instanceof Error ? err.message : String(err)}`);
+        blockedUserIds = new Set();
+      }
+
       let tlSchemaErrorCount = 0;
 
       for (const { client, account } of clients) {
@@ -850,7 +874,7 @@ export async function runCampaignLoop(
             if (!dialog.entity || !(dialog.entity instanceof Api.User)) continue;
 
             try {
-              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop);
+              await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
             } catch (err: unknown) {
               const errMsg = err instanceof Error ? err.message : String(err);
 

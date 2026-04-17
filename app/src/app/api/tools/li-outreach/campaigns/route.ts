@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await supabaseAdmin
       .from('li_campaigns')
       .select('*')
+      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ campaigns: data ?? [] });
