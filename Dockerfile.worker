@@ -19,6 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
     && apt-get purge -y python3 make g++ && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# Place Playwright browsers in a shared, world-readable path so any
+# runtime user (e.g. `worker` in the runner stage) can access them.
+# Default install path is $HOME/.cache/ms-playwright which is /root/.cache/...
+# in this stage and unreadable by non-root users in the runtime stage.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Install Chromium + system dependencies
 RUN npx playwright install chromium --with-deps
 
@@ -50,10 +56,14 @@ RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts work
 FROM node:20-slim AS runner
 WORKDIR /app
 
-RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 worker
+RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 --create-home worker
 
-# Copy Playwright browser cache from deps stage
-COPY --from=deps /root/.cache/ms-playwright /root/.cache/ms-playwright
+# Match deps stage so Playwright runtime resolves browsers from the same path
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Copy Playwright browser cache from deps stage and ensure world read+exec
+COPY --from=deps /ms-playwright /ms-playwright
+RUN chmod -R a+rX /ms-playwright
 
 # ffmpeg for audio/video extraction (transcription workers)
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \

@@ -7030,12 +7030,12 @@ export function DatabaseSpreadsheet() {
     } catch { /* ignore */ }
   };
 
+  // Closing the modal must NOT stop the underlying job — the worker keeps
+  // running in the background and the frontend polling loop keeps applying
+  // results to the spreadsheet. Reopening the modal will show current
+  // progress. To actually cancel the job, use handleStopSignalEnrichment.
   const closeSignalModal = () => {
-    if (signalAbortRef.current) {
-      signalAbortRef.current.abort();
-      signalAbortRef.current = null;
-    }
-    setSignalEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+    setSignalEnrichment((prev) => ({ ...prev, isOpen: false, error: null }));
   };
 
   /** Parses {"stack":"...","profile":"..."} JSON from worker. */
@@ -7266,6 +7266,17 @@ export function DatabaseSpreadsheet() {
     setTabs((prev) =>
       prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
     );
+
+    // Show progress bar instantly, before POST round-trip completes
+    setSignalEnrichment((prev) => ({
+      ...prev,
+      isProcessing: true,
+      progress: 0,
+      totalRows: rowsToProcess.length,
+      currentRow: 0,
+      error: null,
+      detectedJob: null,
+    }));
 
     try {
       const startRes = await fetch('/api/enrich/website/jobs', {
@@ -8401,10 +8412,11 @@ export function DatabaseSpreadsheet() {
         {signalEnrichment.isProcessing ? (
           <button
             type="button"
-            onClick={closeSignalModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+            onClick={openSignalModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-indigo-700"
+            title="Открыть окно прогресса. Анализ продолжается в фоне."
           >
-            Сигналы... {signalEnrichment.progress}% — Стоп
+            Сигналы {signalEnrichment.progress}%
           </button>
         ) : (
           <button
