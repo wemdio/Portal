@@ -22,11 +22,18 @@ export async function GET(req: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return jsonError('Unauthorized', 401);
 
-    const { data: jobs } = await supabaseAdmin
+    const url = new URL(req.url);
+    const typeFilter = url.searchParams.get('extraction_type');
+
+    let query = supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header')
+      .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2')
       .eq('user_id', user.id)
-      .in('status', ['pending', 'running'])
+      .in('status', ['pending', 'running']);
+    if (typeFilter && ['text', 'email', 'signals'].includes(typeFilter)) {
+      query = query.eq('extraction_type', typeFilter);
+    }
+    const { data: jobs } = await query
       .order('created_at', { ascending: false })
       .limit(1);
 
@@ -36,6 +43,8 @@ export async function GET(req: NextRequest) {
       spreadsheet_tab_id: string | null;
       result_col_index: number | null;
       result_col_header: string | null;
+      result_col_index_2: number | null;
+      result_col_header_2: string | null;
     } | undefined;
 
     if (!activeJob) {
@@ -56,6 +65,8 @@ export async function GET(req: NextRequest) {
         spreadsheet_tab_id: activeJob.spreadsheet_tab_id,
         result_col_index: activeJob.result_col_index,
         result_col_header: activeJob.result_col_header,
+        result_col_index_2: activeJob.result_col_index_2,
+        result_col_header_2: activeJob.result_col_header_2,
       },
     });
   } catch (err) {
@@ -82,6 +93,8 @@ export async function POST(req: NextRequest) {
       spreadsheet_tab_id?: string;
       result_col_index?: number;
       result_col_header?: string;
+      result_col_index_2?: number;
+      result_col_header_2?: string;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -89,7 +102,17 @@ export async function POST(req: NextRequest) {
       return jsonError('Invalid JSON body', 400);
     }
 
-    const extractionType = body.extraction_type === 'email' ? 'email' : 'text';
+    const extractionType: 'text' | 'email' | 'signals' =
+      body.extraction_type === 'email'
+        ? 'email'
+        : body.extraction_type === 'signals'
+          ? 'signals'
+          : 'text';
+
+    if (extractionType === 'signals' && body.result_col_index_2 == null) {
+      return jsonError('result_col_index_2 (Profile column) is required for signals extraction', 400);
+    }
+
     const rows = body.rows ?? [];
     if (!Array.isArray(rows) || rows.length === 0) {
       return jsonError('No rows provided', 400);
@@ -100,11 +123,13 @@ export async function POST(req: NextRequest) {
 
     const now = new Date().toISOString();
 
-    // Block if user already has an active enrichment job (don't silently cancel).
+    // Block if user already has an active job of THE SAME extraction_type.
+    // Different types (text + email + signals) can run concurrently in their own queues.
     const { data: existingJobs, error: existingJobsError } = await supabaseAdmin
       .from('website_enrichment_jobs')
       .select('id, status, extraction_type, total, processed, created_at')
       .eq('user_id', user.id)
+      .eq('extraction_type', extractionType)
       .in('status', ['pending', 'running'])
       .order('created_at', { ascending: false })
       .limit(1);
@@ -123,7 +148,12 @@ export async function POST(req: NextRequest) {
     } | undefined;
 
     if (activeJob) {
-      const typeLabel = activeJob.extraction_type === 'email' ? 'Поиск почт' : 'Обогащение с сайта';
+      const typeLabel =
+        activeJob.extraction_type === 'email'
+          ? 'Поиск почт'
+          : activeJob.extraction_type === 'signals'
+            ? 'Сигналы с сайтов'
+            : 'Обогащение с сайта';
       const progress = activeJob.total > 0
         ? Math.round((activeJob.processed / activeJob.total) * 100)
         : 0;
@@ -199,6 +229,8 @@ export async function POST(req: NextRequest) {
         spreadsheet_tab_id: body.spreadsheet_tab_id ?? null,
         result_col_index: body.result_col_index ?? null,
         result_col_header: body.result_col_header ?? null,
+        result_col_index_2: body.result_col_index_2 ?? null,
+        result_col_header_2: body.result_col_header_2 ?? null,
       })
       .select('id')
       .single<{ id: string }>();

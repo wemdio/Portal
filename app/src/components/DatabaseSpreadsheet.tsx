@@ -253,6 +253,30 @@ type DadataEnrichmentState = {
   error: string | null;
 };
 
+type DetectedSignalJob = {
+  id: string;
+  total: number;
+  processed: number;
+  progress: number;
+  spreadsheet_tab_id: string | null;
+  result_col_index: number | null;
+  result_col_header: string | null;
+  result_col_index_2: number | null;
+  result_col_header_2: string | null;
+};
+
+type SignalEnrichmentState = {
+  isOpen: boolean;
+  sourceCol: number;
+  isProcessing: boolean;
+  progress: number;
+  totalRows: number;
+  currentRow: number;
+  error: string | null;
+  jobId: string | null;
+  detectedJob: DetectedSignalJob | null;
+};
+
 const DADATA_FIELDS: DadataFieldOption[] = [
   { key: 'full_name', label: 'Полное название' },
   { key: 'short_name', label: 'Краткое название' },
@@ -1242,6 +1266,19 @@ export function DatabaseSpreadsheet() {
     error: null,
   });
   const dadataAbortRef = useRef<AbortController | null>(null);
+
+  const [signalEnrichment, setSignalEnrichment] = useState<SignalEnrichmentState>({
+    isOpen: false,
+    sourceCol: 0,
+    isProcessing: false,
+    progress: 0,
+    totalRows: 0,
+    currentRow: 0,
+    error: null,
+    jobId: null,
+    detectedJob: null,
+  });
+  const signalAbortRef = useRef<AbortController | null>(null);
 
   const [fnsEnrichment, setFnsEnrichment] = useState<{
     isOpen: boolean;
@@ -6967,6 +7004,398 @@ export function DatabaseSpreadsheet() {
     }
   };
 
+  const SIGNAL_POLL_INTERVAL_MS = 2000;
+  const SIGNAL_POLL_MAX_BACKOFF_MS = 15_000;
+  const SIGNAL_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+  const openSignalModal = async () => {
+    setSignalEnrichment((prev) => ({
+      ...prev,
+      isOpen: true,
+      sourceCol: prev.sourceCol,
+      error: null,
+      detectedJob: null,
+    }));
+    const token = await getFreshToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/enrich/website/jobs?extraction_type=signals', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { active_job?: DetectedSignalJob | null };
+      if (data.active_job) {
+        setSignalEnrichment((prev) => ({ ...prev, detectedJob: data.active_job ?? null }));
+      }
+    } catch { /* ignore */ }
+  };
+
+  const closeSignalModal = () => {
+    if (signalAbortRef.current) {
+      signalAbortRef.current.abort();
+      signalAbortRef.current = null;
+    }
+    setSignalEnrichment((prev) => ({ ...prev, isOpen: false, isProcessing: false }));
+  };
+
+  /** Parses {"stack":"...","profile":"..."} JSON from worker. */
+  const parseSignalResultText = (text: string | null): { stack: string; profile: string } | null => {
+    if (!text) return null;
+    try {
+      const parsed = JSON.parse(text) as { stack?: unknown; profile?: unknown };
+      return {
+        stack: typeof parsed.stack === 'string' ? parsed.stack : '',
+        profile: typeof parsed.profile === 'string' ? parsed.profile : '',
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const runSignalJobPolling = useCallback(async (params: {
+    jobId: string;
+    tabId: string;
+    stackColIndex: number;
+    profileColIndex: number;
+    totalRowsFallback: number;
+    initialToken?: string | null;
+  }) => {
+    const { jobId, tabId, stackColIndex, profileColIndex, totalRowsFallback, initialToken } = params;
+
+    const token = initialToken ?? (await getFreshToken());
+    if (!token) {
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        isProcessing: false,
+        error: 'Необходима авторизация',
+        jobId: null,
+      }));
+      return;
+    }
+
+    const controller = signalAbortRef.current ?? new AbortController();
+    signalAbortRef.current = controller;
+    const signal = controller.signal;
+    if (signal.aborted) {
+      setSignalEnrichment((prev) => ({ ...prev, isProcessing: false, jobId: null }));
+      return;
+    }
+
+    setSignalEnrichment((prev) => ({
+      ...prev,
+      isProcessing: true,
+      totalRows: totalRowsFallback,
+      currentRow: Math.min(prev.currentRow, totalRowsFallback),
+      progress: totalRowsFallback > 0 ? Math.round((Math.min(prev.currentRow, totalRowsFallback) / totalRowsFallback) * 100) : 0,
+      jobId,
+      error: null,
+    }));
+
+    let cursor: string | null = null;
+    let firstErrorAt: number | null = null;
+    let backoffMs = SIGNAL_POLL_INTERVAL_MS;
+    let lastProgressTime = Date.now();
+    let lastProcessed = 0;
+    let currentToken = token;
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      while (!signal.aborted) {
+        const fetchResults = async (tkn: string) =>
+          fetch(
+            `/api/enrich/website/jobs/${jobId}/results?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ''}limit=500`,
+            { headers: { Authorization: `Bearer ${tkn}` }, signal },
+          );
+
+        let res = await fetchResults(currentToken);
+        if (res.status === 401) {
+          const refreshed = await getFreshToken();
+          if (refreshed) {
+            currentToken = refreshed;
+            res = await fetchResults(currentToken);
+          } else {
+            throw new Error('Сессия истекла. Войдите заново.');
+          }
+        }
+
+        if (!res.ok) {
+          if (!firstErrorAt) firstErrorAt = Date.now();
+          if (Date.now() - firstErrorAt > 15 * 60 * 1000) {
+            throw new Error('Сервер недоступен более 15 минут. Задача продолжает работу в фоне — обновите страницу.');
+          }
+          await new Promise((r) => setTimeout(r, backoffMs));
+          backoffMs = Math.min(backoffMs * 2, SIGNAL_POLL_MAX_BACKOFF_MS);
+          continue;
+        }
+        firstErrorAt = null;
+        backoffMs = SIGNAL_POLL_INTERVAL_MS;
+
+        const data = await parseJsonResponse<{
+          job: { status: string; processed: number; total: number; success_count: number; error_count: number };
+          results: Array<{ row_index: number; result_text: string | null; status: string; last_error: string | null }>;
+          next_cursor?: string | null;
+        }>(res, 'signals.results');
+
+        if (data.results?.length) {
+          setTabs((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== tabId) return tab;
+              const nextData = tab.data.map((row) => [...row]);
+              for (const result of data.results) {
+                const ri = result.row_index;
+                if (ri < 1 || ri >= nextData.length) continue;
+                while (nextData[ri].length <= profileColIndex) nextData[ri].push('');
+                if (result.status === 'completed') {
+                  const parsed = parseSignalResultText(result.result_text);
+                  if (parsed) {
+                    nextData[ri][stackColIndex] = parsed.stack;
+                    nextData[ri][profileColIndex] = parsed.profile;
+                  }
+                } else if (result.status === 'failed' || result.status === 'skipped') {
+                  nextData[ri][stackColIndex] = '⚠';
+                  nextData[ri][profileColIndex] = result.last_error ?? 'Ошибка';
+                  errorCount += 1;
+                }
+              }
+              return { ...tab, data: nextData };
+            }),
+          );
+          lastProgressTime = Date.now();
+        }
+
+        if (data.next_cursor) cursor = data.next_cursor;
+
+        const processed = data.job?.processed ?? 0;
+        const jobTotal = data.job?.total ?? totalRowsFallback;
+        if (processed > lastProcessed) {
+          lastProcessed = processed;
+          lastProgressTime = Date.now();
+        }
+        processedCount = processed;
+        setSignalEnrichment((prev) => ({
+          ...prev,
+          currentRow: Math.min(processed, jobTotal),
+          progress: jobTotal > 0 ? Math.round((Math.min(processed, jobTotal) / jobTotal) * 100) : 0,
+        }));
+
+        if (['completed', 'failed', 'cancelled'].includes(data.job?.status)) {
+          break;
+        }
+
+        if (Date.now() - lastProgressTime > SIGNAL_STALL_TIMEOUT_MS) {
+          throw new Error('Анализ сигналов не продвигается более 10 минут');
+        }
+
+        await new Promise((r) => setTimeout(r, SIGNAL_POLL_INTERVAL_MS));
+      }
+
+      setLastAction({
+        message: errorCount > 0
+          ? `Сигналы: ${processedCount - errorCount} обработано, ${errorCount} ошибок`
+          : `Анализ сигналов завершён: ${processedCount} сайтов`,
+        time: Date.now(),
+      });
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        isProcessing: false,
+        isOpen: false,
+        jobId: null,
+        detectedJob: null,
+      }));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        setLastAction({ message: `Сигналы отменены (обработано: ${processedCount})`, time: Date.now() });
+        setSignalEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false, jobId: null }));
+      } else {
+        setSignalEnrichment((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : 'Произошла ошибка',
+          isProcessing: false,
+          jobId: null,
+        }));
+      }
+    } finally {
+      signalAbortRef.current = null;
+    }
+  }, [getFreshToken, setLastAction, setSignalEnrichment, setTabs]);
+
+  const handleStartSignalEnrichment = async () => {
+    if (!activeTab || signalEnrichment.isProcessing) return;
+    flushSave();
+
+    const rowsToProcess: { rowIndex: number; url: string }[] = [];
+    for (let i = 1; i < activeTab.data.length; i++) {
+      const row = activeTab.data[i];
+      const sourceValue = String(row?.[signalEnrichment.sourceCol] ?? '').trim();
+      if (!sourceValue) continue;
+      rowsToProcess.push({ rowIndex: i, url: sourceValue });
+    }
+
+    if (rowsToProcess.length === 0) {
+      setSignalEnrichment((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setSignalEnrichment((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    setUndoSnapshot('Сигналы с сайтов');
+
+    const startCol = signalEnrichment.sourceCol + 1;
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
+
+    let stackCol = startCol;
+    while (!isColumnEmpty(stackCol)) stackCol += 1;
+    const profileCol = stackCol + 1;
+
+    const baseData = activeTab.data.map((row, rowIndex) => {
+      const nextRow = [...row];
+      while (nextRow.length <= profileCol) nextRow.push('');
+      if (rowIndex === 0) {
+        nextRow[stackCol] = 'Стек';
+        nextRow[profileCol] = 'Профиль';
+      }
+      return nextRow;
+    });
+
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, data: baseData } : tab)),
+    );
+
+    try {
+      const startRes = await fetch('/api/enrich/website/jobs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          rows: rowsToProcess,
+          extraction_type: 'signals',
+          spreadsheet_tab_id: activeTabId,
+          result_col_index: stackCol,
+          result_col_header: 'Стек',
+          result_col_index_2: profileCol,
+          result_col_header_2: 'Профиль',
+        }),
+      });
+
+      const startData = await parseJsonResponse<{
+        job_id?: string;
+        total?: number;
+        processed?: number;
+        error?: string;
+        active_job?: { id: string; total: number; processed: number; progress: number };
+      }>(startRes, 'signals.start');
+
+      if (!startRes.ok || !startData.job_id) {
+        if (startRes.status === 409 && startData.active_job?.id) {
+          setSignalEnrichment((prev) => ({
+            ...prev,
+            error: startData.error ?? 'Уже выполняется задача анализа сигналов',
+            isProcessing: false,
+            jobId: null,
+          }));
+          return;
+        }
+        throw new Error(startData.error ?? 'Не удалось создать задачу');
+      }
+
+      void runSignalJobPolling({
+        jobId: startData.job_id,
+        tabId: activeTabId,
+        stackColIndex: stackCol,
+        profileColIndex: profileCol,
+        totalRowsFallback: startData.total ?? rowsToProcess.length,
+        initialToken: currentToken,
+      });
+    } catch (err) {
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : 'Произошла ошибка',
+        isProcessing: false,
+        jobId: null,
+      }));
+    }
+  };
+
+  const handleStopSignalEnrichment = async () => {
+    const jobId = signalEnrichment.jobId ?? signalEnrichment.detectedJob?.id;
+    if (!jobId) return;
+    if (!window.confirm('Остановить анализ сигналов? Прогресс не сохранится.')) return;
+
+    if (signalAbortRef.current) signalAbortRef.current.abort();
+
+    const token = await getFreshToken();
+    if (token) {
+      try {
+        await fetch(`/api/enrich/website/jobs/${jobId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+      } catch { /* ignore */ }
+    }
+    setSignalEnrichment((prev) => ({
+      ...prev,
+      isProcessing: false,
+      isOpen: false,
+      jobId: null,
+      detectedJob: null,
+    }));
+    setLastAction({ message: 'Анализ сигналов остановлен', time: Date.now() });
+  };
+
+  const handleResumeSignalEnrichment = async (overrideJob?: DetectedSignalJob) => {
+    const detected = overrideJob ?? signalEnrichment.detectedJob;
+    if (!activeTab || signalEnrichment.isProcessing || !detected) return;
+    if (detected.result_col_index == null || detected.result_col_index_2 == null) {
+      setSignalEnrichment((prev) => ({ ...prev, error: 'Колонки не заданы для активной задачи' }));
+      return;
+    }
+
+    const currentToken = await getFreshToken();
+    if (!currentToken) {
+      setSignalEnrichment((prev) => ({ ...prev, error: 'Необходима авторизация' }));
+      return;
+    }
+
+    void runSignalJobPolling({
+      jobId: detected.id,
+      tabId: detected.spreadsheet_tab_id ?? activeTabId,
+      stackColIndex: detected.result_col_index,
+      profileColIndex: detected.result_col_index_2,
+      totalRowsFallback: detected.total,
+      initialToken: currentToken,
+    });
+  };
+
+  // Auto-detect active signal enrichment job on mount and resume polling
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const token = await getFreshToken();
+      if (!token || cancelled) return;
+      try {
+        const res = await fetch('/api/enrich/website/jobs?extraction_type=signals', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { active_job?: DetectedSignalJob | null };
+        if (data.active_job && !cancelled) {
+          void handleResumeSignalEnrichment(data.active_job);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openFnsModal = () => {
     setFnsEnrichment({ isOpen: true, sourceCol: 0, isProcessing: false, progress: 0, totalRows: 0, currentRow: 0, found: 0 });
   };
@@ -7966,6 +8395,25 @@ export function DatabaseSpreadsheet() {
             className={toolbarMonochromeButtonClass}
           >
             DaData
+          </button>
+        )}
+
+        {signalEnrichment.isProcessing ? (
+          <button
+            type="button"
+            onClick={closeSignalModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white shadow transition hover:bg-red-700"
+          >
+            Сигналы... {signalEnrichment.progress}% — Стоп
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={openSignalModal}
+            disabled={colCount === 0}
+            className={toolbarMonochromeButtonClass}
+          >
+            Сигналы
           </button>
         )}
 
@@ -11383,6 +11831,129 @@ export function DatabaseSpreadsheet() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Signal enrichment modal */}
+      {signalEnrichment.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-lg font-bold text-indigo-600">
+                  S
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Сигналы с сайтов</h3>
+                  <p className="text-xs text-gray-500 font-medium">Анализ технологического стека и профиля</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1.5">Колонка с сайтами</label>
+                <select
+                  value={signalEnrichment.sourceCol}
+                  onChange={(e) =>
+                    setSignalEnrichment((prev) => ({
+                      ...prev,
+                      sourceCol: Number(e.target.value),
+                      error: null,
+                    }))
+                  }
+                  disabled={signalEnrichment.isProcessing}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:opacity-60"
+                >
+                  {headerLabels.map((label, index) => (
+                    <option key={`signal-col-${index}`} value={index}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-3 text-xs text-indigo-800 space-y-1">
+                <p className="font-semibold">Что будет найдено:</p>
+                <p>Рекламные пиксели, CRM, чат-виджеты, платёжные системы, маркетплейсы, email-рассылки, CMS и другие технологии</p>
+                <p className="text-indigo-600 mt-1">Результат: 2 новые колонки — «Стек» и «Профиль»</p>
+                <p className="text-indigo-600">Можно закрыть страницу — задача продолжит работу в фоне</p>
+              </div>
+
+              {signalEnrichment.detectedJob && !signalEnrichment.isProcessing && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 space-y-2">
+                  <div>
+                    <p className="font-semibold">Найдена активная задача анализа сигналов</p>
+                    <p>Прогресс: {signalEnrichment.detectedJob.processed} / {signalEnrichment.detectedJob.total} ({signalEnrichment.detectedJob.progress}%)</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleResumeSignalEnrichment()}
+                      className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-amber-700"
+                    >
+                      Подключиться
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleStopSignalEnrichment()}
+                      className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
+                    >
+                      Остановить
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {signalEnrichment.isProcessing && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-gray-600">
+                    <span>Обработано: {signalEnrichment.currentRow} / {signalEnrichment.totalRows}</span>
+                    <span className="font-semibold">{signalEnrichment.progress}%</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-gray-200 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                      style={{ width: `${signalEnrichment.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {signalEnrichment.error && (
+                <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                  {signalEnrichment.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-gray-100 px-6 py-4 bg-gray-50/50">
+              <button
+                type="button"
+                onClick={closeSignalModal}
+                className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
+              >
+                Закрыть
+              </button>
+              {signalEnrichment.isProcessing ? (
+                <button
+                  type="button"
+                  onClick={() => void handleStopSignalEnrichment()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
+                >
+                  Остановить
+                </button>
+              ) : !signalEnrichment.detectedJob && (
+                <button
+                  type="button"
+                  onClick={() => void handleStartSignalEnrichment()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-indigo-700"
+                >
+                  Запустить
+                </button>
+              )}
             </div>
           </div>
         </div>
