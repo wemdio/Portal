@@ -2,13 +2,16 @@
  * Outreach worker: SMTP verification, email sequence generation, and Instantly upload
  * for both Bugor (ENG) and Nash (RU) outreach pipelines.
  *
- * Also runs scheduled daily collection:
- *  - Bugor: 04:00 UTC (07:00 MSK) — BUGOR_COLLECT_HOUR_UTC
- *  - Nash:  05:00 UTC (08:00 MSK) — NASH_COLLECT_HOUR_UTC
+ * Schedules:
+ *  - Bugor collect: 04:00 UTC (07:00 MSK) — BUGOR_COLLECT_HOUR_UTC
+ *  - Nash collect:  05:00 UTC (08:00 MSK) — NASH_COLLECT_HOUR_UTC
+ *  - Bugor retry:   08:00 UTC — exactly 4h after collect, gives one more SMTP
+ *                   chance to leads stuck in 'unknown' (proxy timeouts, tarpits).
+ *  - Nash retry:    09:00 UTC — same logic for Russian pipeline.
  */
 
-import { runBugorSmtpValidation } from '@/lib/bugorOutreach/smtpValidationWorker';
-import { runNashSmtpValidation } from '@/lib/nashOutreach/smtpValidationWorker';
+import { runBugorSmtpValidation, retryUnknownBugorLeads } from '@/lib/bugorOutreach/smtpValidationWorker';
+import { runNashSmtpValidation, retryUnknownNashLeads } from '@/lib/nashOutreach/smtpValidationWorker';
 import { collectRawSignals } from '@/lib/nashOutreach/collectLeads';
 import { enrichRawSignals } from '@/lib/nashOutreach/enrichLeads';
 import { collectRawLeads as collectBugorRaw } from '@/lib/bugorOutreach/collectLeads';
@@ -21,6 +24,9 @@ import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdo
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const BUGOR_COLLECT_HOUR_UTC = Number(process.env.BUGOR_COLLECT_HOUR_UTC ?? '4');
 const NASH_COLLECT_HOUR_UTC = Number(process.env.NASH_COLLECT_HOUR_UTC ?? '5');
+const RETRY_DELAY_HOURS = Number(process.env.OUTREACH_RETRY_DELAY_HOURS ?? '4');
+const BUGOR_RETRY_HOUR_UTC = (BUGOR_COLLECT_HOUR_UTC + RETRY_DELAY_HOURS) % 24;
+const NASH_RETRY_HOUR_UTC = (NASH_COLLECT_HOUR_UTC + RETRY_DELAY_HOURS) % 24;
 const WORKER_ID = `outreach-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
@@ -411,6 +417,38 @@ async function nashCollectScheduler(): Promise<void> {
   }
 }
 
+async function bugorRetryScheduler(): Promise<void> {
+  while (!_shuttingDown) {
+    const waitMs = getNextRunMs(BUGOR_RETRY_HOUR_UTC);
+    const nextRun = new Date(Date.now() + waitMs).toISOString();
+    log('info', `Bugor retry: next run at ${nextRun} (in ${Math.round(waitMs / 60_000)} min)`);
+    await sleep(waitMs);
+    if (_shuttingDown) break;
+    try {
+      const reset = await retryUnknownBugorLeads();
+      log('info', `Bugor retry: reset ${reset} unknown lead(s) to pending`);
+    } catch (err) {
+      log('error', 'Bugor retry failed', err);
+    }
+  }
+}
+
+async function nashRetryScheduler(): Promise<void> {
+  while (!_shuttingDown) {
+    const waitMs = getNextRunMs(NASH_RETRY_HOUR_UTC);
+    const nextRun = new Date(Date.now() + waitMs).toISOString();
+    log('info', `Nash retry: next run at ${nextRun} (in ${Math.round(waitMs / 60_000)} min)`);
+    await sleep(waitMs);
+    if (_shuttingDown) break;
+    try {
+      const reset = await retryUnknownNashLeads();
+      log('info', `Nash retry: reset ${reset} unknown lead(s) to pending`);
+    } catch (err) {
+      log('error', 'Nash retry failed', err);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Outreach worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
@@ -425,6 +463,8 @@ async function main(): Promise<void> {
 
   void bugorCollectScheduler();
   void nashCollectScheduler();
+  void bugorRetryScheduler();
+  void nashRetryScheduler();
 
   await pollLoop({
     log,

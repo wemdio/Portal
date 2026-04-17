@@ -106,10 +106,10 @@ function LeadDetail({
         ← Назад к лидам
       </button>
 
-      <div className="neu-card p-5 sm:p-7 mb-6">
-        <div className="flex items-start justify-between gap-4 mb-5">
+      <div className="neu-card p-5 sm:p-8 mb-6">
+        <div className="flex items-start justify-between gap-4 mb-6">
           <div>
-            <h2 className="text-lg font-extrabold" style={{ color: 'var(--cp-text)' }}>
+            <h2 className="text-xl sm:text-2xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
               {lead.lead_name || lead.lead_email}
             </h2>
             {lead.company_name && (
@@ -126,7 +126,7 @@ function LeadDetail({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
           <InfoRow label="Email" value={lead.lead_email} />
           {lead.phone && <InfoRow label="Телефон" value={lead.phone} />}
           {lead.website && <InfoRow label="Сайт" value={lead.website} />}
@@ -139,7 +139,7 @@ function LeadDetail({
             <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
               Наше последнее письмо
             </p>
-            <div className="neu-inset rounded-xl p-4 text-sm whitespace-pre-wrap max-h-36 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
+            <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto" style={{ color: 'var(--cp-text-m)' }}>
               {lead.last_outbound_preview}
             </div>
           </div>
@@ -149,14 +149,14 @@ function LeadDetail({
           <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
             Ответ лида{lead.reply_subject ? `: ${lead.reply_subject}` : ''}
           </p>
-          <div className="neu-inset rounded-xl p-4 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto" style={{ color: 'var(--cp-text)' }}>
+          <div className="neu-inset rounded-xl p-4 sm:p-5 text-sm whitespace-pre-wrap max-h-64 overflow-y-auto" style={{ color: 'var(--cp-text)' }}>
             {lead.reply_body ?? '(пусто)'}
           </div>
         </div>
       </div>
 
-      <div className="neu-card p-5 sm:p-7">
-        <h3 className="text-sm font-extrabold mb-4" style={{ color: 'var(--cp-text)' }}>
+      <div className="neu-card p-5 sm:p-8">
+        <h3 className="text-base font-extrabold mb-5" style={{ color: 'var(--cp-text)' }}>
           Комментарии
         </h3>
 
@@ -200,7 +200,6 @@ function LeadDetail({
             onClick={handleSubmit}
             disabled={!newComment.trim() || submitting}
             className="neu-btn rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40 transition-opacity"
-            style={{ color: 'var(--cp-accent)' }}
           >
             {submitting ? '...' : 'Отправить'}
           </button>
@@ -304,7 +303,7 @@ export default function ClientLeadsPage() {
 
   if (selectedLead) {
     return (
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-5xl">
         <LeadDetail
           lead={selectedLead}
           onBack={() => setSelectedLead(null)}
