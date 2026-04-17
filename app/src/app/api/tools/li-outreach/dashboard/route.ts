@@ -30,12 +30,15 @@ export async function GET(req: NextRequest) {
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const db = supabaseAdmin;
 
-    const campaignIdsRes = await db.from('li_campaigns').select('id');
+    const campaignIdsRes = await db.from('li_campaigns').select('id').eq('user_id', auth.user.id);
     const campaignIds = (campaignIdsRes.data ?? []).map((c: { id: string }) => c.id);
 
     const [leadsRes, campaignsRes, campaignLeadsRes, logsRes] = await Promise.all([
-      db.from('li_leads').select('company, status'),
-      db.from('li_campaigns').select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id'),
+      db.from('li_leads').select('company, status').eq('user_id', auth.user.id),
+      db
+        .from('li_campaigns')
+        .select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id')
+        .eq('user_id', auth.user.id),
       campaignIds.length > 0
         ? db.from('li_campaign_leads')
             .select('status, user_replied, invite_accepted, created_at, lead_id, campaign_id')

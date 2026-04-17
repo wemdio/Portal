@@ -191,6 +191,14 @@ export interface OutreachLog {
   created_at: string;
 }
 
+export interface OutreachBlockedUser {
+  user_id: string;
+  tg_user_id: number;
+  tg_username: string | null;
+  reason: string | null;
+  created_at: string;
+}
+
 export const DEFAULT_OPENAI_SETTINGS: OpenAISettings = {
   llm_model: 'openai/gpt-5-mini',
   system_prompt: '',

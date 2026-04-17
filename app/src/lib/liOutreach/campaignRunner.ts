@@ -8,6 +8,15 @@ import {
   personalizeInviteMessage,
   personalizeFollowUp,
 } from './aiService';
+import { extractPublicIdentifier } from './leadHelpers';
+import {
+  applyCooldownToAccount,
+  COOLDOWN_MINUTES,
+  describeCooldownReason,
+  detectAccountCooldownError,
+  isAccountInCooldown,
+  type AccountCooldownKind,
+} from './accountCooldown';
 import type {
   LiCampaign,
   LiCampaignLead,
@@ -24,6 +33,18 @@ import type {
  */
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string, leadName?: string, stepIndex?: number) => void;
+
+/**
+ * Thrown when a Unipile call indicated LinkedIn parked our account
+ * (invitation limit / already-invited storm / restricted). The current tick
+ * is aborted so we don't burn more requests on the same blocked account.
+ */
+class AccountCooldownTriggered extends Error {
+  constructor(public readonly kind: AccountCooldownKind) {
+    super(`Account cooldown triggered: ${kind}`);
+    this.name = 'AccountCooldownTriggered';
+  }
+}
 
 function randomDelay(minSec: number, maxSec: number): Promise<void> {
   const ms = (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
@@ -62,12 +83,36 @@ export async function runCampaignTick(
     return { processed: 0, errors: 0 };
   }
 
-  // Get account
+  // Get account (need cooldown_until so we can skip the whole tick when LI
+  // told us to back off on a previous run).
   const { data: account } = await db
     .from('li_accounts')
-    .select('unipile_account_id')
+    .select('id, unipile_account_id, cooldown_until, cooldown_reason')
     .eq('id', campaign.account_id ?? '')
-    .maybeSingle<{ unipile_account_id: string }>();
+    .maybeSingle<{
+      id: string;
+      unipile_account_id: string;
+      cooldown_until: string | null;
+      cooldown_reason: AccountCooldownKind | null;
+    }>();
+
+  if (account && isAccountInCooldown(account)) {
+    const until = new Date(account.cooldown_until!).toLocaleString('ru-RU');
+    // Lazily use the campaign log helper here too — but we need it defined
+    // first, so insert the message directly.
+    db.from('li_campaign_logs')
+      .insert({
+        campaign_id: campaignId,
+        level: 'warning',
+        message: `Тик пропущен — аккаунт в отлёжке до ${until} (причина: ${account.cooldown_reason ?? 'unknown'})`,
+        lead_name: null,
+        step_index: null,
+      })
+      .then(({ error }) => {
+        if (error) console.warn(`[li-outreach] cooldown skip log failed: ${error.message}`);
+      }, () => undefined);
+    return { processed: 0, errors: 0 };
+  }
 
   const client = new UnipileClient(
     settings.unipile_dsn,
@@ -168,9 +213,22 @@ export async function runCampaignTick(
 
     try {
       log('info', `Обработка шага ${stepIdx + 1}/${steps.length} (${step.type})`, cl.lead.name, stepIdx);
-      await processStep(step, stepIdx, cl, cl.lead, campaign, client, aiConfig, db, log);
+      await processStep(step, stepIdx, cl, cl.lead, campaign, client, aiConfig, db, log, account?.id ?? null);
       processed++;
     } catch (e) {
+      // Cooldown bubble: account already updated inside processStep — log and
+      // abort the rest of the tick so we don't keep banging on a parked acc.
+      if (e instanceof AccountCooldownTriggered) {
+        const minutes = COOLDOWN_MINUTES[e.kind];
+        errors++;
+        log(
+          'warning',
+          `Аккаунт ушёл в отлёжку на ${minutes} мин — ${describeCooldownReason(e.kind)}. Тик прерван, следующая попытка после восстановления.`,
+          cl.lead.name,
+          stepIdx,
+        );
+        break;
+      }
       const msg = e instanceof Error ? e.message : String(e);
       errors++;
       log('error', `Ошибка на шаге ${stepIdx + 1}/${steps.length} (${step.type}): ${msg}`, cl.lead.name, stepIdx);
@@ -202,10 +260,11 @@ async function processStep(
   aiConfig: { apiKey: string; model?: string },
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
+  accountDbId: string | null,
 ): Promise<void> {
   switch (step.type) {
     case 'invite':
-      await processInviteStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log);
+      await processInviteStep(step, stepIdx, cl, lead, campaign, client, aiConfig, db, log, accountDbId);
       break;
 
     case 'wait':
@@ -229,6 +288,7 @@ async function processInviteStep(
   aiConfig: { apiKey: string; model?: string },
   db: NonNullable<typeof supabaseAdmin>,
   log: LogFn,
+  accountDbId: string | null,
 ): Promise<void> {
   const now = new Date().toISOString();
 
@@ -238,10 +298,18 @@ async function processInviteStep(
   }
 
   let providerId = lead.linkedin_id;
-  if (!providerId && lead.public_identifier) {
-    log('info', `Резолв provider_id по public_identifier: ${lead.public_identifier}`, lead.name, stepIdx);
+  // Fallback: derive public_identifier from profile_url if missing.
+  // Imports/scrapers often store profile_url but leave public_identifier null.
+  const publicId = lead.public_identifier ?? extractPublicIdentifier(lead.profile_url);
+  if (!lead.public_identifier && publicId) {
+    await db.from('li_leads').update({ public_identifier: publicId }).eq('id', lead.id);
+    log('info', `public_identifier восстановлен из profile_url: ${publicId}`, lead.name, stepIdx);
+  }
+
+  if (!providerId && publicId) {
+    log('info', `Резолв provider_id по public_identifier: ${publicId}`, lead.name, stepIdx);
     try {
-      providerId = await client.getProviderId(lead.public_identifier);
+      providerId = await client.getProviderId(publicId);
       await db.from('li_leads').update({ linkedin_id: providerId }).eq('id', lead.id);
       log('info', `provider_id получен: ${providerId}`, lead.name, stepIdx);
     } catch (e) {
@@ -265,7 +333,41 @@ async function processInviteStep(
   }
 
   log('info', `Отправка инвайта${message ? ` (сообщение: "${message.slice(0, 50)}…")` : ' (без сообщения)'}`, lead.name, stepIdx);
-  await client.sendInvite(providerId, message);
+  try {
+    await client.sendInvite(providerId, message);
+  } catch (e) {
+    const cooldown = detectAccountCooldownError(e);
+    if (cooldown && accountDbId) {
+      const until = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+      const untilHuman = new Date(until).toLocaleString('ru-RU');
+      log(
+        'warning',
+        `LinkedIn вернул сигнал «${cooldown.kind}» — аккаунт уходит в отлёжку до ${untilHuman}`,
+        lead.name,
+        stepIdx,
+      );
+
+      if (cooldown.kind === 'already_invited') {
+        // Lead is in fact already invited on LI — record that and advance the
+        // campaign step so we don't retry this lead again on the next tick.
+        await db.from('li_leads').update({ status: 'invited', updated_at: now }).eq('id', lead.id);
+        await db
+          .from('li_campaign_leads')
+          .update({
+            current_step: stepIdx + 1,
+            status:
+              stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed',
+            updated_at: now,
+          })
+          .eq('id', cl.id);
+      }
+      // For invitation_limit / account_restricted we leave the lead in pending
+      // state on purpose so it gets picked up again once cooldown expires.
+
+      throw new AccountCooldownTriggered(cooldown.kind);
+    }
+    throw e;
+  }
 
   const newCount = campaign.invites_sent_today + 1;
   await db.from('li_campaigns').update({ invites_sent_today: newCount }).eq('id', campaign.id);

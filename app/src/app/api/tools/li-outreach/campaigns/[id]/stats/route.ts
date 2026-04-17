@@ -16,6 +16,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       .from('li_campaigns')
       .select('id')
       .eq('id', id)
+      .eq('user_id', auth.user.id)
       .maybeSingle();
     if (!campaign) return jsonError('Campaign not found', 404);
 

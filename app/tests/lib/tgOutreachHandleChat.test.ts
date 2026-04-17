@@ -213,4 +213,86 @@ describe('tgOutreach handleChat', () => {
     );
     expect(messageSaves.length).toBe(0);
   });
+
+  describe('global blocked users', () => {
+    it('skips chat completely when tg_user_id is in blockedUserIds (with username)', async () => {
+      const campaign = makeCampaign();
+      const client = makeMockClient(USER_MESSAGES);
+      const { db, calls } = makeMockDb({ dialogExists: false });
+
+      const entity = makeUser({ id: 12345, username: 'spammer' });
+      const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+
+      const result = await handleChat(
+        client as never,
+        ACCOUNT,
+        dialog,
+        campaign,
+        db as never,
+        log,
+        undefined,
+        { blockedUserIds: new Set([12345]) },
+      );
+
+      expect(result.replied).toBe(false);
+      expect(client.sendMessage).not.toHaveBeenCalled();
+      expect(openaiGenerate).not.toHaveBeenCalled();
+      // Не создаём строку диалога — иначе она засоряет UI и засчитывается как catch-up.
+      const dialogWrites = calls.filter(c => c.table === 'tg_outreach_dialogs' && (c.op === 'insert' || c.op === 'upsert' || c.op === 'update'));
+      expect(dialogWrites.length).toBe(0);
+    });
+
+    it('blocks ID even without username when ignore_no_username=false', async () => {
+      const campaign = makeCampaign({
+        telegram_settings: {
+          ...DEFAULT_TELEGRAM_SETTINGS,
+          ignore_no_username: false,
+          pre_read_delay_range: [0, 0],
+          read_reply_delay_range: [0, 0],
+        },
+      });
+      const client = makeMockClient(USER_MESSAGES);
+      const { db } = makeMockDb({ dialogExists: false });
+
+      const entity = makeUser({ id: 77700123 });
+      const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+
+      const result = await handleChat(
+        client as never,
+        ACCOUNT,
+        dialog,
+        campaign,
+        db as never,
+        log,
+        undefined,
+        { blockedUserIds: new Set([77700123]) },
+      );
+
+      expect(result.replied).toBe(false);
+      expect(client.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not block when blockedUserIds set does not include this id', async () => {
+      const campaign = makeCampaign();
+      const client = makeMockClient(USER_MESSAGES);
+      const { db } = makeMockDb({ dialogExists: true, canSend: true });
+
+      const entity = makeUser({ id: 99999, username: 'normal' });
+      const dialog = { entity, unreadCount: 1 } as unknown as import('telegram/tl/custom/dialog').Dialog;
+
+      const result = await handleChat(
+        client as never,
+        ACCOUNT,
+        dialog,
+        campaign,
+        db as never,
+        log,
+        undefined,
+        { blockedUserIds: new Set([12345]) },
+      );
+
+      expect(result.replied).toBe(false);
+      expect(client.invoke).toHaveBeenCalled();
+    });
+  });
 });
