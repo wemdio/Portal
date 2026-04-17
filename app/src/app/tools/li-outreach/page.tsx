@@ -7,7 +7,40 @@ import { supabase } from '@/lib/supabaseClient';
 
 type Tab = 'dashboard' | 'campaigns' | 'leads' | 'scraper' | 'accounts' | 'logs' | 'settings';
 
-type LiAccount = { id: string; unipile_account_id: string; name: string | null; is_active: boolean; profile_url: string | null; headline: string | null; last_synced_at: string | null; created_at: string };
+type LiAccountCooldownReason = 'invitation_limit' | 'already_invited' | 'account_restricted';
+type LiAccount = {
+  id: string;
+  unipile_account_id: string;
+  name: string | null;
+  is_active: boolean;
+  profile_url: string | null;
+  headline: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+  cooldown_until: string | null;
+  cooldown_reason: LiAccountCooldownReason | null;
+};
+
+const COOLDOWN_REASON_LABELS: Record<LiAccountCooldownReason, string> = {
+  invitation_limit: 'лимит инвайтов LinkedIn',
+  already_invited: 'уже приглашённые контакты',
+  account_restricted: 'аккаунт ограничен LinkedIn',
+};
+
+function isAccountInCooldown(a: Pick<LiAccount, 'cooldown_until'>): boolean {
+  if (!a.cooldown_until) return false;
+  return new Date(a.cooldown_until).getTime() > Date.now();
+}
+
+function formatCooldownRemaining(until: string): string {
+  const ms = new Date(until).getTime() - Date.now();
+  if (ms <= 0) return 'истекла';
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins > 0 ? `${hours}ч ${mins}м` : `${hours}ч`;
+}
 type LiLeadList = { id: string; name: string; description: string | null; created_at: string; leads_count?: number };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; created_at: string };
 
@@ -180,7 +213,13 @@ export default function LiOutreachPage() {
     } catch (e) { console.error('[li-outreach] loadSettings failed', e); }
   }, []);
   const loadCampaignLogs = useCallback(async (id: string) => {
-    try { const d = await api<{ logs: LiCampaignLog[] }>(`/campaigns/${id}/logs`); setCampaignLogs(d.logs); } catch (e) { console.error('[li-outreach] loadCampaignLogs failed', e); }
+    try {
+      const d = await api<{ items: LiCampaignLog[]; total: number }>(`/campaigns/${id}/logs`);
+      setCampaignLogs(Array.isArray(d?.items) ? d.items : []);
+    } catch (e) {
+      console.error('[li-outreach] loadCampaignLogs failed', e);
+      setCampaignLogs([]);
+    }
   }, []);
   const loadDashboard = useCallback(async () => {
     setDashLoading(true);
@@ -662,18 +701,30 @@ export default function LiOutreachPage() {
                 <p className="text-xs text-gray-400">Нет аккаунтов. Подключите через Настройки → Синхронизация.</p>
               ) : (
                 <div className="space-y-2">
-                  {accounts.map((a) => (
-                    <div key={a.id} className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
-                      <span className={`shrink-0 w-2 h-2 rounded-full ${a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
-                      <div className="min-w-0 flex-1">
-                        <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
-                        {a.headline && <span className="text-xs text-gray-500 truncate block">{a.headline}</span>}
+                  {accounts.map((a) => {
+                    const cooling = isAccountInCooldown(a);
+                    return (
+                      <div key={a.id} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${cooling ? 'bg-amber-50 border border-amber-200' : 'bg-gray-50'}`}>
+                        <span className={`shrink-0 w-2 h-2 rounded-full ${cooling ? 'bg-amber-500 animate-pulse' : a.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
+                        <div className="min-w-0 flex-1">
+                          <span className="font-medium text-gray-900 truncate block">{a.name || a.unipile_account_id}</span>
+                          {cooling ? (
+                            <span
+                              className="text-xs text-amber-700 truncate block"
+                              title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. Все кампании и скрапинг с этого аккаунта приостановлены.`}
+                            >
+                              💤 в отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} · {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
+                            </span>
+                          ) : a.headline ? (
+                            <span className="text-xs text-gray-500 truncate block">{a.headline}</span>
+                          ) : null}
+                        </div>
+                        <span className="text-[10px] text-gray-400 shrink-0">
+                          {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
+                        </span>
                       </div>
-                      <span className="text-[10px] text-gray-400 shrink-0">
-                        {a.last_synced_at ? `sync ${new Date(a.last_synced_at).toLocaleDateString()}` : 'не синхр.'}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1134,15 +1185,30 @@ export default function LiOutreachPage() {
           </div>
           {accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
-          ) : accounts.map((a) => (
-            <div key={a.id} className="rounded-xl border border-gray-200 px-3 py-2 text-sm flex items-center justify-between">
-              <div>
-                <span className="font-medium">{a.name || a.unipile_account_id}</span>
-                {a.headline && <span className="text-xs text-gray-500 ml-2">{a.headline}</span>}
+          ) : accounts.map((a) => {
+            const cooling = isAccountInCooldown(a);
+            return (
+              <div key={a.id} className={`rounded-xl border px-3 py-2 text-sm flex items-center justify-between ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{a.name || a.unipile_account_id}</span>
+                    {a.headline && <span className="text-xs text-gray-500">{a.headline}</span>}
+                  </div>
+                  {cooling && (
+                    <div
+                      className="text-xs text-amber-700 mt-0.5"
+                      title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. Это значит LinkedIn вернул сигнал «${a.cooldown_reason}» — мы автоматически приостановили все кампании и скрапинг с этого аккаунта, чтобы не схватить бан. Когда таймер истечёт, кампании продолжатся с того же места.`}
+                    >
+                      💤 В отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} — {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
+                    </div>
+                  )}
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded shrink-0 ml-3 ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                  {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
+                </span>
               </div>
-              <span className={`text-xs px-2 py-0.5 rounded ${a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{a.is_active ? 'Активен' : 'Неактивен'}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -17,6 +17,7 @@ export async function GET(req: NextRequest) {
     let q = supabaseAdmin
       .from('li_leads')
       .select('name,first_name,last_name,position,company,profile_url,public_identifier,status')
+      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false })
       .limit(10000);
 

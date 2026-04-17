@@ -21,6 +21,7 @@ export async function GET(req: NextRequest) {
     let q = supabaseAdmin
       .from('li_leads')
       .select('*', { count: 'exact' })
+      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
 

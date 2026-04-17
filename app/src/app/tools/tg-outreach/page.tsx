@@ -32,6 +32,7 @@ import type {
   OutreachDialog,
   OutreachProcessed,
   OutreachLog,
+  OutreachBlockedUser,
   OpenAISettings,
   TelegramSettings,
 } from '@/lib/tgOutreach/types';
@@ -73,6 +74,126 @@ const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   not_lead: { label: 'Не лид', cls: 'bg-gray-100 text-gray-600' },
   later: { label: 'Потом', cls: 'bg-amber-100 text-amber-700' },
 };
+
+/* =================== GLOBAL BLOCKLIST SECTION =================== */
+function GlobalBlocklistSection() {
+  const [items, setItems] = useState<OutreachBlockedUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [addId, setAddId] = useState('');
+  const [addUsername, setAddUsername] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}/blocked-users`, { headers: authHeaders(token) });
+    if (res.ok) {
+      const d = await res.json() as { items: OutreachBlockedUser[] };
+      setItems(d.items);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  const add = async () => {
+    const idNum = Number(addId.trim());
+    if (!Number.isFinite(idNum) || idNum <= 0) {
+      setError('Укажи числовой tg_user_id');
+      return;
+    }
+    setAdding(true);
+    setError(null);
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}/blocked-users`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify({
+        tg_user_id: idNum,
+        tg_username: addUsername.trim() ? addUsername.trim().replace(/^@/, '') : null,
+      }),
+    });
+    setAdding(false);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({})) as { error?: string };
+      setError(d.error ?? 'Не удалось добавить');
+      return;
+    }
+    setAddId(''); setAddUsername('');
+    void load();
+  };
+
+  const remove = async (tgUserId: number) => {
+    const token = await getToken();
+    await fetch(`${API_BASE}/blocked-users/${tgUserId}`, {
+      method: 'DELETE',
+      headers: authHeaders(token),
+    });
+    void load();
+  };
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800">Глобальный чёрный список (по tg_user_id)</h3>
+        <p className="mt-1 text-[11px] text-gray-500">
+          Применяется ко всем твоим кампаниям и аккаунтам. Бот не будет отвечать и не создаст диалог
+          для пользователей из этого списка — даже если у них нет username.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 p-3">
+        <input
+          value={addId}
+          onChange={e => setAddId(e.target.value)}
+          placeholder="tg_user_id"
+          className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 w-40"
+        />
+        <input
+          value={addUsername}
+          onChange={e => setAddUsername(e.target.value)}
+          placeholder="@username (необязательно)"
+          className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 w-56"
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={adding}
+          className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+        >
+          {adding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
+          Заблокировать
+        </button>
+        {error && <span className="text-[11px] text-rose-600">{error}</span>}
+      </div>
+      {loading ? (
+        <div className="flex items-center gap-2 py-4 text-xs text-gray-400">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />Загрузка...
+        </div>
+      ) : items.length === 0 ? (
+        <p className="text-xs text-gray-400 py-4 text-center">Пока никто не заблокирован</p>
+      ) : (
+        <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
+          {items.map(b => (
+            <div key={b.tg_user_id} className="flex items-center gap-3 px-3 py-2 text-xs">
+              <Ban className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+              <span className="font-medium text-gray-800 w-36">{b.tg_user_id}</span>
+              <span className="text-gray-500 flex-1">{b.tg_username ? `@${b.tg_username}` : '—'}</span>
+              <span className="text-gray-400">{formatDate(b.created_at)}</span>
+              <button
+                type="button"
+                onClick={() => void remove(b.tg_user_id)}
+                className="p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
 /* =================== SETTINGS TAB =================== */
 function SettingsTab({ campaign, onSave }: {
@@ -188,6 +309,8 @@ function SettingsTab({ campaign, onSave }: {
         />
       </section>
 
+      <GlobalBlocklistSection />
+
       {/* Follow-up */}
       <section className="space-y-4">
         <h3 className="text-sm font-semibold text-gray-800">Настройки Follow-up сообщений</h3>
@@ -301,10 +424,8 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 }
 
 /* =================== DIALOGS TAB =================== */
-function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
+function DialogsTab({ campaignId }: {
   campaignId: string;
-  campaign: OutreachCampaign;
-  onCampaignUpdate: () => void;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   const [total, setTotal] = useState(0);
@@ -370,23 +491,17 @@ function DialogsTab({ campaignId, campaign, onCampaignUpdate }: {
 
   const addToBlacklist = async (dialog: OutreachDialog) => {
     const token = await getToken();
-    const tg = campaign.telegram_settings as TelegramSettings;
     const username = (dialog.tg_username ?? '').toLowerCase().replace(/^@/, '');
-    if (username) {
-      const current = (tg.blocked_usernames ?? []).map(u => u.trim().toLowerCase().replace(/^@/, ''));
-      if (!current.includes(username)) {
-        await fetch(`${API_BASE}/campaigns/${campaign.id}`, {
-          method: 'PUT', headers: authHeaders(token),
-          body: JSON.stringify({
-            telegram_settings: { ...tg, blocked_usernames: [...(tg.blocked_usernames ?? []), username] },
-          }),
-        });
-        onCampaignUpdate();
-      }
-    }
-    await fetch(`${API_BASE}/dialogs/${dialog.id}`, {
-      method: 'PUT', headers: authHeaders(token),
-      body: JSON.stringify({ can_send: false }),
+    // Глобальный блок-лист по tg_user_id: запись применяется ко всем кампаниям и
+    // аккаунтам пользователя; API сам выставит can_send=false на всех существующих
+    // диалогах с этим tg_user_id (RLS отфильтрует только свои).
+    await fetch(`${API_BASE}/blocked-users`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify({
+        tg_user_id: dialog.tg_user_id,
+        tg_username: username || null,
+      }),
     });
     void fetchDialogs();
   };
@@ -1252,7 +1367,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         {tab === 'accounts' && <CampaignAccountsTab campaignId={campaign.id} />}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} campaign={campaign} onCampaignUpdate={onUpdate} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
         {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
       </div>
     </div>

@@ -16,13 +16,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .from('li_campaigns')
       .select('id,status')
       .eq('id', id)
-      .single<{ id: string; status: string }>();
+      .eq('user_id', auth.user.id)
+      .maybeSingle<{ id: string; status: string }>();
     if (!campaign) return jsonError('Campaign not found', 404);
 
     await supabaseAdmin
       .from('li_campaigns')
       .update({ status: 'stopped', updated_at: new Date().toISOString() })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', auth.user.id);
 
     return NextResponse.json({ ok: true });
   });
