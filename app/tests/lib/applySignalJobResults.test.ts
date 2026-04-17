@@ -174,4 +174,72 @@ describe('applySignalsToTabData (pure helper)', () => {
     expect(tabData[1][STACK_COL]).toBe('Существующий стек');
     expect(tabData[1][PROFILE_COL]).toBe('Существующий профиль');
   });
+
+  it('overwrites cells containing only the ⚠ error marker when applyOnlyEmpty=true', () => {
+    const tabData = makeTabData(1, 5);
+    tabData[1][STACK_COL] = '⚠';
+    tabData[1][PROFILE_COL] = 'Превышено время ожидания сайта';
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: 'Tilda, Roistat', profile: 'B2B продажи' }),
+      },
+    ];
+
+    const summary = applySignalsToTabData(tabData, results, {
+      stackColIndex: STACK_COL,
+      profileColIndex: PROFILE_COL,
+      applyOnlyEmpty: true,
+    });
+
+    expect(summary.applied).toBe(1);
+    expect(tabData[1][STACK_COL]).toBe('Tilda, Roistat');
+    expect(tabData[1][PROFILE_COL]).toBe('B2B продажи');
+  });
+
+  it('overwrites stale ⚠ row even if new attempt also fails (replaces error message)', () => {
+    const tabData = makeTabData(1, 5);
+    tabData[1][STACK_COL] = '⚠';
+    tabData[1][PROFILE_COL] = 'старая ошибка';
+    const results = [
+      {
+        row_index: 1,
+        status: 'failed',
+        result_text: null,
+        last_error: 'Новая ошибка: DNS не отвечает',
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: STACK_COL,
+      profileColIndex: PROFILE_COL,
+      applyOnlyEmpty: true,
+    });
+
+    expect(tabData[1][STACK_COL]).toBe('⚠');
+    expect(tabData[1][PROFILE_COL]).toBe('Новая ошибка: DNS не отвечает');
+  });
+
+  it('still skips truly filled cells (real stack present, no ⚠) when applyOnlyEmpty=true', () => {
+    const tabData = makeTabData(1, 5);
+    tabData[1][STACK_COL] = 'Tilda, Bitrix';
+    tabData[1][PROFILE_COL] = 'Корп. сайт';
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: 'другое', profile: 'другое' }),
+      },
+    ];
+
+    const summary = applySignalsToTabData(tabData, results, {
+      stackColIndex: STACK_COL,
+      profileColIndex: PROFILE_COL,
+      applyOnlyEmpty: true,
+    });
+
+    expect(summary.skipped).toBe(1);
+    expect(tabData[1][STACK_COL]).toBe('Tilda, Bitrix');
+  });
 });

@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
+import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 
 export type SignalResultRow = {
   row_index: number;
@@ -74,9 +75,11 @@ export function applySignalsToTabData(
     while (row.length <= profileColIndex) row.push('');
 
     if (applyOnlyEmpty) {
-      const stackHas = String(row[stackColIndex] ?? '').trim().length > 0;
-      const profileHas = String(row[profileColIndex] ?? '').trim().length > 0;
-      if (stackHas || profileHas) {
+      // A cell is "refillable" when empty OR contains only the ⚠ error
+      // marker — both states mean the previous attempt produced no usable
+      // data, so a re-run is allowed to overwrite. A cell with a real stack
+      // string is treated as user/historical data and preserved.
+      if (!isStackCellRefillable(row[stackColIndex])) {
         skipped += 1;
         continue;
       }
@@ -88,7 +91,7 @@ export function applySignalsToTabData(
       row[profileColIndex] = parsed.profile;
       applied += 1;
     } else {
-      row[stackColIndex] = '⚠';
+      row[stackColIndex] = SIGNAL_ERROR_MARKER;
       row[profileColIndex] = r.last_error ?? 'Не удалось обработать сайт';
       applied += 1;
     }

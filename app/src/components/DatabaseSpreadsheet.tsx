@@ -12,6 +12,7 @@ import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pend
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
+import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 
 type Sheet = {
   id: string;
@@ -7153,7 +7154,7 @@ export function DatabaseSpreadsheet() {
                     nextData[ri][profileColIndex] = parsed.profile;
                   }
                 } else if (result.status === 'failed' || result.status === 'skipped') {
-                  nextData[ri][stackColIndex] = '⚠';
+                  nextData[ri][stackColIndex] = SIGNAL_ERROR_MARKER;
                   nextData[ri][profileColIndex] = result.last_error ?? 'Ошибка';
                   errorCount += 1;
                 }
@@ -7224,16 +7225,48 @@ export function DatabaseSpreadsheet() {
     if (!activeTab || signalEnrichment.isProcessing) return;
     flushSave();
 
+    const startCol = signalEnrichment.sourceCol + 1;
+    const isColumnEmpty = (colIndex: number) =>
+      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
+
+    // Reuse existing "Стек"/"Профиль" pair if found right of the source
+    // column — supports partial re-runs (only refill empty/⚠ rows). Falls
+    // back to creating fresh columns at the first empty slot.
+    const headerRow = activeTab.data[0] ?? [];
+    let stackCol = -1;
+    for (let c = startCol; c < headerRow.length - 1; c++) {
+      const stackHdr = String(headerRow[c] ?? '').trim();
+      const profileHdr = String(headerRow[c + 1] ?? '').trim();
+      if (stackHdr === 'Стек' && profileHdr === 'Профиль') {
+        stackCol = c;
+        break;
+      }
+    }
+    const isReuse = stackCol >= 0;
+    if (!isReuse) {
+      stackCol = startCol;
+      while (!isColumnEmpty(stackCol)) stackCol += 1;
+    }
+    const profileCol = stackCol + 1;
+
+    // Process only rows whose stack cell is empty or contains the ⚠ marker
+    // when reusing existing columns; otherwise process every row with a URL.
     const rowsToProcess: { rowIndex: number; url: string }[] = [];
     for (let i = 1; i < activeTab.data.length; i++) {
       const row = activeTab.data[i];
       const sourceValue = String(row?.[signalEnrichment.sourceCol] ?? '').trim();
       if (!sourceValue) continue;
+      if (isReuse && !isStackCellRefillable(row?.[stackCol])) continue;
       rowsToProcess.push({ rowIndex: i, url: sourceValue });
     }
 
     if (rowsToProcess.length === 0) {
-      setSignalEnrichment((prev) => ({ ...prev, error: 'Нет данных в выбранной колонке' }));
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        error: isReuse
+          ? 'Все строки уже обработаны — пустых ячеек или ошибок не осталось'
+          : 'Нет данных в выбранной колонке',
+      }));
       return;
     }
 
@@ -7245,20 +7278,12 @@ export function DatabaseSpreadsheet() {
 
     setUndoSnapshot('Сигналы с сайтов');
 
-    const startCol = signalEnrichment.sourceCol + 1;
-    const isColumnEmpty = (colIndex: number) =>
-      activeTab.data.every((row) => (row[colIndex] ?? '').trim().length === 0);
-
-    let stackCol = startCol;
-    while (!isColumnEmpty(stackCol)) stackCol += 1;
-    const profileCol = stackCol + 1;
-
     const baseData = activeTab.data.map((row, rowIndex) => {
       const nextRow = [...row];
       while (nextRow.length <= profileCol) nextRow.push('');
       if (rowIndex === 0) {
-        nextRow[stackCol] = 'Стек';
-        nextRow[profileCol] = 'Профиль';
+        if (!String(nextRow[stackCol] ?? '').trim()) nextRow[stackCol] = 'Стек';
+        if (!String(nextRow[profileCol] ?? '').trim()) nextRow[profileCol] = 'Профиль';
       }
       return nextRow;
     });
