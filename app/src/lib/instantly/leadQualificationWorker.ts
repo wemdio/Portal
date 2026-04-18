@@ -23,18 +23,36 @@ function workerLog(
 }
 
 /**
- * Returns the distinct set of campaign IDs that at least one user has
- * selected in their lead-feed preferences. Only these campaigns are polled.
+ * Returns the distinct set of campaign IDs to poll.
+ * Sources (merged, deduplicated):
+ * 1. project_instantly_campaigns — auto/manual links from projects
+ * 2. user_instantly_campaign_preferences — manual specialist picks (fallback)
  */
 async function getSubscribedCampaignIds(): Promise<string[]> {
   if (!supabaseAdmin) return [];
-  const { data, error } = await supabaseAdmin
+  const ids = new Set<string>();
+
+  // Primary: campaigns linked to projects
+  const { data: projectCampaigns } = await supabaseAdmin
+    .from('project_instantly_campaigns')
+    .select('campaign_id');
+  if (projectCampaigns) {
+    for (const r of projectCampaigns) {
+      ids.add((r as { campaign_id: string }).campaign_id);
+    }
+  }
+
+  // Fallback: manual specialist preferences
+  const { data: prefs } = await supabaseAdmin
     .from('user_instantly_campaign_preferences')
     .select('campaign_id');
+  if (prefs) {
+    for (const r of prefs) {
+      ids.add((r as { campaign_id: string }).campaign_id);
+    }
+  }
 
-  if (error || !data) return [];
-
-  return [...new Set(data.map((r: { campaign_id: string }) => r.campaign_id))];
+  return [...ids];
 }
 
 /**
