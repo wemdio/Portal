@@ -2,6 +2,11 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { UnipileClient, extractPublicIdentifier, extractActivityUrn } from './unipileClient';
+import {
+  applyCooldownToAccount,
+  detectAccountCooldownError,
+  isAccountInCooldown,
+} from './accountCooldown';
 import type { LiSettings } from './types';
 
 /**
@@ -10,6 +15,51 @@ import type { LiSettings } from './types';
  */
 
 const DELAY_BETWEEN_PAGES_MS = 3000;
+
+type ScraperAccountRow = {
+  id: string;
+  unipile_account_id: string;
+  cooldown_until: string | null;
+  cooldown_reason: 'invitation_limit' | 'already_invited' | 'account_restricted' | null;
+};
+
+/**
+ * If the account is currently in cooldown, fail the task with a clear message
+ * and return true (so the caller can short-circuit). The whole point: don't
+ * waste any LinkedIn API quota on a parked account.
+ */
+async function bailIfAccountInCooldown(
+  db: NonNullable<typeof supabaseAdmin>,
+  taskId: string,
+  account: ScraperAccountRow,
+): Promise<boolean> {
+  if (!isAccountInCooldown(account)) return false;
+  const until = new Date(account.cooldown_until!).toLocaleString('ru-RU');
+  await db
+    .from('li_tasks')
+    .update({
+      status: 'failed',
+      error_message: `Аккаунт в отлёжке до ${until} (причина: ${account.cooldown_reason ?? 'unknown'})`,
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', taskId);
+  return true;
+}
+
+/**
+ * Best-effort cooldown bookkeeping when the scraper hits a Unipile error that
+ * matches a LinkedIn-side limit signal. Mirrors what the campaign runner does
+ * on the invite path so a single account is parked for *all* call sites.
+ */
+async function maybeParkAccountFromError(
+  db: NonNullable<typeof supabaseAdmin>,
+  accountDbId: string,
+  err: unknown,
+): Promise<void> {
+  const cooldown = detectAccountCooldownError(err);
+  if (!cooldown) return;
+  await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+}
 
 function parseHeadline(headline: string | null): { position: string; company: string } {
   if (!headline) return { position: '', company: '' };
@@ -48,16 +98,17 @@ export async function scrapeLinkedInSearch(
     return;
   }
 
-  // Get Unipile account ID
+  // Get Unipile account ID + cooldown so we can bail out early.
   const { data: account } = await db
     .from('li_accounts')
-    .select('unipile_account_id')
+    .select('id, unipile_account_id, cooldown_until, cooldown_reason')
     .eq('id', accountId)
-    .maybeSingle<{ unipile_account_id: string }>();
+    .maybeSingle<ScraperAccountRow>();
   if (!account) {
     await db.from('li_tasks').update({ status: 'failed', error_message: 'Аккаунт не найден' }).eq('id', taskId);
     return;
   }
+  if (await bailIfAccountInCooldown(db, taskId, account)) return;
 
   const client = new UnipileClient(settings.unipile_dsn, settings.unipile_api_key, account.unipile_account_id);
 
@@ -132,6 +183,7 @@ export async function scrapeLinkedInSearch(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[li-outreach] scraper search failed:`, msg);
+    await maybeParkAccountFromError(db, account.id, e);
     await db.from('li_tasks').update({
       status: 'failed',
       error_message: msg,
@@ -166,13 +218,14 @@ export async function scrapePostReactions(
 
   const { data: account } = await db
     .from('li_accounts')
-    .select('unipile_account_id')
+    .select('id, unipile_account_id, cooldown_until, cooldown_reason')
     .eq('id', accountId)
-    .maybeSingle<{ unipile_account_id: string }>();
+    .maybeSingle<ScraperAccountRow>();
   if (!account) {
     await db.from('li_tasks').update({ status: 'failed', error_message: 'Аккаунт не найден' }).eq('id', taskId);
     return;
   }
+  if (await bailIfAccountInCooldown(db, taskId, account)) return;
 
   const activityUrn = extractActivityUrn(postUrl);
   if (!activityUrn) {
@@ -246,6 +299,7 @@ export async function scrapePostReactions(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[li-outreach] scraper reactions failed:`, msg);
+    await maybeParkAccountFromError(db, account.id, e);
     await db.from('li_tasks').update({
       status: 'failed',
       error_message: msg,

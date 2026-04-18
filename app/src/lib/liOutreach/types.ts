@@ -73,6 +73,13 @@ export interface LiAccount {
   headline: string | null;
   last_synced_at: string | null;
   created_at: string;
+  /**
+   * When set and >now(), every campaign + scraper that uses this LinkedIn
+   * account skips its tick. Cleared automatically when the timestamp passes.
+   * See `lib/liOutreach/accountCooldown.ts`.
+   */
+  cooldown_until: string | null;
+  cooldown_reason: 'invitation_limit' | 'already_invited' | 'account_restricted' | null;
 }
 
 export interface LiLeadList {

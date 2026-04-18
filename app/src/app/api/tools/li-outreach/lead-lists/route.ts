@@ -15,6 +15,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await admin
       .from('li_lead_lists')
       .select('*')
+      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
     if (error) return jsonError(error.message, 500);
     const lists = data ?? [];
@@ -25,6 +26,7 @@ export async function GET(req: NextRequest) {
         const { count } = await admin
           .from('li_leads')
           .select('*', { head: true, count: 'exact' })
+          .eq('user_id', auth.user.id)
           .eq('lead_list_id', list.id);
         return { ...list, leads_count: count ?? 0 };
       }),
