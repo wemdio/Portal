@@ -122,6 +122,31 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+/**
+ * Build HTTP headers for HH API requests.
+ *
+ * Adds `Authorization: Bearer ${HH_ACCESS_TOKEN}` when the env var is set
+ * (non-empty after trim). HH API requires OAuth for /vacancies and /employers
+ * since 2026-04-15; reference endpoints (/areas, /dictionaries) still work
+ * without it, so the header is intentionally optional.
+ *
+ * @param userAgent  Optional custom User-Agent string (e.g. for non-parser
+ *                   call sites that want to identify themselves separately
+ *                   in HH access logs). Falls back to the default parser UA
+ *                   when omitted or empty.
+ */
+export function buildHhRequestHeaders(userAgent?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': userAgent && userAgent.length > 0 ? userAgent : 'Portal/1.0 (HH parser)',
+    Accept: 'application/json',
+  };
+  const token = process.env.HH_ACCESS_TOKEN?.trim();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 const MIN_REQUEST_INTERVAL_MS = Math.max(100, envInt('HH_REQUEST_INTERVAL_MS', 350));
 const MAX_CONCURRENCY = Math.max(1, envInt('HH_MAX_CONCURRENCY', 2));
 const PARTITION_CONCURRENCY = Math.max(1, envInt('HH_PARTITION_CONCURRENCY', 2));
@@ -668,10 +693,7 @@ export async function fetchWithRetry<T>(
       currentProxy = proxyResult?.entry;
 
       const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
-        headers: {
-          'User-Agent': 'Portal/1.0 (HH parser)',
-          Accept: 'application/json',
-        },
+        headers: buildHhRequestHeaders(),
         cache: 'no-store',
         signal: controller.signal,
         ...(proxyResult ? { dispatcher: proxyResult.dispatcher } : {}),

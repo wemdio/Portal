@@ -92,7 +92,66 @@ describe('processSignalsForUrl', () => {
     if ('stack' in result) expect(result.method).toBe('playwright');
   });
 
-  it('returns error when both HTTP and Playwright fail', async () => {
+  it('returns DNS error message when Playwright fails with ERR_NAME_NOT_RESOLVED', async () => {
+    fetchHtmlWithRetryMock.mockResolvedValue(null);
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(
+      new Error('page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/'),
+    );
+
+    const result = await processSignalsForUrl('example.com');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error).toMatch(/Домен не найден|DNS/i);
+      expect(result.error).not.toContain('Playwright');
+    }
+  });
+
+  it('returns connection-refused message when server rejects connection', async () => {
+    fetchHtmlWithRetryMock.mockRejectedValue(new Error('connect ECONNREFUSED 1.2.3.4:443'));
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(
+      new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://example.com/'),
+    );
+
+    const result = await processSignalsForUrl('example.com');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error).toMatch(/отклон|соединение/i);
+      expect(result.error).not.toContain('Playwright');
+    }
+  });
+
+  it('returns timeout message when both attempts time out', async () => {
+    fetchHtmlWithRetryMock.mockRejectedValue(new Error('Request timed out after 12000ms'));
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(
+      new Error('page.goto: Timeout 18000ms exceeded.'),
+    );
+
+    const result = await processSignalsForUrl('example.com');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error).toMatch(/таймаут/i);
+      expect(result.error).not.toContain('Playwright');
+    }
+  });
+
+  it('returns SSL error message when certificate validation fails', async () => {
+    fetchHtmlWithRetryMock.mockRejectedValue(new Error('certificate has expired'));
+    fetchHtmlWithPlaywrightMock.mockRejectedValue(
+      new Error('page.goto: net::ERR_CERT_DATE_INVALID at https://example.com/'),
+    );
+
+    const result = await processSignalsForUrl('example.com');
+
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error).toMatch(/SSL|сертификат/i);
+    }
+  });
+
+  it('returns generic site-unavailable when no specific cause is available', async () => {
     fetchHtmlWithRetryMock.mockResolvedValue(null);
     fetchHtmlWithPlaywrightMock.mockResolvedValue(null);
 
@@ -100,7 +159,8 @@ describe('processSignalsForUrl', () => {
 
     expect('error' in result).toBe(true);
     if ('error' in result) {
-      expect(result.error.length).toBeGreaterThan(0);
+      expect(result.error).toMatch(/недоступ/i);
+      expect(result.error).not.toContain('Playwright');
     }
   });
 
