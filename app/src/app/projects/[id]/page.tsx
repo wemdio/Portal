@@ -10,6 +10,7 @@ import { canEditProjects } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
@@ -738,6 +739,24 @@ export default function ProjectPage() {
             </div>
           </div>
 
+           {/* Client brief & AI hypotheses (also editable from view mode) */}
+           <ProjectBriefSection
+             projectId={project.id}
+             brief={{
+               brief_file_path: project.brief_file_path,
+               brief_file_name: project.brief_file_name,
+               brief_uploaded_at: project.brief_uploaded_at,
+               lead_source_hypotheses: project.lead_source_hypotheses,
+               lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
+               lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+             }}
+             canEdit={canEdit}
+             onChange={(next) => {
+               setProject({ ...project, ...next });
+               setInitialProject(initialProject ? { ...initialProject, ...next } : initialProject);
+             }}
+           />
+
            {/* KPI Section */}
            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
             <h3 className="text-lg font-semibold mb-4 text-gray-900">KPI</h3>
@@ -885,6 +904,23 @@ export default function ProjectPage() {
               placeholder="Не назначен"
             />
           </div>
+
+          <ProjectBriefSection
+            projectId={project.id}
+            brief={{
+              brief_file_path: project.brief_file_path,
+              brief_file_name: project.brief_file_name,
+              brief_uploaded_at: project.brief_uploaded_at,
+              lead_source_hypotheses: project.lead_source_hypotheses,
+              lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
+              lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+            }}
+            canEdit={canEdit}
+            onChange={(next) => {
+              setProject({ ...project, ...next });
+              setInitialProject(initialProject ? { ...initialProject, ...next } : initialProject);
+            }}
+          />
 
           <SectionCard title="ОС заказчика">
             <EditableTextarea
