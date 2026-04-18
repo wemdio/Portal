@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { buildHhRequestHeaders } from '@/lib/parsers/hhParser';
 import type { RawSignalItem } from './types';
 
 const FETCH_TIMEOUT = 15_000;
@@ -45,7 +46,7 @@ async function fetchEmployerSite(employerId: string): Promise<string | null> {
   try {
     const res = await fetch(`https://api.hh.ru/employers/${employerId}`, {
       signal: withTimeout(8_000),
-      headers: { 'User-Agent': HH_USER_AGENT },
+      headers: buildHhRequestHeaders(HH_USER_AGENT),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as HHEmployerDetail;
@@ -70,7 +71,7 @@ async function fetchHHSignals(): Promise<RawSignalItem[]> {
         });
         const res = await fetch(`${HH_API}?${params}`, {
           signal: withTimeout(FETCH_TIMEOUT),
-          headers: { 'User-Agent': HH_USER_AGENT },
+          headers: buildHhRequestHeaders(HH_USER_AGENT),
         });
         if (!res.ok) return;
         const data = (await res.json()) as HHApiResponse;

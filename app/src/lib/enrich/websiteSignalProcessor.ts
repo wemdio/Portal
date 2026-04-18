@@ -19,6 +19,35 @@ export interface ProcessSignalsOptions {
   signal?: AbortSignal;
 }
 
+const ERROR_PATTERNS: Array<[RegExp, string]> = [
+  [/ERR_NAME_NOT_RESOLVED|ENOTFOUND|EAI_AGAIN/i, 'Домен не найден (DNS не резолвится)'],
+  [/ERR_CONNECTION_REFUSED|ECONNREFUSED/i, 'Сервер отклонил соединение'],
+  [/ERR_CONNECTION_TIMED_OUT|ETIMEDOUT|[Tt]imeout/i, 'Таймаут подключения'],
+  [/ERR_CERT|ERR_SSL|certificate/i, 'Ошибка SSL-сертификата'],
+  [/ERR_CONNECTION_RESET|ECONNRESET/i, 'Соединение сброшено'],
+  [/ERR_TOO_MANY_REDIRECTS/i, 'Слишком много редиректов'],
+];
+
+/**
+ * Classify raw HTTP / Playwright error messages into a short, user-facing
+ * Russian string. Falls back to "Сайт недоступен" when no known pattern
+ * matches.
+ */
+function classifyFetchError(httpErr: unknown, pwErr: unknown): string {
+  const messages = [httpErr, pwErr]
+    .filter(Boolean)
+    .map((e) => (e instanceof Error ? e.message : String(e)));
+
+  const combined = messages.join(' ');
+  if (!combined) return 'Сайт недоступен';
+
+  for (const [pattern, label] of ERROR_PATTERNS) {
+    if (pattern.test(combined)) return label;
+  }
+
+  return 'Сайт недоступен';
+}
+
 /**
  * Fetch a website's HTML and detect signals (tech stack + business profile).
  *
@@ -48,6 +77,8 @@ export async function processSignalsForUrl(
 
   let html: string | null = null;
   let method: 'http' | 'playwright' = 'http';
+  let httpError: unknown = null;
+  let pwError: unknown = null;
 
   try {
     const httpResult = await fetchHtmlWithRetry(normalized, {
@@ -58,7 +89,8 @@ export async function processSignalsForUrl(
     if (httpResult && httpResult.status >= 200 && httpResult.status < 300 && httpResult.html) {
       html = httpResult.html;
     }
-  } catch {
+  } catch (err) {
+    httpError = err;
     html = null;
   }
 
@@ -72,13 +104,14 @@ export async function processSignalsForUrl(
         html = pwHtml;
         method = 'playwright';
       }
-    } catch {
+    } catch (err) {
+      pwError = err;
       html = null;
     }
   }
 
   if (!html) {
-    return { error: 'Не удалось загрузить сайт (HTTP и Playwright недоступны)' };
+    return { error: classifyFetchError(httpError, pwError) };
   }
 
   const signals = detectSignals(html);
