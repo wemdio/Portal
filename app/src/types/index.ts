@@ -45,6 +45,7 @@ export interface Project {
   kpi_fact?: string;
   status: ProjectStatus;
   specialist?: string;
+  specialist_user_id?: string | null;
   manager?: string;
   weekly_tasks?: string;
   comment_elvira?: string;
