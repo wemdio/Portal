@@ -45,6 +45,7 @@ export interface Project {
   kpi_fact?: string;
   status: ProjectStatus;
   specialist?: string;
+  specialist_user_id?: string | null;
   manager?: string;
   weekly_tasks?: string;
   comment_elvira?: string;
@@ -60,6 +61,14 @@ export interface Project {
   payment_date?: string;
   contacts_obligation?: string;
   contacts_done?: string;
+
+  brief_file_path?: string | null;
+  brief_file_name?: string | null;
+  brief_text?: string | null;
+  brief_uploaded_at?: string | null;
+  lead_source_hypotheses?: string | null;
+  lead_source_hypotheses_generated_at?: string | null;
+  lead_source_hypotheses_error?: string | null;
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';

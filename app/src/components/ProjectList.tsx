@@ -395,6 +395,7 @@ export function ProjectList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [assigneeNameToId, setAssigneeNameToId] = useState<Map<string, string>>(new Map());
   const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
   const [assigneePublicAvatars, setAssigneePublicAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
@@ -499,17 +500,20 @@ export function ProjectList() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('email, full_name, avatar_url');
+        .select('id, email, full_name, avatar_url');
 
       if (error) throw error;
-      const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
+      const profiles = (data ?? []) as Array<Pick<UserProfile, 'id' | 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles, locale));
+      const nameIdMap = new Map<string, string>();
       const publicAvatarMap = new Map<string, string>();
       for (const profile of profiles) {
         const name = normalizeAssigneeName(profile.full_name?.trim() || profile.email?.split('@')[0]?.trim());
+        if (name && profile.id) nameIdMap.set(name, profile.id);
         const avatarUrl = typeof profile.avatar_url === 'string' ? profile.avatar_url.trim() : '';
         if (name && avatarUrl) publicAvatarMap.set(name, avatarUrl);
       }
+      setAssigneeNameToId(nameIdMap);
       setAssigneePublicAvatars(publicAvatarMap);
 
       void fetchSignedAvatars();
@@ -885,6 +889,11 @@ export function ProjectList() {
     if (Object.keys(payload).length === 0) {
       clearDraftFields(project.id, Object.keys(updates) as Array<keyof Project>);
       return;
+    }
+
+    if ('specialist' in payload) {
+      const specialistName = payload.specialist;
+      payload.specialist_user_id = specialistName ? (assigneeNameToId.get(specialistName) ?? null) : null;
     }
 
     payload.updated_at = new Date().toISOString();

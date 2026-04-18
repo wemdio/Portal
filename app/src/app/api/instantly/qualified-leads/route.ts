@@ -2,8 +2,49 @@ import { NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * Resolve campaign IDs for a user via:
+ * 1. Manual preferences (user_instantly_campaign_preferences)
+ * 2. If none — auto-resolve via projects where user is specialist_user_id
+ *    → project_instantly_campaigns junction
+ */
+async function resolveCampaignIdsForUser(userId: string): Promise<string[] | null> {
+  if (!supabaseInstantly) return null;
+
+  // 1. Manual preferences
+  const { data: prefs } = await supabaseInstantly
+    .from('user_instantly_campaign_preferences')
+    .select('campaign_id')
+    .eq('user_id', userId);
+
+  if (prefs && prefs.length > 0) {
+    return prefs.map((p) => p.campaign_id as string);
+  }
+
+  // 2. Auto: user's projects → linked campaigns
+  if (!supabaseMain) return null;
+
+  const { data: projects } = await supabaseMain
+    .from('projects')
+    .select('id')
+    .eq('specialist_user_id', userId);
+
+  if (!projects?.length) return null;
+
+  const projectIds = projects.map((p: { id: string }) => p.id);
+  const { data: links } = await supabaseInstantly
+    .from('project_instantly_campaigns')
+    .select('campaign_id')
+    .in('project_id', projectIds);
+
+  if (!links?.length) return null;
+
+  return [...new Set(links.map((l) => l.campaign_id as string))];
+}
 
 export const PATCH = withAuth(async (req, user) => {
   if (!supabaseInstantly) {
@@ -58,17 +99,15 @@ export const GET = withAuth(async (req) => {
     query = query.neq('status', 'pending');
   }
 
+  let prefCampaignIds: string[] | null = null;
+
   if (campaignId) {
     query = query.eq('campaign_id', campaignId);
+    prefCampaignIds = [campaignId];
   } else if (usePreferences && user) {
-    const { data: prefs } = await supabaseInstantly
-      .from('user_instantly_campaign_preferences')
-      .select('campaign_id')
-      .eq('user_id', user.id);
-
-    if (prefs && prefs.length > 0) {
-      const campaignIds = prefs.map((p) => p.campaign_id);
-      query = query.in('campaign_id', campaignIds);
+    prefCampaignIds = await resolveCampaignIdsForUser(user.id);
+    if (prefCampaignIds && prefCampaignIds.length > 0) {
+      query = query.in('campaign_id', prefCampaignIds);
     }
   }
 
@@ -85,17 +124,6 @@ export const GET = withAuth(async (req) => {
   }
 
   // Build status counts with the same campaign/preference/search filters
-  let prefCampaignIds: string[] | null = null;
-  if (campaignId) {
-    prefCampaignIds = [campaignId];
-  } else if (usePreferences && user) {
-    const { data: prefs } = await supabaseInstantly
-      .from('user_instantly_campaign_preferences')
-      .select('campaign_id')
-      .eq('user_id', user.id);
-    if (prefs && prefs.length > 0) prefCampaignIds = prefs.map((p) => p.campaign_id);
-  }
-
   const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error'] as const;
   const counts: Record<string, number> = {};
 

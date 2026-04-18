@@ -2,6 +2,7 @@ import 'server-only';
 
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
+import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { getCampaignAnalytics } from '@/lib/instantly/client';
 import {
   iterateInstantlyCampaignPages,
@@ -140,6 +141,16 @@ export async function syncInstantlyCampaignCatalog(apiKey: string): Promise<{
 
   if (delError) {
     throw new Error(delError.message);
+  }
+
+  // Auto-match campaigns to projects by client name
+  try {
+    const { matched } = await autoMatchCampaignsToProjects();
+    if (matched > 0) {
+      console.log(`[instantly-catalog] auto-matched ${matched} campaign-project links`);
+    }
+  } catch (err) {
+    console.error('[instantly-catalog] auto-match error (non-fatal)', err);
   }
 
   return { pages, rows };
@@ -374,4 +385,69 @@ export async function deleteInstantlyCatalogCampaignById(id: string): Promise<vo
   if (error) {
     console.error('[instantly-catalog] delete by id failed', error.message);
   }
+}
+
+/**
+ * Auto-match Instantly campaigns to Portal projects by checking if
+ * campaign.name contains project.client (case-insensitive).
+ * Only inserts auto matches; manual matches are never overwritten.
+ */
+export async function autoMatchCampaignsToProjects(): Promise<{ matched: number }> {
+  if (!supabaseAdmin || !supabaseMain) return { matched: 0 };
+
+  const { data: projects } = await supabaseMain
+    .from('projects')
+    .select('id, client')
+    .not('client', 'is', null)
+    .neq('client', '');
+
+  if (!projects?.length) return { matched: 0 };
+
+  const { data: campaigns } = await supabaseAdmin
+    .from('instantly_campaign_catalog')
+    .select('id, name');
+
+  if (!campaigns?.length) return { matched: 0 };
+
+  const { data: existingManual } = await supabaseAdmin
+    .from('project_instantly_campaigns')
+    .select('project_id, campaign_id')
+    .eq('match_source', 'manual');
+
+  const manualSet = new Set(
+    (existingManual ?? []).map((r: { project_id: string; campaign_id: string }) =>
+      `${r.project_id}::${r.campaign_id}`),
+  );
+
+  const matches: { project_id: string; campaign_id: string; match_source: string }[] = [];
+
+  for (const project of projects as { id: string; client: string }[]) {
+    const clientLower = project.client.trim().toLowerCase();
+    if (clientLower.length < 2) continue;
+
+    for (const campaign of campaigns as { id: string; name: string }[]) {
+      const campaignLower = (campaign.name ?? '').toLowerCase();
+      if (!campaignLower.includes(clientLower)) continue;
+      const key = `${project.id}::${campaign.id}`;
+      if (manualSet.has(key)) continue;
+      matches.push({
+        project_id: project.id,
+        campaign_id: campaign.id,
+        match_source: 'auto',
+      });
+    }
+  }
+
+  if (matches.length === 0) return { matched: 0 };
+
+  const { error } = await supabaseAdmin
+    .from('project_instantly_campaigns')
+    .upsert(matches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
+
+  if (error) {
+    console.error('[instantly-catalog] auto-match campaigns to projects failed', error.message);
+    return { matched: 0 };
+  }
+
+  return { matched: matches.length };
 }
