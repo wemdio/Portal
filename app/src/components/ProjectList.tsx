@@ -10,6 +10,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -1953,6 +1954,29 @@ export function ProjectList() {
                     </div>
                   )}
                 </div>
+              </section>
+
+              {/* Client brief PDF + AI lead-source hypotheses */}
+              <section>
+                <ProjectBriefSection
+                  projectId={selectedProject.id}
+                  brief={{
+                    brief_file_path: selectedProject.brief_file_path,
+                    brief_file_name: selectedProject.brief_file_name,
+                    brief_uploaded_at: selectedProject.brief_uploaded_at,
+                    lead_source_hypotheses: selectedProject.lead_source_hypotheses,
+                    lead_source_hypotheses_generated_at: selectedProject.lead_source_hypotheses_generated_at,
+                    lead_source_hypotheses_error: selectedProject.lead_source_hypotheses_error,
+                  }}
+                  canEdit={canEdit}
+                  onChange={(next) => {
+                    setProjects((prev) =>
+                      prev.map((item) =>
+                        item.id === selectedProject.id ? { ...item, ...next } : item,
+                      ),
+                    );
+                  }}
+                />
               </section>
 
               {/* Collapsible Project Settings */}
