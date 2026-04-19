@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole } from '@/types';
-import { isTechnician, isLead } from '@/lib/roles';
+import { isTechnician, isLead, isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 
 /* ═══════════════════════════════════════════
@@ -230,6 +230,13 @@ export default function BillingCalendarView() {
     notes: '',
   });
 
+  // Saving state to prevent double-click
+  const [saving, setSaving] = useState(false);
+
+  // Duplicates modal state
+  const [duplicatesModalOpen, setDuplicatesModalOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   /* ─── Data Fetching ─── */
 
   // Table existence state
@@ -419,6 +426,7 @@ export default function BillingCalendarView() {
   }
 
   async function handleSave() {
+    if (saving) return;
     if (!form.project_name.trim() || !form.next_billing_date) return;
 
     const payload = {
@@ -433,31 +441,74 @@ export default function BillingCalendarView() {
       notes: form.notes || null,
     };
 
+    setSaving(true);
     try {
       if (modalMode === 'create') {
+        // Check for duplicate before inserting
+        const { data: existing } = await supabase
+          .from('email_subscriptions')
+          .select('id')
+          .eq('project_name', payload.project_name)
+          .eq('next_billing_date', payload.next_billing_date)
+          .limit(1);
+
+        if (existing && existing.length > 0) {
+          alert('Подписка для этого проекта на эту дату уже существует. Откройте её для редактирования.');
+          setSaving(false);
+          return;
+        }
+
         await supabase
           .from('email_subscriptions')
           .insert({ ...payload, created_by: userId, status: 'active' });
       } else if (modalMode === 'pay_today') {
+        const today = todayStr();
+        const nextMonth = getNextMonthDate(today);
+
+        // Check for duplicate today
+        const { data: existingToday } = await supabase
+          .from('email_subscriptions')
+          .select('id')
+          .eq('project_name', payload.project_name)
+          .eq('next_billing_date', today)
+          .limit(1);
+
+        if (existingToday && existingToday.length > 0) {
+          alert('Оплата для этого проекта на сегодня уже зарегистрирована.');
+          setSaving(false);
+          return;
+        }
+
         await supabase
           .from('email_subscriptions')
           .insert({
             ...payload,
-            next_billing_date: todayStr(),
+            next_billing_date: today,
             created_by: userId,
             status: 'keep',
             lead_decision: 'keep',
             lead_decision_by: userId,
             lead_decision_at: new Date().toISOString(),
           });
-        await supabase
+
+        // Check before creating next-month record
+        const { data: existingNext } = await supabase
           .from('email_subscriptions')
-          .insert({
-            ...payload,
-            next_billing_date: getNextMonthDate(todayStr()),
-            created_by: userId,
-            status: 'active',
-          });
+          .select('id')
+          .eq('project_name', payload.project_name)
+          .eq('next_billing_date', nextMonth)
+          .limit(1);
+
+        if (!existingNext || existingNext.length === 0) {
+          await supabase
+            .from('email_subscriptions')
+            .insert({
+              ...payload,
+              next_billing_date: nextMonth,
+              created_by: userId,
+              status: 'active',
+            });
+        }
       } else if (modalMode === 'edit' && editingItem) {
         await supabase
           .from('email_subscriptions')
@@ -469,13 +520,20 @@ export default function BillingCalendarView() {
       fetchSubscriptions();
     } catch (err) {
       console.error('Error saving:', err);
+    } finally {
+      setSaving(false);
     }
   }
 
   async function handleDecisionSave() {
+    if (saving) return;
     if (!editingItem || !decisionForm.decision) return;
 
+    setSaving(true);
     try {
+      const previousDecision = editingItem.lead_decision;
+      const nextMonthDate = getNextMonthDate(editingItem.next_billing_date);
+
       await supabase
         .from('email_subscriptions')
         .update({
@@ -488,27 +546,47 @@ export default function BillingCalendarView() {
         .eq('id', editingItem.id);
 
       if (decisionForm.decision === 'keep') {
+        // Check if next-month record already exists for this project (prevent duplicates from re-clicking "keep")
+        const { data: existingNext } = await supabase
+          .from('email_subscriptions')
+          .select('id, status')
+          .eq('project_name', editingItem.project_name)
+          .eq('next_billing_date', nextMonthDate)
+          .limit(1);
+
+        if (!existingNext || existingNext.length === 0) {
+          await supabase
+            .from('email_subscriptions')
+            .insert({
+              project_id: editingItem.project_id,
+              project_name: editingItem.project_name,
+              email_provider: editingItem.email_provider,
+              email_count: editingItem.email_count,
+              next_billing_date: nextMonthDate,
+              billing_amount: editingItem.billing_amount,
+              currency: editingItem.currency,
+              billing_cycle: editingItem.billing_cycle,
+              notes: editingItem.notes,
+              created_by: editingItem.created_by,
+              status: 'active',
+            });
+        }
+      } else if (decisionForm.decision === 'cancel' && previousDecision === 'keep') {
+        // Decision changed from keep to cancel — remove the auto-created next-month active record
         await supabase
           .from('email_subscriptions')
-          .insert({
-            project_id: editingItem.project_id,
-            project_name: editingItem.project_name,
-            email_provider: editingItem.email_provider,
-            email_count: editingItem.email_count,
-            next_billing_date: getNextMonthDate(editingItem.next_billing_date),
-            billing_amount: editingItem.billing_amount,
-            currency: editingItem.currency,
-            billing_cycle: editingItem.billing_cycle,
-            notes: editingItem.notes,
-            created_by: editingItem.created_by,
-            status: 'active',
-          });
+          .delete()
+          .eq('project_name', editingItem.project_name)
+          .eq('next_billing_date', nextMonthDate)
+          .eq('status', 'active');
       }
 
       setModalOpen(false);
       fetchSubscriptions();
     } catch (err) {
       console.error('Error saving decision:', err);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -522,6 +600,35 @@ export default function BillingCalendarView() {
     }
   }
 
+  async function handleDeleteDuplicate(id: string) {
+    setDeletingId(id);
+    try {
+      await supabase.from('email_subscriptions').delete().eq('id', id);
+      await fetchSubscriptions();
+    } catch (err) {
+      console.error('Error deleting duplicate:', err);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function handleDeleteFromModal() {
+    if (saving) return;
+    if (!editingItem) return;
+    if (!confirm(`Удалить подписку «${editingItem.project_name}» от ${new Date(editingItem.next_billing_date).toLocaleDateString('ru-RU')}?\n\nЭто действие необратимо.`)) return;
+
+    setSaving(true);
+    try {
+      await supabase.from('email_subscriptions').delete().eq('id', editingItem.id);
+      setModalOpen(false);
+      await fetchSubscriptions();
+    } catch (err) {
+      console.error('Error deleting:', err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function handleProjectSelect(projectId: string) {
     const project = projects.find((p) => p.id === projectId);
     if (project) {
@@ -532,6 +639,37 @@ export default function BillingCalendarView() {
       }));
     }
   }
+
+  /* ─── Duplicates detection ─── */
+
+  const duplicateGroups = useMemo(() => {
+    const groups = new Map<string, EmailSubscription[]>();
+    subscriptions.forEach((sub) => {
+      const key = `${sub.project_name}__${sub.next_billing_date}`;
+      const existing = groups.get(key) || [];
+      existing.push(sub);
+      groups.set(key, existing);
+    });
+    const dups: EmailSubscription[][] = [];
+    groups.forEach((items) => {
+      if (items.length > 1) {
+        dups.push(items.sort((a, b) => a.created_at.localeCompare(b.created_at)));
+      }
+    });
+    return dups.sort((a, b) => b[0].next_billing_date.localeCompare(a[0].next_billing_date));
+  }, [subscriptions]);
+
+  const duplicatesCount = useMemo(
+    () => duplicateGroups.reduce((sum, g) => sum + g.length - 1, 0),
+    [duplicateGroups],
+  );
+
+  useEffect(() => {
+    if (duplicatesModalOpen && duplicateGroups.length === 0) {
+      const timer = setTimeout(() => setDuplicatesModalOpen(false), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [duplicatesModalOpen, duplicateGroups.length]);
 
   /* ─── Stats ─── */
 
@@ -635,6 +773,18 @@ export default function BillingCalendarView() {
             </button>
           </div>
 
+          {isTechnician(userRole) && duplicatesCount > 0 && (
+            <button
+              onClick={() => setDuplicatesModalOpen(true)}
+              className="px-4 py-2 text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors shadow-sm flex items-center gap-1.5"
+              title="Найдены повторяющиеся подписки. Нажмите чтобы просмотреть и удалить лишние."
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              Дубликаты: {duplicatesCount}
+            </button>
+          )}
           {isTechnician(userRole) && (
             <>
               <button
@@ -1315,7 +1465,22 @@ export default function BillingCalendarView() {
             </div>
 
             {/* Modal Footer */}
-            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-3">
+            <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between gap-3">
+              <div>
+                {isAdmin(userRole) && (modalMode === 'edit' || modalMode === 'decision') && editingItem && (
+                  <button
+                    onClick={handleDeleteFromModal}
+                    disabled={saving}
+                    className="px-4 py-2 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3" />
+                    </svg>
+                    Удалить
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
               <button
                 onClick={() => setModalOpen(false)}
                 className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
@@ -1325,18 +1490,18 @@ export default function BillingCalendarView() {
               {(modalMode === 'create' || modalMode === 'edit' || modalMode === 'pay_today') && (
                 <button
                   onClick={handleSave}
-                  disabled={!form.project_name.trim() || !form.next_billing_date}
+                  disabled={saving || !form.project_name.trim() || !form.next_billing_date}
                   className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                     modalMode === 'pay_today' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'
                   }`}
                 >
-                  {modalMode === 'create' ? 'Создать' : modalMode === 'pay_today' ? 'Оплатить' : 'Сохранить'}
+                  {saving ? 'Сохранение...' : modalMode === 'create' ? 'Создать' : modalMode === 'pay_today' ? 'Оплатить' : 'Сохранить'}
                 </button>
               )}
               {modalMode === 'decision' && (
                 <button
                   onClick={handleDecisionSave}
-                  disabled={!decisionForm.decision}
+                  disabled={saving || !decisionForm.decision}
                   className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                     decisionForm.decision === 'keep'
                       ? 'bg-emerald-600 hover:bg-emerald-700'
@@ -1345,9 +1510,117 @@ export default function BillingCalendarView() {
                         : 'bg-blue-600 hover:bg-blue-700'
                   }`}
                 >
-                  Подтвердить
+                  {saving ? 'Сохранение...' : 'Подтвердить'}
                 </button>
               )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicates Modal */}
+      {duplicatesModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setDuplicatesModalOpen(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Найдены повторяющиеся подписки</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {duplicateGroups.length} {duplicateGroups.length === 1 ? 'группа' : 'групп'} ·
+                  {' '}{duplicatesCount} лишних {duplicatesCount === 1 ? 'запись' : 'записей'}
+                </p>
+              </div>
+              <button
+                onClick={() => setDuplicatesModalOpen(false)}
+                className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {duplicateGroups.length === 0 ? (
+              <div className="px-6 py-12 text-center text-sm text-gray-500">
+                Дубликатов больше нет. Спасибо за уборку!
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 text-xs text-blue-700">
+                  Дубликаты — это записи с одинаковым проектом и датой списания. Просмотрите каждую группу и удалите лишние.
+                  Самая старая запись помечена как «Оригинал» — обычно её и оставляют.
+                </div>
+                {duplicateGroups.map((group, gi) => {
+                  const project = group[0].project_name;
+                  const date = group[0].next_billing_date;
+                  return (
+                    <div key={gi} className="border border-gray-200 rounded-xl overflow-hidden">
+                      <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                        <div className="font-medium text-sm text-gray-900 truncate">{project}</div>
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          Дата: {new Date(date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}
+                          {' · '}{group.length} записей
+                        </div>
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {group.map((item, idx) => {
+                          const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.active;
+                          const isOriginal = idx === 0;
+                          const createdDate = new Date(item.created_at).toLocaleString('ru-RU', {
+                            day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+                          });
+                          return (
+                            <div key={item.id} className={`px-4 py-2.5 flex items-center gap-3 ${isOriginal ? 'bg-blue-50/30' : ''}`}>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${cfg.bg} ${cfg.text}`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                                    {cfg.label}
+                                  </span>
+                                  {isOriginal && (
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-semibold uppercase">
+                                      Оригинал
+                                    </span>
+                                  )}
+                                  <span className="text-xs text-gray-500">создано {createdDate}</span>
+                                </div>
+                                <div className="mt-1 text-xs text-gray-500">
+                                  {formatCurrency(item.billing_amount, item.currency)}
+                                  {item.email_provider && <> · {item.email_provider}</>}
+                                  {item.email_count > 1 && <> · {item.email_count} почт</>}
+                                  {item.lead_decision && (
+                                    <> · решение: <span className={item.lead_decision === 'keep' ? 'text-emerald-600' : 'text-red-600'}>
+                                      {item.lead_decision === 'keep' ? 'оставить' : 'отменить'}
+                                    </span></>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleDeleteDuplicate(item.id)}
+                                disabled={deletingId === item.id}
+                                className="px-2.5 py-1 text-[11px] font-medium text-red-600 bg-red-50 rounded-md hover:bg-red-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {deletingId === item.id ? 'Удаление...' : 'Удалить'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="px-6 py-3 border-t border-gray-100 flex items-center justify-end">
+              <button
+                onClick={() => setDuplicatesModalOpen(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                Закрыть
+              </button>
             </div>
           </div>
         </div>
