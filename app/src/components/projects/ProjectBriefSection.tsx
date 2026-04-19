@@ -5,6 +5,7 @@ import { Download, Trash2, Sparkles, FileText, AlertCircle } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient';
 import { logError } from '@/lib/loggerClient';
 import { ProjectBriefUploader } from './ProjectBriefUploader';
+import { LeadSourceHypothesesView } from './LeadSourceHypothesesView';
 
 interface BriefFields {
   brief_file_path?: string | null;
@@ -235,10 +236,8 @@ export function ProjectBriefSection({
         <SectionCard title="Гипотезы по сбору баз (AI)">
           {hasHypotheses ? (
             <>
-              <div className="rounded-lg border border-gray-100 bg-gray-50/60 p-4 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed font-sans">
-                {brief.lead_source_hypotheses}
-              </div>
-              <p className="mt-2 text-xs text-gray-400">
+              <LeadSourceHypothesesView markdown={brief.lead_source_hypotheses ?? ''} />
+              <p className="mt-3 text-xs text-gray-400">
                 Сгенерировано {formatDate(brief.lead_source_hypotheses_generated_at)} один раз на основе брифа.
                 {hasBrief && canEdit && ' Чтобы пересоздать — удалите бриф и загрузите заново.'}
               </p>
