@@ -14,6 +14,32 @@ const MAX_FILE_NAME_LENGTH = 120;
 const MAX_PROJECT_ID_LENGTH = 64;
 const DEFAULT_FILE_BASE = 'brief';
 
+/**
+ * Supabase Storage (на бэке Go) валидирует ключ объектов через `\w` — это
+ * только `[A-Za-z0-9_]`, без юникода. Кириллица в ключе ломает upload
+ * с ошибкой "Invalid key". Поэтому имя файла для STORAGE_KEY мы
+ * транслитерируем (а исходное имя сохраняем отдельно в `brief_file_name`
+ * для отображения).
+ */
+const RU_TRANSLITERATION: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh',
+  з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o',
+  п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts',
+  ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+  А: 'A', Б: 'B', В: 'V', Г: 'G', Д: 'D', Е: 'E', Ё: 'E', Ж: 'Zh',
+  З: 'Z', И: 'I', Й: 'Y', К: 'K', Л: 'L', М: 'M', Н: 'N', О: 'O',
+  П: 'P', Р: 'R', С: 'S', Т: 'T', У: 'U', Ф: 'F', Х: 'Kh', Ц: 'Ts',
+  Ч: 'Ch', Ш: 'Sh', Щ: 'Sch', Ъ: '', Ы: 'Y', Ь: '', Э: 'E', Ю: 'Yu', Я: 'Ya',
+};
+
+function transliterateRu(input: string): string {
+  let out = '';
+  for (const ch of input) {
+    out += RU_TRANSLITERATION[ch] ?? ch;
+  }
+  return out;
+}
+
 /** Strip path-traversal and slashes from a single project id segment. */
 export function sanitizeProjectIdForPath(projectId: string): string {
   const trimmed = String(projectId ?? '').trim();
@@ -46,10 +72,13 @@ export function sanitizeBriefFileName(rawName: string): string {
   const hasPdfExt = lower.endsWith('.pdf');
   const base = hasPdfExt ? noTraversal.slice(0, -4) : noTraversal;
 
-  // sanitise base: collapse whitespace and unsafe chars to hyphen, keep cyrillic + ascii word chars
-  const safeBase = base
+  // sanitise base for an S3-compatible Supabase Storage key (ASCII only):
+  // 1) транслитерируем кириллицу, 2) пробелы/_ → дефис, 3) выкидываем всё, что
+  // не [A-Za-z0-9-], 4) схлопываем дубли дефисов.
+  const transliterated = transliterateRu(base);
+  const safeBase = transliterated
     .replace(/[\s_]+/g, '-')
-    .replace(/[^\p{L}\p{N}\-]+/gu, '-')
+    .replace(/[^a-zA-Z0-9-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
 
