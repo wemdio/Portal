@@ -388,8 +388,141 @@ export async function deleteInstantlyCatalogCampaignById(id: string): Promise<vo
 }
 
 /**
+ * AI-powered matching for campaigns that text-based matching missed.
+ * Only processes campaigns not yet linked to any project.
+ * Uses a cheap model to match campaign names to project clients
+ * (handles transliteration, abbreviations, different languages).
+ */
+async function aiMatchUnmatchedCampaigns(
+  projects: { id: string; client: string }[],
+  allCampaignIds: Set<string>,
+): Promise<{ matched: number }> {
+  if (!supabaseAdmin || !supabaseMain) return { matched: 0 };
+
+  const apiKey =
+    process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
+    process.env.OPENROUTER_BRIEF_API_KEY ??
+    '';
+  if (!apiKey) return { matched: 0 };
+
+  // Find campaigns not linked to any project yet
+  const { data: alreadyLinked } = await supabaseAdmin
+    .from('project_instantly_campaigns')
+    .select('campaign_id');
+
+  const linkedIds = new Set(
+    (alreadyLinked ?? []).map((r: { campaign_id: string }) => r.campaign_id),
+  );
+
+  const { data: unmatchedRows } = await supabaseAdmin
+    .from('instantly_campaign_catalog')
+    .select('id, name')
+    .not('name', 'is', null);
+
+  if (!unmatchedRows?.length) return { matched: 0 };
+
+  const unmatched = (unmatchedRows as { id: string; name: string }[])
+    .filter((c) => !linkedIds.has(c.id) && allCampaignIds.has(c.id) && c.name.trim().length > 3);
+
+  if (unmatched.length === 0) return { matched: 0 };
+
+  // Process in batches to stay within token limits
+  const BATCH_SIZE = 200;
+  const projectList = projects.map((p) => `${p.id}|${p.client}`).join('\n');
+  let totalMatched = 0;
+
+  for (let i = 0; i < unmatched.length; i += BATCH_SIZE) {
+    const batch = unmatched.slice(i, i + BATCH_SIZE);
+    const campaignList = batch.map((c) => `${c.id}|${c.name}`).join('\n');
+
+    const prompt = `Match campaigns to projects by client name. Campaigns may use transliteration, abbreviations, or different languages than the project client name.
+
+PROJECTS (id|client):
+${projectList}
+
+CAMPAIGNS (id|name):
+${campaignList}
+
+Return ONLY a JSON array of matches: [{"project_id":"...","campaign_id":"..."}]
+Only include confident matches. If a campaign clearly belongs to a project client, include it. If unsure, skip it.
+Return [] if no matches found.`;
+
+    try {
+      const response = await fetch('https://router.requesty.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://portal.app',
+          'X-Title': 'Portal - Campaign Project Matcher',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.0-flash-001',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0,
+          max_tokens: 4000,
+          response_format: { type: 'json_object' },
+        }),
+      });
+
+      if (!response.ok) {
+        console.error(`[ai-match] API ${response.status}`);
+        continue;
+      }
+
+      const json = (await response.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const content = json.choices?.[0]?.message?.content ?? '';
+      let parsed: { project_id: string; campaign_id: string }[] = [];
+      try {
+        const raw = JSON.parse(content);
+        parsed = Array.isArray(raw) ? raw : (raw.matches ?? raw.results ?? []);
+      } catch {
+        const arrMatch = content.match(/\[[\s\S]*\]/);
+        if (arrMatch) {
+          try { parsed = JSON.parse(arrMatch[0]); } catch { /* skip */ }
+        }
+      }
+
+      if (parsed.length === 0) continue;
+
+      // Validate: only allow known project_id and campaign_id values
+      const projectIds = new Set(projects.map((p) => p.id));
+      const batchCampaignIds = new Set(batch.map((c) => c.id));
+      const valid = parsed.filter(
+        (m) => projectIds.has(m.project_id) && batchCampaignIds.has(m.campaign_id),
+      );
+
+      if (valid.length > 0) {
+        const rows = valid.map((m) => ({
+          project_id: m.project_id,
+          campaign_id: m.campaign_id,
+          match_source: 'auto',
+        }));
+
+        const { error } = await supabaseAdmin
+          .from('project_instantly_campaigns')
+          .upsert(rows, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
+
+        if (!error) {
+          totalMatched += valid.length;
+        } else {
+          console.error('[ai-match] upsert error:', error.message);
+        }
+      }
+    } catch (err) {
+      console.error('[ai-match] error:', err);
+    }
+  }
+
+  return { matched: totalMatched };
+}
+
+/**
  * Auto-match Instantly campaigns to Portal projects by checking if
  * campaign.name contains project.client (case-insensitive).
+ * Then uses AI for remaining unmatched campaigns.
  * Only inserts auto matches; manual matches are never overwritten.
  */
 export async function autoMatchCampaignsToProjects(): Promise<{ matched: number }> {
@@ -438,16 +571,34 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     }
   }
 
-  if (matches.length === 0) return { matched: 0 };
+  let textMatched = 0;
+  if (matches.length > 0) {
+    const { error } = await supabaseAdmin
+      .from('project_instantly_campaigns')
+      .upsert(matches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
 
-  const { error } = await supabaseAdmin
-    .from('project_instantly_campaigns')
-    .upsert(matches, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
-
-  if (error) {
-    console.error('[instantly-catalog] auto-match campaigns to projects failed', error.message);
-    return { matched: 0 };
+    if (error) {
+      console.error('[instantly-catalog] auto-match campaigns to projects failed', error.message);
+    } else {
+      textMatched = matches.length;
+    }
   }
 
-  return { matched: matches.length };
+  // AI-powered matching for campaigns that text matching missed
+  const allCampaignIds = new Set((campaigns as { id: string }[]).map((c) => c.id));
+  let aiMatched = 0;
+  try {
+    const aiResult = await aiMatchUnmatchedCampaigns(
+      projects as { id: string; client: string }[],
+      allCampaignIds,
+    );
+    aiMatched = aiResult.matched;
+    if (aiMatched > 0) {
+      console.log(`[instantly-catalog] AI matched ${aiMatched} additional campaign-project links`);
+    }
+  } catch (err) {
+    console.error('[instantly-catalog] AI match error (non-fatal)', err);
+  }
+
+  return { matched: textMatched + aiMatched };
 }
