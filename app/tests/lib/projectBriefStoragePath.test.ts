@@ -45,9 +45,28 @@ describe('project brief storage path', () => {
     expect(path).toMatch(/^projects\/[a-z0-9_-]+\//i);
   });
 
-  it('заменяет пробелы и небезопасные символы на дефис, оставляет кириллицу', () => {
+  it('транслитерирует кириллицу в латиницу (Supabase Storage S3-ключи разрешают только ASCII)', () => {
     const safe = sanitizeBriefFileName('Бриф для клиента 2026-04.pdf');
-    expect(safe).toBe('Бриф-для-клиента-2026-04.pdf');
+    expect(safe).toBe('Brif-dlya-klienta-2026-04.pdf');
+  });
+
+  it('итог имени файла всегда ASCII-only', () => {
+    const cases = [
+      'Бриф_для_клиента.pdf',
+      'redev _ Бриф _ Аутрич.pdf',
+      'Договор № 47.pdf',
+      'üñíçødé.pdf',
+    ];
+    for (const name of cases) {
+      const safe = sanitizeBriefFileName(name);
+      // eslint-disable-next-line no-control-regex
+      expect(safe).toMatch(/^[\x00-\x7F]+$/);
+    }
+  });
+
+  it('regression: prod-сбой "Invalid key: ...redev-Бриф-Аутрич.pdf" больше не воспроизводится', () => {
+    const safe = sanitizeBriefFileName('redev _ Бриф _ Аутрич.pdf');
+    expect(safe).toBe('redev-Brif-Autrich.pdf');
   });
 
   it('добавляет .pdf если расширение отсутствует', () => {
