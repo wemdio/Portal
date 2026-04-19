@@ -6,10 +6,10 @@ export const runtime = 'nodejs';
 
 const CRON_SECRET = process.env.CRON_SECRET ?? '';
 
-const CEO_EMAILS = [
-  'sorichev@polzaagency.ru',
-  'grid4ina.an@gmail.com',
-];
+const ESCALATION_EMAILS: Record<string, string> = {
+  anya: 'grid4ina.an@gmail.com',
+  nikita: 'sorichev@polzaagency.ru',
+};
 
 const MSK_OFFSET_HOURS = 3;
 
@@ -201,9 +201,13 @@ async function run() {
 
   const nameIndex = buildNameIndex(profiles ?? []);
 
-  const ceoProfiles = (profiles ?? []).filter(
-    (p) => p.email && CEO_EMAILS.includes(p.email.toLowerCase()),
+  const anyaProfile = (profiles ?? []).find(
+    (p) => p.email?.toLowerCase() === ESCALATION_EMAILS.anya,
   );
+  const nikitaProfile = (profiles ?? []).find(
+    (p) => p.email?.toLowerCase() === ESCALATION_EMAILS.nikita,
+  );
+  const ceoProfiles = [anyaProfile, nikitaProfile].filter(Boolean) as ProfileRow[];
 
   // --- Load existing dedup entries ---
   const { data: existingLogs } = await supabaseAdmin
@@ -302,7 +306,12 @@ async function run() {
   }
 
   // ─── Lead qualification escalation ─────────────────────────────────
-  const leadCreated = await escalateLeadNotifications(supabaseAdmin, profiles ?? [], ceoProfiles);
+  const leadCreated = await escalateLeadNotifications(
+    supabaseAdmin,
+    nameIndex,
+    anyaProfile ?? null,
+    nikitaProfile ?? null,
+  );
 
   return NextResponse.json({
     processed: entities.length,
@@ -313,24 +322,26 @@ async function run() {
 
 /**
  * Escalate lead qualification notifications:
- *  - 1h after specialist notified and lead still unread → notify all leads (role='lead')
- *  - 2h after specialist notified and lead still unread → notify CEOs
+ *  - 30min after specialist notified and still unread → notify PM (project manager)
+ *  - 1.5h after specialist notified and still unread → notify Anya
+ *  - 2.5h after specialist notified and still unread → notify Nikita
  */
 async function escalateLeadNotifications(
   db: NonNullable<typeof supabaseAdmin>,
-  _profiles: ProfileRow[],
-  ceoProfiles: ProfileRow[],
+  nameIndex: Map<string, ProfileRow>,
+  anyaProfile: ProfileRow | null,
+  nikitaProfile: ProfileRow | null,
 ): Promise<number> {
   const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const thirtyMinAgo = new Date(now.getTime() - 30 * 60 * 1000).toISOString();
 
-  // Find lead qualifications with specialist-level notification sent 1h+ ago
+  // Find lead qualifications with specialist-level notification sent 30min+ ago
   const { data: specLogs } = await db
     .from('deadline_notification_log')
     .select('entity_id, created_at')
     .eq('entity_type', 'lead_qualification')
     .eq('level', 'specialist')
-    .lte('created_at', oneHourAgo);
+    .lte('created_at', thirtyMinAgo);
 
   if (!specLogs?.length) return 0;
 
@@ -364,12 +375,6 @@ async function escalateLeadNotifications(
     ),
   );
 
-  // Get all users with role 'lead' for the lead-level escalation
-  const { data: leadRoleProfiles } = await db
-    .from('profiles')
-    .select('id, email, full_name')
-    .eq('role', 'lead');
-
   const specLogMap = new Map<string, string>();
   for (const log of specLogs) {
     specLogMap.set(log.entity_id, log.created_at);
@@ -388,6 +393,54 @@ async function escalateLeadNotifications(
     if (n.body) notifBodyMap.set(n.entity_id, n.body);
   }
 
+  // Load qualification → campaign → project → manager (PM) mapping
+  const { data: quals } = await db
+    .from('notifications')
+    .select('entity_id, entity_type')
+    .eq('entity_type', 'lead_qualification')
+    .eq('type', 'lead_new')
+    .in('entity_id', [...unreadQualIds]);
+
+  // Build qualId → PM profile mapping via instantly DB
+  const qualPmMap = new Map<string, ProfileRow>();
+  // We need to go: qualification → instantly_lead_qualifications.campaign_id → project_instantly_campaigns → projects.manager
+  // But we only have main DB here. Use a single query approach:
+  // Get campaign_ids from the lead_new notification body is not ideal.
+  // Instead, query instantly DB from main cron is not possible (different DB).
+  // Workaround: store campaign_id context in notification or use projects.manager for all unread leads.
+  // Best approach: query projects where specialist_user_id matches the original notification recipient.
+  const { data: notifRecipients } = await db
+    .from('notifications')
+    .select('entity_id, user_id')
+    .eq('entity_type', 'lead_qualification')
+    .eq('type', 'lead_new')
+    .in('entity_id', [...unreadQualIds]);
+
+  const qualSpecialistMap = new Map<string, string>();
+  for (const n of notifRecipients ?? []) {
+    if (n.user_id) qualSpecialistMap.set(n.entity_id, n.user_id);
+  }
+
+  // For each specialist, find their project's manager
+  const specialistIds = [...new Set(qualSpecialistMap.values())];
+  const specialistPmMap = new Map<string, ProfileRow>();
+  if (specialistIds.length > 0) {
+    const { data: projects } = await db
+      .from('projects')
+      .select('specialist_user_id, manager')
+      .in('specialist_user_id', specialistIds)
+      .not('manager', 'is', null);
+
+    if (projects) {
+      for (const p of projects) {
+        if (p.specialist_user_id && p.manager) {
+          const pm = resolveProfile(nameIndex, p.manager as string);
+          if (pm) specialistPmMap.set(p.specialist_user_id as string, pm);
+        }
+      }
+    }
+  }
+
   let created = 0;
 
   for (const qualId of unreadQualIds) {
@@ -395,54 +448,77 @@ async function escalateLeadNotifications(
     if (!specCreatedAt) continue;
 
     const specTime = new Date(specCreatedAt).getTime();
-    const elapsed = now.getTime() - specTime;
-    const elapsedHours = elapsed / (3_600_000);
+    const elapsedMin = (now.getTime() - specTime) / 60_000;
     const leadBody = notifBodyMap.get(qualId) ?? '';
 
-    // 1h+ → lead escalation
-    if (elapsedHours >= 1 && !escalatedSet.has(`${qualId}:lead`)) {
-      const recipients = leadRoleProfiles ?? [];
-      if (recipients.length) {
-        const rows = recipients.map((r: ProfileRow) => ({
-          user_id: r.id,
+    // 30min+ → PM (manager of the project) escalation
+    if (elapsedMin >= 30 && !escalatedSet.has(`${qualId}:lead`)) {
+      const specialistId = qualSpecialistMap.get(qualId);
+      const pm = specialistId ? specialistPmMap.get(specialistId) : null;
+      if (pm) {
+        const { error } = await db.from('notifications').insert({
+          user_id: pm.id,
           type: 'lead_escalation',
-          title: 'Лид не обработан более часа',
+          title: 'Лид не обработан более 30 мин',
           body: leadBody,
           entity_type: 'lead_qualification',
           entity_id: qualId,
-        }));
-
-        const { error } = await db.from('notifications').insert(rows);
+        });
         if (!error) {
           await db.from('deadline_notification_log').upsert(
             { entity_type: 'lead_qualification', entity_id: qualId, level: 'lead' },
             { onConflict: 'entity_type,entity_id,level' },
           );
-          created += rows.length;
+          created += 1;
         }
       }
     }
 
-    // 2h+ → CEO escalation
-    if (elapsedHours >= 2 && !escalatedSet.has(`${qualId}:ceo`)) {
-      if (ceoProfiles.length) {
-        const rows = ceoProfiles.map((r) => ({
-          user_id: r.id,
+    // 1.5h+ → Anya escalation
+    if (elapsedMin >= 90 && !escalatedSet.has(`${qualId}:ceo`)) {
+      if (anyaProfile) {
+        const { error } = await db.from('notifications').insert({
+          user_id: anyaProfile.id,
           type: 'lead_ceo',
-          title: 'Лид не обработан более 2 часов',
+          title: 'Лид не обработан более 1.5 часов',
           body: leadBody,
           entity_type: 'lead_qualification',
           entity_id: qualId,
-        }));
-
-        const { error } = await db.from('notifications').insert(rows);
+        });
         if (!error) {
           await db.from('deadline_notification_log').upsert(
             { entity_type: 'lead_qualification', entity_id: qualId, level: 'ceo' },
             { onConflict: 'entity_type,entity_id,level' },
           );
-          created += rows.length;
+          created += 1;
         }
+      }
+    }
+
+    // 2.5h+ → Nikita escalation (reuse 'ceo' level won't work since Anya already uses it)
+    // We need a 4th level. For now use a separate check via notifications dedup.
+    if (elapsedMin >= 150 && nikitaProfile) {
+      const nikitaKey = `lead_qualification:${qualId}:nikita`;
+      const { data: nikitaExisting } = await db
+        .from('notifications')
+        .select('id')
+        .eq('entity_type', 'lead_qualification')
+        .eq('entity_id', qualId)
+        .eq('user_id', nikitaProfile.id)
+        .eq('type', 'lead_ceo')
+        .limit(1)
+        .maybeSingle();
+
+      if (!nikitaExisting) {
+        const { error } = await db.from('notifications').insert({
+          user_id: nikitaProfile.id,
+          type: 'lead_ceo',
+          title: 'Лид не обработан более 2.5 часов',
+          body: leadBody,
+          entity_type: 'lead_qualification',
+          entity_id: qualId,
+        });
+        if (!error) created += 1;
       }
     }
   }

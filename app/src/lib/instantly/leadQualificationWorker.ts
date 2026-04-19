@@ -264,8 +264,10 @@ async function qualifyOneReply(
 }
 
 /**
- * Create in-app notifications for specialists subscribed to the campaign.
- * Also logs the 'specialist' level in deadline_notification_log for dedup/escalation.
+ * Create in-app notifications for specialists responsible for this campaign's project.
+ * Finds specialist via: campaign → project_instantly_campaigns → projects.specialist_user_id.
+ * Falls back to user_instantly_campaign_preferences if no project link exists.
+ * Also logs the 'specialist' level in deadline_notification_log for escalation.
  */
 async function notifySpecialistsAboutLead(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
@@ -279,23 +281,52 @@ async function notifySpecialistsAboutLead(
   if (!supabaseMain) return;
 
   try {
-    // Find users subscribed to this campaign
-    const { data: prefs } = await instantlyDb
-      .from('user_instantly_campaign_preferences')
-      .select('user_id')
+    const userIds = new Set<string>();
+
+    // Primary: find specialist via project link
+    const { data: links } = await instantlyDb
+      .from('project_instantly_campaigns')
+      .select('project_id')
       .eq('campaign_id', campaignId);
 
-    if (!prefs?.length) {
-      workerLog('warn', `No users subscribed to campaign ${campaignId} — no lead notification sent`);
-      return;
+    if (links?.length) {
+      const projectIds = links.map((l: { project_id: string }) => l.project_id);
+      const { data: projects } = await supabaseMain
+        .from('projects')
+        .select('specialist_user_id')
+        .in('id', projectIds)
+        .not('specialist_user_id', 'is', null);
+
+      if (projects) {
+        for (const p of projects) {
+          if (p.specialist_user_id) userIds.add(p.specialist_user_id as string);
+        }
+      }
     }
 
-    const userIds = [...new Set(prefs.map((p: { user_id: string }) => p.user_id))];
+    // Fallback: manual campaign preferences
+    if (userIds.size === 0) {
+      const { data: prefs } = await instantlyDb
+        .from('user_instantly_campaign_preferences')
+        .select('user_id')
+        .eq('campaign_id', campaignId);
+
+      if (prefs) {
+        for (const p of prefs) {
+          userIds.add((p as { user_id: string }).user_id);
+        }
+      }
+    }
+
+    if (userIds.size === 0) {
+      workerLog('warn', `No specialist found for campaign ${campaignId} — no lead notification sent`);
+      return;
+    }
 
     const contactLabel = leadName ?? leadEmail;
     const campaignLabel = campaignName ? ` (${campaignName})` : '';
 
-    const rows = userIds.map((uid) => ({
+    const rows = [...userIds].map((uid) => ({
       user_id: uid,
       type: 'lead_new',
       title: 'Новый квалифицированный лид',
@@ -313,7 +344,6 @@ async function notifySpecialistsAboutLead(
       return;
     }
 
-    // Log for escalation dedup
     await supabaseMain
       .from('deadline_notification_log')
       .upsert(
@@ -325,7 +355,7 @@ async function notifySpecialistsAboutLead(
         { onConflict: 'entity_type,entity_id,level' },
       );
 
-    workerLog('info', `Created lead notifications for ${userIds.length} specialist(s)`);
+    workerLog('info', `Created lead notifications for ${userIds.size} specialist(s)`);
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
   }
