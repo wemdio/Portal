@@ -37,6 +37,8 @@ type LeadQualification = {
   objection_handleable: boolean | null;
   objection_draft: string | null;
   error_message: string | null;
+  instantly_email_id: string | null;
+  thread_id: string | null;
 };
 
 type QualifiedLeadsResponse = {
@@ -322,9 +324,9 @@ function ForwardToClientDialog({
 /* ─── Forward via Email (reply with CC) ──────────────────────────────────────── */
 
 function ForwardEmailDialog({
-  qualificationId, companyName, onClose, onForwarded,
+  qualificationId, companyName, campaignId, leadEmail, onClose, onForwarded,
 }: {
-  qualificationId: string; companyName?: string | null; onClose: () => void; onForwarded: () => void;
+  qualificationId: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onForwarded: () => void;
 }) {
   const [clientEmail, setClientEmail] = useState('');
   const [replyText, setReplyText] = useState('Добрый день! Скоро свяжемся с вами с основной почты.');
@@ -375,7 +377,7 @@ function ForwardEmailDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
-          <MacroPicker companyName={companyName} onSelect={setReplyText} />
+          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
 
           <div>
             <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC)</label>
@@ -419,15 +421,16 @@ function ForwardEmailDialog({
 /* ─── Macro Picker (shared between Reply and Forward dialogs) ────────────────── */
 
 function MacroPicker({
-  companyName, onSelect,
+  companyName, campaignId, leadEmail, onSelect,
 }: {
-  companyName?: string | null; onSelect: (text: string) => void;
+  companyName?: string | null; campaignId?: string; leadEmail?: string; onSelect: (text: string) => void;
 }) {
   const [userMacros, setUserMacros] = useState<ReplyMacro[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [loadingProposal, setLoadingProposal] = useState(false);
 
   useEffect(() => {
     if (loaded) return;
@@ -450,6 +453,28 @@ function MacroPicker({
       result = result.replace(/\{\{companyName\}\}/g, '');
     }
     return result;
+  };
+
+  const handleMacroClick = async (macro: ReplyMacro) => {
+    if (macro.id === 'sys-1' && campaignId && leadEmail) {
+      setLoadingProposal(true);
+      try {
+        const res = await fetchWithAuth<{ text: string | null; step: number }>(
+          `/api/instantly/qualified-leads/thread-outbound?campaign_id=${campaignId}&lead_email=${encodeURIComponent(leadEmail)}`,
+        );
+        let body = macro.body;
+        if (res.text) {
+          body = body.replace('[текст предложения]', res.text);
+        }
+        onSelect(applyVars(body));
+      } catch {
+        onSelect(applyVars(macro.body));
+      } finally {
+        setLoadingProposal(false);
+      }
+    } else {
+      onSelect(applyVars(macro.body));
+    }
   };
 
   const handleAdd = async () => {
@@ -482,14 +507,15 @@ function MacroPicker({
           <div key={m.id} className="group relative">
             <button
               type="button"
-              onClick={() => onSelect(applyVars(m.body))}
-              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+              onClick={() => void handleMacroClick(m)}
+              disabled={loadingProposal}
+              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
                 m.system
                   ? 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
                   : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
               }`}
             >
-              {m.title}
+              {loadingProposal && m.id === 'sys-1' ? '...' : m.title}
             </button>
             {!m.system && (
               <button
@@ -546,9 +572,9 @@ function MacroPicker({
 /* ─── Reply to lead (no CC) ──────────────────────────────────────────────────── */
 
 function ReplyDialog({
-  qualificationId, initialText, companyName, onClose, onSent,
+  qualificationId, initialText, companyName, campaignId, leadEmail, onClose, onSent,
 }: {
-  qualificationId: string; initialText?: string; companyName?: string | null; onClose: () => void; onSent: () => void;
+  qualificationId: string; initialText?: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onSent: () => void;
 }) {
   const [replyText, setReplyText] = useState(initialText ?? '');
   const [sending, setSending] = useState(false);
@@ -597,7 +623,7 @@ function ReplyDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
-          <MacroPicker companyName={companyName} onSelect={setReplyText} />
+          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
 
           <div>
             <textarea
@@ -877,6 +903,8 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
             qualificationId={item.id}
             initialText={item.objection_draft ?? ''}
             companyName={item.company_name}
+            campaignId={item.campaign_id}
+            leadEmail={item.lead_email}
             onClose={() => setShowReply(false)}
             onSent={() => { setShowReply(false); onRefresh(); }}
           />
@@ -892,6 +920,8 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           <ForwardEmailDialog
             qualificationId={item.id}
             companyName={item.company_name}
+            campaignId={item.campaign_id}
+            leadEmail={item.lead_email}
             onClose={() => setShowEmailForward(false)}
             onForwarded={() => { setShowEmailForward(false); onRefresh(); }}
           />
