@@ -10,6 +10,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -395,9 +396,14 @@ export function ProjectList() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [assigneeNameToId, setAssigneeNameToId] = useState<Map<string, string>>(new Map());
   const [assigneeAvatars, setAssigneeAvatars] = useState<Map<string, string>>(new Map());
   const [assigneePublicAvatars, setAssigneePublicAvatars] = useState<Map<string, string>>(new Map());
   const [showProjectSettings, setShowProjectSettings] = useState(false);
+  const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
+  const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
+  const [panelCampaignSearch, setPanelCampaignSearch] = useState('');
+  const [showPanelCampaignPicker, setShowPanelCampaignPicker] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
   const [editingContactsValue, setEditingContactsValue] = useState('');
   const [projectTasks, setProjectTasks] = useState<Record<string, Task[]>>({});
@@ -478,6 +484,18 @@ export function ProjectList() {
     setCanDelete(canDeleteProjects(userRole));
   }, [userRole]);
 
+  useEffect(() => {
+    if (selectedProjectId) {
+      void fetchPanelCampaigns(selectedProjectId);
+      void fetchPanelAllCampaigns();
+    } else {
+      setPanelLinkedCampaigns([]);
+      setShowPanelCampaignPicker(false);
+      setPanelCampaignSearch('');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
   async function fetchProjects() {
     try {
       setLoading(true);
@@ -499,17 +517,20 @@ export function ProjectList() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('email, full_name, avatar_url');
+        .select('id, email, full_name, avatar_url');
 
       if (error) throw error;
-      const profiles = (data ?? []) as Array<Pick<UserProfile, 'email' | 'full_name' | 'avatar_url'>>;
+      const profiles = (data ?? []) as Array<Pick<UserProfile, 'id' | 'email' | 'full_name' | 'avatar_url'>>;
       setAssigneeOptions(buildAssigneeOptions(profiles, locale));
+      const nameIdMap = new Map<string, string>();
       const publicAvatarMap = new Map<string, string>();
       for (const profile of profiles) {
         const name = normalizeAssigneeName(profile.full_name?.trim() || profile.email?.split('@')[0]?.trim());
+        if (name && profile.id) nameIdMap.set(name, profile.id);
         const avatarUrl = typeof profile.avatar_url === 'string' ? profile.avatar_url.trim() : '';
         if (name && avatarUrl) publicAvatarMap.set(name, avatarUrl);
       }
+      setAssigneeNameToId(nameIdMap);
       setAssigneePublicAvatars(publicAvatarMap);
 
       void fetchSignedAvatars();
@@ -573,6 +594,57 @@ export function ProjectList() {
 
       return next;
     });
+  }
+
+  async function getAuthHeaders(): Promise<Record<string, string>> {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+  }
+
+  async function fetchPanelCampaigns(projectId: string) {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${projectId}/campaigns`, { headers });
+      if (!res.ok) return;
+      const json = await res.json() as { items: { campaign_id: string; campaign_name: string; match_source: string }[] };
+      setPanelLinkedCampaigns(json.items ?? []);
+    } catch { /* non-critical */ }
+  }
+
+  async function fetchPanelAllCampaigns() {
+    if (panelAllCampaigns.length > 0) return;
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch('/api/instantly/campaigns?limit=all', { headers });
+      if (!res.ok) return;
+      const json = await res.json() as { items?: { id: string; name: string }[] };
+      setPanelAllCampaigns((json.items ?? []).map((c) => ({ id: c.id, name: c.name })));
+    } catch { /* non-critical */ }
+  }
+
+  async function addPanelCampaign(projectId: string, campaignId: string) {
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/projects/${projectId}/campaigns`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      void fetchPanelCampaigns(projectId);
+      setShowPanelCampaignPicker(false);
+      setPanelCampaignSearch('');
+    } catch { /* non-critical */ }
+  }
+
+  async function removePanelCampaign(projectId: string, campaignId: string) {
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/projects/${projectId}/campaigns?campaign_id=${campaignId}`, {
+        method: 'DELETE',
+        headers,
+      });
+      setPanelLinkedCampaigns((prev) => prev.filter((c) => c.campaign_id !== campaignId));
+    } catch { /* non-critical */ }
   }
 
   async function fetchAllTasks() {
@@ -885,6 +957,11 @@ export function ProjectList() {
     if (Object.keys(payload).length === 0) {
       clearDraftFields(project.id, Object.keys(updates) as Array<keyof Project>);
       return;
+    }
+
+    if ('specialist' in payload) {
+      const specialistName = payload.specialist;
+      payload.specialist_user_id = specialistName ? (assigneeNameToId.get(specialistName) ?? null) : null;
     }
 
     payload.updated_at = new Date().toISOString();
@@ -1944,6 +2021,114 @@ export function ProjectList() {
                     </div>
                   )}
                 </div>
+              </section>
+
+              {/* Instantly Campaigns */}
+              <section>
+                <h3 className="text-sm font-medium text-zinc-900 mb-2">Кампании Instantly</h3>
+                {panelLinkedCampaigns.length === 0 ? (
+                  <p className="text-xs text-zinc-400 mb-2">Нет привязанных кампаний</p>
+                ) : (
+                  <div className="space-y-1 mb-2">
+                    {panelLinkedCampaigns.map((camp) => (
+                      <div key={camp.campaign_id} className="flex items-center justify-between gap-2 rounded-lg border border-zinc-100 px-2.5 py-1.5 text-xs">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate text-zinc-700">{camp.campaign_name}</span>
+                          <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${camp.match_source === 'auto' ? 'bg-blue-50 text-blue-500' : 'bg-violet-50 text-violet-500'}`}>
+                            {camp.match_source === 'auto' ? 'авто' : 'вручную'}
+                          </span>
+                        </div>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => void removePanelCampaign(selectedProject.id, camp.campaign_id)}
+                            className="shrink-0 text-zinc-300 hover:text-red-400 transition-colors"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {canEdit && (
+                  <div>
+                    {!showPanelCampaignPicker ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowPanelCampaignPicker(true)}
+                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+                        </svg>
+                        Привязать кампанию
+                      </button>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <input
+                          type="text"
+                          value={panelCampaignSearch}
+                          onChange={(e) => setPanelCampaignSearch(e.target.value)}
+                          placeholder="Поиск кампании..."
+                          className="w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs focus:border-blue-400 focus:outline-none"
+                          autoFocus
+                        />
+                        <div className="max-h-36 overflow-y-auto rounded-lg border border-zinc-100">
+                          {(() => {
+                            const linkedIds = new Set(panelLinkedCampaigns.map((c) => c.campaign_id));
+                            const filtered = panelAllCampaigns
+                              .filter((c) => !linkedIds.has(c.id))
+                              .filter((c) => !panelCampaignSearch || c.name.toLowerCase().includes(panelCampaignSearch.toLowerCase()));
+                            if (filtered.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
+                            return filtered.slice(0, 15).map((c) => (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => void addPanelCampaign(selectedProject.id, c.id)}
+                                className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
+                              >
+                                {c.name}
+                              </button>
+                            ));
+                          })()}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { setShowPanelCampaignPicker(false); setPanelCampaignSearch(''); }}
+                          className="text-[10px] text-zinc-400 hover:text-zinc-600"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              {/* Client brief PDF + AI lead-source hypotheses */}
+              <section>
+                <ProjectBriefSection
+                  projectId={selectedProject.id}
+                  brief={{
+                    brief_file_path: selectedProject.brief_file_path,
+                    brief_file_name: selectedProject.brief_file_name,
+                    brief_uploaded_at: selectedProject.brief_uploaded_at,
+                    lead_source_hypotheses: selectedProject.lead_source_hypotheses,
+                    lead_source_hypotheses_generated_at: selectedProject.lead_source_hypotheses_generated_at,
+                    lead_source_hypotheses_error: selectedProject.lead_source_hypotheses_error,
+                  }}
+                  canEdit={canEdit}
+                  onChange={(next) => {
+                    setProjects((prev) =>
+                      prev.map((item) =>
+                        item.id === selectedProject.id ? { ...item, ...next } : item,
+                      ),
+                    );
+                  }}
+                />
               </section>
 
               {/* Collapsible Project Settings */}

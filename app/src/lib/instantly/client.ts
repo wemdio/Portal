@@ -426,7 +426,13 @@ export async function getEmail(id: string) {
   return request<Email>(`/emails/${id}`);
 }
 
-export async function replyToEmail(body: { reply_to_uuid: string; from_email: string; body: string }) {
+export async function replyToEmail(body: {
+  reply_to_uuid: string;
+  eaccount: string;
+  body: { html?: string; text?: string } | string;
+  cc_address_email_list?: string;
+  bcc_address_email_list?: string;
+}) {
   return request<Email>('/emails/reply', { method: 'POST', body });
 }
 

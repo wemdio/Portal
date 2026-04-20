@@ -9,6 +9,7 @@ import { canCreateProjects, ROLE_LABELS } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions } from '@/lib/projectAssignees';
+import { ProjectBriefUploader } from '@/components/projects/ProjectBriefUploader';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
@@ -97,6 +98,11 @@ export default function NewProjectPage() {
     launch_date: '',
   });
 
+  /* brief PDF picked at creation time, uploaded after the project is inserted */
+  const [briefFile, setBriefFile] = useState<File | null>(null);
+  const [briefUploadStatus, setBriefUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
+  const [briefUploadError, setBriefUploadError] = useState<string | null>(null);
+
   /* monthly expense – used only for margin calculation, not persisted separately */
   const [monthlyExpense, setMonthlyExpense] = useState('');
   /* true while margin is driven by the auto formula; false if user overrides */
@@ -182,6 +188,35 @@ export default function NewProjectPage() {
       if (error) throw error;
 
       void logAudit('projects.create.success', 'Project created', { projectId: data.id });
+
+      if (briefFile) {
+        setBriefUploadStatus('uploading');
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          const formData = new FormData();
+          formData.append('file', briefFile);
+          const res = await fetch(`/api/projects/${data.id}/brief`, {
+            method: 'POST',
+            headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {},
+            body: formData,
+          });
+          if (!res.ok) {
+            const payload = await res.json().catch(() => ({}));
+            throw new Error(payload.error || `HTTP ${res.status}`);
+          }
+          setBriefUploadStatus('done');
+        } catch (uploadErr) {
+          void logError('projects.create.brief_upload_failed', uploadErr, { projectId: data.id });
+          setBriefUploadStatus('error');
+          setBriefUploadError(
+            uploadErr instanceof Error
+              ? uploadErr.message
+              : 'Не удалось загрузить бриф (проект уже создан, попробуйте загрузить его на странице проекта)',
+          );
+          // не блокируем переход — бриф можно дозагрузить позже
+        }
+      }
+
       router.push(`/projects/${data.id}`);
     } catch (caughtError) {
       void logError('projects.create.failed', caughtError);
@@ -664,6 +699,26 @@ export default function NewProjectPage() {
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
             placeholder="Дополнительные заметки"
           />
+        </div>
+
+        {/* Client Brief PDF */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Бриф клиента (PDF)
+            <span className="ml-2 text-xs font-normal text-gray-400">опционально</span>
+          </label>
+          <ProjectBriefUploader
+            file={briefFile}
+            onFileChange={setBriefFile}
+            disabled={saving}
+            hint="После создания проекта бриф будет автоматически загружен и AI один раз сгенерирует гипотезы по сбору базы."
+          />
+          {briefUploadStatus === 'uploading' && (
+            <p className="mt-2 text-xs text-blue-600">Загружаю бриф и генерирую гипотезы…</p>
+          )}
+          {briefUploadStatus === 'error' && briefUploadError && (
+            <p className="mt-2 text-xs text-red-600">{briefUploadError}</p>
+          )}
         </div>
 
         {/* Save Button */}

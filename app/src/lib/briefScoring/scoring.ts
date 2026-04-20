@@ -1,3 +1,5 @@
+import { callOpenRouterChat } from '@/lib/openrouter/client';
+
 export type BriefScoringCompany = {
   idx: number;
   data: Record<string, string>;
@@ -44,10 +46,6 @@ const SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенераци
 ФОРМАТ ОТВЕТА:
 Верни ТОЛЬКО валидный JSON массив. Никакого текста до или после.
 Каждый элемент: {"idx": <индекс компании из запроса>, "score": <0-10>, "reason": "<краткое обоснование на русском, 1 предложение>"}`;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function normalizeBriefScoringItem(item: Record<string, unknown>): BriefScoringResult {
   const idx = typeof item.idx === 'number' && Number.isFinite(item.idx) ? item.idx : 0;
@@ -123,7 +121,7 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
     model = DEFAULT_BRIEF_SCORING_MODEL,
     maxRetries = 3,
     retryBaseDelayMs = 1500,
-    fetchImpl = fetch,
+    fetchImpl,
     signal,
   } = options;
 
@@ -134,63 +132,24 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
   }
 
   const userMessage = buildUserMessage(briefText, companies);
-  const shouldRetryStatus = (status: number) => [502, 503, 504].includes(status);
 
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    let response: Response;
+  const content = await callOpenRouterChat({
+    apiKey,
+    model,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userMessage },
+    ],
+    temperature: 0.2,
+    maxTokens: 4000,
+    responseFormat: { type: 'json_object' },
+    signal,
+    fetchImpl,
+    maxRetries,
+    retryBaseDelayMs,
+    title: 'Portal - Brief Scoring',
+  });
 
-    try {
-      response = await fetchImpl('https://router.requesty.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-          'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Brief Scoring',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.2,
-          max_tokens: 4000,
-          response_format: { type: 'json_object' },
-        }),
-        signal,
-      });
-    } catch (err) {
-      if (attempt < maxRetries) {
-        await sleep(retryBaseDelayMs * Math.pow(2, attempt));
-        continue;
-      }
-      const msg = err instanceof Error ? err.message : 'Network error';
-      throw new Error(`Ошибка сети при обращении к AI: ${msg}`);
-    }
-
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-      return parseBriefScoringContent(content);
-    }
-
-    let errorMessage = `API error: ${response.status}`;
-    try {
-      const errorData = await response.json();
-      errorMessage = errorData.error?.message || errorMessage;
-    } catch {
-      // ignore parsing errors
-    }
-
-    if (shouldRetryStatus(response.status) && attempt < maxRetries) {
-      await sleep(retryBaseDelayMs * Math.pow(2, attempt));
-      continue;
-    }
-
-    throw new Error(errorMessage);
-  }
-
-  throw new Error('Не удалось получить ответ от AI после нескольких попыток');
+  return parseBriefScoringContent(content);
 }
 

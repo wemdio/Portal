@@ -10,6 +10,7 @@ import { canEditProjects } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
+import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
@@ -140,6 +141,10 @@ export default function ProjectPage() {
   const [deleting, setDeleting] = useState(false);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
   const [clientUsers, setClientUsers] = useState<Array<{ id: string; label: string }>>([]);
+  const [linkedCampaigns, setLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
+  const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string }[]>([]);
+  const [campaignSearch, setCampaignSearch] = useState('');
+  const [showCampaignPicker, setShowCampaignPicker] = useState(false);
 
   const canEdit = canEditProjects(userRole);
 
@@ -148,6 +153,8 @@ export default function ProjectPage() {
       void fetchProject(id);
       void fetchAssigneeUsers();
       void fetchClientUsers();
+      void fetchLinkedCampaigns();
+      void fetchAllCampaigns();
     }
   }, [id]);
 
@@ -187,6 +194,56 @@ export default function ProjectPage() {
     } catch (fetchError) {
       void logError('projects.client_users.fetch.failed', fetchError);
     }
+  }
+
+  async function getAuthHeaders(): Promise<Record<string, string>> {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+  }
+
+  async function fetchLinkedCampaigns() {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${id}/campaigns`, { headers });
+      if (!res.ok) return;
+      const json = await res.json() as { items: { campaign_id: string; campaign_name: string; match_source: string }[] };
+      setLinkedCampaigns(json.items ?? []);
+    } catch { /* non-critical */ }
+  }
+
+  async function fetchAllCampaigns() {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch('/api/instantly/campaigns?limit=all', { headers });
+      if (!res.ok) return;
+      const json = await res.json() as { items?: { id: string; name: string }[] };
+      setAllCampaigns((json.items ?? []).map((c) => ({ id: c.id, name: c.name })));
+    } catch { /* non-critical */ }
+  }
+
+  async function addCampaign(campaignId: string) {
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/projects/${id}/campaigns`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      void fetchLinkedCampaigns();
+      setShowCampaignPicker(false);
+      setCampaignSearch('');
+    } catch { /* non-critical */ }
+  }
+
+  async function removeCampaign(campaignId: string) {
+    try {
+      const headers = await getAuthHeaders();
+      await fetch(`/api/projects/${id}/campaigns?campaign_id=${campaignId}`, {
+        method: 'DELETE',
+        headers,
+      });
+      setLinkedCampaigns((prev) => prev.filter((c) => c.campaign_id !== campaignId));
+    } catch { /* non-critical */ }
   }
 
   async function fetchProject(projectId: string) {
@@ -705,6 +762,24 @@ export default function ProjectPage() {
             </div>
           </div>
 
+           {/* Client brief & AI hypotheses (also editable from view mode) */}
+           <ProjectBriefSection
+             projectId={project.id}
+             brief={{
+               brief_file_path: project.brief_file_path,
+               brief_file_name: project.brief_file_name,
+               brief_uploaded_at: project.brief_uploaded_at,
+               lead_source_hypotheses: project.lead_source_hypotheses,
+               lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
+               lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+             }}
+             canEdit={canEdit}
+             onChange={(next) => {
+               setProject({ ...project, ...next });
+               setInitialProject(initialProject ? { ...initialProject, ...next } : initialProject);
+             }}
+           />
+
            {/* KPI Section */}
            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
             <h3 className="text-lg font-semibold mb-4 text-gray-900">KPI</h3>
@@ -877,6 +952,23 @@ export default function ProjectPage() {
             />
           </div>
 
+          <ProjectBriefSection
+            projectId={project.id}
+            brief={{
+              brief_file_path: project.brief_file_path,
+              brief_file_name: project.brief_file_name,
+              brief_uploaded_at: project.brief_uploaded_at,
+              lead_source_hypotheses: project.lead_source_hypotheses,
+              lead_source_hypotheses_generated_at: project.lead_source_hypotheses_generated_at,
+              lead_source_hypotheses_error: project.lead_source_hypotheses_error,
+            }}
+            canEdit={canEdit}
+            onChange={(next) => {
+              setProject({ ...project, ...next });
+              setInitialProject(initialProject ? { ...initialProject, ...next } : initialProject);
+            }}
+          />
+
           <SectionCard title="ОС заказчика">
             <EditableTextarea
               value={project.client_feedback}
@@ -967,6 +1059,96 @@ export default function ProjectPage() {
                     );
                   })}
                 </ul>
+              )}
+            </div>
+          </SectionCard>
+
+          {/* Instantly Campaigns linked to this project */}
+          <SectionCard title="Кампании Instantly">
+            <div className="space-y-2">
+              {linkedCampaigns.length === 0 ? (
+                <p className="text-sm text-gray-400">Нет привязанных кампаний</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {linkedCampaigns.map((c) => (
+                    <li key={c.campaign_id} className="flex items-center justify-between gap-2 rounded-lg border border-gray-100 px-3 py-2 text-sm">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="truncate text-gray-900">{c.campaign_name}</span>
+                        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${c.match_source === 'auto' ? 'bg-blue-50 text-blue-600' : 'bg-violet-50 text-violet-600'}`}>
+                          {c.match_source === 'auto' ? 'авто' : 'вручную'}
+                        </span>
+                      </div>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={() => void removeCampaign(c.campaign_id)}
+                          className="shrink-0 text-gray-300 hover:text-red-500 transition-colors"
+                          title="Отвязать"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                          </svg>
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {canEdit && (
+                <div className="pt-2">
+                  {!showCampaignPicker ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowCampaignPicker(true)}
+                      className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+                      </svg>
+                      Привязать кампанию
+                    </button>
+                  ) : (
+                    <div className="space-y-2">
+                      <input
+                        type="text"
+                        value={campaignSearch}
+                        onChange={(e) => setCampaignSearch(e.target.value)}
+                        placeholder="Поиск кампании..."
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                        autoFocus
+                      />
+                      <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-100">
+                        {(() => {
+                          const linkedIds = new Set(linkedCampaigns.map((c) => c.campaign_id));
+                          const filtered = allCampaigns
+                            .filter((c) => !linkedIds.has(c.id))
+                            .filter((c) => !campaignSearch || c.name.toLowerCase().includes(campaignSearch.toLowerCase()));
+                          if (filtered.length === 0) {
+                            return <p className="px-3 py-2 text-sm text-gray-400">Не найдено</p>;
+                          }
+                          return filtered.slice(0, 20).map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => void addCampaign(c.id)}
+                              className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0"
+                            >
+                              {c.name}
+                            </button>
+                          ));
+                        })()}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { setShowCampaignPicker(false); setCampaignSearch(''); }}
+                        className="text-xs text-gray-400 hover:text-gray-600"
+                      >
+                        Отмена
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </SectionCard>

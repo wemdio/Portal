@@ -1,6 +1,7 @@
 import type { Email } from './types';
 import * as instantly from './client';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -152,7 +153,7 @@ export function isProposalMessage(text: string): boolean {
 
 function buildSystemPrompt(briefText?: string | null): string {
   const briefSection = briefText
-    ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 4000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
+    ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 8000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
     : '';
 
   return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}
@@ -212,18 +213,43 @@ export interface ClassifyOptions {
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
 
+/**
+ * Fetch brief text for a campaign.
+ * Source: campaign → project (via project_instantly_campaigns) → projects.brief_text.
+ * Falls back to old instantly_brief_campaigns → instantly_briefs if project brief not found.
+ */
 export async function fetchBriefByCampaign(campaignId: string): Promise<string | null> {
   if (!supabaseInstantly) return null;
 
+  // Primary: get brief from project linked to this campaign
+  if (supabaseMain) {
+    const { data: link } = await supabaseInstantly
+      .from('project_instantly_campaigns')
+      .select('project_id')
+      .eq('campaign_id', campaignId)
+      .limit(1)
+      .maybeSingle();
+
+    if (link?.project_id) {
+      const { data: project } = await supabaseMain
+        .from('projects')
+        .select('brief_text')
+        .eq('id', link.project_id)
+        .maybeSingle();
+
+      if (project?.brief_text) return project.brief_text as string;
+    }
+  }
+
+  // Fallback: old instantly_briefs table (for campaigns not yet linked to projects)
   const { data } = await supabaseInstantly
     .from('instantly_brief_campaigns')
     .select('brief_id, instantly_briefs(brief_text)')
     .eq('campaign_id', campaignId)
     .limit(1)
-    .single();
+    .maybeSingle();
 
   if (!data) return null;
-
   const briefs = data.instantly_briefs as unknown as { brief_text: string } | null;
   return briefs?.brief_text ?? null;
 }
