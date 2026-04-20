@@ -207,6 +207,7 @@ export default function CampaignDetailPage() {
   const [exporting, setExporting] = useState<string | false>(false);
   const [exportSeconds, setExportSeconds] = useState(0);
   const [exportingEmails, setExportingEmails] = useState<string | false>(false);
+  const [emailsExportProgress, setEmailsExportProgress] = useState<{ fetched: number; status?: string } | null>(null);
   const [clearing, setClearing] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
@@ -610,7 +611,7 @@ export default function CampaignDetailPage() {
             <div className="flex items-center gap-1.5 ml-auto">
               {exporting && (
                 <span className="text-xs text-zinc-400 mr-1">
-                  Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300">(обычно 10с – 1 мин)</span>
+                  Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300"></span>
                 </span>
               )}
               {exportingEmails && (
@@ -750,26 +751,28 @@ export default function CampaignDetailPage() {
       )}
 
       {tab === 'settings' && (
-        <div className="rounded-xl border border-zinc-200 bg-white p-6 max-w-lg">
+        <div className="rounded-xl border border-zinc-200 bg-white p-6">
           <h3 className="mb-4 text-sm font-semibold text-zinc-900">Редактировать кампанию</h3>
           <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-500">Название</label>
-              <input
-                type="text"
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-500">Дневной лимит</label>
-              <input
-                type="number"
-                value={editDailyLimit}
-                onChange={(e) => setEditDailyLimit(e.target.value)}
-                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
-              />
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_200px]">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-500">Название</label>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-500">Дневной лимит</label>
+                <input
+                  type="number"
+                  value={editDailyLimit}
+                  onChange={(e) => setEditDailyLimit(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+                />
+              </div>
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-zinc-500">Теги аккаунтов отправки</label>
