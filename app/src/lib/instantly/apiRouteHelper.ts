@@ -20,7 +20,7 @@ export async function requireAuth(req: NextRequest) {
 /**
  * Fetch the caller's role from profiles. Returns null on any failure.
  */
-async function fetchUserRole(userId: string, token: string): Promise<string | null> {
+export async function fetchUserRole(userId: string, token: string): Promise<string | null> {
   const supabase = createAuthedSupabaseClient(token);
   const { data } = await supabase
     .from('profiles')

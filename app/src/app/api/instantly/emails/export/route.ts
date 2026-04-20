@@ -1,76 +1,109 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
-import { withAuth, jsonError } from '@/lib/instantly/apiRouteHelper';
+import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
+import { fetchUserRole, jsonError } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
 import { buildEmailsExportRows } from '@/lib/instantly/emailsExport';
-import type { Lead } from '@/lib/instantly/types';
+import type { Email, Lead } from '@/lib/instantly/types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
 
-export const GET = withAuth(async (req) => {
+/** NDJSON event types streamed to the client. */
+export type ExportEvent =
+  | { type: 'progress'; fetched: number }
+  | { type: 'status'; message: string }
+  | { type: 'done'; fetched: number; file: string; filename: string }
+  | { type: 'error'; message: string };
+
+function encode(obj: ExportEvent): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(obj) + '\n');
+}
+
+async function checkAuth(req: NextRequest): Promise<{ token: string; userId: string } | NextResponse> {
+  const token = getBearerToken(req.headers.get('authorization'));
+  if (!token) return jsonError('Необходима авторизация', 401);
+
+  const supabase = createAuthedSupabaseClient(token);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return jsonError('Необходима авторизация', 401);
+
+  const role = await fetchUserRole(user.id, token);
+  if (role === 'client') return jsonError('Доступ запрещён. Используйте клиентский кабинет.', 403);
+
+  return { token, userId: user.id };
+}
+
+export async function GET(req: NextRequest) {
+  const auth = await checkAuth(req);
+  if (auth instanceof NextResponse) return auth;
+
   const url = new URL(req.url);
   const campaignId = url.searchParams.get('campaign_id');
   const format = (url.searchParams.get('format') ?? 'xlsx') as 'csv' | 'xlsx';
 
   if (!campaignId) return jsonError('campaign_id is required', 400);
 
-  // Fetch all emails and all leads for the campaign in parallel
-  const [emails, leads] = await Promise.all([
-    fetchAllEmails(campaignId),
-    instantly.listAllLeads(campaignId),
-  ]);
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        // ── 1. Fetch all email pages with per-page progress ──────────────────
+        const allEmails: Email[] = [];
+        let startingAfter: string | undefined;
 
-  const leadsById = new Map<string, Lead>(leads.map((l) => [l.id, l]));
-  const rows = buildEmailsExportRows(emails, leadsById);
+        do {
+          const page = await instantly.listEmails({
+            campaign_id: campaignId,
+            limit: 100,
+            starting_after: startingAfter,
+          });
+          allEmails.push(...(page.items ?? []));
+          startingAfter = page.next_starting_after ?? undefined;
+          controller.enqueue(encode({ type: 'progress', fetched: allEmails.length }));
+        } while (startingAfter);
 
-  if (rows.length === 0) {
-    return jsonError('Нет писем в этой кампании', 404);
-  }
+        // ── 2. Fetch leads for enrichment ────────────────────────────────────
+        controller.enqueue(encode({ type: 'status', message: 'Загружаем данные лидов…' }));
+        const leads = await instantly.listAllLeads(campaignId);
+        const leadsById = new Map<string, Lead>(leads.map((l) => [l.id, l]));
 
-  const ws = XLSX.utils.json_to_sheet(rows);
+        // ── 3. Build file ────────────────────────────────────────────────────
+        controller.enqueue(encode({ type: 'status', message: 'Формируем файл…' }));
+        const rows = buildEmailsExportRows(allEmails, leadsById);
 
-  // Auto-fit column widths based on content
-  const colWidths = Object.keys(rows[0]).map((key) => {
-    const maxLen = rows.reduce((max, row) => {
-      const val = String(row[key as keyof typeof row] ?? '');
-      return Math.max(max, val.length);
-    }, key.length);
-    return { wch: Math.min(maxLen, 80) };
-  });
-  ws['!cols'] = colWidths;
+        const ws = XLSX.utils.json_to_sheet(rows);
+        if (rows.length > 0) {
+          ws['!cols'] = Object.keys(rows[0]).map((key) => ({
+            wch: Math.min(
+              rows.reduce((max, row) => Math.max(max, String(row[key as keyof typeof row] ?? '').length), key.length),
+              80,
+            ),
+          }));
+        }
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Письма');
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Письма');
+        const buf: Buffer = XLSX.write(wb, { type: 'buffer', bookType: format });
+        const ext = format === 'csv' ? 'csv' : 'xlsx';
 
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: format });
-  const ext = format === 'csv' ? 'csv' : 'xlsx';
-  const mime =
-    format === 'csv'
-      ? 'text/csv; charset=utf-8'
-      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-  return new NextResponse(buf, {
-    headers: {
-      'Content-Type': mime,
-      'Content-Disposition': `attachment; filename="emails-${campaignId.slice(0, 8)}.${ext}"`,
+        controller.enqueue(encode({
+          type: 'done',
+          fetched: allEmails.length,
+          file: buf.toString('base64'),
+          filename: `emails-${campaignId.slice(0, 8)}.${ext}`,
+        }));
+      } catch (err) {
+        controller.enqueue(encode({
+          type: 'error',
+          message: err instanceof Error ? err.message : 'Ошибка экспорта',
+        }));
+      } finally {
+        controller.close();
+      }
     },
   });
-});
 
-async function fetchAllEmails(campaignId: string) {
-  const all = [];
-  let startingAfter: string | undefined;
-
-  do {
-    const page = await instantly.listEmails({
-      campaign_id: campaignId,
-      limit: 100,
-      starting_after: startingAfter,
-    });
-    if (page.items?.length) all.push(...page.items);
-    startingAfter = page.next_starting_after ?? undefined;
-  } while (startingAfter);
-
-  return all;
+  return new Response(stream, {
+    headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+  });
 }
