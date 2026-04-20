@@ -385,6 +385,87 @@ function ForwardEmailDialog({
   );
 }
 
+/* ─── Reply to lead (no CC) ──────────────────────────────────────────────────── */
+
+function ReplyDialog({
+  qualificationId, initialText, onClose, onSent,
+}: {
+  qualificationId: string; initialText?: string; onClose: () => void; onSent: () => void;
+}) {
+  const [replyText, setReplyText] = useState(initialText ?? '');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+
+  const handleSend = async () => {
+    if (!replyText.trim()) return;
+    setSending(true);
+    setError('');
+    try {
+      await fetchWithAuth('/api/instantly/qualified-leads/forward-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          qualification_id: qualificationId,
+          reply_text: replyText.trim(),
+        }),
+      });
+      setSuccess(true);
+      setTimeout(() => { onSent(); onClose(); }, 1200);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка отправки');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-emerald-200/80 bg-gradient-to-br from-emerald-50 to-white p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <Send className="h-3.5 w-3.5 text-emerald-500" />
+          <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Ответить лиду</span>
+        </div>
+        <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {success ? (
+        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium">
+          <CheckCircle2 className="h-4 w-4" />Ответ отправлен
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 mb-1">Текст ответа</label>
+            <textarea
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              rows={6}
+              className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm focus:border-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-100 placeholder:text-zinc-300 resize-none"
+              placeholder="Ваш ответ..."
+              autoFocus
+            />
+            <p className="mt-1 text-[10px] text-zinc-400">Ответ уйдёт лиду в тред переписки. Клиент не получит копию.</p>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
+            <button
+              onClick={handleSend}
+              disabled={!replyText.trim() || sending}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+            >
+              {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}Отправить
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── List Item (left panel) ─────────────────────────────────────────────────── */
 
 function ListItem({
@@ -455,6 +536,7 @@ function ListItem({
 function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: () => void }) {
   const [showForward, setShowForward] = useState(false);
   const [showEmailForward, setShowEmailForward] = useState(false);
+  const [showReply, setShowReply] = useState(false);
   const [copied, setCopied] = useState(false);
   const m = STATUS_META[item.status] ?? STATUS_META.error;
   const canForward = item.status === 'lead' || item.status === 'objection' || item.status === 'needs_review';
@@ -515,18 +597,25 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           {canForward && (
             <>
               <button
-                onClick={() => { setShowForward(!showForward); setShowEmailForward(false); }}
+                onClick={() => { setShowReply(!showReply); setShowForward(false); setShowEmailForward(false); }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 transition-colors"
+              >
+                <Send className="h-3.5 w-3.5" />
+                Ответить
+              </button>
+              <button
+                onClick={() => { setShowForward(!showForward); setShowReply(false); setShowEmailForward(false); }}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
               >
                 <Send className="h-3.5 w-3.5" />
                 В Telegram
               </button>
               <button
-                onClick={() => { setShowEmailForward(!showEmailForward); setShowForward(false); }}
+                onClick={() => { setShowEmailForward(!showEmailForward); setShowReply(false); setShowForward(false); }}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 transition-colors"
               >
                 <Mail className="h-3.5 w-3.5" />
-                На почту
+                На почту клиенту
               </button>
             </>
           )}
@@ -623,6 +712,14 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         )}
 
         {/* Forward dialogs */}
+        {showReply && (
+          <ReplyDialog
+            qualificationId={item.id}
+            initialText={item.objection_draft ?? ''}
+            onClose={() => setShowReply(false)}
+            onSent={() => { setShowReply(false); onRefresh(); }}
+          />
+        )}
         {showForward && (
           <ForwardToClientDialog
             qualificationId={item.id}
