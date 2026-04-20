@@ -19,107 +19,34 @@
 
 // ---------------------------------------------------------------------------
 // Mocks must be declared BEFORE any import that pulls them in transitively.
+// The chainable in-memory builder lives in `tests/helpers/liOutreachDb.ts` so
+// it can be reused by the invite-counter tests as well (DRY).
 // ---------------------------------------------------------------------------
 
-type Row = Record<string, unknown>;
+import { createLiOutreachMockDb, type Row } from '../helpers/liOutreachDb';
 
-interface DbState {
-  rows: Record<string, Row[]>;
-  updates: Array<{ table: string; data: Row; filters: Record<string, unknown> }>;
-}
+const mockDb = createLiOutreachMockDb();
+const dbState = mockDb.state;
+const resetDb = (): void => mockDb.reset();
 
-const dbState: DbState = { rows: {}, updates: [] };
-
-function resetDb(): void {
-  dbState.rows = {};
-  dbState.updates = [];
-}
-
-function makeBuilder(table: string): Record<string, unknown> {
-  const filters: Record<string, unknown> = {};
-  let inserted: Row | Row[] | null = null;
-  let updated: Row | null = null;
-  let mode: 'select' | 'update' | 'insert' | 'delete' = 'select';
-
-  const finalize = (): { data: Row[]; error: null } => {
-    let rows = (dbState.rows[table] ?? []).slice();
-    for (const [col, val] of Object.entries(filters)) {
-      if (col === '__or' || col === '__in_status') continue;
-      rows = rows.filter((r) => r[col] === val);
-    }
-    if (filters.__in_status) {
-      const allowed = filters.__in_status as string[];
-      rows = rows.filter((r) => allowed.includes(String(r.status ?? '')));
-    }
-    return { data: rows, error: null };
-  };
-
-  const builder: Record<string, unknown> = {
-    select: () => {
-      mode = 'select';
-      return builder;
-    },
-    insert: (data: Row | Row[]) => {
-      mode = 'insert';
-      inserted = data;
-      return builder;
-    },
-    update: (data: Row) => {
-      mode = 'update';
-      updated = data;
-      return builder;
-    },
-    delete: () => {
-      mode = 'delete';
-      return builder;
-    },
-    eq: (col: string, val: unknown) => {
-      filters[col] = val;
-      return builder;
-    },
-    in: (col: string, values: unknown[]) => {
-      if (col === 'status') filters.__in_status = values as string[];
-      else filters[col] = values;
-      return builder;
-    },
-    or: () => builder,
-    order: () => builder,
-    limit: () => builder,
-    single: async () => {
-      const r = finalize();
-      return { data: r.data[0] ?? null, error: r.data[0] ? null : { message: 'not found' } };
-    },
-    maybeSingle: async () => {
-      const r = finalize();
-      return { data: r.data[0] ?? null, error: null };
-    },
-    then: (resolve: (v: unknown) => void) => {
-      if (mode === 'update') {
-        dbState.updates.push({ table, data: updated ?? {}, filters: { ...filters } });
-        // Apply update to in-memory rows so subsequent reads see it.
-        const r = finalize();
-        for (const row of r.data) {
-          Object.assign(row, updated ?? {});
-        }
-        resolve({ data: null, error: null });
-        return;
-      }
-      if (mode === 'insert') {
-        const arr = Array.isArray(inserted) ? inserted : [inserted as Row];
-        dbState.rows[table] = (dbState.rows[table] ?? []).concat(arr);
-        resolve({ data: arr, error: null });
-        return;
-      }
-      resolve(finalize());
-    },
-  };
-
-  return builder;
-}
+// Default RPC handler for `li_campaign_increment_invite`: returns the new
+// counter value so the runner can echo it in logs. Tests can override per-case.
+mockDb.registerRpc('li_campaign_increment_invite', async (args) => {
+  const campaignId = String(args.p_campaign_id);
+  const today = String(args.p_today);
+  const rows = dbState.rows.li_campaigns ?? [];
+  const camp = rows.find((r) => r.id === campaignId);
+  if (!camp) return { data: null, error: { message: 'campaign not found' } };
+  const sameDay = camp.last_invite_date === today;
+  const next = (sameDay ? Number(camp.invites_sent_today ?? 0) : 0) + 1;
+  camp.invites_sent_today = next;
+  camp.last_invite_date = today;
+  return { data: next, error: null };
+});
 
 jest.mock('@/lib/supabaseAdmin', () => ({
-  supabaseAdmin: {
-    from: (table: string) => makeBuilder(table),
+  get supabaseAdmin() {
+    return mockDb.client;
   },
 }));
 

@@ -152,13 +152,13 @@ export async function runCampaignTick(
 
   log('info', `Тик запущен — кампания «${campaign.name}», аккаунт ${account?.unipile_account_id ?? 'N/A'}`);
 
-  // Reset daily invite counter if new day
+  // Daily-counter reset is now atomic inside `li_campaign_increment_invite`
+  // (see migration 20260420_0002). For the in-memory state used by the
+  // limit-check and the "найдено N лидов / отправлено сегодня X" log line,
+  // mirror that "fresh day → 0" view here so we don't briefly show last
+  // night's count before the first invite of the day.
   const today = todayStr();
   if (campaign.last_invite_date !== today) {
-    await db
-      .from('li_campaigns')
-      .update({ invites_sent_today: 0, last_invite_date: today })
-      .eq('id', campaignId);
     campaign.invites_sent_today = 0;
     log('info', `Новый день — счётчик инвайтов сброшен (лимит: ${campaign.daily_invite_limit}/день)`);
   }
@@ -369,8 +369,28 @@ async function processInviteStep(
     throw e;
   }
 
-  const newCount = campaign.invites_sent_today + 1;
-  await db.from('li_campaigns').update({ invites_sent_today: newCount }).eq('id', campaign.id);
+  // Atomic increment in the DB so concurrent ticks (after a worker restart
+  // that cleared the in-memory tick debounce) and multiple leads inside one
+  // tick can never share a stale read. The RPC also handles new-day reset
+  // in the same statement. See migration 20260420_0002.
+  const today = todayStr();
+  const { data: rpcData, error: rpcErr } = await db.rpc('li_campaign_increment_invite', {
+    p_campaign_id: campaign.id,
+    p_today: today,
+  });
+  if (rpcErr || typeof rpcData !== 'number') {
+    log(
+      'error',
+      `Не удалось обновить дневной счётчик инвайтов: ${rpcErr?.message ?? 'нет данных от RPC'}`,
+      lead.name,
+      stepIdx,
+    );
+    throw new Error(`li_campaign_increment_invite RPC failed: ${rpcErr?.message ?? 'no data'}`);
+  }
+  const newCount = rpcData;
+  campaign.invites_sent_today = newCount;
+  campaign.last_invite_date = today;
+
   await db.from('li_leads').update({ status: 'invited', updated_at: now }).eq('id', lead.id);
 
   await db
