@@ -206,6 +206,7 @@ export default function CampaignDetailPage() {
 
   const [exporting, setExporting] = useState<string | false>(false);
   const [exportSeconds, setExportSeconds] = useState(0);
+  const [exportingEmails, setExportingEmails] = useState<string | false>(false);
   const [clearing, setClearing] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
@@ -242,6 +243,36 @@ export default function CampaignDetailPage() {
       setError(err instanceof Error ? err.message : 'Ошибка экспорта');
     } finally {
       setExporting(false);
+    }
+  }, [campaignId, campaign?.name]);
+
+  const handleEmailsExport = useCallback(async (format: 'csv' | 'xlsx') => {
+    setExportingEmails(format);
+    try {
+      const { supabase } = await import('@/lib/supabaseClient');
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData?.session?.access_token;
+      if (!token) throw new Error('Нет авторизации');
+
+      const res = await fetch(`/api/instantly/emails/export?campaign_id=${campaignId}&format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => 'Ошибка');
+        throw new Error(text);
+      }
+      const blob = await res.blob();
+      const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safeName}-письма.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка экспорта писем');
+    } finally {
+      setExportingEmails(false);
     }
   }, [campaignId, campaign?.name]);
 
@@ -582,6 +613,11 @@ export default function CampaignDetailPage() {
                   Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300">(обычно 10с – 1 мин)</span>
                 </span>
               )}
+              {exportingEmails && (
+                <span className="text-xs text-zinc-400 mr-1">
+                  Выгружаем письма…
+                </span>
+              )}
               <button
                 onClick={() => handleExport('csv')}
                 disabled={!!exporting || leads.length === 0}
@@ -597,6 +633,25 @@ export default function CampaignDetailPage() {
               >
                 {exporting === 'xlsx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 XLSX
+              </button>
+              <div className="w-px h-5 bg-zinc-200 mx-0.5" />
+              <button
+                onClick={() => handleEmailsExport('csv')}
+                disabled={!!exportingEmails}
+                title="Экспорт всех писем кампании (CSV)"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exportingEmails === 'csv' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                Письма CSV
+              </button>
+              <button
+                onClick={() => handleEmailsExport('xlsx')}
+                disabled={!!exportingEmails}
+                title="Экспорт всех писем кампании (XLSX)"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+              >
+                {exportingEmails === 'xlsx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                Письма XLSX
               </button>
               <button
                 onClick={() => setShowClearConfirm(true)}

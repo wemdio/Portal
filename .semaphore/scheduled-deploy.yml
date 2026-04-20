@@ -159,24 +159,26 @@ blocks:
                 echo "[scheduled] Instantly DB: syncing to ${IDB_USER}@${IDB_HOST}:${IDB_PATH}"
                 IDB_TMP=$(mktemp -d)
                 mkdir -p "${IDB_TMP}/migrations" "${IDB_TMP}/scripts/db"
-                cp deploy/instantly-db/docker-compose.yml deploy/instantly-db/Dockerfile.backup deploy/instantly-db/backup.sh deploy/instantly-db/crontab "${IDB_TMP}/"
+                cp deploy/instantly-db/docker-compose.yml "${IDB_TMP}/"
                 cp deploy/instantly-db/scripts/db/ensureDatabase.js "${IDB_TMP}/scripts/db/"
                 shopt -s nullglob
                 cp supabase/instantly-migrations/*.sql "${IDB_TMP}/migrations/" || true
                 shopt -u nullglob
                 run_ssh_idb "mkdir instantly-db" "sudo -n mkdir -p ${IDB_PATH} && sudo -n chown -R ${IDB_USER}:${IDB_USER} ${IDB_PATH}"
-                ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db files" docker-compose.yml Dockerfile.backup backup.sh crontab "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
+                ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db files" docker-compose.yml "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
                 ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db migrations" -r migrations "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
                 ( cd "${IDB_TMP}" && run_scp_idb "sync instantly-db scripts" -r scripts "${IDB_USER}@${IDB_HOST}:${IDB_PATH}/" )
                 rm -rf "${IDB_TMP}"
                 run_ssh_idb "instantly-db compose up + migrator" "set -e
                 cd ${IDB_PATH}
                 if [ ! -f .env ]; then echo \"[idb] FATAL: нет .env в ${IDB_PATH} — создай по deploy/instantly-db/.env.example\"; exit 1; fi
-                chmod +x backup.sh 2>/dev/null || true
                 printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
                 export DOCKER_CLIENT_TIMEOUT=300
                 export COMPOSE_HTTP_TIMEOUT=300
                 sudo -n docker rm -f instantly-migrator 2>/dev/null || true
+                # Бэкапы переехали на Portal-сервер (services/backup). Гарантированно
+                # сносим старый instantly-backup, чтобы не плодить дубли дампов.
+                sudo -n docker rm -f instantly-backup 2>/dev/null || true
                 sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env pull
                 sudo -n docker compose -f docker-compose.yml -p instantly-db --env-file .env up -d --build
                 echo '[idb] waiting for instantly-migrator...'
@@ -381,11 +383,11 @@ blocks:
                   sleep 3;
                   echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
                 };
-                echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot ---';
-                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot; do force_rm_svc \"\$svc\"; done;
-                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot 2>/dev/null || true;
+                echo '--- Step 4: restart portal + yandexmaps + transcribe-worker + guacd + rdp-ws + telegram-bot-api + health-check + atmos-bot + instantly-sync-bot + portal-backup ---';
+                for svc in portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-backup; do force_rm_svc \"\$svc\"; done;
+                sudo -n docker rm -f portal portal-portal-1 portal-guacd portal-yandexmaps portal-transcribe-worker portal-rdp-ws portal-telegram-bot-api portal-health-check portal-atmos-bot portal-instantly-sync-bot portal-backup 2>/dev/null || true;
                 wait_port_free 3000 15;
-                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot;
+                sudo -n env DOCKER_GID="\${DOCKER_GID}" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal yandexmaps transcribe-worker guacd rdp-ws telegram-bot-api health-check atmos-bot instantly-sync-bot portal-backup;
                 echo '--- Step 4.1: verify Docker socket access inside portal ---';
                 PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                 echo \"portal GroupAdd=\${PORTAL_GROUPS}\";

@@ -505,6 +505,39 @@ services:
     networks:
       - portal-network
 
+  # pg_dump-бэкапы обеих БД (Supabase main + Instantly local PG) → Supabase Storage.
+  # Cron внутри контейнера; см. services/backup/crontab.
+  # Восстановление и подробности — docs/instantly-local-pg-cutover.md.
+  portal-backup:
+    image: ${DOCKER_USERNAME}/portal-backup:prod
+    container_name: portal-backup
+    env_file:
+      - .env
+    environment:
+      # Источники для pg_dump (URL — те же, что использует приложение).
+      - MAIN_SUPABASE_DATABASE_URL=${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}
+      - INSTANTLY_DATABASE_URL=${INSTANTLY_DATABASE_URL:-}
+      - INSTANTLY_DEV_DATABASE_URL=${INSTANTLY_DEV_DATABASE_URL:-}
+      # Куда грузим (bucket deploy-backups). По умолчанию — основной Supabase
+      # проект Portal (можно переопределить отдельным проектом-«хранилищем»).
+      - BACKUP_SUPABASE_URL=${BACKUP_SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}
+      - BACKUP_SUPABASE_KEY=${BACKUP_SUPABASE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
+      - BACKUP_REMOTE_RETENTION_DAYS=${BACKUP_REMOTE_RETENTION_DAYS:-30}
+      # Алерты при падении pg_dump или upload.
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN:-}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID:-}
+    volumes:
+      - portal-backup-data:/backups
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   atmos-bot:
     image: ${DOCKER_USERNAME}/portal-atmos-bot:prod
     container_name: portal-atmos-bot
@@ -602,6 +635,7 @@ services:
 
 volumes:
   telegram-bot-api-data:
+  portal-backup-data:
 
 networks:
   portal-network:

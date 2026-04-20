@@ -60,6 +60,8 @@ export interface Project {
   payment_date?: string;
   contacts_obligation?: string;
   contacts_done?: string;
+
+  client_user_id?: string | null;
 }
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';

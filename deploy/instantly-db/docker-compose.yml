@@ -295,48 +295,12 @@ services:
     networks:
       - instantly-network
 
-  # ─── BACKUP ────────────────────────────────────────────────────────────────────
-
-  instantly-backup:
-    build:
-      context: .
-      dockerfile: Dockerfile.backup
-    container_name: instantly-backup
-    environment:
-      PROD_PG_HOST: instantly-postgres-prod
-      PROD_PG_PORT: "5432"
-      PROD_PG_USER: instantly
-      PROD_PG_PASSWORD: ${INSTANTLY_PROD_PG_PASSWORD}
-      PROD_PG_DB: instantly
-      DEV_PG_HOST: instantly-postgres-dev
-      DEV_PG_PORT: "5432"
-      DEV_PG_USER: instantly
-      DEV_PG_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
-      DEV_PG_DB: instantly
-      MAIN_PG_HOST: main-postgres
-      MAIN_PG_PORT: "5432"
-      MAIN_PG_USER: supabase_admin
-      MAIN_PG_PASSWORD: ${MAIN_PG_PASSWORD}
-      MAIN_PG_DB: postgres
-      MAIN_PG_ENABLED: ${MAIN_PG_ENABLED:-false}
-      BACKUP_SUPABASE_URL: ${BACKUP_SUPABASE_URL}
-      BACKUP_SUPABASE_KEY: ${BACKUP_SUPABASE_KEY}
-      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
-    volumes:
-      - backup-data:/backups
-    depends_on:
-      instantly-postgres-prod:
-        condition: service_healthy
-      instantly-postgres-dev:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.2'
-    restart: unless-stopped
-    networks:
-      - instantly-network
+# ВНИМАНИЕ: бэкапы переехали на Portal-сервер (services/backup, контейнер
+# portal-backup). pg_dump/curl одинаково ходят к Postgres что с DB-, что с
+# Portal-сервера — но на Portal-сервере уже есть .env с нужными URL и Telegram
+# health-бот; держать бэкап-контейнер здесь больше нет смысла. Удаление
+# instantly-backup на самом DB-сервере делает scheduled-deploy.yml автоматически
+# (`docker rm -f instantly-backup`).
 
 volumes:
   prod-pg-data:
@@ -345,7 +309,6 @@ volumes:
   dev-pgadmin-data:
   main-supabase-pg-data:
   main-pgadmin-data:
-  backup-data:
 
 networks:
   instantly-network:
