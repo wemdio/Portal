@@ -1,0 +1,247 @@
+# Self-hosted Supabase services для main Portal DB.
+# Подключаются к main-postgres из deploy/instantly-db/docker-compose.yml через
+# external network instantly-db_instantly-network.
+#
+# Поднимать ПОСЛЕ того как main-postgres из instantly-db compose уже запущен.
+#
+# Порты на хосте (не пересекаются с instantly-db):
+#   Kong API gateway:    35480 (http) — это и будет новый NEXT_PUBLIC_SUPABASE_URL
+#   Studio (UI):         127.0.0.1:35413 (через SSH-tunnel)
+#
+# Использование:
+#   cd deploy/main-db
+#   cp .env.example .env  # обязательно сначала сгенерировать ключи: node scripts/generate-keys.mjs
+#   docker compose -p main-supabase --env-file .env up -d
+
+name: main-supabase
+
+services:
+  # ─── Kong: API gateway, агрегирует REST/Auth/Storage/Realtime ──────────────────
+  kong:
+    image: kong:2.8.1
+    container_name: main-kong
+    restart: unless-stopped
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      SUPABASE_ANON_KEY: ${MAIN_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${MAIN_SERVICE_ROLE_KEY}
+      DASHBOARD_USERNAME: ${MAIN_DASHBOARD_USERNAME:-supabase}
+      DASHBOARD_PASSWORD: ${MAIN_DASHBOARD_PASSWORD}
+    volumes:
+      - ./kong.yml:/home/kong/kong.yml:ro
+    ports:
+      - "0.0.0.0:35480:8000"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - instantly-network
+
+  # ─── GoTrue: Supabase Auth ────────────────────────────────────────────────────
+  auth:
+    image: supabase/gotrue:v2.179.0
+    container_name: main-auth
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_started
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${MAIN_API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      GOTRUE_SITE_URL: ${MAIN_SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${MAIN_ADDITIONAL_REDIRECT_URLS:-}
+      GOTRUE_DISABLE_SIGNUP: ${MAIN_DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${MAIN_JWT_EXP:-3600}
+      GOTRUE_JWT_SECRET: ${MAIN_JWT_SECRET}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${MAIN_ENABLE_EMAIL_SIGNUP:-true}
+      GOTRUE_MAILER_AUTOCONFIRM: ${MAIN_ENABLE_EMAIL_AUTOCONFIRM:-true}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${MAIN_SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_HOST: ${MAIN_SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${MAIN_SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${MAIN_SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${MAIN_SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${MAIN_SMTP_SENDER_NAME:-Portal}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAIN_MAILER_URLPATHS_INVITE:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAIN_MAILER_URLPATHS_CONFIRMATION:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAIN_MAILER_URLPATHS_RECOVERY:-/auth/v1/verify}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAIN_MAILER_URLPATHS_EMAIL_CHANGE:-/auth/v1/verify}
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_SMS_AUTOCONFIRM: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - instantly-network
+
+  # ─── PostgREST: REST API над Postgres ─────────────────────────────────────────
+  rest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: main-rest
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_started
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      PGRST_DB_SCHEMAS: ${MAIN_PGRST_DB_SCHEMAS:-public,storage,graphql_public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${MAIN_JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${MAIN_JWT_EXP:-3600}
+      PGRST_DB_POOL: 30
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
+    command: ["postgrest"]
+    networks:
+      - instantly-network
+
+  # ─── Realtime: WebSocket для postgres_changes ─────────────────────────────────
+  realtime:
+    image: supabase/realtime:v2.34.43
+    container_name: main-realtime
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_started
+    environment:
+      PORT: "4000"
+      DB_HOST: main-postgres
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${MAIN_PG_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${MAIN_REALTIME_DB_ENC_KEY}
+      API_JWT_SECRET: ${MAIN_JWT_SECRET}
+      SECRET_KEY_BASE: ${MAIN_REALTIME_SECRET_KEY_BASE}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Authorization: Bearer ${MAIN_ANON_KEY}", "http://localhost:4000/api/tenants/realtime-dev/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - instantly-network
+
+  # ─── Storage API: загрузка/раздача файлов через S3-протокол ───────────────────
+  storage:
+    image: supabase/storage-api:v1.13.3
+    container_name: main-storage
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_started
+      imgproxy:
+        condition: service_started
+    environment:
+      ANON_KEY: ${MAIN_ANON_KEY}
+      SERVICE_KEY: ${MAIN_SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      FILE_SIZE_LIMIT: "${MAIN_STORAGE_FILE_SIZE_LIMIT:-524288000}"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+    volumes:
+      - main-storage-data:/var/lib/storage
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - instantly-network
+
+  # ─── imgproxy: трансформации изображений для Storage ──────────────────────────
+  imgproxy:
+    image: darthsim/imgproxy:v3.8.0
+    container_name: main-imgproxy
+    restart: unless-stopped
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${MAIN_IMGPROXY_ENABLE_WEBP_DETECTION:-true}
+    volumes:
+      - main-storage-data:/var/lib/storage:ro
+    networks:
+      - instantly-network
+
+  # ─── postgres-meta: API для управления схемой БД (нужен Studio) ───────────────
+  meta:
+    image: supabase/postgres-meta:v0.84.2
+    container_name: main-meta
+    restart: unless-stopped
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: main-postgres
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${MAIN_PG_PASSWORD}
+    networks:
+      - instantly-network
+
+  # ─── Studio: веб-интерфейс (опционально, доступ через SSH tunnel) ─────────────
+  studio:
+    image: supabase/studio:2025.06.30-sha-6f5982d
+    container_name: main-studio
+    restart: unless-stopped
+    depends_on:
+      meta:
+        condition: service_started
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${MAIN_PG_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: ${MAIN_STUDIO_ORGANIZATION_NAME:-Portal}
+      DEFAULT_PROJECT_NAME: ${MAIN_STUDIO_PROJECT_NAME:-Default Project}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${MAIN_API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${MAIN_ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${MAIN_SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${MAIN_JWT_SECRET}
+      LOGFLARE_PUBLIC_ACCESS_TOKEN: stub
+      LOGFLARE_PRIVATE_ACCESS_TOKEN: stub
+      NEXT_PUBLIC_ENABLE_LOGS: "false"
+    ports:
+      - "127.0.0.1:35413:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - instantly-network
+
+volumes:
+  main-storage-data:
+
+networks:
+  instantly-network:
+    external: true
+    name: instantly-db_instantly-network

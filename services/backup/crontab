@@ -1,0 +1,13 @@
+# Cron schedule для контейнера portal-backup.
+# Все времена UTC. Параллельные запуски одного instance практически невозможны
+# (pg_dump на нескольких ГБ дольше часа не идёт), поэтому без lock-файлов.
+
+# Главная Supabase БД (portal-main): каждые 6 часов в :15
+# (15-минутный сдвиг чтобы не пересекаться с встроенными Supabase backups).
+15 */6 * * * /backup.sh main-supabase >> /var/log/cron.log 2>&1
+
+# Instantly local Postgres prod: каждые 6 часов в :00
+0 */6 * * * /backup.sh instantly-prod >> /var/log/cron.log 2>&1
+
+# Instantly local Postgres dev: раз в сутки в 03:00
+0 3 * * * /backup.sh instantly-dev >> /var/log/cron.log 2>&1

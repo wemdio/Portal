@@ -988,12 +988,6 @@ async def _fetch_heartbeat_db_data_generic(
                 )
                 metrics_deque.append((datetime.now(timezone.utc).timestamp(), cur or 0, txn or 0))
 
-                data["db_users"] = await conn.fetch(
-                    "SELECT usename, count(*)::int AS n "
-                    "FROM pg_stat_activity WHERE datname = current_database() "
-                    "GROUP BY usename ORDER BY n DESC LIMIT 5"
-                )
-
                 if job_tables is not None:
                     data["active_jobs"] = await _fetch_active_jobs(conn, job_tables)
 
@@ -1117,7 +1111,7 @@ def _format_heartbeat_caption(
     include_sparklines: bool = True,
 ) -> str:
     """Format heartbeat caption from pre-fetched data (pure formatting, no DB)."""
-    parts: list[str] = [f"💚 <b>HEARTBEAT</b> — бот работает ({_now_msk()})"]
+    parts: list[str] = [f"<b>Отчет от {_now_msk()}</b>"]
 
     parts.append("")
     parts.extend(_format_db_section(
@@ -1217,7 +1211,7 @@ async def _ping_site(count: int = 5) -> str:
                 except Exception:
                     results.append((0, 0.0))
     except Exception:
-        return f"🌐 <b>Пинг</b> {PORTAL_URL}: ошибка"
+        return f"🌐 <b>Пинг сервера</b> {PORTAL_URL}: ошибка"
 
     ok_count = sum(1 for code, _ in results if 200 <= code < 400)
     times = [ms for _, ms in results if ms > 0]
@@ -1228,7 +1222,7 @@ async def _ping_site(count: int = 5) -> str:
         for code, ms in results
     )
     return (
-        f"🌐 <b>Пинг</b> ({ok_count}/{count}, avg {avg_ms:.0f}ms):\n"
+        f"🌐 <b>Пинг сервера</b> ({ok_count}/{count}, avg {avg_ms:.0f}ms):\n"
         f"<code>  {pings}</code>"
     )
 
@@ -1286,22 +1280,8 @@ async def _ping_proxies(count: int = 3) -> str:
 
 
 
-def _format_db_users_section(data: dict, label: str = "") -> str | None:
-    """Format DB user connection breakdown from pre-fetched data."""
-    if not data.get("ok"):
-        return None
-    users = data.get("db_users")
-    if not users:
-        return None
-    header = f"👥 <b>Пользователи {label}</b> (подключения):" if label else "👥 <b>Пользователи БД</b> (подключения):"
-    lines = [header]
-    for r in users:
-        lines.append(f"  • {r['usename']}: {r['n']}")
-    return "\n".join(lines)
-
-
 async def send_heartbeat():
-    """Periodic heartbeat: chart + caption + jobs + db users + proxies (single message)."""
+    """Periodic heartbeat: chart + caption + jobs + proxies (single message)."""
     global HEARTBEAT_STARTED
     if not HEARTBEAT_STARTED:
         HEARTBEAT_STARTED = True
@@ -1315,7 +1295,7 @@ async def send_heartbeat():
     results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
     db_data = results[0] if not isinstance(results[0], Exception) else {"ok": False, "error": str(results[0])}
-    ping_text = results[1] if not isinstance(results[1], Exception) else "🌐 Пинг: ошибка"
+    ping_text = results[1] if not isinstance(results[1], Exception) else "🌐 Пинг сервера: ошибка"
     proxy_text = results[2] if not isinstance(results[2], Exception) else "🔗 Прокси: ошибка"
     instantly_data: dict | None = None
     if INSTANTLY_DATABASE_URL and len(results) > 3:
@@ -1325,14 +1305,6 @@ async def send_heartbeat():
     jobs_text = _format_active_jobs(db_data)
     if jobs_text:
         extra_parts.append(jobs_text)
-
-    main_users = _format_db_users_section(db_data, label="Supabase")
-    if main_users:
-        extra_parts.append(main_users)
-    if instantly_data:
-        inst_users = _format_db_users_section(instantly_data, label="Instantly")
-        if inst_users:
-            extra_parts.append(inst_users)
 
     extra_parts.append(proxy_text)
     extra_block = "\n\n".join(extra_parts)

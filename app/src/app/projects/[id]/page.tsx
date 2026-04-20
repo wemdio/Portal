@@ -140,6 +140,7 @@ export default function ProjectPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [clientUsers, setClientUsers] = useState<Array<{ id: string; label: string }>>([]);
   const [linkedCampaigns, setLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [campaignSearch, setCampaignSearch] = useState('');
@@ -151,6 +152,7 @@ export default function ProjectPage() {
     if (id) {
       void fetchProject(id);
       void fetchAssigneeUsers();
+      void fetchClientUsers();
       void fetchLinkedCampaigns();
       void fetchAllCampaigns();
     }
@@ -170,6 +172,27 @@ export default function ProjectPage() {
       );
     } catch (fetchError) {
       void logError('projects.assignees.fetch.failed', fetchError);
+    }
+  }
+
+  async function fetchClientUsers() {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, email, full_name')
+        .eq('role', 'client')
+        .order('full_name', { ascending: true });
+
+      if (error) throw error;
+      const rows = ((data ?? []) as Array<Pick<UserProfile, 'id' | 'email' | 'full_name'>>);
+      setClientUsers(
+        rows.map((row) => ({
+          id: row.id,
+          label: row.full_name?.trim() || row.email || row.id,
+        })),
+      );
+    } catch (fetchError) {
+      void logError('projects.client_users.fetch.failed', fetchError);
     }
   }
 
@@ -848,6 +871,30 @@ export default function ProjectPage() {
                         </option>
                       ))}
                     </select>
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Доступ клиента (ЛК)</label>
+                    <select
+                      value={project.client_user_id ?? ''}
+                      onChange={(e) =>
+                        setProject({
+                          ...project,
+                          client_user_id: e.target.value ? e.target.value : null,
+                        })
+                      }
+                      disabled={!canEdit}
+                      className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border text-gray-900 disabled:bg-gray-100 disabled:cursor-not-allowed bg-white"
+                    >
+                      <option value="">Не привязан</option>
+                      {clientUsers.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-[11px] text-gray-500">
+                      Выберите пользователя клиента — он увидит этот проект в личном кабинете.
+                    </p>
                 </div>
             </div>
            </div>
