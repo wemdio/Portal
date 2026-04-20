@@ -37,6 +37,8 @@ type LeadQualification = {
   objection_handleable: boolean | null;
   objection_draft: string | null;
   error_message: string | null;
+  instantly_email_id: string | null;
+  thread_id: string | null;
 };
 
 type QualifiedLeadsResponse = {
@@ -68,6 +70,35 @@ const STATUS_FILTERS = [
   { value: 'objection', label: 'Возражения' },
   { value: 'needs_review', label: 'На проверку' },
   { value: 'not_lead', label: 'Не лид' },
+];
+
+type ReplyMacro = { id: string; title: string; body: string; system?: boolean };
+
+const SYSTEM_MACROS: ReplyMacro[] = [
+  {
+    id: 'sys-1',
+    title: 'Раскрыть предложение',
+    body: `Добрый день!\nЭто [Имя], общались с Вами ранее.\n\nХочу предложить [решение] для «{{companyName}}». Это может быть актуально в Вашей ситуации.\n\n[текст предложения]\n\nПредлагаю обсудить на коротком звонке, без обязательств.\n\nОчень жду Вашего ответа!\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-2',
+    title: 'Запросить почту',
+    body: `Добрый день!\n\nСпасибо за контакт.\nМогли бы вы подсказать почту? Хочу направить письмо перед звонком.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-3',
+    title: 'Передача лида (CC)',
+    body: `Здравствуйте!\n\nЯ добавил в копию свою основную почту, чтобы не потерять ваше письмо. В ближайшее время отвечу.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-4',
+    title: 'Письмо ЛПР-у',
+    body: `Добрый день!\nВаш коллега поделился этим контактом для передачи актуального предложения.\n\nМеня зовут [Имя], хочу рассказать о [решение] для «{{companyName}}».\n\n[текст предложения]\n\nПредлагаю обсудить на коротком звонке, без обязательств.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
 ];
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
@@ -293,9 +324,9 @@ function ForwardToClientDialog({
 /* ─── Forward via Email (reply with CC) ──────────────────────────────────────── */
 
 function ForwardEmailDialog({
-  qualificationId, onClose, onForwarded,
+  qualificationId, companyName, campaignId, leadEmail, onClose, onForwarded,
 }: {
-  qualificationId: string; onClose: () => void; onForwarded: () => void;
+  qualificationId: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onForwarded: () => void;
 }) {
   const [clientEmail, setClientEmail] = useState('');
   const [replyText, setReplyText] = useState('Добрый день! Скоро свяжемся с вами с основной почты.');
@@ -346,6 +377,8 @@ function ForwardEmailDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
+          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
+
           <div>
             <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC)</label>
             <input
@@ -377,6 +410,240 @@ function ForwardEmailDialog({
               className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50 transition-colors"
             >
               {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Mail className="h-3 w-3" />}Отправить
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Macro Picker (shared between Reply and Forward dialogs) ────────────────── */
+
+function MacroPicker({
+  companyName, campaignId, leadEmail, onSelect,
+}: {
+  companyName?: string | null; campaignId?: string; leadEmail?: string; onSelect: (text: string) => void;
+}) {
+  const [userMacros, setUserMacros] = useState<ReplyMacro[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newBody, setNewBody] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [loadingProposal, setLoadingProposal] = useState(false);
+
+  useEffect(() => {
+    if (loaded) return;
+    fetchWithAuth<{ macros: ReplyMacro[] }>('/api/instantly/macros')
+      .then((res) => setUserMacros(res.macros ?? []))
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, [loaded]);
+
+  const allMacros = [...SYSTEM_MACROS, ...userMacros];
+
+  const applyVars = (text: string) => {
+    const name = companyName?.trim();
+    let result = text;
+    if (name) {
+      result = result.replace(/\{\{companyName\}\}/g, name);
+    } else {
+      result = result.replace(/\s*для «\{\{companyName\}\}»/g, '');
+      result = result.replace(/\s*«\{\{companyName\}\}»/g, '');
+      result = result.replace(/\{\{companyName\}\}/g, '');
+    }
+    return result;
+  };
+
+  const handleMacroClick = async (macro: ReplyMacro) => {
+    if (macro.id === 'sys-1' && campaignId && leadEmail) {
+      setLoadingProposal(true);
+      try {
+        const res = await fetchWithAuth<{ text: string | null; step: number }>(
+          `/api/instantly/qualified-leads/thread-outbound?campaign_id=${campaignId}&lead_email=${encodeURIComponent(leadEmail)}`,
+        );
+        let body = macro.body;
+        if (res.text) {
+          body = body.replace('[текст предложения]', res.text);
+        }
+        onSelect(applyVars(body));
+      } catch {
+        onSelect(applyVars(macro.body));
+      } finally {
+        setLoadingProposal(false);
+      }
+    } else {
+      onSelect(applyVars(macro.body));
+    }
+  };
+
+  const handleAdd = async () => {
+    if (!newTitle.trim() || !newBody.trim()) return;
+    try {
+      const res = await fetchWithAuth<{ macro: ReplyMacro }>('/api/instantly/macros', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle.trim(), body: newBody.trim() }),
+      });
+      setUserMacros((prev) => [...prev, res.macro]);
+      setShowAdd(false);
+      setNewTitle('');
+      setNewBody('');
+    } catch { /* */ }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await fetchWithAuth(`/api/instantly/macros?id=${id}`, { method: 'DELETE' });
+      setUserMacros((prev) => prev.filter((m) => m.id !== id));
+    } catch { /* */ }
+  };
+
+  return (
+    <div>
+      <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wide mb-1.5">Макросы</p>
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {allMacros.map((m) => (
+          <div key={m.id} className="group relative">
+            <button
+              type="button"
+              onClick={() => void handleMacroClick(m)}
+              disabled={loadingProposal}
+              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                m.system
+                  ? 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                  : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+              }`}
+            >
+              {loadingProposal && m.id === 'sys-1' ? '...' : m.title}
+            </button>
+            {!m.system && (
+              <button
+                type="button"
+                onClick={() => void handleDelete(m.id)}
+                className="absolute -top-1 -right-1 hidden group-hover:flex items-center justify-center w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[8px]"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => setShowAdd(!showAdd)}
+          className="rounded-md px-2 py-1 text-[11px] font-medium bg-zinc-50 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 transition-colors border border-dashed border-zinc-200"
+        >
+          + Свой
+        </button>
+      </div>
+      {showAdd && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-2.5 space-y-2 mb-2">
+          <input
+            type="text"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            placeholder="Название макроса"
+            className="w-full rounded border border-zinc-200 px-2 py-1 text-xs focus:border-blue-300 focus:outline-none"
+          />
+          <textarea
+            value={newBody}
+            onChange={(e) => setNewBody(e.target.value)}
+            placeholder="Текст шаблона... (можно использовать {{companyName}})"
+            rows={3}
+            className="w-full rounded border border-zinc-200 px-2 py-1 text-xs focus:border-blue-300 focus:outline-none resize-none"
+          />
+          <div className="flex gap-1.5 justify-end">
+            <button type="button" onClick={() => setShowAdd(false)} className="px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-600">Отмена</button>
+            <button
+              type="button"
+              onClick={handleAdd}
+              disabled={!newTitle.trim() || !newBody.trim()}
+              className="px-2 py-1 text-[10px] font-medium bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+            >
+              Сохранить
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Reply to lead (no CC) ──────────────────────────────────────────────────── */
+
+function ReplyDialog({
+  qualificationId, initialText, companyName, campaignId, leadEmail, onClose, onSent,
+}: {
+  qualificationId: string; initialText?: string; companyName?: string | null; campaignId?: string; leadEmail?: string; onClose: () => void; onSent: () => void;
+}) {
+  const [replyText, setReplyText] = useState(initialText ?? '');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+
+  const handleSend = async () => {
+    if (!replyText.trim()) return;
+    setSending(true);
+    setError('');
+    try {
+      await fetchWithAuth('/api/instantly/qualified-leads/forward-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          qualification_id: qualificationId,
+          reply_text: replyText.trim(),
+        }),
+      });
+      setSuccess(true);
+      setTimeout(() => { onSent(); onClose(); }, 1200);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка отправки');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-emerald-200/80 bg-gradient-to-br from-emerald-50 to-white p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <Send className="h-3.5 w-3.5 text-emerald-500" />
+          <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Ответить лиду</span>
+        </div>
+        <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 transition-colors">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {success ? (
+        <div className="flex items-center gap-2 py-3 text-sm text-emerald-600 font-medium">
+          <CheckCircle2 className="h-4 w-4" />Ответ отправлен
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
+
+          <MacroPicker companyName={companyName} campaignId={campaignId} leadEmail={leadEmail} onSelect={setReplyText} />
+
+          <div>
+            <textarea
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              rows={6}
+              className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm focus:border-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-100 placeholder:text-zinc-300 resize-none"
+              placeholder="Ваш ответ..."
+              autoFocus
+            />
+            <p className="mt-1 text-[10px] text-zinc-400">Ответ уйдёт лиду в тред переписки. Клиент не получит копию.</p>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-100 transition-colors">Отмена</button>
+            <button
+              onClick={handleSend}
+              disabled={!replyText.trim() || sending}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+            >
+              {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}Отправить
             </button>
           </div>
         </div>
@@ -455,6 +722,7 @@ function ListItem({
 function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: () => void }) {
   const [showForward, setShowForward] = useState(false);
   const [showEmailForward, setShowEmailForward] = useState(false);
+  const [showReply, setShowReply] = useState(false);
   const [copied, setCopied] = useState(false);
   const m = STATUS_META[item.status] ?? STATUS_META.error;
   const canForward = item.status === 'lead' || item.status === 'objection' || item.status === 'needs_review';
@@ -515,18 +783,25 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           {canForward && (
             <>
               <button
-                onClick={() => { setShowForward(!showForward); setShowEmailForward(false); }}
+                onClick={() => { setShowReply(!showReply); setShowForward(false); setShowEmailForward(false); }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 transition-colors"
+              >
+                <Send className="h-3.5 w-3.5" />
+                Ответить
+              </button>
+              <button
+                onClick={() => { setShowForward(!showForward); setShowReply(false); setShowEmailForward(false); }}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
               >
                 <Send className="h-3.5 w-3.5" />
                 В Telegram
               </button>
               <button
-                onClick={() => { setShowEmailForward(!showEmailForward); setShowForward(false); }}
+                onClick={() => { setShowEmailForward(!showEmailForward); setShowReply(false); setShowForward(false); }}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 transition-colors"
               >
                 <Mail className="h-3.5 w-3.5" />
-                На почту
+                На почту клиенту
               </button>
             </>
           )}
@@ -623,6 +898,17 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         )}
 
         {/* Forward dialogs */}
+        {showReply && (
+          <ReplyDialog
+            qualificationId={item.id}
+            initialText={item.objection_draft ?? ''}
+            companyName={item.company_name}
+            campaignId={item.campaign_id}
+            leadEmail={item.lead_email}
+            onClose={() => setShowReply(false)}
+            onSent={() => { setShowReply(false); onRefresh(); }}
+          />
+        )}
         {showForward && (
           <ForwardToClientDialog
             qualificationId={item.id}
@@ -633,6 +919,9 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         {showEmailForward && (
           <ForwardEmailDialog
             qualificationId={item.id}
+            companyName={item.company_name}
+            campaignId={item.campaign_id}
+            leadEmail={item.lead_email}
             onClose={() => setShowEmailForward(false)}
             onForwarded={() => { setShowEmailForward(false); onRefresh(); }}
           />
