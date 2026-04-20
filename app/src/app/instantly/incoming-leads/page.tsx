@@ -934,6 +934,8 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
 
 /* ─── Main Page ──────────────────────────────────────────────────────────────── */
 
+type UserProject = { id: string; client: string; campaign_ids: string[] };
+
 export default function IncomingLeadsPage() {
   const [items, setItems] = useState<LeadQualification[]>([]);
   const [total, setTotal] = useState(0);
@@ -944,29 +946,52 @@ export default function IncomingLeadsPage() {
   const readIdsRef = useRef<Set<string>>(new Set());
 
   const [statusFilter, setStatusFilter] = useState('all');
+  const [projectId, setProjectId] = useState('');
   const [campaignId, setCampaignId] = useState('');
   const [search, setSearch] = useState('');
   const [offset, setOffset] = useState(0);
   const LIMIT = 30;
 
+  const [projects, setProjects] = useState<UserProject[]>([]);
   const [campaigns, setCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [campaignsLoading, setCampaignsLoading] = useState(true);
 
   useEffect(() => {
+    fetchWithAuth<{ projects: UserProject[] }>('/api/instantly/my-projects')
+      .then((res) => setProjects(res.projects ?? []))
+      .catch(() => {});
+
     instantlyFetch<PaginatedResponse<Campaign>>('/campaigns?limit=all')
       .then((res) => setCampaigns((res.items ?? []).map((c) => ({ id: c.id, name: c.name }))))
       .catch(() => setCampaigns([]))
       .finally(() => setCampaignsLoading(false));
   }, []);
 
+  // When project is selected, scope campaigns to that project
+  const selectedProject = projects.find((p) => p.id === projectId);
+  const visibleCampaigns = projectId && selectedProject
+    ? campaigns.filter((c) => selectedProject.campaign_ids.includes(c.id))
+    : campaigns;
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const params = new URLSearchParams({ status: statusFilter, limit: String(LIMIT), offset: String(offset) });
-      if (campaignId) params.set('campaign_id', campaignId);
+      if (campaignId) {
+        params.set('campaign_id', campaignId);
+      } else if (projectId) {
+        const proj = projects.find((p) => p.id === projectId);
+        if (proj?.campaign_ids.length) {
+          for (const cid of proj.campaign_ids) {
+            params.append('campaign_ids', cid);
+          }
+        }
+        params.set('use_preferences', 'false');
+      } else {
+        params.set('use_preferences', 'true');
+      }
       if (search) params.set('search', search);
-      if (!campaignId) params.set('use_preferences', 'true');
 
       const data = await fetchWithAuth<QualifiedLeadsResponse>(`/api/instantly/qualified-leads?${params.toString()}`);
       setItems(data.items);
@@ -977,7 +1002,7 @@ export default function IncomingLeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, campaignId, search, offset]);
+  }, [statusFilter, campaignId, projectId, projects, search, offset]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -1053,14 +1078,27 @@ export default function IncomingLeadsPage() {
             })}
           </div>
 
+          {projects.length > 0 && (
+            <select
+              value={projectId}
+              onChange={(e) => { setProjectId(e.target.value); setCampaignId(''); setOffset(0); setSelectedId(null); }}
+              className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs focus:border-zinc-400 focus:outline-none max-w-[200px]"
+            >
+              <option value="">Все проекты</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.client}{p.campaign_ids.length === 0 ? ' (нет кампаний)' : ''}</option>
+              ))}
+            </select>
+          )}
+
           <select
             value={campaignId}
             onChange={(e) => { setCampaignId(e.target.value); setOffset(0); setSelectedId(null); }}
             className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs focus:border-zinc-400 focus:outline-none max-w-[220px]"
             disabled={campaignsLoading}
           >
-            <option value="">Мои кампании</option>
-            {campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <option value="">{projectId ? 'Все кампании проекта' : 'Все кампании'}</option>
+            {visibleCampaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
 
           <div className="relative min-w-[160px] max-w-[240px]">
