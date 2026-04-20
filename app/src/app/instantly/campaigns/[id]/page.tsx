@@ -249,6 +249,7 @@ export default function CampaignDetailPage() {
 
   const handleEmailsExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExportingEmails(format);
+    setEmailsExportProgress({ fetched: 0 });
     try {
       const { supabase } = await import('@/lib/supabaseClient');
       const { data: sessionData } = await supabase.auth.getSession();
@@ -258,22 +259,62 @@ export default function CampaignDetailPage() {
       const res = await fetch(`/api/instantly/emails/export?campaign_id=${campaignId}&format=${format}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => 'Ошибка');
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => `Ошибка ${res.status}`);
         throw new Error(text);
       }
-      const blob = await res.blob();
-      const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${safeName}-письма.${format}`;
-      a.click();
-      URL.revokeObjectURL(url);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let downloaded = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let event: Record<string, unknown>;
+          try { event = JSON.parse(trimmed); } catch { continue; }
+
+          if (event.type === 'progress') {
+            setEmailsExportProgress({ fetched: event.fetched as number });
+          } else if (event.type === 'status') {
+            setEmailsExportProgress((p) => ({ fetched: p?.fetched ?? 0, status: event.message as string }));
+          } else if (event.type === 'done') {
+            setEmailsExportProgress({ fetched: event.fetched as number, status: 'Готово' });
+            const b64 = event.file as string;
+            const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+            const mime = format === 'csv'
+              ? 'text/csv;charset=utf-8'
+              : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            const blob = new Blob([bytes], { type: mime });
+            const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
+            const objUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objUrl;
+            a.download = `${safeName}-письма.${format}`;
+            a.click();
+            URL.revokeObjectURL(objUrl);
+            downloaded = true;
+          } else if (event.type === 'error') {
+            throw new Error(event.message as string);
+          }
+        }
+      }
+
+      if (!downloaded) throw new Error('Экспорт не завершился корректно');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка экспорта писем');
     } finally {
       setExportingEmails(false);
+      setEmailsExportProgress(null);
     }
   }, [campaignId, campaign?.name]);
 
@@ -614,9 +655,13 @@ export default function CampaignDetailPage() {
                   Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300"></span>
                 </span>
               )}
-              {exportingEmails && (
+              {exportingEmails && emailsExportProgress && (
                 <span className="text-xs text-zinc-400 mr-1">
-                  Выгружаем письма…
+                  {emailsExportProgress.status
+                    ? emailsExportProgress.status
+                    : emailsExportProgress.fetched > 0
+                      ? `${emailsExportProgress.fetched} писем загружено…`
+                      : 'Начинаем выгрузку…'}
                 </span>
               )}
               <button

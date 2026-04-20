@@ -11,6 +11,11 @@ const customJestConfig = {
     '<rootDir>/tests/**/*.[jt]s?(x)',
     '<rootDir>/tests/**/?(*.)+(spec|test).[jt]s?(x)'
   ],
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '<rootDir>/tests/helpers/',
+    '<rootDir>/tests/fixtures/',
+  ],
   collectCoverageFrom: [
     'src/**/*.{js,jsx,ts,tsx}',
     '!src/**/*.d.ts',
