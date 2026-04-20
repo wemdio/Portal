@@ -62,6 +62,8 @@ export interface Project {
   contacts_obligation?: string;
   contacts_done?: string;
 
+  client_user_id?: string | null;
+
   brief_file_path?: string | null;
   brief_file_name?: string | null;
   brief_text?: string | null;

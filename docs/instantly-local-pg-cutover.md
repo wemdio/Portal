@@ -197,16 +197,124 @@ docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recr
 
 ## Автобэкапы
 
-- Prod: каждые 6 часов, загрузка в Supabase Storage `deploy-backups/instantly/prod/`
-- Dev: раз в сутки (03:00 UTC), `deploy-backups/instantly/dev/`
-- Локальная ротация: 7 дней (настраивается через `BACKUP_RETENTION_DAYS`)
+Сервис `portal-backup` (контейнер на **Portal-сервере**, `services/backup/`,
+образ `${DOCKER_USERNAME}/portal-backup:prod`) держит cron внутри себя и пишет
+дампы в bucket `deploy-backups` Supabase Storage. Один контейнер бэкапит и
+главную Supabase БД, и обе Instantly-копии (prod + dev) — так все дампы и
+алерты живут в одном месте.
 
-Восстановление из бэкапа:
+| Источник | Расписание (UTC) | Путь в Storage | Локальный ретеншн | Облачный ретеншн |
+|----------|------------------|----------------|-------------------|------------------|
+| Главная Supabase БД (`main-supabase`) | каждые 6 ч в `:15` | `deploy-backups/portal-main/` | 7 дней | 30 дней |
+| Instantly local PG prod (`instantly-prod`) | каждые 6 ч в `:00` | `deploy-backups/instantly/prod/` | 7 дней | 30 дней |
+| Instantly local PG dev (`instantly-dev`) | раз в сутки в `03:00` | `deploy-backups/instantly/dev/` | 7 дней | 30 дней |
+
+Все дампы — `pg_dump --format=custom --compress=6 --no-owner --no-privileges`.
+Для главной Supabase БД дополнительно исключаем супабейзовскую инфраструктуру
+(`_supavisor`, `_realtime`, `_analytics`, `pgsodium`, `vault`, `supabase_*`,
+`extensions`, `graphql*`, `cron`, `net`, `pgbouncer`) — это нужно, чтобы дамп
+накатывался на чистый Postgres без managed-стека (`auth`, `storage`, `public`
+сохраняются).
+
+### Параметры в `/home/Portal/prod/.env`
+
+`portal-backup` берёт URL подключения к БД **те же, что использует приложение**
+(никаких параллельных PROD_PG_HOST/PASSWORD — DRY):
+
+- `INSTANTLY_DATABASE_URL` — уже есть (Portal сам им пользуется).
+- `INSTANTLY_DEV_DATABASE_URL` — опционально; если не задано, бэкап dev скипается.
+- `MAIN_SUPABASE_DATABASE_URL` — **SESSION pooler URL** Supabase (порт **5432**,
+  НЕ 6543 — transaction-pooler не поддерживает pg_dump). Если не задано —
+  падает обратно на `DATABASE_URL`. Бери из Supabase Dashboard → Connect →
+  Connection string → «Session pooler».
+
+Куда грузим (по умолчанию — основной Supabase Portal, можно отдельный):
+
+- `BACKUP_SUPABASE_URL` (default = `NEXT_PUBLIC_SUPABASE_URL`)
+- `BACKUP_SUPABASE_KEY` (default = `SUPABASE_SERVICE_ROLE_KEY`)
+- `BACKUP_RETENTION_DAYS` (default 7) — локальная ротация в named volume
+- `BACKUP_REMOTE_RETENTION_DAYS` (default 30) — ротация в Storage
+
+Telegram-алерты используют те же `TELEGRAM_HEALTH_BOT_TOKEN` /
+`TELEGRAM_HEALTH_CHAT_ID`, что и `health-check`.
+
+Bucket `deploy-backups` должен существовать в проекте `BACKUP_SUPABASE_URL`
+(Storage → New bucket → Private). У service_role доступ к нему есть автоматически.
+
+### Алерты и чистка
+
+Алерт уходит в Telegram при двух событиях:
+1. `pg_dump` упал (ненулевой exit code)
+2. `curl` upload в Supabase Storage вернул не-2xx
+
+После успешного аплоада скрипт сам чистит старые объекты в Storage через
+`POST /storage/v1/object/list/deploy-backups` + `DELETE`. Чистка скипается, если
+upload упал, чтобы не остаться без копии.
+
+### Ручной запуск
 
 ```bash
-# Скачать дамп из Supabase Storage (или взять локальный из /backups/)
+# С Portal-сервера
+docker exec portal-backup /backup.sh main-supabase    # главная БД
+docker exec portal-backup /backup.sh instantly-prod   # Instantly prod
+docker exec portal-backup /backup.sh instantly-dev    # Instantly dev
+```
+
+### Восстановление дампа на чистый Postgres
+
+```bash
+# 1) Скачать дамп из Supabase Storage
+curl -fsSL -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
+  "${BACKUP_SUPABASE_URL}/storage/v1/object/deploy-backups/portal-main/portal-main-main-supabase-YYYYMMDD_HHMMSS.dump" \
+  -o portal-main.dump
+
+# 2) Поднять чистый Postgres
+docker run -d --name pg-restore \
+  -e POSTGRES_PASSWORD=temp \
+  -p 5432:5432 \
+  postgres:17-alpine
+
+# 3) Для main-supabase ОДИН РАЗ создать расширения, которые могут встретиться
+#    в дампе (auth/storage используют pgcrypto + uuid-ossp; vector — для embedding)
+docker exec -i pg-restore psql -U postgres -d postgres <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+
+# 4) Накатить дамп
+docker exec -i pg-restore pg_restore \
+  -U postgres -d postgres \
+  --clean --if-exists --no-owner --no-privileges \
+  --jobs=4 < portal-main.dump
+
+# Для Instantly БД расширений не нужно — там public схема и всё:
 docker exec -i instantly-postgres-prod pg_restore \
-  -U instantly -d instantly --clean --if-exists < instantly-prod-YYYYMMDD_HHMMSS.dump
+  -U instantly -d instantly --clean --if-exists --no-owner --no-privileges \
+  < instantly-instantly-prod-YYYYMMDD_HHMMSS.dump
+```
+
+### Тесты
+
+Контракт `backup.sh` покрыт shell-тестами в `services/backup/test_backup.sh`
+(нужен только bash; `pg_dump` и `curl` шиммируются через PATH; никаких внешних
+зависимостей):
+
+```bash
+bash services/backup/test_backup.sh
+# TESTS:   passed=45  failed=0
+```
+
+### Снос старого instantly-backup на DB-сервере
+
+При первом запуске scheduled-deploy после этого изменения старый контейнер
+`instantly-backup` на DB-сервере будет автоматически удалён
+(`docker rm -f instantly-backup`). Если нужно убрать вручную сразу:
+
+```bash
+ssh root@<DB_HOST>
+sudo docker rm -f instantly-backup 2>/dev/null
+sudo docker volume rm instantly-db_backup-data 2>/dev/null   # если был
 ```
 
 ## Сервисы и их зависимости от Instantly env-переменных

@@ -28,9 +28,14 @@ import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
 import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
 import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
+import { runDeadlineNotifications } from '@/lib/notifications/deadlineCron';
+import { runLeadEscalation } from '@/lib/notifications/leadEscalation';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const LI_CAMPAIGN_TICK_INTERVAL_MS = Number(process.env.LI_CAMPAIGN_TICK_INTERVAL_MS ?? String(5 * 60 * 1000));
+const DEADLINE_NOTIFICATIONS_INTERVAL_MS = Number(
+  process.env.DEADLINE_NOTIFICATIONS_INTERVAL_MS ?? String(10 * 60 * 1000),
+);
 const HH_DRAIN_TIMEOUT_MS = Number(process.env.WORKER_DRAIN_TIMEOUT_MINUTES ?? '180') * 60 * 1000;
 const WORKER_ID = `worker-${process.pid}-${Date.now()}`;
 
@@ -666,6 +671,42 @@ async function liCampaignTickLoop(): Promise<void> {
 }
 
 // --------------------------------------------------------------------------
+// Deadline-driven notifications (replaces Vercel Cron in self-hosted setup)
+// --------------------------------------------------------------------------
+
+async function deadlineNotificationsLoop(): Promise<void> {
+  // Run immediately on startup, then on a fixed interval. Keeps parity with
+  // the previous Vercel Cron schedule (`*/10 * * * *`).
+  const tick = async () => {
+    if (!supabaseAdmin) return;
+    const now = new Date();
+    try {
+      const deadline = await runDeadlineNotifications({ db: supabaseAdmin, now });
+      if (deadline.created > 0) {
+        log('info', `Deadline notifications: processed=${deadline.processed}, created=${deadline.created}`);
+      }
+    } catch (err) {
+      log('error', 'Deadline notifications tick failed', err);
+    }
+    try {
+      const lead = await runLeadEscalation({ db: supabaseAdmin, now });
+      if (lead.created > 0) {
+        log('info', `Lead escalation: created=${lead.created}`);
+      }
+    } catch (err) {
+      log('error', 'Lead escalation tick failed', err);
+    }
+  };
+
+  await tick();
+  while (!shuttingDown) {
+    await sleep(DEADLINE_NOTIFICATIONS_INTERVAL_MS);
+    if (shuttingDown) break;
+    await tick();
+  }
+}
+
+// --------------------------------------------------------------------------
 // Scheduled Nash Outreach collection (daily at 07:00 Moscow time = 04:00 UTC)
 // --------------------------------------------------------------------------
 
@@ -824,6 +865,9 @@ async function main(): Promise<void> {
 
   // Start LinkedIn Outreach campaign tick loop (every 5 min by default).
   void liCampaignTickLoop();
+
+  // Start deadline-notifications loop (every 10 min by default).
+  void deadlineNotificationsLoop();
 
   await pollLoop();
 }

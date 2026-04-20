@@ -23,6 +23,8 @@ function normalizePathnameForNav(pathname: string): string {
 
 function getClientPortalSectionTitle(pathname: string, locale: Locale): string {
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) return locale === 'en' ? 'Campaigns' : 'Кампании';
+  if (pathname.startsWith('/client/projects')) return locale === 'en' ? 'Projects' : 'Проекты';
+  if (pathname.startsWith('/client/leads')) return locale === 'en' ? 'Leads' : 'Лиды';
   if (pathname.startsWith('/client/bases')) return locale === 'en' ? 'Databases' : 'Базы';
   if (pathname.startsWith('/client/reports')) return locale === 'en' ? 'Reports' : 'Отчёты';
   return SITE_LABEL;
