@@ -1055,6 +1055,43 @@ export default function IncomingLeadsPage() {
           </div>
         </div>
 
+        {/* Project tabs */}
+        {projects.length > 0 && (
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-2 mb-3 scrollbar-thin">
+            <button
+              onClick={() => { setProjectId(''); setCampaignId(''); setOffset(0); setSelectedId(null); }}
+              className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 ${
+                projectId === ''
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+              }`}
+            >
+              Все проекты
+            </button>
+            {projects.map((p) => {
+              const isActive = projectId === p.id;
+              const noCampaigns = p.campaign_ids.length === 0;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => { setProjectId(p.id); setCampaignId(''); setOffset(0); setSelectedId(null); }}
+                  disabled={noCampaigns}
+                  title={noCampaigns ? 'Нет привязанных кампаний' : p.client}
+                  className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 ${
+                    isActive
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : noCampaigns
+                        ? 'bg-zinc-50 text-zinc-300 cursor-not-allowed'
+                        : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                  }`}
+                >
+                  {p.client}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Filters row */}
         <div className="flex flex-wrap items-center gap-3">
           {/* Status tabs with counters */}
@@ -1077,19 +1114,6 @@ export default function IncomingLeadsPage() {
               );
             })}
           </div>
-
-          {projects.length > 0 && (
-            <select
-              value={projectId}
-              onChange={(e) => { setProjectId(e.target.value); setCampaignId(''); setOffset(0); setSelectedId(null); }}
-              className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs focus:border-zinc-400 focus:outline-none max-w-[200px]"
-            >
-              <option value="">Все проекты</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>{p.client}{p.campaign_ids.length === 0 ? ' (нет кампаний)' : ''}</option>
-              ))}
-            </select>
-          )}
 
           <select
             value={campaignId}
