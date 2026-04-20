@@ -70,6 +70,35 @@ const STATUS_FILTERS = [
   { value: 'not_lead', label: 'Не лид' },
 ];
 
+type ReplyMacro = { id: string; title: string; body: string; system?: boolean };
+
+const SYSTEM_MACROS: ReplyMacro[] = [
+  {
+    id: 'sys-1',
+    title: 'Раскрыть предложение',
+    body: `Добрый день!\nЭто [Имя], общались с Вами ранее.\n\nХочу предложить [решение] для «{{companyName}}». Это может быть актуально в Вашей ситуации.\n\n[текст предложения]\n\nПредлагаю обсудить на коротком звонке, без обязательств.\n\nОчень жду Вашего ответа!\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-2',
+    title: 'Запросить почту',
+    body: `Добрый день!\n\nСпасибо за контакт.\nМогли бы вы подсказать почту? Хочу направить письмо перед звонком.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-3',
+    title: 'Передача лида (CC)',
+    body: `Здравствуйте!\n\nЯ добавил в копию свою основную почту, чтобы не потерять ваше письмо. В ближайшее время отвечу.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+  {
+    id: 'sys-4',
+    title: 'Письмо ЛПР-у',
+    body: `Добрый день!\nВаш коллега поделился этим контактом для передачи актуального предложения.\n\nМеня зовут [Имя], хочу рассказать о [решение] для «{{companyName}}».\n\n[текст предложения]\n\nПредлагаю обсудить на коротком звонке, без обязательств.\n\nС уважением,\n[Подпись]`,
+    system: true,
+  },
+];
+
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
 async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T> {
@@ -293,9 +322,9 @@ function ForwardToClientDialog({
 /* ─── Forward via Email (reply with CC) ──────────────────────────────────────── */
 
 function ForwardEmailDialog({
-  qualificationId, onClose, onForwarded,
+  qualificationId, companyName, onClose, onForwarded,
 }: {
-  qualificationId: string; onClose: () => void; onForwarded: () => void;
+  qualificationId: string; companyName?: string | null; onClose: () => void; onForwarded: () => void;
 }) {
   const [clientEmail, setClientEmail] = useState('');
   const [replyText, setReplyText] = useState('Добрый день! Скоро свяжемся с вами с основной почты.');
@@ -346,6 +375,8 @@ function ForwardEmailDialog({
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
 
+          <MacroPicker companyName={companyName} onSelect={setReplyText} />
+
           <div>
             <label className="block text-xs font-medium text-zinc-500 mb-1">Email клиента (CC)</label>
             <input
@@ -385,12 +416,129 @@ function ForwardEmailDialog({
   );
 }
 
+/* ─── Macro Picker (shared between Reply and Forward dialogs) ────────────────── */
+
+function MacroPicker({
+  companyName, onSelect,
+}: {
+  companyName?: string | null; onSelect: (text: string) => void;
+}) {
+  const [userMacros, setUserMacros] = useState<ReplyMacro[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newBody, setNewBody] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (loaded) return;
+    fetchWithAuth<{ macros: ReplyMacro[] }>('/api/instantly/macros')
+      .then((res) => setUserMacros(res.macros ?? []))
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, [loaded]);
+
+  const allMacros = [...SYSTEM_MACROS, ...userMacros];
+
+  const applyVars = (text: string) =>
+    text.replace(/\{\{companyName\}\}/g, companyName ?? '[Компания]');
+
+  const handleAdd = async () => {
+    if (!newTitle.trim() || !newBody.trim()) return;
+    try {
+      const res = await fetchWithAuth<{ macro: ReplyMacro }>('/api/instantly/macros', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle.trim(), body: newBody.trim() }),
+      });
+      setUserMacros((prev) => [...prev, res.macro]);
+      setShowAdd(false);
+      setNewTitle('');
+      setNewBody('');
+    } catch { /* */ }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await fetchWithAuth(`/api/instantly/macros?id=${id}`, { method: 'DELETE' });
+      setUserMacros((prev) => prev.filter((m) => m.id !== id));
+    } catch { /* */ }
+  };
+
+  return (
+    <div>
+      <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wide mb-1.5">Макросы</p>
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {allMacros.map((m) => (
+          <div key={m.id} className="group relative">
+            <button
+              type="button"
+              onClick={() => onSelect(applyVars(m.body))}
+              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                m.system
+                  ? 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                  : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+              }`}
+            >
+              {m.title}
+            </button>
+            {!m.system && (
+              <button
+                type="button"
+                onClick={() => void handleDelete(m.id)}
+                className="absolute -top-1 -right-1 hidden group-hover:flex items-center justify-center w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[8px]"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => setShowAdd(!showAdd)}
+          className="rounded-md px-2 py-1 text-[11px] font-medium bg-zinc-50 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 transition-colors border border-dashed border-zinc-200"
+        >
+          + Свой
+        </button>
+      </div>
+      {showAdd && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-2.5 space-y-2 mb-2">
+          <input
+            type="text"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            placeholder="Название макроса"
+            className="w-full rounded border border-zinc-200 px-2 py-1 text-xs focus:border-blue-300 focus:outline-none"
+          />
+          <textarea
+            value={newBody}
+            onChange={(e) => setNewBody(e.target.value)}
+            placeholder="Текст шаблона... (можно использовать {{companyName}})"
+            rows={3}
+            className="w-full rounded border border-zinc-200 px-2 py-1 text-xs focus:border-blue-300 focus:outline-none resize-none"
+          />
+          <div className="flex gap-1.5 justify-end">
+            <button type="button" onClick={() => setShowAdd(false)} className="px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-600">Отмена</button>
+            <button
+              type="button"
+              onClick={handleAdd}
+              disabled={!newTitle.trim() || !newBody.trim()}
+              className="px-2 py-1 text-[10px] font-medium bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+            >
+              Сохранить
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Reply to lead (no CC) ──────────────────────────────────────────────────── */
 
 function ReplyDialog({
-  qualificationId, initialText, onClose, onSent,
+  qualificationId, initialText, companyName, onClose, onSent,
 }: {
-  qualificationId: string; initialText?: string; onClose: () => void; onSent: () => void;
+  qualificationId: string; initialText?: string; companyName?: string | null; onClose: () => void; onSent: () => void;
 }) {
   const [replyText, setReplyText] = useState(initialText ?? '');
   const [sending, setSending] = useState(false);
@@ -438,8 +586,10 @@ function ReplyDialog({
       ) : (
         <div className="space-y-3">
           {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
+
+          <MacroPicker companyName={companyName} onSelect={setReplyText} />
+
           <div>
-            <label className="block text-xs font-medium text-zinc-500 mb-1">Текст ответа</label>
             <textarea
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
@@ -716,6 +866,7 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           <ReplyDialog
             qualificationId={item.id}
             initialText={item.objection_draft ?? ''}
+            companyName={item.company_name}
             onClose={() => setShowReply(false)}
             onSent={() => { setShowReply(false); onRefresh(); }}
           />
@@ -730,6 +881,7 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
         {showEmailForward && (
           <ForwardEmailDialog
             qualificationId={item.id}
+            companyName={item.company_name}
             onClose={() => setShowEmailForward(false)}
             onForwarded={() => { setShowEmailForward(false); onRefresh(); }}
           />
