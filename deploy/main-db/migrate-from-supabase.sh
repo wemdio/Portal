@@ -38,6 +38,13 @@ DUMP_DIR="${DUMP_DIR:-/tmp}"
 TS=$(date -u +%Y%m%d_%H%M%S)
 JOBS="${JOBS:-4}"
 
+# Supavisor pooler не поддерживает параллельные коннекты pg_dump --jobs.
+# Если хост содержит "pooler.supabase.com" — переключаемся на single-thread.
+if [[ "$SOURCE_HOST" == *pooler.supabase.com* ]]; then
+  echo "  ▸ Источник — Supavisor pooler: дамп будет single-threaded (JOBS=1)."
+  JOBS=1
+fi
+
 echo "═══════════════════════════════════════════════════════"
 echo " Supabase Cloud → self-hosted Supabase migration"
 echo " Source: ${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_PORT}/${SOURCE_DB}"
@@ -73,17 +80,24 @@ PGPASSWORD="$SOURCE_PASSWORD" pg_dump \
 echo "  $(wc -l < "$STORAGE_DUMP") строк -> $STORAGE_DUMP"
 
 # ─── Step 3: dump public schema (всё приложение) ─────────────────────────────
+# Используем custom-формат без --jobs, чтобы работать как через прямой коннект,
+# так и через Supavisor pooler. На pooler параллельный pg_dump не поддерживается.
 echo ""
 echo "▸ Step 3/6: dump public schema..."
 PUBLIC_DUMP="${DUMP_DIR}/portal-public-${TS}.dump"
-PGPASSWORD="$SOURCE_PASSWORD" pg_dump \
-  --host="$SOURCE_HOST" --port="$SOURCE_PORT" \
-  --username="$SOURCE_USER" --dbname="$SOURCE_DB" \
-  --schema=public \
-  --format=custom --compress=6 \
-  --no-owner --no-privileges \
-  --jobs="$JOBS" \
+PG_DUMP_PUBLIC_ARGS=(
+  --host="$SOURCE_HOST" --port="$SOURCE_PORT"
+  --username="$SOURCE_USER" --dbname="$SOURCE_DB"
+  --schema=public
+  --format=custom --compress=6
+  --no-owner --no-privileges
   --file="$PUBLIC_DUMP"
+)
+if [ "${JOBS}" != "1" ] && [[ "$SOURCE_HOST" != *pooler.supabase.com* ]]; then
+  # параллельный режим возможен только при прямом подключении и --format=directory
+  PG_DUMP_PUBLIC_ARGS+=( --jobs="$JOBS" )
+fi
+PGPASSWORD="$SOURCE_PASSWORD" pg_dump "${PG_DUMP_PUBLIC_ARGS[@]}"
 DUMP_SIZE=$(stat -c '%s' "$PUBLIC_DUMP" 2>/dev/null || stat -f '%z' "$PUBLIC_DUMP" 2>/dev/null || echo '?')
 echo "  ${DUMP_SIZE} байт -> $PUBLIC_DUMP"
 
@@ -113,13 +127,15 @@ PGPASSWORD="$TARGET_PASSWORD" psql \
   }
 
 # ─── Step 6: restore public schema ───────────────────────────────────────────
+# pg_restore --jobs работает в локальной БД (target — наш main-postgres), поэтому
+# здесь параллелим всегда. Если упадёт — зови без --jobs.
 echo ""
 echo "▸ Step 6/6: restore public schema..."
 PGPASSWORD="$TARGET_PASSWORD" pg_restore \
   --host="$TARGET_HOST" --port="$TARGET_PORT" \
   --username="$TARGET_USER" --dbname="$TARGET_DB" \
   --no-owner --no-privileges \
-  --jobs="$JOBS" \
+  --jobs=4 \
   --if-exists --clean \
   "$PUBLIC_DUMP" || {
     echo ""
