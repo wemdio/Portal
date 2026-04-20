@@ -439,8 +439,18 @@ function MacroPicker({
 
   const allMacros = [...SYSTEM_MACROS, ...userMacros];
 
-  const applyVars = (text: string) =>
-    text.replace(/\{\{companyName\}\}/g, companyName ?? '[Компания]');
+  const applyVars = (text: string) => {
+    const name = companyName?.trim();
+    let result = text;
+    if (name) {
+      result = result.replace(/\{\{companyName\}\}/g, name);
+    } else {
+      result = result.replace(/\s*для «\{\{companyName\}\}»/g, '');
+      result = result.replace(/\s*«\{\{companyName\}\}»/g, '');
+      result = result.replace(/\{\{companyName\}\}/g, '');
+    }
+    return result;
+  };
 
   const handleAdd = async () => {
     if (!newTitle.trim() || !newBody.trim()) return;
