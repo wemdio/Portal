@@ -164,19 +164,31 @@ upload_failed=0
 if [ -n "${BACKUP_SUPABASE_URL:-}" ] && [ -n "${BACKUP_SUPABASE_KEY:-}" ]; then
   REMOTE_PATH="deploy-backups/${SUBPATH}/${PREFIX}-${INSTANCE}-${TS}.dump"
   echo "[backup] Uploading to ${REMOTE_PATH}..."
+
+  # ВАЖНО: используем -T (--upload-file) вместо --data-binary @file.
+  # `--data-binary @file` грузит ВЕСЬ файл в RAM (см. curl/curl#18300), что
+  # на портал-бэкапе (256 МБ memory limit) приводит к OOM-kill curl-а через
+  # SIGKILL: stdout пустой → %{http_code} пустой → алерт «Upload FAILED (HTTP )».
+  # `-T` стримит с диска чанками, память плоская независимо от размера дампа.
+  # `-X POST` оставляем явно: Supabase Storage REST принимает POST + x-upsert
+  # для апсерта (это же делает supabase-js клиент).
+  curl_rc=0
   HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 600 \
     -X POST "${BACKUP_SUPABASE_URL}/storage/v1/object/${REMOTE_PATH}" \
     -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
     -H 'Content-Type: application/octet-stream' \
     -H 'x-upsert: true' \
-    --data-binary @"${DUMP_FILE}")
+    -T "${DUMP_FILE}") || curl_rc=$?
 
   case "$HTTP_CODE" in
     200|201)
       echo "[backup] Upload OK (HTTP ${HTTP_CODE})"
       ;;
     *)
-      msg="🚨 [backup ${INSTANCE}] Upload FAILED (HTTP ${HTTP_CODE}) for ${REMOTE_PATH}"
+      # Включаем curl_rc и size в текст: rc=137 → OOM/SIGKILL,
+      # rc=28 → таймаут, rc=7 → connect refused, rc=0+code 4xx → серверная
+      # ошибка. Без этого пустой HTTP_CODE не даёт никаких подсказок.
+      msg="🚨 [backup ${INSTANCE}] Upload FAILED (HTTP ${HTTP_CODE} rc=${curl_rc} size=${DUMP_SIZE}) for ${REMOTE_PATH}"
       echo "$msg" >&2
       send_alert "$msg"
       upload_failed=1

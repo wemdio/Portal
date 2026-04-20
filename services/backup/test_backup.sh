@@ -122,6 +122,21 @@ for a in "$@"; do
   prev="$a"
 done
 
+# Имитация SIGKILL (например OOM). Реальный curl, убитый -9, не успевает
+# напечатать ничего: пустой stdout + ненулевой rc. Используется для теста,
+# что алерт не показывает «HTTP » без диагностики.
+# CURL_FAKE_KILL=1     — все запросы.
+# CURL_UPLOAD_KILL=1   — только запросы upload (POST/PUT /storage/v1/object/<path>),
+#                        не трогает list-/delete-эндпойнты, чтобы не ломать тесты cleanup.
+is_upload_url=0
+case "$url" in
+  *"/storage/v1/object/list/"*) ;;
+  *"/storage/v1/object/"*) is_upload_url=1 ;;
+esac
+if [ "${CURL_FAKE_KILL:-0}" = 1 ] || { [ "${CURL_UPLOAD_KILL:-0}" = 1 ] && [ "$is_upload_url" = 1 ]; }; then
+  exit 137
+fi
+
 body=""
 case "$url" in
   *"/storage/v1/object/list/"*)
@@ -182,6 +197,8 @@ assert_contains "$SB/pg_dump.log" "--no-owner" "instantly-prod uses --no-owner"
 assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/instantly/prod/" "instantly-prod upload path"
 assert_contains "$SB/curl.log" "Authorization: Bearer svc" "instantly-prod sends bearer token"
 assert_contains "$SB/curl.log" "x-upsert: true" "instantly-prod uses x-upsert header"
+assert_contains "$SB/curl.log" "-T " "instantly-prod uses streaming upload (-T)"
+assert_not_contains "$SB/curl.log" "--data-binary @" "instantly-prod no longer uses --data-binary @file (OOM-prone)"
 
 echo ""
 echo "── 3) instantly-prod: skipped when INSTANTLY_DATABASE_URL is empty ──"
@@ -202,6 +219,7 @@ rc="$(INSTANTLY_DEV_DATABASE_URL='postgresql://instantly:dev@db.example.com:3543
 assert_exit_code "$rc" "0" "instantly-dev exits 0"
 assert_contains "$SB/pg_dump.log" "35433/instantly" "instantly-dev uses INSTANTLY_DEV_DATABASE_URL"
 assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/instantly/dev/" "instantly-dev upload path"
+assert_contains "$SB/curl.log" "-T " "instantly-dev uses streaming upload (-T)"
 
 echo ""
 echo "── 5) main-supabase: MAIN_SUPABASE_DATABASE_URL + schema filters + portal-main path ──"
@@ -221,6 +239,8 @@ assert_not_contains "$SB/pg_dump.log" "--exclude-schema=public" "main-supabase k
 assert_not_contains "$SB/pg_dump.log" "--exclude-schema=auth" "main-supabase keeps auth"
 assert_not_contains "$SB/pg_dump.log" "--exclude-schema=storage" "main-supabase keeps storage"
 assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/portal-main/" "main-supabase upload path"
+assert_contains "$SB/curl.log" "-T " "main-supabase uses streaming upload (-T)"
+assert_not_contains "$SB/curl.log" "--data-binary @" "main-supabase no longer uses --data-binary @file (OOM-prone)"
 
 echo ""
 echo "── 6) main-supabase: fallback to DATABASE_URL when MAIN_SUPABASE_DATABASE_URL is empty ──"
@@ -287,6 +307,22 @@ assert_contains "$SB/curl.log" "/storage/v1/object/list/deploy-backups" "cleanup
 assert_contains "$SB/curl.log" "-X DELETE" "cleanup issues DELETE request"
 assert_contains "$SB/curl.log" "instantly-instantly-prod-19990101_000000.dump" "cleanup deletes 100-day-old object"
 assert_not_contains "$SB/curl.log" "-X DELETE https://example.supabase.co/storage/v1/object/deploy-backups/instantly/prod/instantly-instantly-prod-29990101" "cleanup keeps fresh object"
+
+echo ""
+echo "── 11) upload OOM (SIGKILL) → alert содержит rc и size, а не пустой HTTP ──"
+# Регрессия: «🚨 [backup main-supabase] Upload FAILED (HTTP )» — пустой код,
+# потому что curl --data-binary @file OOM-killed -9 и не успел напечатать
+# %{http_code}. После фикса алерт должен содержать rc=137 и size=<байты>.
+SB="$TMP_ROOT/t11"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
+  CURL_UPLOAD_KILL=1 \
+  TELEGRAM_HEALTH_BOT_TOKEN=tok TELEGRAM_HEALTH_CHAT_ID=42 \
+  BACKUP_SUPABASE_URL=https://x BACKUP_SUPABASE_KEY=k \
+  run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "1" "upload OOM (rc=137) → exit 1"
+assert_contains "$SB/curl.log" "api.telegram.org/bottok/sendMessage" "upload OOM → Telegram alert"
+assert_contains "$SB/curl.log" "rc=137" "alert text contains curl rc"
+assert_contains "$SB/curl.log" "size=" "alert text contains dump size"
 
 echo ""
 echo "═══════════════════════════════════════"

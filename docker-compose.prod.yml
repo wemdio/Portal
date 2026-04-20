@@ -535,8 +535,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.2'
+          # 1 ГБ + 1 CPU нужны pg_dump для главной Supabase БД (несколько ГБ
+          # данных, --compress=6 жмёт в один поток). Прежний лимит 256M убивал
+          # curl OOM-ом при стриминге (даже после перехода на -T --upload-file
+          # хочется иметь запас на pg_dump + tr/sed/find в cleanup_remote).
+          # См. services/backup/backup.sh комментарий про curl/curl#18300.
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
