@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 
 interface ForwardEmailBody {
   qualification_id: string;
-  client_email: string;
+  client_email?: string;
   reply_text: string;
 }
 
@@ -19,16 +19,18 @@ export const POST = withAuth(async (req, user) => {
   const body = (await req.json()) as ForwardEmailBody;
   const { qualification_id, client_email, reply_text } = body;
 
-  if (!qualification_id || !client_email || !reply_text) {
+  if (!qualification_id || !reply_text) {
     return NextResponse.json(
-      { error: 'qualification_id, client_email и reply_text обязательны' },
+      { error: 'qualification_id и reply_text обязательны' },
       { status: 400 },
     );
   }
 
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(client_email)) {
-    return NextResponse.json({ error: 'Некорректный email' }, { status: 400 });
+  if (client_email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(client_email)) {
+      return NextResponse.json({ error: 'Некорректный email' }, { status: 400 });
+    }
   }
 
   const { data: qual, error: qualErr } = await supabaseInstantly
@@ -82,13 +84,13 @@ export const POST = withAuth(async (req, user) => {
     );
   }
 
-  // Send reply via Instantly API with client in CC
+  // Send reply via Instantly API (with client in CC if provided, otherwise direct reply)
   try {
     await instantly.replyToEmail({
       reply_to_uuid: instantlyEmailId,
       eaccount,
       body: { text: reply_text },
-      cc_address_email_list: client_email,
+      ...(client_email ? { cc_address_email_list: client_email } : {}),
     });
   } catch (err) {
     return NextResponse.json(
@@ -97,30 +99,32 @@ export const POST = withAuth(async (req, user) => {
     );
   }
 
-  // Record in client_forwarded_leads for tracking
-  try {
-    await supabaseInstantly
-      .from('client_forwarded_leads')
-      .insert({
-        qualification_id,
-        forwarded_by: user.id,
-        campaign_id: qual.campaign_id,
-        campaign_name: qual.campaign_name,
-        lead_email: qual.lead_email,
-        lead_name: qual.lead_name,
-        company_name: qual.company_name,
-        reply_subject: qual.reply_subject,
-        reply_body: qual.reply_body,
-        last_outbound_preview: qual.last_outbound_preview,
-        reply_timestamp: qual.reply_timestamp,
-        status: qual.status,
-        ai_reason: qual.ai_reason,
-        forwarded_via: 'email',
-        client_email,
-      });
-  } catch {
-    // tracking is best-effort
+  // Record tracking only when forwarded to client; direct replies don't create forwarded_leads rows
+  if (client_email) {
+    try {
+      await supabaseInstantly
+        .from('client_forwarded_leads')
+        .insert({
+          qualification_id,
+          forwarded_by: user.id,
+          campaign_id: qual.campaign_id,
+          campaign_name: qual.campaign_name,
+          lead_email: qual.lead_email,
+          lead_name: qual.lead_name,
+          company_name: qual.company_name,
+          reply_subject: qual.reply_subject,
+          reply_body: qual.reply_body,
+          last_outbound_preview: qual.last_outbound_preview,
+          reply_timestamp: qual.reply_timestamp,
+          status: qual.status,
+          ai_reason: qual.ai_reason,
+          forwarded_via: 'email',
+          client_email,
+        });
+    } catch {
+      // tracking is best-effort
+    }
   }
 
-  return NextResponse.json({ ok: true, sent_to: client_email });
+  return NextResponse.json({ ok: true, sent_to: client_email ?? qual.lead_email });
 });
