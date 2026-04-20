@@ -1,233 +1,348 @@
-# Перенос основной БД Portal: Supabase → self-hosted Postgres
+# Перенос Portal с Supabase Cloud на self-hosted стек
 
-**DB-хост:** тот же, где instantly-db (IP: `144.31.54.166`)  
-**Порт main-postgres:** `35434`  
-**Даунтайм:** 5–15 минут (только шаг 5 — cutover)
+**Цель:** уйти с Supabase Cloud на свой хост (тот же, где `instantly-db`),
+с минимальными правками в коде Portal (меняем только URL/ключи в `.env`).
+
+**DB-хост:** `144.31.54.166`  
+**Новый Supabase API URL:** `http://144.31.54.166:35480` (Kong)  
+**main-postgres:** `144.31.54.166:35434` (для прямых подключений + миграций)  
+**Даунтайм:** 15-30 мин на cutover (Шаг 6).
 
 ---
 
-## Шаг 0: Подготовка .env на DB-сервере
+## Что переносится
 
-SSH на DB-сервер и добавь переменные в `/opt/instantly-db/.env`:
+| Компонент | Что | Где живёт после |
+|-----------|-----|-----------------|
+| `public` schema (~125 таблиц) | весь код приложения | `main-postgres` |
+| `auth` schema (users, sessions, identities) | пользователи и логины | `main-postgres` + GoTrue |
+| `storage` schema (buckets, objects metadata) | метаданные файлов | `main-postgres` + Storage API |
+| Файлы Storage (~7 бакетов) | бинарники | local filesystem на DB-хосте, под Storage API |
+| JWT secret | подпись токенов | `MAIN_JWT_SECRET` в `/opt/main-db/.env` |
+
+## Что **не** переносится / новое
+
+- pgsodium / vault — у нас нет секретов в Supabase Vault (проверить `select * from vault.secrets`)
+- Edge Functions — приложение не использует
+- Analytics / Logflare — не используется
+
+---
+
+## Шаг 0: Сгенерировать ключи (на локалке)
+
+Решить, **сохранять старый JWT_SECRET или нет**:
+
+- **Сохранить** = после cutover все залогиненные пользователи останутся залогинены.  
+  Берём JWT secret из Supabase Dashboard → Project Settings → API → "JWT Settings" → JWT Secret.
+- **Сгенерировать новый** = все пользователи разлогинены (придётся ввести пароль).  
+  Безопаснее (на случай если старый секрет утёк).
 
 ```bash
-# Добавить в конец /opt/instantly-db/.env:
-MAIN_PG_PASSWORD=<придумай надёжный пароль>
-MAIN_PGADMIN_EMAIL=admin@portal.com
-MAIN_PGADMIN_PASSWORD=<пароль для pgAdmin>
+# Вариант A: сохранить старый
+node deploy/main-db/scripts/generate-keys.mjs --secret='<old_jwt_secret_from_supabase>'
+
+# Вариант B: новый
+node deploy/main-db/scripts/generate-keys.mjs
 ```
 
-## Шаг 1: Поднять main-postgres на DB-сервере
+Скрипт выведет блок переменных. Сохрани вывод — он понадобится в шагах 2 и 6.
+
+---
+
+## Шаг 1: Обновить `/opt/instantly-db/.env` на DB-сервере
 
 ```bash
 ssh root@144.31.54.166
 
 cd /opt/instantly-db
+# Если есть старый MAIN_PG_PASSWORD — проверь, что он матчит то, что планируешь дальше.
+# Если нет — добавь его (он же будет для всех Supabase сервисов).
 
-# Скопируй обновлённые файлы с локалки (или через CI):
-#   docker-compose.yml, backup.sh, crontab, Dockerfile.backup
+cat >> .env <<'EOF'
+# Главный пароль Postgres (используется и Supabase сервисами)
+MAIN_PG_PASSWORD=<тот же пароль, что в /opt/main-db/.env>
+# JWT для встроенного в supabase/postgres ENV (используется pgjwt extension)
+MAIN_JWT_SECRET=<вывод generate-keys.mjs>
+MAIN_JWT_EXP=3600
+EOF
 
-# Поднять только новый контейнер (instantly не трогается):
+sed -i 's/\r$//' .env
+```
+
+## Шаг 2: Пересоздать main-postgres на supabase/postgres
+
+> ВАЖНО: меняется image (postgres:16-alpine → supabase/postgres:15.8.1.060) и volume
+> (`main-pg-data` → `main-supabase-pg-data`). Если в старом volume уже что-то было — оно
+> не пропадёт, просто не будет использоваться. Можно удалить позже.
+
+Скопировать обновлённые файлы с локалки:
+
+```bash
+scp -r deploy/instantly-db/docker-compose.yml \
+       deploy/instantly-db/main-init \
+       root@144.31.54.166:/opt/instantly-db/
+```
+
+На DB-сервере:
+
+```bash
+ssh root@144.31.54.166
+cd /opt/instantly-db
+
+# Снять старый main-postgres (если он был запущен)
+docker compose -p instantly-db --profile main-db --env-file .env down main-postgres main-pgadmin || true
+
+# Поднять заново на supabase/postgres
 docker compose -p instantly-db --profile main-db --env-file .env up -d main-postgres main-pgadmin
 
-# Проверить:
-docker ps --filter name=main-postgres --format "table {{.Names}}\t{{.Status}}"
-docker exec main-postgres psql -U portal -d portal -c "SELECT 1;"
+# Дождаться готовности
+docker compose -p instantly-db --profile main-db --env-file .env logs -f main-postgres
+# Жди строк "database system is ready to accept connections" + "init script ... completed"
+# Ctrl+C когда увидишь
 ```
 
-## Шаг 2: Открыть порт 35434 для Portal-сервера
+Проверить, что схемы и роли подняты:
 
-Убедиться, что firewall разрешает подключение с Portal-сервера к порту 35434.  
-Проверка с Portal-сервера:
+```bash
+docker exec -it main-postgres psql -U supabase_admin -d postgres -c "\dn" \
+  | grep -E '(auth|storage|realtime|extensions|graphql|pgsodium|vault)'
+docker exec -it main-postgres psql -U supabase_admin -d postgres -c "\du" \
+  | grep -E '(anon|authenticated|service_role|supabase_)'
+docker exec -it main-postgres psql -U supabase_admin -d postgres -c "\dx" \
+  | grep -E '(pgcrypto|pgjwt|pgvector|pg_cron|pgsodium|supabase_vault)'
+```
+
+## Шаг 3: Развернуть Supabase-стек (Kong, GoTrue, PostgREST, Storage, Realtime)
+
+```bash
+# С локалки:
+scp -r deploy/main-db root@144.31.54.166:/opt/
+
+# На сервере:
+ssh root@144.31.54.166
+cd /opt/main-db
+
+# Создать .env по шаблону
+cp .env.example .env
+# Вставить туда: MAIN_PG_PASSWORD, MAIN_JWT_SECRET, MAIN_ANON_KEY, MAIN_SERVICE_ROLE_KEY,
+# MAIN_REALTIME_DB_ENC_KEY, MAIN_REALTIME_SECRET_KEY_BASE из generate-keys.mjs.
+# А также MAIN_API_EXTERNAL_URL=http://144.31.54.166:35480 (или твой публичный URL).
+nano .env
+sed -i 's/\r$//' .env
+
+# Поднять стек
+docker compose -p main-supabase --env-file .env up -d
+
+# Подождать healthchecks
+sleep 15
+docker compose -p main-supabase ps
+```
+
+Проверка снаружи:
+
+```bash
+# С Portal-сервера:
+curl -i http://144.31.54.166:35480/auth/v1/health -H "apikey: <MAIN_ANON_KEY>"
+curl -i http://144.31.54.166:35480/rest/v1/ -H "apikey: <MAIN_ANON_KEY>"
+# 401/200 — оба ОК (они как минимум отвечают)
+```
+
+## Шаг 4: Открыть порт 35480 (Kong) для Portal-сервера
+
+С Portal-сервера:
+
+```bash
+timeout 5 bash -c 'cat < /dev/null > /dev/tcp/144.31.54.166/35480' && echo OK || echo BLOCKED
+```
+
+## Шаг 5: PRELOAD — первичный дамп БЕЗ даунтайма
+
+Portal продолжает работать на Supabase Cloud. Делаем первый проход переноса.
+
+```bash
+ssh root@144.31.54.166
+cd /opt/main-db
+
+# Скопировать пароль Supabase из Dashboard → Settings → Database
+docker exec -it main-postgres bash -c "
+  apt-get update -qq && apt-get install -y -qq curl
+"
+
+# Скопировать скрипт миграции в контейнер
+docker cp /opt/main-db/migrate-from-supabase.sh main-postgres:/tmp/migrate-from-supabase.sh
+
+# Запустить миграцию schema + данных
+docker exec -it main-postgres bash -c "
+  export SOURCE_HOST=db.pwcidzaqudfkodgmesyk.supabase.co
+  export SOURCE_PORT=5432
+  export SOURCE_USER=postgres
+  export SOURCE_PASSWORD='<supabase_db_password>'
+  export TARGET_PASSWORD='<MAIN_PG_PASSWORD>'
+  bash /tmp/migrate-from-supabase.sh
+"
+```
+
+Перенос файлов Storage (можно одновременно с pg_dump в другом терминале):
+
+```bash
+# С локалки или с DB-сервера, нужен node 18+
+SOURCE_SUPABASE_URL=https://pwcidzaqudfkodgmesyk.supabase.co \
+SOURCE_SERVICE_ROLE_KEY='<old service_role key из Supabase>' \
+TARGET_SUPABASE_URL=http://144.31.54.166:35480 \
+TARGET_SERVICE_ROLE_KEY='<MAIN_SERVICE_ROLE_KEY>' \
+  node deploy/main-db/migrate-storage-files.mjs --concurrency=8
+
+# Сначала dry-run, чтобы увидеть масштаб:
+# ... node ... migrate-storage-files.mjs --dry-run
+```
+
+## Шаг 6: CUTOVER (даунтайм)
+
+### 6a. Включить maintenance mode на Portal
 
 ```bash
 ssh root@<PORTAL_HOST>
-timeout 5 bash -c 'cat < /dev/null > /dev/tcp/144.31.54.166/35434' && echo OK || echo BLOCKED
+cd /home/Portal/prod
+# Workers и Portal остановим в 6c — не сейчас, чтобы успеть обновить .env.
 ```
 
-## Шаг 3: Первичный дамп (preload) — БЕЗ даунтайма
-
-Выполняется заранее. Portal продолжает работать со старой Supabase БД.
+### 6b. Финальный delta-дамп
 
 ```bash
 ssh root@144.31.54.166
+docker exec -it main-postgres bash -c "
+  export SOURCE_HOST=db.pwcidzaqudfkodgmesyk.supabase.co
+  export SOURCE_PORT=5432
+  export SOURCE_USER=postgres
+  export SOURCE_PASSWORD='<supabase_db_password>'
+  export TARGET_PASSWORD='<MAIN_PG_PASSWORD>'
+  bash /tmp/migrate-from-supabase.sh
+"
 
-# Запустить из контейнера postgres (там есть pg_dump/pg_restore):
-docker exec -it main-postgres bash
-
-# Внутри контейнера:
-pg_dump \
-  --host=db.pwcidzaqudfkodgmesyk.supabase.co \
-  --port=5432 \
-  --username=postgres \
-  --dbname=postgres \
-  --format=custom \
-  --compress=6 \
-  --no-owner \
-  --no-privileges \
-  --exclude-schema='supabase_*' \
-  --exclude-schema='_supavisor' \
-  --exclude-schema='_realtime' \
-  --exclude-schema='_analytics' \
-  --exclude-schema='auth' \
-  --exclude-schema='storage' \
-  --exclude-schema='graphql*' \
-  --exclude-schema='pgsodium*' \
-  --exclude-schema='vault' \
-  --exclude-schema='pgbouncer' \
-  --exclude-schema='net' \
-  --exclude-schema='extensions' \
-  --file=/tmp/portal-preload.dump
-
-# Восстановить в main-postgres:
-pg_restore \
-  --host=127.0.0.1 \
-  --port=5432 \
-  --username=portal \
-  --dbname=portal \
-  --no-owner \
-  --no-privileges \
-  --if-exists \
-  --clean \
-  /tmp/portal-preload.dump || echo "Warnings above are normal on first restore"
-
-# Проверить:
-psql -U portal -d portal -c "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 15;"
-
-exit
+# И delta для файлов
+SOURCE_SUPABASE_URL=https://pwcidzaqudfkodgmesyk.supabase.co \
+SOURCE_SERVICE_ROLE_KEY='<old service_role>' \
+TARGET_SUPABASE_URL=http://144.31.54.166:35480 \
+TARGET_SERVICE_ROLE_KEY='<MAIN_SERVICE_ROLE_KEY>' \
+  node deploy/main-db/migrate-storage-files.mjs --skip-existing --concurrency=8
 ```
 
-> **Пароль Supabase Postgres:** найти в Supabase Dashboard → Settings → Database → Connection string.  
-> Задать перед pg_dump: `export PGPASSWORD='<supabase_db_password>'`
-
-## Шаг 4: Применить миграции
-
-После pg_restore в новой БД уже есть все таблицы. Но чтобы `ensureDatabase.js` не пытался повторно применить миграции, нужно убедиться, что таблица `portal_migrations` заполнена.
-
-Она уже перенесётся из дампа, если была в Supabase. Проверить:
-
-```bash
-docker exec main-postgres psql -U portal -d portal \
-  -c "SELECT count(*) FROM portal_migrations;"
-```
-
-Если таблицы нет (Portal раньше не трекал миграции в таблице) — не страшно, `ensureDatabase.js` создаст её и применит все файлы из `supabase/migrations/`. Они идемпотентны (`IF NOT EXISTS`).
-
-## Шаг 5: Cutover (даунтайм 5–15 мин)
-
-### 5a. Повторный быстрый дамп (delta)
-
-```bash
-ssh root@144.31.54.166
-
-# Внутри main-postgres:
-docker exec -it main-postgres bash
-
-export PGPASSWORD='<supabase_db_password>'
-pg_dump \
-  --host=db.pwcidzaqudfkodgmesyk.supabase.co \
-  --port=5432 \
-  --username=postgres \
-  --dbname=postgres \
-  --format=custom \
-  --compress=6 \
-  --no-owner \
-  --no-privileges \
-  --exclude-schema='supabase_*' \
-  --exclude-schema='_supavisor' \
-  --exclude-schema='_realtime' \
-  --exclude-schema='_analytics' \
-  --exclude-schema='auth' \
-  --exclude-schema='storage' \
-  --exclude-schema='graphql*' \
-  --exclude-schema='pgsodium*' \
-  --exclude-schema='vault' \
-  --exclude-schema='pgbouncer' \
-  --exclude-schema='net' \
-  --exclude-schema='extensions' \
-  --file=/tmp/portal-final.dump
-
-pg_restore \
-  --host=127.0.0.1 \
-  --port=5432 \
-  --username=portal \
-  --dbname=portal \
-  --no-owner \
-  --no-privileges \
-  --if-exists \
-  --clean \
-  /tmp/portal-final.dump || true
-
-exit
-```
-
-### 5b. Переключить Portal на новую БД
+### 6c. Переключить .env на Portal-сервере
 
 ```bash
 ssh root@<PORTAL_HOST>
 cd /home/Portal/prod
 
-# Удалить старые строки и добавить новые:
-sed -i '/^DATABASE_URL=/d;/^SUPABASE_DB_URL=/d' .env
+# Снять текущие значения
+sed -i '/^NEXT_PUBLIC_SUPABASE_URL=/d' .env
+sed -i '/^NEXT_PUBLIC_SUPABASE_ANON_KEY=/d' .env
+sed -i '/^SUPABASE_SERVICE_ROLE_KEY=/d' .env
+sed -i '/^SUPABASE_DB_URL=/d' .env
+sed -i '/^DATABASE_URL=/d' .env
 
+# Прописать новые
 cat >> .env <<'EOF'
-DATABASE_URL=postgresql://portal:<MAIN_PG_PASSWORD>@144.31.54.166:35434/portal?sslmode=disable
-SUPABASE_DB_URL=postgresql://portal:<MAIN_PG_PASSWORD>@144.31.54.166:35434/portal?sslmode=disable
+NEXT_PUBLIC_SUPABASE_URL=http://144.31.54.166:35480
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<MAIN_ANON_KEY>
+SUPABASE_SERVICE_ROLE_KEY=<MAIN_SERVICE_ROLE_KEY>
+DATABASE_URL=postgresql://supabase_admin:<MAIN_PG_PASSWORD>@144.31.54.166:35434/postgres?sslmode=disable
+SUPABASE_DB_URL=postgresql://supabase_admin:<MAIN_PG_PASSWORD>@144.31.54.166:35434/postgres?sslmode=disable
 EOF
 
-# Проверить:
-grep -nE '^DATABASE_URL=|^SUPABASE_DB_URL=' .env
-
-# Перезапустить Portal и воркеры:
-docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate portal
-docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate \
-  worker-hh worker-search worker-enrich worker-yandexmaps \
-  worker-emailvalidation worker-tg-outreach worker-aicaller \
-  worker-sales-copilot worker-tg-parser worker-tg-transcribe \
-  worker-instantly-leads worker-outreach
-
-# Проверить логи:
-docker logs --tail=50 portal
+grep -nE '^(NEXT_PUBLIC_SUPABASE_URL|NEXT_PUBLIC_SUPABASE_ANON_KEY|SUPABASE_SERVICE_ROLE_KEY|DATABASE_URL|SUPABASE_DB_URL)=' .env
 ```
 
-### 5c. Проверить, что Portal работает
-
-- Открыть Portal в браузере
-- Проверить, что данные на месте
-- Проверить логи на ошибки: `docker logs --tail=200 portal 2>&1 | grep -i error`
-
-## Rollback (если что-то пошло не так)
+### 6d. Перезапустить Portal + workers + python-боты
 
 ```bash
-ssh root@<PORTAL_HOST>
-cd /home/Portal/prod
+docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \
+  portal yandexmaps transcribe-worker telegram-bot-api health-check atmos-bot \
+  instantly-sync-bot
 
-# Вернуть старые URL:
-sed -i '/^DATABASE_URL=/d;/^SUPABASE_DB_URL=/d' .env
-
-cat >> .env <<'EOF'
-DATABASE_URL=postgresql://postgres.pwcidzaqudfkodgmesyk:<SUPABASE_PASSWORD>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres
-SUPABASE_DB_URL=postgresql://postgres.pwcidzaqudfkodgmesyk:<SUPABASE_PASSWORD>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres
-EOF
-
-docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate portal
-docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate \
+docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \
   worker-hh worker-search worker-enrich worker-yandexmaps \
   worker-emailvalidation worker-tg-outreach worker-aicaller \
   worker-sales-copilot worker-tg-parser worker-tg-transcribe \
-  worker-instantly-leads worker-outreach
+  worker-instantly-leads worker-outreach worker-li-outreach
+
+docker logs --tail=80 portal 2>&1
+docker logs --tail=80 portal-health-check 2>&1
+docker logs --tail=80 portal-instantly-sync-bot 2>&1
 ```
+
+### 6e. Smoke-тест
+
+| Проверка | Как |
+|---|---|
+| Главная грузится | открыть Portal в браузере |
+| Login работает | разлогиниться, залогиниться |
+| Список пользователей в админке | `/admin/users` |
+| Storage upload | загрузить файл в KB или brief |
+| Storage download | скачать существующий файл |
+| Realtime | открыть admin/logs или admin/traces — данные апдейтятся |
+| Worker подбирает задачу | запустить любой парсер |
+| `/api/health` | `curl https://portal.example.com/api/health` |
 
 ---
 
-## Бэкапы
-
-После переключения пересобрать контейнер бэкапов:
+## Rollback (если что-то отвалилось критически)
 
 ```bash
-ssh root@144.31.54.166
-cd /opt/instantly-db
-docker compose -p instantly-db --env-file .env up -d --build instantly-backup
+ssh root@<PORTAL_HOST>
+cd /home/Portal/prod
+
+# Снять новые значения
+sed -i '/^NEXT_PUBLIC_SUPABASE_URL=/d' .env
+sed -i '/^NEXT_PUBLIC_SUPABASE_ANON_KEY=/d' .env
+sed -i '/^SUPABASE_SERVICE_ROLE_KEY=/d' .env
+sed -i '/^SUPABASE_DB_URL=/d' .env
+sed -i '/^DATABASE_URL=/d' .env
+
+# Вернуть старые (записи Supabase Cloud — найди в .env.backup или Semaphore Secrets)
+cat >> .env <<'EOF'
+NEXT_PUBLIC_SUPABASE_URL=https://pwcidzaqudfkodgmesyk.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<old anon key>
+SUPABASE_SERVICE_ROLE_KEY=<old service_role key>
+DATABASE_URL=postgresql://postgres.pwcidzaqudfkodgmesyk:<old_pwd>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres
+SUPABASE_DB_URL=postgresql://postgres.pwcidzaqudfkodgmesyk:<old_pwd>@aws-0-eu-west-1.pooler.supabase.com:6543/postgres
+EOF
+
+# Перезапуск (см. 6d)
 ```
 
-Main DB будет бэкапиться каждые 4 часа (crontab).
+Данные, которые юзеры записали ПОСЛЕ cutover, останутся в self-hosted и не вернутся в Cloud.
+Поэтому при rollback окно операции должно быть очень коротким.
+
+---
+
+## После успешного cutover (T+24-48 ч)
+
+1. Заморозить (или удалить) проект в Supabase Cloud Dashboard.
+2. Удалить из `.env` старые ключи (не нужны).
+3. Удалить старый volume `main-pg-data` (от postgres:16-alpine):
+   ```bash
+   docker volume rm instantly-db_main-pg-data 2>/dev/null || true
+   ```
+4. Настроить бэкапы — `portal-backup` на Portal-сервере уже бэкапит main-supabase
+   и Instantly через `MAIN_SUPABASE_DATABASE_URL` / `INSTANTLY_DATABASE_URL`
+   (см. `docs/instantly-local-pg-cutover.md` → «Автобэкапы»). Если переезжаешь
+   на self-hosted main-postgres — поменяй `MAIN_SUPABASE_DATABASE_URL` на
+   локальный URL (`postgresql://supabase_admin:<pw>@<DB_HOST>:35434/postgres`).
+5. **Storage файлы**: они лежат на DB-хосте в named volume `main-supabase_main-storage-data`.
+   Включить их в бэкап-сценарий (например, `tar` + upload в S3).
+
+---
+
+## Возможные грабли
+
+- **`auth restore` падает с дубликатами** — нормально, если запускаешь второй раз. Используй
+  опцию `--data-only --disable-triggers` (она уже в скрипте).
+- **`storage.objects` пустые после restore, но файлы есть** — проверь, что переносишь оба:
+  и таблицу (через pg_dump), и бинарники (через `migrate-storage-files.mjs`).
+- **Portal жалуется на CORS** — проверь `MAIN_API_EXTERNAL_URL` и `MAIN_SITE_URL` в .env.
+- **GoTrue не находит юзеров** — проверь, что роли в БД корректные:
+  `select * from auth.users limit 1` под `supabase_auth_admin`.
+- **Realtime не работает** — Postgres должен быть в режиме `wal_level=logical`.
+  В `supabase/postgres` это уже включено по умолчанию.
+- **`pg_cron` не работает** — расширение работает только в БД `postgres` (а не `portal`).
+  В нашем init скрипте мы используем именно `postgres`.

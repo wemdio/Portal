@@ -18,6 +18,7 @@ const nunito = Nunito({
 
 const clientNav = [
   { name: 'Кампании', nameEn: 'Campaigns', href: '/client' },
+  { name: 'Проекты', nameEn: 'Projects', href: '/client/projects' },
   { name: 'Лиды', nameEn: 'Leads', href: '/client/leads' },
   { name: 'Базы', nameEn: 'Databases', href: '/client/bases' },
   { name: 'Отчёты', nameEn: 'Reports', href: '/client/reports' },

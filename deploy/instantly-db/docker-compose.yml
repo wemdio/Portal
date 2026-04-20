@@ -188,37 +188,47 @@ services:
     networks:
       - instantly-network
 
-  # ─── MAIN PORTAL DB ───────────────────────────────────────────────────────────
+  # ─── MAIN PORTAL DB (Supabase-compatible Postgres) ────────────────────────────
+  # Используем supabase/postgres — там предустановлены pgjwt, pg_graphql, pgvector,
+  # pg_cron, pgsodium, supabase_vault. Эти расширения нужны для self-hosted стека
+  # (GoTrue, PostgREST, Storage, Realtime).
+  #
+  # ВНИМАНИЕ: volume main-supabase-pg-data — отдельный, не используем старый
+  # main-pg-data (тот был от postgres:16-alpine, версии несовместимы).
 
   main-postgres:
-    image: postgres:16-alpine
+    image: supabase/postgres:15.8.1.060
     container_name: main-postgres
     profiles:
       - main-db
     command:
       - postgres
       - -c
-      - max_connections=80
+      - config_file=/etc/postgresql/postgresql.conf
       - -c
-      - shared_buffers=512MB
-      - -c
-      - work_mem=8MB
-      - -c
-      - maintenance_work_mem=128MB
+      - log_min_messages=fatal
     environment:
-      POSTGRES_DB: portal
-      POSTGRES_USER: portal
+      POSTGRES_DB: postgres
+      POSTGRES_USER: supabase_admin
       POSTGRES_PASSWORD: ${MAIN_PG_PASSWORD}
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_PORT: "5432"
+      PGPORT: "5432"
+      PGPASSWORD: ${MAIN_PG_PASSWORD}
+      PGDATABASE: postgres
+      JWT_SECRET: ${MAIN_JWT_SECRET}
+      JWT_EXP: ${MAIN_JWT_EXP:-3600}
     volumes:
-      - main-pg-data:/var/lib/postgresql/data
+      - main-supabase-pg-data:/var/lib/postgresql/data
+      - ./main-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "0.0.0.0:35434:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U portal -d portal"]
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d postgres"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 10
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -285,57 +295,20 @@ services:
     networks:
       - instantly-network
 
-  # ─── BACKUP ────────────────────────────────────────────────────────────────────
-
-  instantly-backup:
-    build:
-      context: .
-      dockerfile: Dockerfile.backup
-    container_name: instantly-backup
-    environment:
-      PROD_PG_HOST: instantly-postgres-prod
-      PROD_PG_PORT: "5432"
-      PROD_PG_USER: instantly
-      PROD_PG_PASSWORD: ${INSTANTLY_PROD_PG_PASSWORD}
-      PROD_PG_DB: instantly
-      DEV_PG_HOST: instantly-postgres-dev
-      DEV_PG_PORT: "5432"
-      DEV_PG_USER: instantly
-      DEV_PG_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
-      DEV_PG_DB: instantly
-      MAIN_PG_HOST: main-postgres
-      MAIN_PG_PORT: "5432"
-      MAIN_PG_USER: portal
-      MAIN_PG_PASSWORD: ${MAIN_PG_PASSWORD}
-      MAIN_PG_DB: portal
-      MAIN_PG_ENABLED: ${MAIN_PG_ENABLED:-false}
-      BACKUP_SUPABASE_URL: ${BACKUP_SUPABASE_URL}
-      BACKUP_SUPABASE_KEY: ${BACKUP_SUPABASE_KEY}
-      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
-    volumes:
-      - backup-data:/backups
-    depends_on:
-      instantly-postgres-prod:
-        condition: service_healthy
-      instantly-postgres-dev:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.2'
-    restart: unless-stopped
-    networks:
-      - instantly-network
+# ВНИМАНИЕ: бэкапы переехали на Portal-сервер (services/backup, контейнер
+# portal-backup). pg_dump/curl одинаково ходят к Postgres что с DB-, что с
+# Portal-сервера — но на Portal-сервере уже есть .env с нужными URL и Telegram
+# health-бот; держать бэкап-контейнер здесь больше нет смысла. Удаление
+# instantly-backup на самом DB-сервере делает scheduled-deploy.yml автоматически
+# (`docker rm -f instantly-backup`).
 
 volumes:
   prod-pg-data:
   prod-pgadmin-data:
   dev-pg-data:
   dev-pgadmin-data:
-  main-pg-data:
+  main-supabase-pg-data:
   main-pgadmin-data:
-  backup-data:
 
 networks:
   instantly-network:
