@@ -651,3 +651,4 @@ volumes:
 networks:
   portal-network:
     driver: bridge
+
