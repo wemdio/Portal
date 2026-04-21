@@ -35,10 +35,6 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: ['pdf-parse', 'pdfjs-dist', 'dockerode', 'sqlite3'],
-  env: {
-    NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: supabaseAnonKey,
-  },
 };
 
 export default nextConfig;
