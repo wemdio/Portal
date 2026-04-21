@@ -521,10 +521,13 @@ services:
       - MAIN_SUPABASE_DATABASE_URL=${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}
       - INSTANTLY_DATABASE_URL=${INSTANTLY_DATABASE_URL:-}
       - INSTANTLY_DEV_DATABASE_URL=${INSTANTLY_DEV_DATABASE_URL:-}
-      # Куда грузим (bucket deploy-backups). По умолчанию — основной Supabase
-      # проект Portal (можно переопределить отдельным проектом-«хранилищем»).
+      # Куда грузим. Дефолт — основной Supabase проект Portal (можно
+      # переопределить отдельным проектом-«хранилищем» через .env).
       - BACKUP_SUPABASE_URL=${BACKUP_SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}
       - BACKUP_SUPABASE_KEY=${BACKUP_SUPABASE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}
+      # Bucket для дампов: db-backups создан вручную в Supabase Storage с
+      # File size limit 2 GB (deploy-backups оставлен под мелкие конфиги).
+      - BACKUP_BUCKET=${BACKUP_BUCKET:-db-backups}
       - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
       - BACKUP_REMOTE_RETENTION_DAYS=${BACKUP_REMOTE_RETENTION_DAYS:-30}
       # Алерты при падении pg_dump или upload.

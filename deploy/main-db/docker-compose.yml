@@ -144,6 +144,13 @@ services:
       - instantly-network
 
   # ─── Storage API: загрузка/раздача файлов через S3-протокол ───────────────────
+  # Бэкенд: TWC Cloud Storage (S3-совместимое хранилище). Все файлы летят в один
+  # bucket MAIN_S3_BUCKET, по логическим Supabase-бакетам Storage сам делает
+  # префиксы в ключах (avatars/..., briefs/...).
+  #
+  # FORCE_PATH_STYLE=true обязательно для не-AWS S3 (TWC, MinIO и пр.) — иначе
+  # SDK пытается сходить по virtual-hosted style URL вида bucket.s3.twcstorage.ru
+  # которого попросту не существует.
   storage:
     image: supabase/storage-api:v1.13.3
     container_name: main-storage
@@ -158,17 +165,23 @@ services:
       SERVICE_KEY: ${MAIN_SERVICE_ROLE_KEY}
       POSTGREST_URL: http://rest:3000
       PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
-      DATABASE_URL: postgres://supabase_storage_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres
+      # search_path передаётся явно через options-параметр URL — knex/pg иначе
+      # игнорируют наши ALTER ROLE ... SET search_path и делают select из public.
+      DATABASE_URL: postgres://supabase_storage_admin:${MAIN_PG_PASSWORD}@main-postgres:5432/postgres?options=-c%20search_path%3Dstorage%2Cpublic
+      DB_SEARCH_PATH: storage,public
       FILE_SIZE_LIMIT: "${MAIN_STORAGE_FILE_SIZE_LIMIT:-524288000}"
-      STORAGE_BACKEND: file
-      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      STORAGE_BACKEND: s3
+      GLOBAL_S3_ENDPOINT: ${MAIN_S3_ENDPOINT}
+      GLOBAL_S3_PROTOCOL: ${MAIN_S3_PROTOCOL:-https}
+      GLOBAL_S3_FORCE_PATH_STYLE: "true"
+      AWS_DEFAULT_REGION: ${MAIN_S3_REGION}
+      AWS_ACCESS_KEY_ID: ${MAIN_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${MAIN_S3_SECRET_ACCESS_KEY}
+      GLOBAL_S3_BUCKET: ${MAIN_S3_BUCKET}
       TENANT_ID: stub
-      REGION: stub
-      GLOBAL_S3_BUCKET: stub
+      REGION: ${MAIN_S3_REGION}
       ENABLE_IMAGE_TRANSFORMATION: "true"
       IMGPROXY_URL: http://imgproxy:5001
-    volumes:
-      - main-storage-data:/var/lib/storage
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
       interval: 10s
@@ -178,17 +191,21 @@ services:
       - instantly-network
 
   # ─── imgproxy: трансформации изображений для Storage ──────────────────────────
+  # Поскольку Storage переехал на S3, imgproxy должен ходить за исходниками тоже
+  # в S3, а не на локальный диск. IMGPROXY_USE_S3=true + AWS_* переменные.
   imgproxy:
     image: darthsim/imgproxy:v3.8.0
     container_name: main-imgproxy
     restart: unless-stopped
     environment:
       IMGPROXY_BIND: ":5001"
-      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
       IMGPROXY_USE_ETAG: "true"
       IMGPROXY_ENABLE_WEBP_DETECTION: ${MAIN_IMGPROXY_ENABLE_WEBP_DETECTION:-true}
-    volumes:
-      - main-storage-data:/var/lib/storage:ro
+      IMGPROXY_USE_S3: "true"
+      IMGPROXY_S3_ENDPOINT: ${MAIN_S3_PROTOCOL:-https}://${MAIN_S3_ENDPOINT_HOST}
+      IMGPROXY_S3_REGION: ${MAIN_S3_REGION}
+      AWS_ACCESS_KEY_ID: ${MAIN_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${MAIN_S3_SECRET_ACCESS_KEY}
     networks:
       - instantly-network
 
@@ -237,9 +254,6 @@ services:
       retries: 3
     networks:
       - instantly-network
-
-volumes:
-  main-storage-data:
 
 networks:
   instantly-network:

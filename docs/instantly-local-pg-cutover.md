@@ -199,15 +199,15 @@ docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recr
 
 Сервис `portal-backup` (контейнер на **Portal-сервере**, `services/backup/`,
 образ `${DOCKER_USERNAME}/portal-backup:prod`) держит cron внутри себя и пишет
-дампы в bucket `deploy-backups` Supabase Storage. Один контейнер бэкапит и
-главную Supabase БД, и обе Instantly-копии (prod + dev) — так все дампы и
-алерты живут в одном месте.
+дампы в bucket `db-backups` Supabase Storage (имя задаётся через `BACKUP_BUCKET`,
+дефолт `db-backups`). Один контейнер бэкапит и главную Supabase БД, и обе
+Instantly-копии (prod + dev) — так все дампы и алерты живут в одном месте.
 
 | Источник | Расписание (UTC) | Путь в Storage | Локальный ретеншн | Облачный ретеншн |
 |----------|------------------|----------------|-------------------|------------------|
-| Главная Supabase БД (`main-supabase`) | каждые 6 ч в `:15` | `deploy-backups/portal-main/` | 7 дней | 30 дней |
-| Instantly local PG prod (`instantly-prod`) | каждые 6 ч в `:00` | `deploy-backups/instantly/prod/` | 7 дней | 30 дней |
-| Instantly local PG dev (`instantly-dev`) | раз в сутки в `03:00` | `deploy-backups/instantly/dev/` | 7 дней | 30 дней |
+| Главная Supabase БД (`main-supabase`) | каждые 6 ч в `:15` | `db-backups/portal-main/` | 7 дней | 30 дней |
+| Instantly local PG prod (`instantly-prod`) | каждые 6 ч в `:00` | `db-backups/instantly/prod/` | 7 дней | 30 дней |
+| Instantly local PG dev (`instantly-dev`) | раз в сутки в `03:00` | `db-backups/instantly/dev/` | 7 дней | 30 дней |
 
 Все дампы — `pg_dump --format=custom --compress=6 --no-owner --no-privileges`.
 Для главной Supabase БД дополнительно исключаем супабейзовскую инфраструктуру
@@ -232,14 +232,22 @@ docker compose -p portal -f docker-compose.prod.yml up -d --no-deps --force-recr
 
 - `BACKUP_SUPABASE_URL` (default = `NEXT_PUBLIC_SUPABASE_URL`)
 - `BACKUP_SUPABASE_KEY` (default = `SUPABASE_SERVICE_ROLE_KEY`)
+- `BACKUP_BUCKET` (default `db-backups`) — bucket для дампов в Storage
 - `BACKUP_RETENTION_DAYS` (default 7) — локальная ротация в named volume
 - `BACKUP_REMOTE_RETENTION_DAYS` (default 30) — ротация в Storage
 
 Telegram-алерты используют те же `TELEGRAM_HEALTH_BOT_TOKEN` /
 `TELEGRAM_HEALTH_CHAT_ID`, что и `health-check`.
 
-Bucket `deploy-backups` должен существовать в проекте `BACKUP_SUPABASE_URL`
-(Storage → New bucket → Private). У service_role доступ к нему есть автоматически.
+Bucket `db-backups` должен существовать в проекте `BACKUP_SUPABASE_URL`:
+**Storage → New bucket → Private**, **Restrict file size = 2 GB** (или больше).
+Глобальный лимит проекта: **Storage Settings → Global file size limit ≥ 2 GB**
+(на Free поднять выше 50 МБ нельзя — нужен Pro). У `service_role` доступ есть
+автоматически без RLS-политик.
+
+История: ранее дампы лились в общий бакет `deploy-backups` (50 МБ лимит для
+конфигов), что приводило к HTTP 400 на дампах главной БД (~830 МБ). Теперь
+конфиги остались в `deploy-backups`, дампы БД — в отдельном `db-backups`.
 
 ### Алерты и чистка
 
@@ -247,9 +255,13 @@ Bucket `deploy-backups` должен существовать в проекте 
 1. `pg_dump` упал (ненулевой exit code)
 2. `curl` upload в Supabase Storage вернул не-2xx
 
+Текст алерта содержит `HTTP <code> rc=<curl_rc> size=<bytes>` — этого достаточно,
+чтобы отличить серверную ошибку (`HTTP 4xx`/`5xx`, `rc=0`) от сетевой/таймаута
+(`HTTP 000`, `rc=28`/`7`/...) и от OOM-kill самого curl (`HTTP=`, `rc=137`).
+
 После успешного аплоада скрипт сам чистит старые объекты в Storage через
-`POST /storage/v1/object/list/deploy-backups` + `DELETE`. Чистка скипается, если
-upload упал, чтобы не остаться без копии.
+`POST /storage/v1/object/list/${BACKUP_BUCKET}` + `DELETE`. Чистка скипается,
+если upload упал, чтобы не остаться без копии.
 
 ### Ручной запуск
 
@@ -265,7 +277,7 @@ docker exec portal-backup /backup.sh instantly-dev    # Instantly dev
 ```bash
 # 1) Скачать дамп из Supabase Storage
 curl -fsSL -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
-  "${BACKUP_SUPABASE_URL}/storage/v1/object/deploy-backups/portal-main/portal-main-main-supabase-YYYYMMDD_HHMMSS.dump" \
+  "${BACKUP_SUPABASE_URL}/storage/v1/object/db-backups/portal-main/portal-main-main-supabase-YYYYMMDD_HHMMSS.dump" \
   -o portal-main.dump
 
 # 2) Поднять чистый Postgres

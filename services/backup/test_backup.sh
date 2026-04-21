@@ -194,7 +194,7 @@ assert_exit_code "$rc" "0" "instantly-prod exits 0"
 assert_contains "$SB/pg_dump.log" "--dbname=postgresql://instantly:secret@db.example.com:35432/instantly" "instantly-prod uses INSTANTLY_DATABASE_URL"
 assert_contains "$SB/pg_dump.log" "--format=custom" "instantly-prod uses --format=custom"
 assert_contains "$SB/pg_dump.log" "--no-owner" "instantly-prod uses --no-owner"
-assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/instantly/prod/" "instantly-prod upload path"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/prod/" "instantly-prod upload path uses default db-backups bucket"
 assert_contains "$SB/curl.log" "Authorization: Bearer svc" "instantly-prod sends bearer token"
 assert_contains "$SB/curl.log" "x-upsert: true" "instantly-prod uses x-upsert header"
 assert_contains "$SB/curl.log" "-T " "instantly-prod uses streaming upload (-T)"
@@ -218,7 +218,7 @@ rc="$(INSTANTLY_DEV_DATABASE_URL='postgresql://instantly:dev@db.example.com:3543
   run_backup "$SB" instantly-dev)"
 assert_exit_code "$rc" "0" "instantly-dev exits 0"
 assert_contains "$SB/pg_dump.log" "35433/instantly" "instantly-dev uses INSTANTLY_DEV_DATABASE_URL"
-assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/instantly/dev/" "instantly-dev upload path"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/instantly/dev/" "instantly-dev upload path uses default db-backups bucket"
 assert_contains "$SB/curl.log" "-T " "instantly-dev uses streaming upload (-T)"
 
 echo ""
@@ -238,7 +238,7 @@ assert_contains "$SB/pg_dump.log" "--exclude-schema=vault" "main-supabase exclud
 assert_not_contains "$SB/pg_dump.log" "--exclude-schema=public" "main-supabase keeps public"
 assert_not_contains "$SB/pg_dump.log" "--exclude-schema=auth" "main-supabase keeps auth"
 assert_not_contains "$SB/pg_dump.log" "--exclude-schema=storage" "main-supabase keeps storage"
-assert_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/portal-main/" "main-supabase upload path"
+assert_contains "$SB/curl.log" "/storage/v1/object/db-backups/portal-main/" "main-supabase upload path uses default db-backups bucket"
 assert_contains "$SB/curl.log" "-T " "main-supabase uses streaming upload (-T)"
 assert_not_contains "$SB/curl.log" "--data-binary @" "main-supabase no longer uses --data-binary @file (OOM-prone)"
 
@@ -303,10 +303,10 @@ rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
   LIST_RESPONSE_FILE="$LIST_RESPONSE_FILE" \
   run_backup "$SB" instantly-prod)"
 assert_exit_code "$rc" "0" "cleanup branch exits 0"
-assert_contains "$SB/curl.log" "/storage/v1/object/list/deploy-backups" "cleanup uses Storage list endpoint"
+assert_contains "$SB/curl.log" "/storage/v1/object/list/db-backups" "cleanup uses Storage list endpoint with default bucket"
 assert_contains "$SB/curl.log" "-X DELETE" "cleanup issues DELETE request"
 assert_contains "$SB/curl.log" "instantly-instantly-prod-19990101_000000.dump" "cleanup deletes 100-day-old object"
-assert_not_contains "$SB/curl.log" "-X DELETE https://example.supabase.co/storage/v1/object/deploy-backups/instantly/prod/instantly-instantly-prod-29990101" "cleanup keeps fresh object"
+assert_not_contains "$SB/curl.log" "-X DELETE https://example.supabase.co/storage/v1/object/db-backups/instantly/prod/instantly-instantly-prod-29990101" "cleanup keeps fresh object"
 
 echo ""
 echo "── 11) upload OOM (SIGKILL) → alert содержит rc и size, а не пустой HTTP ──"
@@ -323,6 +323,23 @@ assert_exit_code "$rc" "1" "upload OOM (rc=137) → exit 1"
 assert_contains "$SB/curl.log" "api.telegram.org/bottok/sendMessage" "upload OOM → Telegram alert"
 assert_contains "$SB/curl.log" "rc=137" "alert text contains curl rc"
 assert_contains "$SB/curl.log" "size=" "alert text contains dump size"
+
+echo ""
+echo "── 12) BACKUP_BUCKET override → upload + list используют кастомное имя ──"
+# Bucket конфигурируется через env. Дефолт db-backups (см. тесты 2/4/5);
+# здесь — что переопределение работает И для upload, И для list-эндпойнта,
+# И не остаётся хардкода старого имени deploy-backups.
+SB="$TMP_ROOT/t12"; make_sandbox "$SB"
+rc="$(INSTANTLY_DATABASE_URL='postgresql://i:p@h:5432/d' \
+  BACKUP_SUPABASE_URL=https://example.supabase.co BACKUP_SUPABASE_KEY=svc \
+  BACKUP_BUCKET=my-custom-bucket \
+  LIST_RESPONSE_FILE="$SB/list.json" \
+  run_backup "$SB" instantly-prod)"
+assert_exit_code "$rc" "0" "BACKUP_BUCKET override exits 0"
+assert_contains "$SB/curl.log" "/storage/v1/object/my-custom-bucket/instantly/prod/" "upload path uses BACKUP_BUCKET"
+assert_contains "$SB/curl.log" "/storage/v1/object/list/my-custom-bucket" "cleanup list uses BACKUP_BUCKET"
+assert_not_contains "$SB/curl.log" "/storage/v1/object/db-backups/" "no leak of default bucket when overridden"
+assert_not_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/" "no leak of legacy bucket name"
 
 echo ""
 echo "═══════════════════════════════════════"
