@@ -260,6 +260,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadingResults, setLoadingResults] = useState(false);
+  const [resultsError, setResultsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string; href?: string } | null>(null);
   const [copying, setCopying] = useState(false);
@@ -404,7 +405,10 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
   const loadResults = useCallback(
     async (jobId: string, mode: 'initial' | 'incremental' = 'initial') => {
       const isInitial = mode === 'initial';
-      if (isInitial) setLoadingResults(true);
+      if (isInitial) {
+        setLoadingResults(true);
+        setResultsError(null);
+      }
       try {
         if (!isInitial) {
           const after = latestCreatedAtRef.current;
@@ -440,6 +444,13 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         }
         if (activeJobIdRef.current !== jobId) return;
         setResults(all);
+      } catch (err) {
+        if (activeJobIdRef.current !== jobId) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('loadResults failed:', msg);
+        if (isInitial) {
+          setResultsError(msg);
+        }
       } finally {
         if (isInitial && activeJobIdRef.current === jobId) setLoadingResults(false);
       }
@@ -471,12 +482,14 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
       setQueryStats([]);
       setQueryStatsOpen(false);
       setQueryStatsPage(0);
+      setResultsError(null);
       latestCreatedAtRef.current = null;
       loadResults(activeJobId, 'initial');
       loadQueryStats(activeJobId);
     } else {
       setResults([]);
       setQueryStats([]);
+      setResultsError(null);
       latestCreatedAtRef.current = null;
       setLoadingResults(false);
     }
@@ -618,11 +631,12 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
   }, [activeJob, handleStart]);
 
   const totalCompanies = companyLeads.length;
-  /** В БД — всего строк; в таблице — после дедупа по сайту. Показываем max, чтобы не было 0 при загрузке и рассинхрона со свёрнутым списком. */
   const displayCompanyCount = useMemo(() => {
     if (!activeJob) return totalCompanies;
+    if (resultsError) return 0;
+    if (loadingResults && totalCompanies === 0) return activeJob.total_results ?? 0;
     return Math.max(activeJob.total_results ?? 0, totalCompanies);
-  }, [activeJob, totalCompanies]);
+  }, [activeJob, totalCompanies, resultsError, loadingResults]);
   const activeProgress = activeJob ? getSearchProgress(activeJob) : null;
   const activeUserQuery = activeJob ? getUserSearchQuery(activeJob) : '';
   const activeUserQueryUi = activeUserQuery ? truncateUiText(activeUserQuery, 160) : '';
@@ -791,7 +805,11 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                   </div>
                 </div>
                 <p className="text-sm text-gray-500">
-                  {activeJob ? `Компаний: ${displayCompanyCount}` : `${totalCompanies} компаний`}
+                  {activeJob
+                    ? resultsError
+                      ? 'Ошибка загрузки результатов'
+                      : `Компаний: ${displayCompanyCount}`
+                    : `${totalCompanies} компаний`}
                 </p>
                 {activeJob ? (
                   <p className="mt-1 text-xs text-gray-500" title={activeUserQuery || undefined}>
@@ -1040,6 +1058,20 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
                    <tbody className={`divide-y divide-gray-100 ${activeJobStoppedByUser ? 'bg-amber-50/20' : 'bg-white'}`}>
                       {loadingResults ? (
                          <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-500">Загрузка...</td></tr>
+                      ) : resultsError ? (
+                         <tr>
+                           <td colSpan={4} className="px-4 py-8 text-center">
+                             <div className="text-sm text-red-600 mb-2">Не удалось загрузить результаты: {resultsError}</div>
+                             <button
+                               type="button"
+                               onClick={() => { if (activeJobId) loadResults(activeJobId, 'initial'); }}
+                               className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                             >
+                               <RefreshCw className="h-3.5 w-3.5" />
+                               Повторить
+                             </button>
+                           </td>
+                         </tr>
                       ) : companyLeads.length === 0 ? (
                          isJobLoading ? (
                            <tr>
