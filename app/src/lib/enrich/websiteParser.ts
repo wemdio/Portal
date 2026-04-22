@@ -817,7 +817,12 @@ async function fetchHtml(
     const body = await res.arrayBuffer();
     const html = decodeHtml(body, contentType);
     return { html, status: res.status };
-  } catch {
+  } catch (err) {
+    const e = err as Error & { cause?: { code?: string; message?: string } };
+    const causeCode = e.cause?.code ?? '';
+    const causeMsg = e.cause?.message ?? '';
+    const reason = causeCode || causeMsg || e.message || 'unknown';
+    console.warn(`[fetchHtml] ${url} — ${reason}`);
     return null;
   } finally {
     clearTimeout(timer);

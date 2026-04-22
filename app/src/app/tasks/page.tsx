@@ -463,6 +463,14 @@ export default function TasksPage() {
   const [deadlineDefaultTime, setDeadlineDefaultTime] = useState('12:00');
   const [savingDeadlineDefault, setSavingDeadlineDefault] = useState(false);
 
+  const [errorToast, setErrorToast] = useState<string | null>(null);
+  const errorToastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const showErrorToast = useCallback((msg: string) => {
+    setErrorToast(msg);
+    clearTimeout(errorToastTimer.current);
+    errorToastTimer.current = setTimeout(() => setErrorToast(null), 5000);
+  }, []);
+
   const userIsLead = checkIsLead(currentUserRole);
 
   const sensors = useSensors(
@@ -545,6 +553,7 @@ export default function TasksPage() {
 
       setBoardPreferenceLoaded(true);
     } catch (error) {
+      showErrorToast('Не удалось загрузить данные');
       void logError('tasks.fetch.failed', error);
     } finally {
       setLoading(false);
@@ -552,15 +561,22 @@ export default function TasksPage() {
   }
 
   const updateTaskStatus = useCallback(async (taskId: string, newStatus: TaskStatus) => {
-    setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
-    await supabase.from('tasks').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', taskId);
-  }, []);
+    const prev = dbTasks.find((t) => t.id === taskId);
+    setDbTasks((p) => p.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
+    const { error } = await supabase.from('tasks').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) {
+      if (prev) setDbTasks((p) => p.map((t) => (t.id === taskId ? { ...t, status: prev.status } : t)));
+      showErrorToast('Не удалось изменить статус задачи');
+      void logError('tasks.status.update.failed', error);
+    }
+  }, [dbTasks, showErrorToast]);
 
   const updateTaskResult = useCallback(async (taskId: string, result: string) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, result } : t)));
-    await supabase.from('tasks').update({ result, updated_at: new Date().toISOString() }).eq('id', taskId);
+    const { error } = await supabase.from('tasks').update({ result, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) { showErrorToast('Не удалось сохранить результат'); void logError('tasks.result.update.failed', error); }
     setEditingResultId(null);
-  }, []);
+  }, [showErrorToast]);
 
   const updateTaskDescriptionAndImage = useCallback(
     async (taskId: string, description: string, imageUrl: string) => {
@@ -569,7 +585,7 @@ export default function TasksPage() {
           t.id === taskId ? { ...t, description: description || null, image_url: imageUrl || null } : t
         )
       );
-      await supabase
+      const { error } = await supabase
         .from('tasks')
         .update({
           description: description || null,
@@ -577,35 +593,46 @@ export default function TasksPage() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', taskId);
+      if (error) { showErrorToast('Не удалось сохранить описание'); void logError('tasks.desc.update.failed', error); }
     },
-    []
+    [showErrorToast]
   );
 
   const updateTaskTitle = useCallback(async (taskId: string, title: string) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, title } : t)));
-    await supabase.from('tasks').update({ title, updated_at: new Date().toISOString() }).eq('id', taskId);
-  }, []);
+    const { error } = await supabase.from('tasks').update({ title, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) { showErrorToast('Не удалось сохранить название'); void logError('tasks.title.update.failed', error); }
+  }, [showErrorToast]);
 
   const updateTaskSpecialist = useCallback(async (taskId: string, specialist: string) => {
     const value = specialist.trim() || null;
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, specialist: value ?? undefined } : t)));
-    await supabase.from('tasks').update({ specialist: value, updated_at: new Date().toISOString() }).eq('id', taskId);
-  }, []);
+    const { error } = await supabase.from('tasks').update({ specialist: value, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) { showErrorToast('Не удалось назначить специалиста'); void logError('tasks.specialist.update.failed', error); }
+  }, [showErrorToast]);
 
   const updateTaskProject = useCallback(async (taskId: string, projectId: string | null) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, project_id: projectId } : t)));
-    await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
-  }, []);
+    const { error } = await supabase.from('tasks').update({ project_id: projectId, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) { showErrorToast('Не удалось привязать проект'); void logError('tasks.project.update.failed', error); }
+  }, [showErrorToast]);
 
   const updateTaskDeadline = useCallback(async (taskId: string, deadline: string | null) => {
     setDbTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, deadline } : t)));
-    await supabase.from('tasks').update({ deadline, updated_at: new Date().toISOString() }).eq('id', taskId);
-  }, []);
+    const { error } = await supabase.from('tasks').update({ deadline, updated_at: new Date().toISOString() }).eq('id', taskId);
+    if (error) { showErrorToast('Не удалось изменить дедлайн'); void logError('tasks.deadline.update.failed', error); }
+  }, [showErrorToast]);
 
   const deleteTask = useCallback(async (taskId: string) => {
+    const removed = dbTasks.find((t) => t.id === taskId);
     setDbTasks((prev) => prev.filter((t) => t.id !== taskId));
-    await supabase.from('tasks').delete().eq('id', taskId);
-  }, []);
+    const { error } = await supabase.from('tasks').delete().eq('id', taskId);
+    if (error) {
+      if (removed) setDbTasks((prev) => [removed, ...prev]);
+      showErrorToast('Не удалось удалить задачу');
+      void logError('tasks.delete.failed', error);
+    }
+  }, [dbTasks, showErrorToast]);
 
   const uploadTaskImage = useCallback(async (file: File): Promise<string> => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -652,9 +679,10 @@ export default function TasksPage() {
           t.id === taskId ? { ...t, column_id: columnId, board_id: selectedBoardId!, ...(newStatus && { status: newStatus }) } : t
         )
       );
-      await supabase.from('tasks').update(payload).eq('id', taskId);
+      const { error } = await supabase.from('tasks').update(payload).eq('id', taskId);
+      if (error) { showErrorToast('Не удалось переместить задачу'); void logError('tasks.column.move.failed', error); }
     },
-    [columns, selectedBoardId]
+    [columns, selectedBoardId, showErrorToast]
   );
 
   const projectMap = useMemo(() => {
@@ -842,10 +870,11 @@ export default function TasksPage() {
           })
         );
       } catch (error) {
+        showErrorToast('Не удалось пересортировать колонки');
         void logError('tasks.column.reorder.failed', error);
       }
     },
-    []
+    [showErrorToast]
   );
 
   const handleBoardDragEnd = useCallback(
@@ -944,6 +973,7 @@ export default function TasksPage() {
         throw new Error(text || 'Failed to save deadline default');
       }
     } catch (error) {
+      showErrorToast('Не удалось сохранить настройку дедлайна');
       void logError('tasks.deadline-default.save.failed', error);
     } finally {
       setSavingDeadlineDefault(false);
@@ -986,6 +1016,7 @@ export default function TasksPage() {
       setShowAddForm(false);
       setNewTaskColumnId(null);
     } catch (error) {
+      showErrorToast('Не удалось создать задачу — изменения не сохранены');
       void logError('tasks.add.failed', error);
     } finally {
       setAddingSaving(false);
@@ -1008,6 +1039,7 @@ export default function TasksPage() {
       setShowAddBoardForm(false);
       setSelectedBoardId(data.id);
     } catch (error) {
+      showErrorToast('Не удалось создать доску');
       void logError('tasks.board.add.failed', error);
     } finally {
       setAddingBoard(false);
@@ -1029,6 +1061,7 @@ export default function TasksPage() {
         setUserDefaultBoardId(boardId);
       }
     } catch (error) {
+      showErrorToast('Не удалось сохранить доску по умолчанию');
       void logError('tasks.board.set-default.failed', error);
     } finally {
       setSavingDefaultBoard(false);
@@ -1054,6 +1087,7 @@ export default function TasksPage() {
       setEditingColumnTitle(newCol.title);
       setEditingColumnStatus((newCol.status as string) || '');
     } catch (error) {
+      showErrorToast('Не удалось добавить колонку');
       void logError('tasks.column.add.failed', error);
     } finally {
       setAddingColumn(false);
@@ -1079,6 +1113,7 @@ export default function TasksPage() {
       );
       setEditingColumnId(null);
     } catch (error) {
+      showErrorToast('Не удалось обновить колонку');
       void logError('tasks.column.update.failed', error);
     } finally {
       setAddingColumn(false);
@@ -1103,6 +1138,7 @@ export default function TasksPage() {
       setColumns((prev) => prev.filter((c) => c.id !== columnId));
       setEditingColumnId(null);
     } catch (error) {
+      showErrorToast('Не удалось удалить колонку');
       void logError('tasks.column.delete.failed', error);
     }
   }
@@ -1446,6 +1482,7 @@ export default function TasksPage() {
                   const url = await uploadTaskImage(file);
                   setNewImageUrl(url);
                 } catch (err) {
+                  showErrorToast('Не удалось загрузить изображение');
                   void logError('tasks.image.upload.failed', err);
                 } finally {
                   setTaskImageUploading(false);
@@ -1466,6 +1503,7 @@ export default function TasksPage() {
                     const url = await uploadTaskImage(file);
                     setNewImageUrl(url);
                   } catch (err) {
+                    showErrorToast('Не удалось загрузить изображение');
                     void logError('tasks.image.upload.failed', err);
                   } finally {
                     setTaskImageUploading(false);
@@ -2251,6 +2289,7 @@ export default function TasksPage() {
                       const url = await uploadTaskImage(file);
                       setNewImageUrl(url);
                     } catch (err) {
+                      showErrorToast('Не удалось загрузить изображение');
                       void logError('tasks.image.upload.failed', err);
                     } finally {
                       setTaskImageUploading(false);
@@ -2271,6 +2310,7 @@ export default function TasksPage() {
                         const url = await uploadTaskImage(file);
                         setNewImageUrl(url);
                       } catch (err) {
+                        showErrorToast('Не удалось загрузить изображение');
                         void logError('tasks.image.upload.failed', err);
                       } finally {
                         setTaskImageUploading(false);
@@ -2491,6 +2531,7 @@ export default function TasksPage() {
                           const url = await uploadTaskImage(file);
                           setEditingImageUrlValue(url);
                         } catch (err) {
+                          showErrorToast('Не удалось загрузить изображение');
                           void logError('tasks.image.upload.failed', err);
                         } finally {
                           setTaskImageUploading(false);
@@ -2511,6 +2552,7 @@ export default function TasksPage() {
                             const url = await uploadTaskImage(file);
                             setEditingImageUrlValue(url);
                           } catch (err) {
+                            showErrorToast('Не удалось загрузить изображение');
                             void logError('tasks.image.upload.failed', err);
                           } finally {
                             setTaskImageUploading(false);
@@ -2696,6 +2738,16 @@ export default function TasksPage() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {errorToast && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-5 py-3 text-sm font-medium text-red-700 shadow-lg">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0"><circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/><path d="M8 5v3.5M8 10.5v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          {errorToast}
+          <button type="button" onClick={() => setErrorToast(null)} className="ml-2 text-red-400 hover:text-red-600">
+            <X size={14} />
+          </button>
         </div>
       )}
     </div>
