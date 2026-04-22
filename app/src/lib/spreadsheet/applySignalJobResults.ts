@@ -1,6 +1,8 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
+import { ExtractorKey } from '@/lib/enrich/extractors/types';
+import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
 
 export type SignalResultRow = {
   row_index: number;
@@ -8,6 +10,16 @@ export type SignalResultRow = {
   status: string;
   last_error?: string | null;
 };
+
+/** Configuration for one extra spreadsheet column derived from an extractor. */
+export interface ExtraColumnSpec {
+  /** Which extractor key's value to render (e.g. 'customers', 'pricing_min'). */
+  key: ExtractorKey;
+  /** Zero-based column index in the spreadsheet to write into. */
+  colIndex: number;
+  /** Header text written to row 0 if the existing header cell is empty. */
+  header: string;
+}
 
 export interface ApplySignalsOptions {
   stackColIndex: number;
@@ -19,6 +31,8 @@ export interface ApplySignalsOptions {
    * Useful for partial re-runs where the user keeps existing data.
    */
   applyOnlyEmpty?: boolean;
+  /** Extra columns to write per row, populated from extractor outputs. */
+  extraCols?: ExtraColumnSpec[];
 }
 
 type SpreadsheetTab = {
@@ -39,26 +53,47 @@ type SpreadsheetState = {
 /**
  * Pure function — mutates `tabData` in place.
  *
- * Parses each result_text as JSON {stack, profile} and writes to the two columns.
- * - Failed rows: writes ⚠ + error message to make problems visible.
+ * Parses each result_text as JSON {stack, profile, ...extras} and writes to
+ * the configured columns.
+ * - Failed rows: writes ⚠ + error message to stack/profile, empty extras.
  * - Invalid JSON: writes empty strings (does not throw).
  * - row_index = 0 (header) and out-of-bounds rows are skipped.
+ * - applyOnlyEmpty: if stack cell already has user data (not ⚠), skip the
+ *   whole row including extras to preserve manual edits.
  */
 export function applySignalsToTabData(
   tabData: string[][],
   results: SignalResultRow[],
   options: ApplySignalsOptions,
 ): { applied: number; skipped: number } {
-  const { stackColIndex, profileColIndex, stackHeader, profileHeader, applyOnlyEmpty } = options;
+  const {
+    stackColIndex,
+    profileColIndex,
+    stackHeader,
+    profileHeader,
+    applyOnlyEmpty,
+    extraCols,
+  } = options;
+
+  const allExtras = extraCols ?? [];
+  const maxColIndex = allExtras.reduce(
+    (max, ec) => Math.max(max, ec.colIndex),
+    profileColIndex,
+  );
 
   if (tabData.length > 0) {
     const header = tabData[0];
-    while (header.length <= profileColIndex) header.push('');
+    while (header.length <= maxColIndex) header.push('');
     if (stackHeader && !String(header[stackColIndex] ?? '').trim()) {
       header[stackColIndex] = stackHeader;
     }
     if (profileHeader && !String(header[profileColIndex] ?? '').trim()) {
       header[profileColIndex] = profileHeader;
+    }
+    for (const ec of allExtras) {
+      if (!String(header[ec.colIndex] ?? '').trim()) {
+        header[ec.colIndex] = ec.header;
+      }
     }
   }
 
@@ -72,13 +107,14 @@ export function applySignalsToTabData(
     }
 
     const row = tabData[r.row_index];
-    while (row.length <= profileColIndex) row.push('');
+    while (row.length <= maxColIndex) row.push('');
 
     if (applyOnlyEmpty) {
       // A cell is "refillable" when empty OR contains only the ⚠ error
       // marker — both states mean the previous attempt produced no usable
       // data, so a re-run is allowed to overwrite. A cell with a real stack
-      // string is treated as user/historical data and preserved.
+      // string is treated as user/historical data and preserved (extras
+      // are skipped too to keep the row internally consistent).
       if (!isStackCellRefillable(row[stackColIndex])) {
         skipped += 1;
         continue;
@@ -89,10 +125,16 @@ export function applySignalsToTabData(
       const parsed = parseSignalResult(r.result_text);
       row[stackColIndex] = parsed.stack;
       row[profileColIndex] = parsed.profile;
+      for (const ec of allExtras) {
+        row[ec.colIndex] = formatExtraValue(ec.key, parsed.raw[ec.key]);
+      }
       applied += 1;
     } else {
       row[stackColIndex] = SIGNAL_ERROR_MARKER;
       row[profileColIndex] = r.last_error ?? 'Не удалось обработать сайт';
+      for (const ec of allExtras) {
+        row[ec.colIndex] = '';
+      }
       applied += 1;
     }
   }
@@ -100,16 +142,23 @@ export function applySignalsToTabData(
   return { applied, skipped };
 }
 
-function parseSignalResult(resultText: string | null): { stack: string; profile: string } {
-  if (!resultText) return { stack: '', profile: '' };
+interface ParsedSignalResult {
+  stack: string;
+  profile: string;
+  raw: Record<string, unknown>;
+}
+
+function parseSignalResult(resultText: string | null): ParsedSignalResult {
+  if (!resultText) return { stack: '', profile: '', raw: {} };
   try {
-    const parsed = JSON.parse(resultText) as { stack?: unknown; profile?: unknown };
+    const parsed = JSON.parse(resultText) as Record<string, unknown>;
     return {
       stack: typeof parsed.stack === 'string' ? parsed.stack : '',
       profile: typeof parsed.profile === 'string' ? parsed.profile : '',
+      raw: parsed,
     };
   } catch {
-    return { stack: '', profile: '' };
+    return { stack: '', profile: '', raw: {} };
   }
 }
 

@@ -243,3 +243,203 @@ describe('applySignalsToTabData (pure helper)', () => {
     expect(tabData[1][STACK_COL]).toBe('Tilda, Bitrix');
   });
 });
+
+describe('applySignalsToTabData — extra columns from extractors', () => {
+  it('writes string[] (customers) joined by comma into the configured column', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', ''],
+      ['site.com', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({
+          stack: 'Roistat',
+          profile: 'B2B',
+          customers: ['Сбербанк', 'Газпром', 'Тинькофф'],
+        }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [{ key: 'customers', colIndex: 5, header: 'Клиенты' }],
+    });
+
+    expect(tabData[0][5]).toBe('Клиенты');
+    expect(tabData[1][5]).toBe('Сбербанк, Газпром, Тинькофф');
+  });
+
+  it('writes booleans as "Да" (true) and empty string (false)', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', '', ''],
+      ['a.com', '', '', '', '', '', ''],
+      ['b.com', '', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: '', profile: '', enterprise_logos: true, free_trial: false }),
+      },
+      {
+        row_index: 2,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: '', profile: '', enterprise_logos: false, free_trial: true }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [
+        { key: 'enterprise_logos', colIndex: 5, header: 'Enterprise лого' },
+        { key: 'free_trial', colIndex: 6, header: 'Free trial' },
+      ],
+    });
+
+    expect(tabData[1][5]).toBe('Да');
+    expect(tabData[1][6]).toBe('');
+    expect(tabData[2][5]).toBe('');
+    expect(tabData[2][6]).toBe('Да');
+  });
+
+  it('writes numbers as plain strings, missing fields as empty', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', ''],
+      ['a.com', '', '', '', '', ''],
+      ['b.com', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: '', profile: '', vacancies_count: 12 }),
+      },
+      {
+        row_index: 2,
+        status: 'completed',
+        result_text: JSON.stringify({ stack: '', profile: '' }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [{ key: 'vacancies_count', colIndex: 5, header: 'Вакансий' }],
+    });
+
+    expect(tabData[1][5]).toBe('12');
+    expect(tabData[2][5]).toBe('');
+  });
+
+  it('writes pricing_min as "<value> <currency>" and pricing_model as plain string', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', '', ''],
+      ['a.com', '', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({
+          stack: '',
+          profile: '',
+          pricing_model: 'self-serve',
+          pricing_min: { value: 990, currency: 'RUB' },
+        }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [
+        { key: 'pricing_model', colIndex: 5, header: 'Модель продаж' },
+        { key: 'pricing_min', colIndex: 6, header: 'Мин. цена' },
+      ],
+    });
+
+    expect(tabData[1][5]).toBe('self-serve');
+    expect(tabData[1][6]).toBe('990 RUB');
+  });
+
+  it('writes hiring_roles as comma-joined enabled role names in RU', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', ''],
+      ['a.com', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({
+          stack: '',
+          profile: '',
+          hiring_roles: { engineering: true, marketing: true, sales: false },
+        }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [{ key: 'hiring_roles', colIndex: 5, header: 'Нанимают' }],
+    });
+
+    expect(tabData[1][5]).toBe('инженеры, маркетинг');
+  });
+
+  it('writes empty extra cells for failed rows but still marks ⚠ in stack/profile', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', ''],
+      ['a.com', '', '', '', '', ''],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'failed',
+        result_text: null,
+        last_error: 'Тайм-аут',
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [{ key: 'customers', colIndex: 5, header: 'Клиенты' }],
+    });
+
+    expect(tabData[1][3]).toBe('⚠');
+    expect(tabData[1][5]).toBe('');
+  });
+
+  it('respects applyOnlyEmpty for extra columns too — does not overwrite filled cells', () => {
+    const tabData = [
+      ['Сайт', '', '', 'Стек', 'Профиль', 'Клиенты'],
+      ['a.com', '', '', 'Roistat', 'B2B', 'Старые клиенты'],
+    ];
+    const results = [
+      {
+        row_index: 1,
+        status: 'completed',
+        result_text: JSON.stringify({
+          stack: 'Roistat, AmoCRM',
+          profile: 'B2B',
+          customers: ['Новый1', 'Новый2'],
+        }),
+      },
+    ];
+
+    applySignalsToTabData(tabData, results, {
+      stackColIndex: 3,
+      profileColIndex: 4,
+      extraCols: [{ key: 'customers', colIndex: 5, header: 'Клиенты' }],
+      applyOnlyEmpty: true,
+    });
+
+    expect(tabData[1][5]).toBe('Старые клиенты');
+  });
+});

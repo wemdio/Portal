@@ -6,7 +6,8 @@ import { processSignalsForUrl } from '@/lib/enrich/websiteSignalProcessor';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { shouldRetryEnrichmentItem, shouldUseCachedError } from '@/lib/enrich/errorPolicy';
 import { applyEnrichmentResults } from '@/lib/spreadsheet/applyJobResults';
-import { applySignalJobResults } from '@/lib/spreadsheet/applySignalJobResults';
+import { applySignalJobResults, type ExtraColumnSpec } from '@/lib/spreadsheet/applySignalJobResults';
+import type { ExtractorKey } from '@/lib/enrich/extractors/types';
 import { startTrace } from '@/lib/tracer';
 import type { Span } from '@/lib/tracer';
 
@@ -35,7 +36,32 @@ type JobRow = {
   result_col_header: string | null;
   result_col_index_2: number | null;
   result_col_header_2: string | null;
+  extractors: string[] | null;
+  extra_cols: unknown;
 };
+
+function parseExtraCols(value: unknown): ExtraColumnSpec[] | undefined {
+  if (!value || !Array.isArray(value)) return undefined;
+  const out: ExtraColumnSpec[] = [];
+  for (const entry of value) {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      typeof (entry as { key?: unknown }).key === 'string' &&
+      typeof (entry as { colIndex?: unknown }).colIndex === 'number' &&
+      typeof (entry as { header?: unknown }).header === 'string'
+    ) {
+      out.push(entry as ExtraColumnSpec);
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseExtractors(value: unknown): ExtractorKey[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const filtered = value.filter((v): v is string => typeof v === 'string');
+  return filtered.length > 0 ? (filtered as ExtractorKey[]) : undefined;
+}
 
 type FetchResult = { text?: string; error?: string };
 
@@ -353,14 +379,23 @@ async function fetchEmailsForUrl(
 
 /**
  * Signal detection: in-memory dedup only (no cross-job DB cache).
- * Worker writes JSON {"stack":"...","profile":"..."} into queue.result_text.
- * Applier later parses this and writes to two spreadsheet columns.
+ * Worker writes JSON of full ExtractedData (stack/profile + any per-extractor
+ * fields) into queue.result_text. Applier parses this and writes to the
+ * configured spreadsheet columns. Backward compat: when extractors is omitted,
+ * default behavior (only stack/profile) is preserved.
+ *
+ * Dedup key includes the extractors set so two jobs requesting different
+ * extractors for the same URL don't share a cached result.
  */
 async function fetchSignalsForUrl(
   item: QueueItem,
   inflight: Map<string, Promise<FetchResult>>,
+  extractors?: ExtractorKey[],
 ): Promise<FetchResult> {
-  const key = `signals:${item.url_normalized || item.url_raw}`;
+  const extractorsKeyPart = extractors && extractors.length > 0
+    ? `:${[...extractors].sort().join(',')}`
+    : '';
+  const key = `signals:${item.url_normalized || item.url_raw}${extractorsKeyPart}`;
   if (inflight.has(key)) return inflight.get(key)!;
 
   const promise = (async () => {
@@ -370,6 +405,7 @@ async function fetchSignalsForUrl(
         processSignalsForUrl(item.url_raw, {
           timeout: FETCH_TIMEOUT_MS,
           signal: abortController.signal,
+          extractors,
         }),
         {
           timeoutMs: FETCH_HARD_TIMEOUT_MS,
@@ -380,11 +416,12 @@ async function fetchSignalsForUrl(
       if ('error' in result) {
         return { error: result.error };
       }
-      const payload = JSON.stringify({
-        stack: result.stack,
-        profile: result.profile,
-      });
-      return { text: payload };
+      // Persist all extractor-produced fields. Drop bulky/internal-only ones
+      // (signalIds is informational and method is debug metadata).
+      const { signalIds: _signalIds, method: _method, ...persisted } = result;
+      void _signalIds;
+      void _method;
+      return { text: JSON.stringify(persisted) };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Ошибка анализа сигналов';
       return { error: message };
@@ -541,7 +578,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
   try {
     const { data: job, error: jobError } = await supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2')
+      .select('id, user_id, status, extraction_type, total, processed, success_count, error_count, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2, extractors, extra_cols')
       .eq('id', jobId)
       .single<JobRow>();
 
@@ -725,7 +762,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
             if (extractionType === 'email') {
               result = await fetchEmailsWithCache(item, inflight);
             } else if (extractionType === 'signals') {
-              result = await fetchSignalsForUrl(item, inflight);
+              result = await fetchSignalsForUrl(item, inflight, parseExtractors(job.extractors));
             } else {
               result = await fetchWithCache(item, inflight);
             }
@@ -877,6 +914,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
             stackHeader: job.result_col_header ?? 'Стек',
             profileHeader: job.result_col_header_2 ?? 'Профиль',
             applyOnlyEmpty: true,
+            extraCols: parseExtraCols(job.extra_cols),
           },
         );
       } else {
