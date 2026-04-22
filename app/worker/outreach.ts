@@ -149,6 +149,34 @@ function getNextRunMs(hourUtc: number): number {
   return next.getTime() - now.getTime();
 }
 
+/**
+ * Catch-up: was today's scheduled run missed?
+ * Returns true if the scheduled UTC hour has already passed today AND
+ * no lead has been inserted into the table at/after today's scheduled time.
+ *
+ * Without this, restarting the container after the daily UTC hour silently
+ * skips the entire day's collection (root cause of the "outreach has been
+ * down for N days" outage).
+ */
+async function wasTodaysCollectMissed(table: 'bugor_outreach_leads' | 'nash_outreach_leads', hourUtc: number): Promise<boolean> {
+  const db = requireSupabaseAdmin(log);
+  if (!db) return false;
+  const now = new Date();
+  const todayScheduled = new Date(now);
+  todayScheduled.setUTCHours(hourUtc, 0, 0, 0);
+  if (now.getTime() < todayScheduled.getTime()) return false;
+  const { data, error } = await db
+    .from(table)
+    .select('created_at')
+    .gte('created_at', todayScheduled.toISOString())
+    .limit(1);
+  if (error) {
+    log('warn', `Catch-up check failed for ${table}: ${error.message}`);
+    return false;
+  }
+  return !data || data.length === 0;
+}
+
 async function runBugorCollect(): Promise<void> {
   const db = requireSupabaseAdmin(log);
   log('info', 'Bugor Outreach scheduled collection starting...');
@@ -396,6 +424,14 @@ async function runNashCollect(): Promise<void> {
 let _shuttingDown = false;
 
 async function bugorCollectScheduler(): Promise<void> {
+  if (await wasTodaysCollectMissed('bugor_outreach_leads', BUGOR_COLLECT_HOUR_UTC)) {
+    log('info', `Bugor collect: catch-up — today's ${BUGOR_COLLECT_HOUR_UTC}:00 UTC run was missed, running now`);
+    try {
+      await runBugorCollect();
+    } catch (err) {
+      log('error', 'Bugor catch-up collect failed', err);
+    }
+  }
   while (!_shuttingDown) {
     const waitMs = getNextRunMs(BUGOR_COLLECT_HOUR_UTC);
     const nextRun = new Date(Date.now() + waitMs).toISOString();
@@ -407,6 +443,14 @@ async function bugorCollectScheduler(): Promise<void> {
 }
 
 async function nashCollectScheduler(): Promise<void> {
+  if (await wasTodaysCollectMissed('nash_outreach_leads', NASH_COLLECT_HOUR_UTC)) {
+    log('info', `Nash collect: catch-up — today's ${NASH_COLLECT_HOUR_UTC}:00 UTC run was missed, running now`);
+    try {
+      await runNashCollect();
+    } catch (err) {
+      log('error', 'Nash catch-up collect failed', err);
+    }
+  }
   while (!_shuttingDown) {
     const waitMs = getNextRunMs(NASH_COLLECT_HOUR_UTC);
     const nextRun = new Date(Date.now() + waitMs).toISOString();

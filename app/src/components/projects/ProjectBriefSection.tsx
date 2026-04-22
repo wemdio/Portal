@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Download, Trash2, Sparkles, FileText, AlertCircle } from 'lucide-react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
@@ -67,18 +67,61 @@ export function ProjectBriefSection({
   onChange,
 }: ProjectBriefSectionProps) {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState<'idle' | 'uploading' | 'deleting' | 'downloading'>('idle');
+  const [busy, setBusy] = useState<
+    'idle' | 'uploading' | 'generating' | 'deleting' | 'downloading'
+  >('idle');
   const [error, setError] = useState<string | null>(null);
 
   const hasBrief = Boolean(brief.brief_file_path);
   const hasHypotheses = Boolean(brief.lead_source_hypotheses);
   const hypothesesError = brief.lead_source_hypotheses_error;
+  const autoTriggeredRef = useRef<string | null>(null);
+
+  // Автозапуск генерации, если бриф уже залит, но гипотез нет и нет ошибки.
+  // Срабатывает один раз на projectId — повторных циклов «ошибка → авто-ретрай» не будет.
+  useEffect(() => {
+    if (!canEdit) return;
+    if (!hasBrief || hasHypotheses || hypothesesError) return;
+    if (busy !== 'idle') return;
+    if (autoTriggeredRef.current === projectId) return;
+    autoTriggeredRef.current = projectId;
+    void generateHypotheses({ regenerate: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, hasBrief, hasHypotheses, hypothesesError, canEdit]);
+
+  async function generateHypotheses(opts: { regenerate?: boolean } = {}): Promise<void> {
+    setBusy('generating');
+    try {
+      const headers = await authHeaders();
+      const url = `/api/projects/${projectId}/brief/hypotheses${opts.regenerate ? '?regenerate=1' : ''}`;
+      const res = await fetch(url, { method: 'POST', headers });
+      const payload = (await res.json().catch(() => ({}))) as BriefApiResponse & { error?: string };
+      onChange({
+        lead_source_hypotheses: payload.lead_source_hypotheses ?? null,
+        lead_source_hypotheses_generated_at: payload.lead_source_hypotheses_generated_at ?? null,
+        lead_source_hypotheses_error: payload.lead_source_hypotheses_error ?? null,
+      });
+      if (!res.ok) {
+        throw new Error(payload.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      void logError('projects.brief.hypotheses.client_failed', err, { projectId });
+      setError(
+        err instanceof Error
+          ? `Гипотезы не сгенерированы: ${err.message}`
+          : 'Гипотезы не сгенерированы',
+      );
+    } finally {
+      setBusy('idle');
+    }
+  }
 
   async function handleUpload() {
     if (!pendingFile) return;
     setError(null);
     setBusy('uploading');
 
+    let payload: (BriefApiResponse & { error?: string; hypotheses_pending?: boolean }) | null = null;
     try {
       const token = await getAccessToken();
       const fd = new FormData();
@@ -89,8 +132,11 @@ export function ProjectBriefSection({
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
       });
-      const payload = (await res.json().catch(() => ({}))) as BriefApiResponse & { error?: string };
-      if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+      payload = (await res.json().catch(() => ({}))) as BriefApiResponse & {
+        error?: string;
+        hypotheses_pending?: boolean;
+      };
+      if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
 
       onChange({
         brief_file_path: payload.brief_file_path ?? null,
@@ -104,7 +150,15 @@ export function ProjectBriefSection({
     } catch (err) {
       void logError('projects.brief.upload.client_failed', err, { projectId });
       setError(err instanceof Error ? err.message : 'Ошибка при загрузке брифа');
-    } finally {
+      setBusy('idle');
+      return;
+    }
+
+    // Загрузка PDF прошла. Если гипотез ещё нет — запускаем второй запрос
+    // (генерация уже в своём собственном setBusy('generating') / 'idle').
+    if (payload?.hypotheses_pending) {
+      await generateHypotheses();
+    } else {
       setBusy('idle');
     }
   }
@@ -206,7 +260,9 @@ export function ProjectBriefSection({
                 className="inline-flex items-center gap-2 bg-blue-600 text-white text-sm px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
               >
                 {busy === 'uploading' ? (
-                  <>Загружаю и генерирую гипотезы…</>
+                  <>Загружаю PDF…</>
+                ) : busy === 'generating' ? (
+                  <>Генерирую гипотезы…</>
                 ) : (
                   <><Sparkles className="w-4 h-4" /> Загрузить и сгенерировать гипотезы</>
                 )}
@@ -225,30 +281,67 @@ export function ProjectBriefSection({
         )}
       </SectionCard>
 
-      {(hasHypotheses || hypothesesError) && (
+      {(hasHypotheses || hypothesesError || (hasBrief && canEdit)) && (
         <SectionCard title="Гипотезы по сбору баз (AI)">
           {hasHypotheses ? (
             <>
               <LeadSourceHypothesesView markdown={brief.lead_source_hypotheses ?? ''} />
-              <p className="mt-3 text-xs text-gray-400">
-                Сгенерировано {formatDate(brief.lead_source_hypotheses_generated_at)} один раз на основе брифа.
-                {hasBrief && canEdit && ' Чтобы пересоздать — удалите бриф и загрузите заново.'}
-              </p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-gray-400">
+                  Сгенерировано {formatDate(brief.lead_source_hypotheses_generated_at)} на основе брифа.
+                </p>
+                {hasBrief && canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => void generateHypotheses({ regenerate: true })}
+                    disabled={busy !== 'idle'}
+                    className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                    title="Перегенерировать гипотезы по уже загруженному брифу"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    {busy === 'generating' ? 'Генерирую…' : 'Сгенерировать заново'}
+                  </button>
+                )}
+              </div>
             </>
-          ) : (
+          ) : busy === 'generating' ? (
+            <div className="flex items-center gap-2 text-sm text-gray-600 bg-blue-50 border border-blue-200 rounded-lg p-3">
+              <Sparkles className="w-4 h-4 animate-pulse text-blue-500" />
+              <span>Генерирую гипотезы… (до ~60 секунд)</span>
+            </div>
+          ) : hypothesesError ? (
             <div className="flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <div>
+              <div className="flex-1">
                 <p className="font-medium">Гипотезы не сгенерированы</p>
                 <p className="text-xs mt-0.5">{hypothesesError}</p>
                 {canEdit && hasBrief && (
-                  <p className="text-xs mt-1">
-                    Удалите и загрузите бриф заново — это запустит повторную генерацию.
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void generateHypotheses({ regenerate: true })}
+                    disabled={busy !== 'idle'}
+                    className="mt-2 inline-flex items-center gap-1.5 text-xs bg-amber-600 text-white px-3 py-1.5 rounded-md hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Сгенерировать ещё раз
+                  </button>
                 )}
               </div>
             </div>
-          )}
+          ) : hasBrief && canEdit ? (
+            <div className="flex items-center justify-between gap-3 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <span>Бриф загружен. Запустите AI, чтобы получить идеи по сбору базы.</span>
+              <button
+                type="button"
+                onClick={() => void generateHypotheses({ regenerate: true })}
+                disabled={busy !== 'idle'}
+                className="inline-flex items-center gap-1.5 text-xs bg-blue-600 text-white px-3 py-1.5 rounded-md hover:bg-blue-700 disabled:opacity-50"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Сгенерировать
+              </button>
+            </div>
+          ) : null}
         </SectionCard>
       )}
     </div>
