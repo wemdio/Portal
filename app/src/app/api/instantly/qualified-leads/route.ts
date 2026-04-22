@@ -82,6 +82,7 @@ export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
   const status = url.searchParams.get('status');
   const campaignId = url.searchParams.get('campaign_id');
+  const campaignIds = url.searchParams.getAll('campaign_ids');
   const search = url.searchParams.get('search');
   const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 200);
   const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
@@ -104,6 +105,9 @@ export const GET = withAuth(async (req) => {
   if (campaignId) {
     query = query.eq('campaign_id', campaignId);
     prefCampaignIds = [campaignId];
+  } else if (campaignIds.length > 0) {
+    query = query.in('campaign_id', campaignIds);
+    prefCampaignIds = campaignIds;
   } else if (usePreferences && user) {
     prefCampaignIds = await resolveCampaignIdsForUser(user.id);
     if (prefCampaignIds && prefCampaignIds.length > 0) {

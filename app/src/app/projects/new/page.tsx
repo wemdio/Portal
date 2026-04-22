@@ -714,7 +714,7 @@ export default function NewProjectPage() {
             hint="После создания проекта бриф будет автоматически загружен и AI один раз сгенерирует гипотезы по сбору базы."
           />
           {briefUploadStatus === 'uploading' && (
-            <p className="mt-2 text-xs text-blue-600">Загружаю бриф и генерирую гипотезы…</p>
+            <p className="mt-2 text-xs text-blue-600">Загружаю PDF… AI сгенерирует гипотезы на странице проекта.</p>
           )}
           {briefUploadStatus === 'error' && briefUploadError && (
             <p className="mt-2 text-xs text-red-600">{briefUploadError}</p>

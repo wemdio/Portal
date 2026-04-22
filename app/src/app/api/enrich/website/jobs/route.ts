@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { extractNormalizedUrls, normalizeUrl } from '@/lib/enrich/websiteParser';
+import { ALL_EXTRACTOR_KEYS, ExtractorKey } from '@/lib/enrich/extractors/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
 
     let query = supabaseAdmin
       .from('website_enrichment_jobs')
-      .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2')
+      .select('id, status, extraction_type, total, processed, created_at, spreadsheet_tab_id, result_col_index, result_col_header, result_col_index_2, result_col_header_2, extractors, extra_cols')
       .eq('user_id', user.id)
       .in('status', ['pending', 'running']);
     if (typeFilter && ['text', 'email', 'signals'].includes(typeFilter)) {
@@ -45,6 +46,8 @@ export async function GET(req: NextRequest) {
       result_col_header: string | null;
       result_col_index_2: number | null;
       result_col_header_2: string | null;
+      extractors: string[] | null;
+      extra_cols: unknown;
     } | undefined;
 
     if (!activeJob) {
@@ -54,6 +57,25 @@ export async function GET(req: NextRequest) {
     const progress = activeJob.total > 0
       ? Math.round((activeJob.processed / activeJob.total) * 100)
       : 0;
+
+    // Validate extra_cols defensively: never trust DB JSON to round-trip
+    // exactly the shape the UI expects (e.g. a manual SQL edit could leave
+    // garbage). Drop entries that don't have all required fields.
+    const extraColsValidated: Array<{ key: ExtractorKey; colIndex: number; header: string }> | null =
+      Array.isArray(activeJob.extra_cols)
+        ? (activeJob.extra_cols as unknown[])
+            .map((entry): { key: ExtractorKey; colIndex: number; header: string } | null => {
+              if (!entry || typeof entry !== 'object') return null;
+              const k = (entry as { key?: unknown }).key;
+              const c = (entry as { colIndex?: unknown }).colIndex;
+              const h = (entry as { header?: unknown }).header;
+              if (typeof k !== 'string' || !(ALL_EXTRACTOR_KEYS as string[]).includes(k)) return null;
+              if (typeof c !== 'number' || !Number.isFinite(c) || c < 0) return null;
+              if (typeof h !== 'string') return null;
+              return { key: k as ExtractorKey, colIndex: c, header: h };
+            })
+            .filter((x): x is { key: ExtractorKey; colIndex: number; header: string } => x !== null)
+        : null;
 
     return NextResponse.json({
       active_job: {
@@ -67,6 +89,8 @@ export async function GET(req: NextRequest) {
         result_col_header: activeJob.result_col_header,
         result_col_index_2: activeJob.result_col_index_2,
         result_col_header_2: activeJob.result_col_header_2,
+        extractors: activeJob.extractors,
+        extra_cols: extraColsValidated,
       },
     });
   } catch (err) {
@@ -95,6 +119,8 @@ export async function POST(req: NextRequest) {
       result_col_header?: string;
       result_col_index_2?: number;
       result_col_header_2?: string;
+      extractors?: unknown;
+      extra_cols?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -112,6 +138,32 @@ export async function POST(req: NextRequest) {
     if (extractionType === 'signals' && body.result_col_index_2 == null) {
       return jsonError('result_col_index_2 (Profile column) is required for signals extraction', 400);
     }
+
+    // Validate optional per-extractor configuration. Whitelist enforces that
+    // unknown keys are silently dropped (defensive — don't fail the job for
+    // a typo in the UI; just process the recognized subset).
+    const extractorsValidated: ExtractorKey[] | null =
+      Array.isArray(body.extractors)
+        ? (body.extractors.filter(
+            (k): k is ExtractorKey => typeof k === 'string' && (ALL_EXTRACTOR_KEYS as string[]).includes(k),
+          ) as ExtractorKey[])
+        : null;
+
+    const extraColsValidated: Array<{ key: ExtractorKey; colIndex: number; header: string }> | null =
+      Array.isArray(body.extra_cols)
+        ? body.extra_cols
+            .map((entry): { key: ExtractorKey; colIndex: number; header: string } | null => {
+              if (!entry || typeof entry !== 'object') return null;
+              const key = (entry as { key?: unknown }).key;
+              const colIndex = (entry as { colIndex?: unknown }).colIndex;
+              const header = (entry as { header?: unknown }).header;
+              if (typeof key !== 'string' || !(ALL_EXTRACTOR_KEYS as string[]).includes(key)) return null;
+              if (typeof colIndex !== 'number' || !Number.isFinite(colIndex) || colIndex < 0) return null;
+              if (typeof header !== 'string') return null;
+              return { key: key as ExtractorKey, colIndex, header };
+            })
+            .filter((x): x is { key: ExtractorKey; colIndex: number; header: string } => x !== null)
+        : null;
 
     const rows = body.rows ?? [];
     if (!Array.isArray(rows) || rows.length === 0) {
@@ -231,6 +283,8 @@ export async function POST(req: NextRequest) {
         result_col_header: body.result_col_header ?? null,
         result_col_index_2: body.result_col_index_2 ?? null,
         result_col_header_2: body.result_col_header_2 ?? null,
+        extractors: extractorsValidated && extractorsValidated.length > 0 ? extractorsValidated : null,
+        extra_cols: extraColsValidated && extraColsValidated.length > 0 ? extraColsValidated : null,
       })
       .select('id')
       .single<{ id: string }>();
