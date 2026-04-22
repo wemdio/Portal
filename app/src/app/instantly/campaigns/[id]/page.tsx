@@ -268,6 +268,7 @@ export default function CampaignDetailPage() {
       const decoder = new TextDecoder();
       let buf = '';
       let downloaded = false;
+      const fileChunks: string[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -283,14 +284,18 @@ export default function CampaignDetailPage() {
           let event: Record<string, unknown>;
           try { event = JSON.parse(trimmed); } catch { continue; }
 
-          if (event.type === 'progress') {
+          if (event.type === 'emails_progress') {
             setEmailsExportProgress({ fetched: event.fetched as number });
           } else if (event.type === 'status') {
             setEmailsExportProgress((p) => ({ fetched: p?.fetched ?? 0, status: event.message as string }));
-          } else if (event.type === 'done') {
-            setEmailsExportProgress({ fetched: event.fetched as number, status: 'Готово' });
-            const b64 = event.file as string;
-            const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          } else if (event.type === 'file_chunk') {
+            fileChunks[event.index as number] = event.data as string;
+          } else if (event.type === 'file_end') {
+            setEmailsExportProgress({ fetched: event.totalEmails as number, status: 'Готово' });
+            const b64 = fileChunks.join('');
+            const raw = atob(b64);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
             const mime = format === 'csv'
               ? 'text/csv;charset=utf-8'
               : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -658,7 +663,7 @@ export default function CampaignDetailPage() {
               {exportingEmails && emailsExportProgress && (
                 <span className="text-xs text-zinc-400 mr-1">
                   {emailsExportProgress.status
-                    ? emailsExportProgress.status
+                    ? `${emailsExportProgress.fetched} писем · ${emailsExportProgress.status}`
                     : emailsExportProgress.fetched > 0
                       ? `${emailsExportProgress.fetched} писем загружено…`
                       : 'Начинаем выгрузку…'}

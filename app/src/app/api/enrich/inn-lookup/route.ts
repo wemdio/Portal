@@ -11,6 +11,7 @@ type RequestItem = { url?: string };
 type ResultItem = {
   inn: string | null;
   companyName: string | null;
+  error?: string;
 };
 
 function jsonError(message: string, status: number) {
@@ -45,24 +46,33 @@ export async function POST(req: NextRequest) {
   for (const item of items) {
     const url = typeof item.url === 'string' ? item.url.trim() : '';
 
-    if (url) {
-      try {
-        const inn = await fetchInnFromWebsite(url, { timeout: 15_000 });
-        if (inn) {
-          let companyName: string | null = null;
-          if (hasDadataKey()) {
-            try {
-              const suggestion = await findByInn(inn);
-              companyName = suggestion?.data.name?.short_with_opf ?? suggestion?.value ?? null;
-            } catch { /* non-critical */ }
-          }
-          results.push({ inn, companyName });
-          continue;
-        }
-      } catch { /* fall through */ }
+    if (!url) {
+      results.push({ inn: null, companyName: null, error: 'empty URL' });
+      continue;
     }
 
-    results.push({ inn: null, companyName: null });
+    try {
+      const inn = await fetchInnFromWebsite(url, { timeout: 15_000 });
+      if (!inn) {
+        console.warn(`[inn-lookup] ${url} — no INN found on site`);
+        results.push({ inn: null, companyName: null, error: 'no INN found on site' });
+        continue;
+      }
+      let companyName: string | null = null;
+      if (hasDadataKey()) {
+        try {
+          const suggestion = await findByInn(inn);
+          companyName = suggestion?.data.name?.short_with_opf ?? suggestion?.value ?? null;
+        } catch (err) {
+          console.warn(`[inn-lookup] DaData lookup failed for ${inn}:`, (err as Error).message);
+        }
+      }
+      results.push({ inn, companyName });
+    } catch (err) {
+      const msg = (err as Error).message || 'unknown error';
+      console.warn(`[inn-lookup] ${url} — ${msg}`);
+      results.push({ inn: null, companyName: null, error: msg });
+    }
   }
 
   return NextResponse.json({ results });
