@@ -20,6 +20,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { writePendingDbImport, buildDatabasesImportUrl } from '@/lib/databases/pendingImport';
 import { CITIES, RUBRICS } from '@/lib/parsers/yandexMapsData';
 import { humanProgressStage } from '@/lib/reputationFinder/progressStages';
@@ -76,19 +77,8 @@ const API_BASE = '/api/tools/reputation-finder/jobs';
 const CITY_GROUPS = Object.entries(CITIES);
 const RUBRIC_GROUPS = Object.entries(RUBRICS);
 
-async function getToken(): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
-
-
 async function apiFetch(path: string, init?: RequestInit) {
-  const token = await getToken();
-  if (!token) throw new Error('Not authenticated');
-  return fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...init?.headers },
-  });
+  return authFetch(`${API_BASE}${path}`, init);
 }
 
 function painBadge(score: number) {
@@ -301,10 +291,8 @@ export default function ReputationFinderPage() {
       const ac = new AbortController();
       abortRef.current = ac;
 
-      const token = await getToken();
-      const runRes = await fetch(`${API_BASE}/${job.id}/run`, {
+      const runRes = await authFetch(`${API_BASE}/${job.id}/run`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         signal: ac.signal,
       });
 

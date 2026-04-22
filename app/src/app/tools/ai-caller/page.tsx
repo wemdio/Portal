@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { Phone, Bot, History, Users, BarChart3 } from 'lucide-react';
 import { TestCallTab } from '@/components/ai-caller/TestCallTab';
 import { AssistantsTab } from '@/components/ai-caller/AssistantsTab';
@@ -18,11 +18,6 @@ const TABS: { id: AiCallerTab; label: string; icon: typeof Phone }[] = [
   { id: 'history', label: 'История', icon: History },
 ];
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
 export default function AiCallerPage() {
   const [activeTab, setActiveTab] = useState<AiCallerTab>('test-call');
   const [assistants, setAssistants] = useState<VapiAssistant[]>([]);
@@ -37,12 +32,9 @@ export default function AiCallerPage() {
   const fetchCore = useCallback(async () => {
     setLoading(true);
     try {
-      const token = await getToken();
-      const headers = { Authorization: `Bearer ${token}` };
-
       const [assistantsRes, phonesRes] = await Promise.all([
-        fetch('/api/ai-caller/assistants', { headers }),
-        fetch('/api/ai-caller/phone-numbers', { headers }),
+        authFetch('/api/ai-caller/assistants'),
+        authFetch('/api/ai-caller/phone-numbers'),
       ]);
 
       const assistantsData = await assistantsRes.json();
@@ -59,10 +51,7 @@ export default function AiCallerPage() {
   const fetchCalls = useCallback(async () => {
     setLoadingCalls(true);
     try {
-      const token = await getToken();
-      const res = await fetch('/api/ai-caller/calls?limit=30', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/ai-caller/calls?limit=30');
       const data = await res.json();
       setCalls((data.calls ?? []) as VapiCall[]);
     } catch {

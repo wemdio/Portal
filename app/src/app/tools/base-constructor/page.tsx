@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, type DragEvent } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
@@ -263,11 +264,6 @@ function getStepHints(steps: StepKey[], header: string[]): Map<StepKey, string> 
    HELPERS
    ═══════════════════════════════════════════ */
 
-async function getToken(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token || '';
-}
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
@@ -335,9 +331,7 @@ export default function BaseConstructorPage() {
   /* ─── Load history ─── */
 
   const loadHistory = useCallback(async () => {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch('/api/tools/base-constructor', { headers: { Authorization: `Bearer ${token}` } });
+    const res = await authFetch('/api/tools/base-constructor');
     if (!res.ok) return;
     const { jobs } = await res.json();
     setHistory(jobs || []);
@@ -358,11 +352,8 @@ export default function BaseConstructorPage() {
     }
 
     async function poll() {
-      const token = await getToken();
-      if (!token || !activeJob) return;
-      const res = await fetch(`/api/tools/base-constructor/${activeJob.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      if (!activeJob) return;
+      const res = await authFetch(`/api/tools/base-constructor/${activeJob.id}`);
       if (!res.ok) return;
       const { job } = await res.json();
       setActiveJob(job);
@@ -381,10 +372,7 @@ export default function BaseConstructorPage() {
   /* ─── Load job result data ─── */
 
   async function loadJobData(jobId: string) {
-    const token = await getToken();
-    const res = await fetch(`/api/tools/base-constructor/${jobId}/data`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data`);
     if (!res.ok) return;
     const { data } = await res.json();
     setJobData(data || null);
@@ -480,14 +468,12 @@ export default function BaseConstructorPage() {
     }
 
     try {
-      const token = await getToken();
       const uploadPath = `brief-scoring/${Date.now()}_${file.name}`;
       const { error: upErr } = await supabase.storage.from(BRIEF_BUCKET).upload(uploadPath, file);
       if (upErr) throw upErr;
 
-      const res = await fetch('/api/brief-scoring/parse-pdf', {
+      const res = await authFetch('/api/brief-scoring/parse-pdf', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ bucket: BRIEF_BUCKET, path: uploadPath, fileName: file.name }),
       });
       if (!res.ok) throw new Error(`Ошибка обработки PDF (${res.status})`);
@@ -508,15 +494,13 @@ export default function BaseConstructorPage() {
     setSubmitting(true);
     setError('');
     try {
-      const token = await getToken();
       const stepConfig: Record<string, string> = {};
       if (selectedSteps.includes('ta_scoring') && brief.trim()) stepConfig.brief = brief.trim();
       if (selectedSteps.includes('personalization') && prompt.trim()) stepConfig.prompt = prompt.trim();
       if (Object.keys(columnMapping).length > 0) stepConfig.column_mapping = JSON.stringify(columnMapping);
 
-      const res = await fetch('/api/tools/base-constructor', {
+      const res = await authFetch('/api/tools/base-constructor', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           data: fileData,
           selected_steps: selectedSteps,
@@ -538,10 +522,8 @@ export default function BaseConstructorPage() {
 
   async function handleCancel() {
     if (!activeJob) return;
-    const token = await getToken();
-    await fetch(`/api/tools/base-constructor/${activeJob.id}`, {
+    await authFetch(`/api/tools/base-constructor/${activeJob.id}`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'cancel' }),
     });
     setActiveJob((j) => j ? { ...j, status: 'cancelled' } : null);

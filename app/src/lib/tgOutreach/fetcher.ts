@@ -1,19 +1,12 @@
-import { supabase } from '@/lib/supabaseClient';
-
-async function getToken(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? '';
-}
+import { authFetch } from '@/lib/authFetch';
 
 export async function tgOutreachFetch<T = unknown>(
   path: string,
   options?: RequestInit & { json?: unknown },
 ): Promise<T> {
-  const token = await getToken();
   const { json, ...rest } = options ?? {};
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
     ...(rest.headers as Record<string, string> ?? {}),
   };
 
@@ -21,7 +14,7 @@ export async function tgOutreachFetch<T = unknown>(
     headers['Content-Type'] = 'application/json';
   }
 
-  const res = await fetch(`/api/tg-outreach${path}`, {
+  const res = await authFetch(`/api/tg-outreach${path}`, {
     ...rest,
     headers,
     body: json !== undefined ? JSON.stringify(json) : rest.body,

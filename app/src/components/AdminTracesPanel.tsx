@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 
 /* -------------------------------------------------------------------------- */
 /*  Types                                                                     */
@@ -852,18 +853,12 @@ export function AdminTracesPanel({
 
     try {
       if (traces.length === 0) setLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) {
-        setError('Не авторизован');
-        return;
-      }
 
       const params = new URLSearchParams({ limit: '50' });
       if (jobId) params.set('job_id', jobId);
       if (statusFilter !== 'all') params.set('status', statusFilter);
 
-      const res = await fetch(`/api/traces?${params}`, {
-        headers: { Authorization: `Bearer ${session.access_token}` },
+      const res = await authFetch(`/api/traces?${params}`, {
         signal: controller.signal,
       });
 

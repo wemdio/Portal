@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, useRef } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -68,12 +68,6 @@ const ROW_COLORS = [
   { value: '#ddd6fe', label: 'Фиолетовый', swatch: '#a78bfa' },
 ];
 
-async function authHeaders() {
-  const { data } = await supabase.auth.getSession();
-  const token = data?.session?.access_token;
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
-
 export default function ReviewQueuePage() {
   const [requests, setRequests] = useState<ReviewRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,11 +95,10 @@ export default function ReviewQueuePage() {
 
   const fetchRequests = useCallback(async () => {
     try {
-      const h = await authHeaders();
       const url = statusFilter
         ? `/api/database-review/requests?status=${statusFilter}`
         : '/api/database-review/requests';
-      const res = await fetch(url, { headers: h });
+      const res = await authFetch(url);
       const d = await res.json();
       setRequests(d.requests ?? []);
     } finally {
@@ -121,10 +114,9 @@ export default function ReviewQueuePage() {
     setActiveRow(null);
     setPopupPos(null);
     try {
-      const h = await authHeaders();
       const [baseRes, marksRes] = await Promise.all([
-        fetch(`/api/database-review/requests/${id}/base`, { headers: h }),
-        fetch(`/api/database-review/requests/${id}/marks`, { headers: h }),
+        authFetch(`/api/database-review/requests/${id}/base`),
+        authFetch(`/api/database-review/requests/${id}/marks`),
       ]);
       const baseData = await baseRes.json();
       const marksData = await marksRes.json();
@@ -139,10 +131,8 @@ export default function ReviewQueuePage() {
     if (!selectedId) return;
     setDeciding(true);
     try {
-      const h = await authHeaders();
-      const res = await fetch(`/api/database-review/requests/${selectedId}/decide`, {
+      const res = await authFetch(`/api/database-review/requests/${selectedId}/decide`, {
         method: 'POST',
-        headers: h,
         body: JSON.stringify({ decision, comment: decisionComment }),
       });
       const d = await res.json();
@@ -159,10 +149,8 @@ export default function ReviewQueuePage() {
     if (activeRow === null || !selectedId || !tabData) return;
     setSavingMark(true);
     try {
-      const h = await authHeaders();
-      await fetch(`/api/database-review/requests/${selectedId}/marks`, {
+      await authFetch(`/api/database-review/requests/${selectedId}/marks`, {
         method: 'POST',
-        headers: h,
         body: JSON.stringify({
           tabId: tabData.id,
           rowIndex: activeRow,
@@ -172,7 +160,7 @@ export default function ReviewQueuePage() {
         }),
       });
       closeRowEditor();
-      const marksRes = await fetch(`/api/database-review/requests/${selectedId}/marks`, { headers: h });
+      const marksRes = await authFetch(`/api/database-review/requests/${selectedId}/marks`);
       const marksData = await marksRes.json();
       setMarks(marksData.marks ?? []);
       setToast('Пометка сохранена');

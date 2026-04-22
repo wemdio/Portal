@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { useState } from 'react';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   Plus,
   Loader2,
@@ -64,11 +64,6 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
-
   // ── Brief Upload ──
 
   async function handleBriefUpload(file: File) {
@@ -76,7 +71,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
     setError('');
 
     try {
-      const token = await getToken();
+      const token = await getAccessToken();
       const providerQuery = `?provider=${encodeURIComponent(provider)}`;
       const formData = new FormData();
       formData.append('file', file);
@@ -84,9 +79,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
       const res = await fetch(`${apiBase}/briefs/parse${providerQuery}`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
 
@@ -198,17 +191,12 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
     setError('');
 
     try {
-      const token = await getToken();
       const url = editingId
         ? `${apiBase}/assistants/${editingId}`
         : `${apiBase}/assistants`;
 
-      const res = await fetch(url, {
+      const res = await authFetch(url, {
         method: editingId ? 'PATCH' : 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify(payload),
       });
 
@@ -236,10 +224,8 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
     setDeleting(id);
     try {
-      const token = await getToken();
-      await fetch(`${apiBase}/assistants/${id}`, {
+      await authFetch(`${apiBase}/assistants/${id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
       });
       onRefresh();
     } catch {
@@ -255,10 +241,7 @@ export function AssistantsTab({ assistants, loading, onRefresh, apiBase = '/api/
 
     let full = a;
     try {
-      const token = await getToken();
-      const res = await fetch(`${apiBase}/assistants/${a.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`${apiBase}/assistants/${a.id}`);
       if (res.ok) {
         const data = await res.json();
         if (data.assistant) full = data.assistant as VapiAssistant;

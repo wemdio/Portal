@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson } from '@/lib/authFetch';
 import type { SearchParserJob, SearchResult, SearchQueryStat } from '@/types/parsers';
 import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
@@ -370,32 +371,6 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
 
   const companyLeads = leads;
 
-  const getAccessToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? null;
-  }, []);
-
-  const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
-    const token = await getAccessToken();
-    if (!token) throw new Error('Not authenticated');
-
-    const res = await fetch(path, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || `Request failed: ${res.status}`);
-    }
-
-    return (await res.json()) as T;
-  }, [getAccessToken]);
-
   useEffect(() => {
     if (results.length === 0) {
       latestCreatedAtRef.current = null;
@@ -435,7 +410,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
           const after = latestCreatedAtRef.current;
           if (!after) return;
           const url = `/api/parsers/search/${jobId}/results?after=${encodeURIComponent(after)}&limit=${RESULTS_PAGE_SIZE}`;
-          const data = await apiFetch<{ results: SearchResult[] }>(url);
+          const data = await authFetchJson<{ results: SearchResult[] }>(url);
           if (activeJobIdRef.current !== jobId) return;
           const incoming = data.results ?? [];
           if (incoming.length === 0) return;
@@ -456,7 +431,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         while (true) {
           if (activeJobIdRef.current !== jobId) return;
           const url = `/api/parsers/search/${jobId}/results?limit=${RESULTS_PAGE_SIZE}&offset=${offset}`;
-          const data = await apiFetch<{ results: SearchResult[]; count: number }>(url);
+          const data = await authFetchJson<{ results: SearchResult[]; count: number }>(url);
           if (activeJobIdRef.current !== jobId) return;
           const page = data.results ?? [];
           all = all.concat(page);
@@ -469,13 +444,13 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         if (isInitial && activeJobIdRef.current === jobId) setLoadingResults(false);
       }
     },
-    [apiFetch],
+    [],
   );
 
   const loadQueryStats = useCallback(
     async (jobId: string) => {
       try {
-        const data = await apiFetch<{ stats: SearchQueryStat[] }>(`/api/parsers/search/${jobId}/query-stats`);
+        const data = await authFetchJson<{ stats: SearchQueryStat[] }>(`/api/parsers/search/${jobId}/query-stats`);
         if (activeJobIdRef.current !== jobId) return;
         setQueryStats(data.stats ?? []);
       } catch {
@@ -483,7 +458,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
         setQueryStats([]);
       }
     },
-    [apiFetch],
+    [],
   );
 
   useEffect(() => {
@@ -527,7 +502,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
       const normalized = { ...payload };
       if (typeof normalized.brief === 'string') normalized.brief = normalized.brief.trim();
       if (typeof normalized.user_query === 'string') normalized.user_query = normalized.user_query.trim();
-      const data = await apiFetch<{ job: SearchParserJob }>('/api/parsers/search', {
+      const data = await authFetchJson<{ job: SearchParserJob }>('/api/parsers/search', {
         method: 'POST',
         body: JSON.stringify(normalized),
       });
@@ -539,7 +514,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
     } finally {
       setBusy(false);
     }
-  }, [apiFetch, refreshJobs]);
+  }, [refreshJobs]);
 
   const stopJob = useCallback(async (jobId: string) => {
     setJobActionId(jobId);

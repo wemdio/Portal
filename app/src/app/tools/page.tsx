@@ -25,7 +25,7 @@ import {
   Blocks,
   type LucideIcon,
 } from 'lucide-react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
 import { RdpToolCard } from './RdpToolCard';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
@@ -139,15 +139,7 @@ export default function ToolsPage() {
     let cancelled = false;
     void (async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const token = session?.access_token ?? null;
-        if (!token) {
-          if (!cancelled) setToolIds([]);
-          return;
-        }
-        const res = await fetch('/api/user/tools', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await authFetch('/api/user/tools');
         if (!res.ok || cancelled) return;
         const data = (await res.json()) as { toolIds?: string[] };
         if (!cancelled) setToolIds(Array.isArray(data.toolIds) ? data.toolIds : [...ALL_TOOL_IDS]);

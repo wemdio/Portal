@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   Play,
   Loader2,
@@ -53,11 +54,6 @@ function cellValue(v: unknown): string {
 
 function jobAccountKey(accountId: string): string {
   return accountId.trim() || '__env__';
-}
-
-async function getAccessToken(): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
 }
 
 type TgAccount = {
@@ -129,15 +125,8 @@ export default function TgParserPage() {
 
   const loadAccounts = useCallback(async () => {
     setAccountsLoading(true);
-    const token = await getAccessToken();
-    if (!token) {
-      setAccountsLoading(false);
-      return;
-    }
     try {
-      const res = await fetch(API_ACCOUNTS, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(API_ACCOUNTS);
       if (res.ok) {
         const { items } = (await res.json()) as { items: TgAccount[] };
         setAccounts(items ?? []);
@@ -163,12 +152,8 @@ export default function TgParserPage() {
   }, []);
 
   const loadParseJobs = useCallback(async () => {
-    const token = await getAccessToken();
-    if (!token) return;
     try {
-      const res = await fetch('/api/tools/tg-parser/jobs?limit=50', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/tools/tg-parser/jobs?limit=50');
       if (!res.ok) return;
       const { items } = (await res.json()) as { items: TgParserJobApiRow[] };
       const rows = items ?? [];
@@ -189,14 +174,10 @@ export default function TgParserPage() {
   useEffect(() => { void loadParseJobs(); }, [loadParseJobs]);
 
   const loadParseLogs = useCallback(async () => {
-    const token = await getAccessToken();
-    if (!token) return;
     setLogsLoading(true);
     try {
       const isTarget = activeTab === 'target';
-      const res = await fetch(`/api/tools/tg-parser/logs?limit=200&is_target=${isTarget}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/tools/tg-parser/logs?limit=200&is_target=${isTarget}`);
       if (!res.ok) return;
       const { items } = (await res.json()) as { items: TgParserLog[] };
       setParseLogs((items ?? []).reverse());
@@ -237,11 +218,8 @@ export default function TgParserPage() {
     setAddBusy(true);
     setError(null);
     try {
-      const token = await getAccessToken();
-      if (!token) { setError('Необходима авторизация'); return; }
-      const res = await fetch(AUTH_API, {
+      const res = await authFetch(AUTH_API, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           step: 'send_code',
           api_id: apiId,
@@ -267,11 +245,8 @@ export default function TgParserPage() {
     setAddBusy(true);
     setError(null);
     try {
-      const token = await getAccessToken();
-      if (!token) { setError('Необходима авторизация'); return; }
-      const res = await fetch(AUTH_API, {
+      const res = await authFetch(AUTH_API, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ step: 'sign_in', auth_id: authId, code }),
       });
       const data = (await res.json()) as { step?: string; auth_id?: string; error?: string };
@@ -293,11 +268,8 @@ export default function TgParserPage() {
     setAddBusy(true);
     setError(null);
     try {
-      const token = await getAccessToken();
-      if (!token) { setError('Необходима авторизация'); return; }
-      const res = await fetch(AUTH_API, {
+      const res = await authFetch(AUTH_API, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ step: 'check_password', auth_id: authId, password }),
       });
       const data = (await res.json()) as { step?: string; error?: string };
@@ -313,11 +285,8 @@ export default function TgParserPage() {
 
   const deleteAccount = useCallback(async (id: string) => {
     if (!confirm('Удалить аккаунт?')) return;
-    const token = await getAccessToken();
-    if (!token) return;
-    const res = await fetch(`${API_ACCOUNTS}/${id}`, {
+    const res = await authFetch(`${API_ACCOUNTS}/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) {
       if (accountId === id) setAccountId('');
@@ -329,12 +298,9 @@ export default function TgParserPage() {
   }, [accountId, loadAccounts]);
 
   const updateMaxContactsPerRun = useCallback(async (id: string, newLimit: number) => {
-    const token = await getAccessToken();
-    if (!token) return;
     const clamped = clampTgParserMaxContactsPerRun(newLimit);
-    const res = await fetch(`${API_ACCOUNTS}/${id}`, {
+    const res = await authFetch(`${API_ACCOUNTS}/${id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ max_contacts_per_run: clamped }),
     });
     if (res.ok) {
@@ -400,13 +366,6 @@ export default function TgParserPage() {
     runningAccountKeysRef.current.add(key);
 
     try {
-      const token = await getAccessToken();
-      if (!token) {
-        runningAccountKeysRef.current.delete(key);
-        setError('Необходима авторизация');
-        return;
-      }
-
       const body: Record<string, unknown> = {
         links: linkList,
         parse_chat_messages: parseMessages,
@@ -421,9 +380,8 @@ export default function TgParserPage() {
       };
       if (!isTarget && accountId.trim()) body.account_id = accountId.trim();
 
-      const res = await fetch('/api/tools/tg-parser/parse', {
+      const res = await authFetch('/api/tools/tg-parser/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       });
 
@@ -461,11 +419,8 @@ export default function TgParserPage() {
 
   const removeParseJob = useCallback(
     async (id: string) => {
-      const token = await getAccessToken();
-      if (!token) return;
-      const res = await fetch(`/api/tools/tg-parser/jobs/${id}`, {
+      const res = await authFetch(`/api/tools/tg-parser/jobs/${id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
       });
       const data = (await res.json()) as { error?: string };
       if (res.status === 409) {
@@ -487,17 +442,11 @@ export default function TgParserPage() {
 
   const stopParseJob = useCallback(
     async (id: string) => {
-      const token = await getAccessToken();
-      if (!token) return;
       setStoppingJobId(id);
       setError(null);
       try {
-        const res = await fetch(`/api/tools/tg-parser/jobs/${id}`, {
+        const res = await authFetch(`/api/tools/tg-parser/jobs/${id}`, {
           method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
           body: JSON.stringify({ action: 'stop' }),
         });
         const data = (await res.json()) as { error?: string };

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
 /* ═══════════════════════════════════════════
@@ -50,11 +50,6 @@ const STEP_LABELS = [
    HELPERS
    ═══════════════════════════════════════════ */
 
-async function getToken(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token || '';
-}
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
@@ -84,9 +79,7 @@ export default function DoneForYouPage() {
   /* ─── Load history ─── */
 
   const loadHistory = useCallback(async () => {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch('/api/tools/dfyb', { headers: { Authorization: `Bearer ${token}` } });
+    const res = await authFetch('/api/tools/dfyb');
     if (!res.ok) return;
     const { jobs } = await res.json();
     setHistory(jobs || []);
@@ -107,11 +100,8 @@ export default function DoneForYouPage() {
     }
 
     async function poll() {
-      const token = await getToken();
-      if (!token || !activeJob) return;
-      const res = await fetch(`/api/tools/dfyb/${activeJob.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      if (!activeJob) return;
+      const res = await authFetch(`/api/tools/dfyb/${activeJob.id}`);
       if (!res.ok) return;
       const { job } = await res.json();
       setActiveJob(job);
@@ -130,10 +120,7 @@ export default function DoneForYouPage() {
   /* ─── Load data ─── */
 
   async function loadJobData(jobId: string) {
-    const token = await getToken();
-    const res = await fetch(`/api/tools/dfyb/${jobId}/data`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await authFetch(`/api/tools/dfyb/${jobId}/data`);
     if (!res.ok) return;
     const { data } = await res.json();
     setJobData(data || null);
@@ -147,7 +134,7 @@ export default function DoneForYouPage() {
     setPdfParsing(true);
     setError('');
     try {
-      const token = await getToken();
+      const token = await getAccessToken();
       const formData = new FormData();
       formData.append('file', file);
       const res = await fetch('/api/brief-scoring/parse-pdf', {
@@ -179,10 +166,8 @@ export default function DoneForYouPage() {
     setSubmitting(true);
     setError('');
     try {
-      const token = await getToken();
-      const res = await fetch('/api/tools/dfyb', {
+      const res = await authFetch('/api/tools/dfyb', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           brief: brief.trim(),
           company_url: companyUrl.trim() || null,
@@ -210,10 +195,8 @@ export default function DoneForYouPage() {
 
   async function handleCancel() {
     if (!activeJob) return;
-    const token = await getToken();
-    await fetch(`/api/tools/dfyb/${activeJob.id}`, {
+    await authFetch(`/api/tools/dfyb/${activeJob.id}`, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'cancel' }),
     });
     setActiveJob((j) => j ? { ...j, status: 'cancelled' } : null);

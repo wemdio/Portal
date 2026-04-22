@@ -4,7 +4,7 @@ import React, { useState, useCallback, useMemo, useRef, memo, useEffect } from '
 import { FileText, ExternalLink, Loader2, Download, Search, FileSpreadsheet, Check, History, RefreshCw } from 'lucide-react';
 import type * as XLSXTypes from 'xlsx';
 import type ExcelJSTypes from 'exceljs';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 
 const ROW_HEIGHT = 44;
 const OVERSCAN = 8;
@@ -581,11 +581,6 @@ function StyledReportView({
   );
 }
 
-async function getToken(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? '';
-}
-
 function downloadCsv(csvText: string, filename: string) {
   const blob = new Blob(['\uFEFF' + csvText], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -1141,16 +1136,8 @@ export default function AutoReportPage() {
     }
     setError('');
     try {
-      const token = await getToken();
-      if (!token) {
-        setError('Нужна авторизация. Войдите в аккаунт.');
-        if (!silent) setCampaignsLoading(false);
-        return;
-      }
       const sourceSuffix = direct ? '?source=instantly' : '';
-      const res = await fetch(`/api/tools/auto-report/campaigns${sourceSuffix}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/tools/auto-report/campaigns${sourceSuffix}`);
       const data = (await res.json().catch(() => ({}))) as {
         campaigns?: InstantlyCampaignItem[];
         meta?: CampaignsListMeta;
@@ -1259,11 +1246,6 @@ export default function AutoReportPage() {
     setReport(null);
     setProgress(null);
     setProgressTotal(0);
-    const token = await getToken();
-    if (!token) {
-      setError('Нужна авторизация. Войдите в аккаунт.');
-      return;
-    }
 
     const ids = Array.from(selectedIds);
     if (ids.length === 0) {
@@ -1273,12 +1255,8 @@ export default function AutoReportPage() {
 
     setLoading(true);
     try {
-      const res = await fetch('/api/tools/auto-report/stream', {
+      const res = await authFetch('/api/tools/auto-report/stream', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ campaignIds: ids }),
       });
 

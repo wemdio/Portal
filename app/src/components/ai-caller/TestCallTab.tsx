@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   Phone,
   Loader2,
@@ -85,24 +85,15 @@ export function TestCallTab({
   const effectiveAssistant = selectedAssistant || (assistants.length ? assistants[0].id : '');
   const effectivePhone = selectedPhone || (phoneNumbers.length ? phoneNumbers[0].id : '');
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
-
   // Load TG chats once
   useEffect(() => {
     if (tgLoadedRef.current) return;
     tgLoadedRef.current = true;
-    getToken().then((token) =>
-      fetch('/api/ai-caller/telegram/chats', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((r) => r.json())
-        .then((data) => setTgChats(data.chats ?? []))
-        .catch(() => {}),
-    );
-  }, [getToken]);
+    authFetch('/api/ai-caller/telegram/chats')
+      .then((r) => r.json())
+      .then((data) => setTgChats(data.chats ?? []))
+      .catch(() => {});
+  }, []);
 
   const addToHistory = useCallback(
     (call: VapiCall) => {
@@ -129,10 +120,7 @@ export function TestCallTab({
 
       pollRef.current = setInterval(async () => {
         try {
-          const token = await getToken();
-          const res = await fetch(`${apiBase}/calls/${callId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
+          const res = await authFetch(`${apiBase}/calls/${callId}`);
           const data = await res.json();
           if (data.call) {
             const call = data.call as VapiCall;
@@ -148,7 +136,7 @@ export function TestCallTab({
         }
       }, 5000);
     },
-    [getToken, apiBase, addToHistory],
+    [apiBase, addToHistory],
   );
 
   async function makeCall() {
@@ -159,13 +147,8 @@ export function TestCallTab({
     setActiveCall(null);
 
     try {
-      const token = await getToken();
-      const res = await fetch(`${apiBase}/calls`, {
+      const res = await authFetch(`${apiBase}/calls`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({
           assistantId: effectiveAssistant,
           phoneNumberId: effectivePhone,
@@ -207,10 +190,7 @@ export function TestCallTab({
     setLoadingAudio(callId);
 
     try {
-      const token = await getToken();
-      const res = await fetch(`${apiBase}/calls/${callId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`${apiBase}/calls/${callId}`);
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
       let url =
@@ -221,6 +201,7 @@ export function TestCallTab({
       if (!url) { setLoadingAudio(null); return; }
 
       if (url.startsWith('/api/')) {
+        const token = await getAccessToken();
         const sep = url.includes('?') ? '&' : '?';
         url = `${url}${sep}token=${encodeURIComponent(token)}`;
       }
@@ -250,11 +231,7 @@ export function TestCallTab({
     setSendingTg(callId);
     setTgSuccess(null);
     try {
-      const token = await getToken();
-
-      const res = await fetch(`${apiBase}/calls/${callId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`${apiBase}/calls/${callId}`);
       const data = await res.json();
       const fullCall = data.call as Record<string, unknown> | undefined;
       let recordingUrl =
@@ -271,12 +248,8 @@ export function TestCallTab({
         .map((m) => `${m.role === 'user' ? 'Клиент' : 'AI'}: ${m.message || m.content || ''}`)
         .join('\n') || call.transcript || '';
 
-      const tgRes = await fetch('/api/ai-caller/telegram/send', {
+      const tgRes = await authFetch('/api/ai-caller/telegram/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({
           chatId,
           vapiCallId: callId,
@@ -300,11 +273,7 @@ export function TestCallTab({
     setSendingTgRec(callId);
     setTgRecSuccess(null);
     try {
-      const token = await getToken();
-
-      const res = await fetch(`${apiBase}/calls/${callId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`${apiBase}/calls/${callId}`);
       const data = await res.json();
       const fullCall = data.call as Record<string, unknown> | undefined;
       let recordingUrl =
@@ -316,9 +285,8 @@ export function TestCallTab({
         recordingUrl = `${window.location.origin}${recordingUrl}`;
       }
 
-      const tgRes = await fetch('/api/ai-caller/telegram/send-recording', {
+      const tgRes = await authFetch('/api/ai-caller/telegram/send-recording', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           chatId,
           vapiCallId: callId,

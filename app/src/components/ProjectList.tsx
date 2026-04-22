@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Project, ProjectNote, ProjectStatus, Task, TaskStatus, UserProfile } from '@/types';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import Link from 'next/link';
 import { canCreateProjects, canEditProjects, canDeleteProjects } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
@@ -546,13 +547,7 @@ export function ProjectList() {
 
   async function fetchSignedAvatars() {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) return;
-
-      const res = await fetch('/api/avatars/batch-signed', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/avatars/batch-signed');
       if (!res.ok) return;
 
       const map = (await res.json()) as Record<string, string>;
@@ -596,15 +591,9 @@ export function ProjectList() {
     });
   }
 
-  async function getAuthHeaders(): Promise<Record<string, string>> {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
-  }
-
   async function fetchPanelCampaigns(projectId: string) {
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch(`/api/projects/${projectId}/campaigns`, { headers });
+      const res = await authFetch(`/api/projects/${projectId}/campaigns`);
       if (!res.ok) return;
       const json = await res.json() as { items: { campaign_id: string; campaign_name: string; match_source: string }[] };
       setPanelLinkedCampaigns(json.items ?? []);
@@ -614,8 +603,7 @@ export function ProjectList() {
   async function fetchPanelAllCampaigns() {
     if (panelAllCampaigns.length > 0) return;
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetch('/api/instantly/campaigns?limit=all', { headers });
+      const res = await authFetch('/api/instantly/campaigns?limit=all');
       if (!res.ok) return;
       const json = await res.json() as { items?: { id: string; name: string }[] };
       setPanelAllCampaigns((json.items ?? []).map((c) => ({ id: c.id, name: c.name })));
@@ -624,10 +612,8 @@ export function ProjectList() {
 
   async function addPanelCampaign(projectId: string, campaignId: string) {
     try {
-      const headers = await getAuthHeaders();
-      await fetch(`/api/projects/${projectId}/campaigns`, {
+      await authFetch(`/api/projects/${projectId}/campaigns`, {
         method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ campaign_id: campaignId }),
       });
       void fetchPanelCampaigns(projectId);
@@ -638,10 +624,8 @@ export function ProjectList() {
 
   async function removePanelCampaign(projectId: string, campaignId: string) {
     try {
-      const headers = await getAuthHeaders();
-      await fetch(`/api/projects/${projectId}/campaigns?campaign_id=${campaignId}`, {
+      await authFetch(`/api/projects/${projectId}/campaigns?campaign_id=${campaignId}`, {
         method: 'DELETE',
-        headers,
       });
       setPanelLinkedCampaigns((prev) => prev.filter((c) => c.campaign_id !== campaignId));
     } catch { /* non-critical */ }
@@ -669,12 +653,7 @@ export function ProjectList() {
 
   async function fetchTaskDeadlineDefault() {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) return;
-      const res = await fetch('/api/user/task-deadline-preference', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/user/task-deadline-preference');
       if (!res.ok) return;
       const data = (await res.json()) as { enabled?: boolean; mode?: string; at?: string | null; time?: string | null };
       setTaskDeadlineDefaultEnabled(Boolean(data.enabled));
@@ -853,16 +832,8 @@ export function ProjectList() {
     setDeleting(true);
     setDeleteError(null);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) {
-        setDeleteError('Необходима авторизация');
-        return;
-      }
-
-      const res = await fetch(`/api/projects/${id}`, {
+      const res = await authFetch(`/api/projects/${id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
       });
 
       if (!res.ok) {
