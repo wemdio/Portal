@@ -92,9 +92,8 @@ export function ProjectBriefSection({
   async function generateHypotheses(opts: { regenerate?: boolean } = {}): Promise<void> {
     setBusy('generating');
     try {
-      const headers = await authHeaders();
       const url = `/api/projects/${projectId}/brief/hypotheses${opts.regenerate ? '?regenerate=1' : ''}`;
-      const res = await fetch(url, { method: 'POST', headers });
+      const res = await authFetch(url, { method: 'POST' });
       const payload = (await res.json().catch(() => ({}))) as BriefApiResponse & { error?: string };
       onChange({
         lead_source_hypotheses: payload.lead_source_hypotheses ?? null,
