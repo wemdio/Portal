@@ -293,13 +293,12 @@ export default function CampaignDetailPage() {
           } else if (event.type === 'file_end') {
             setEmailsExportProgress({ fetched: event.totalEmails as number, status: 'Готово' });
             const b64 = fileChunks.join('');
-            const raw = atob(b64);
-            const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
             const mime = format === 'csv'
               ? 'text/csv;charset=utf-8'
               : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-            const blob = new Blob([bytes], { type: mime });
+            const dataUrl = `data:${mime};base64,${b64}`;
+            const blobRes = await fetch(dataUrl);
+            const blob = await blobRes.blob();
             const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
             const objUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
