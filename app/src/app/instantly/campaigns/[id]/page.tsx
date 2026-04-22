@@ -208,7 +208,7 @@ export default function CampaignDetailPage() {
   const [exporting, setExporting] = useState<string | false>(false);
   const [exportSeconds, setExportSeconds] = useState(0);
   const [exportingEmails, setExportingEmails] = useState<string | false>(false);
-  const [emailsExportProgress, setEmailsExportProgress] = useState<{ fetched: number; status?: string } | null>(null);
+  const [emailsExportSeconds, setEmailsExportSeconds] = useState(0);
   const [clearing, setClearing] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
@@ -217,6 +217,12 @@ export default function CampaignDetailPage() {
     const interval = setInterval(() => setExportSeconds((s) => s + 1), 1000);
     return () => clearInterval(interval);
   }, [exporting]);
+
+  useEffect(() => {
+    if (!exportingEmails) { setEmailsExportSeconds(0); return; }
+    const interval = setInterval(() => setEmailsExportSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [exportingEmails]);
 
   const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExporting(format);
@@ -248,7 +254,6 @@ export default function CampaignDetailPage() {
 
   const handleEmailsExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExportingEmails(format);
-    setEmailsExportProgress({ fetched: 0 });
     try {
       const token = await getAccessToken();
       if (!token) throw new Error('Нет авторизации');
@@ -256,66 +261,22 @@ export default function CampaignDetailPage() {
       const res = await fetch(`/api/instantly/emails/export?campaign_id=${campaignId}&format=${format}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         const text = await res.text().catch(() => `Ошибка ${res.status}`);
         throw new Error(text);
       }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let downloaded = false;
-      const fileChunks: string[] = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let event: Record<string, unknown>;
-          try { event = JSON.parse(trimmed); } catch { continue; }
-
-          if (event.type === 'emails_progress') {
-            setEmailsExportProgress({ fetched: event.fetched as number });
-          } else if (event.type === 'status') {
-            setEmailsExportProgress((p) => ({ fetched: p?.fetched ?? 0, status: event.message as string }));
-          } else if (event.type === 'file_chunk') {
-            fileChunks[event.index as number] = event.data as string;
-          } else if (event.type === 'file_end') {
-            setEmailsExportProgress({ fetched: event.totalEmails as number, status: 'Готово' });
-            const b64 = fileChunks.join('');
-            const mime = format === 'csv'
-              ? 'text/csv;charset=utf-8'
-              : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-            const dataUrl = `data:${mime};base64,${b64}`;
-            const blobRes = await fetch(dataUrl);
-            const blob = await blobRes.blob();
-            const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
-            const objUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = objUrl;
-            a.download = `${safeName}-письма.${format}`;
-            a.click();
-            URL.revokeObjectURL(objUrl);
-            downloaded = true;
-          } else if (event.type === 'error') {
-            throw new Error(event.message as string);
-          }
-        }
-      }
-
-      if (!downloaded) throw new Error('Экспорт не завершился корректно');
+      const blob = await res.blob();
+      const safeName = (campaign?.name ?? 'emails').replace(/[^\w\sа-яёА-ЯЁ-]/gi, '').slice(0, 50);
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = `${safeName}-письма.${format}`;
+      a.click();
+      URL.revokeObjectURL(objUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка экспорта писем');
     } finally {
       setExportingEmails(false);
-      setEmailsExportProgress(null);
     }
   }, [campaignId, campaign?.name]);
 
@@ -656,13 +617,9 @@ export default function CampaignDetailPage() {
                   Выгружаем лиды… {exportSeconds}с <span className="text-zinc-300"></span>
                 </span>
               )}
-              {exportingEmails && emailsExportProgress && (
+              {exportingEmails && (
                 <span className="text-xs text-zinc-400 mr-1">
-                  {emailsExportProgress.status
-                    ? `${emailsExportProgress.fetched} писем · ${emailsExportProgress.status}`
-                    : emailsExportProgress.fetched > 0
-                      ? `${emailsExportProgress.fetched} писем загружено…`
-                      : 'Начинаем выгрузку…'}
+                  Выгружаем письма… {emailsExportSeconds}с
                 </span>
               )}
               <button
