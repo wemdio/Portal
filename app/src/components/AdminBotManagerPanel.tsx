@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { Bot, Play, Square, FileText, RefreshCw, X } from 'lucide-react';
 import type { BotListItem } from '@/app/api/admin/bots/route';
 
@@ -32,14 +32,9 @@ export function AdminBotManagerPanel() {
   const [logsLoading, setLogsLoading] = useState(false);
 
   const fetchBots = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
-    if (!token) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/bots', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/admin/bots');
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j?.error ?? res.statusText);
@@ -62,14 +57,10 @@ export function AdminBotManagerPanel() {
 
   const runAction = useCallback(
     async (botId: string, action: 'stop' | 'start') => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) return;
       setActionLoading(botId);
       try {
-        const res = await fetch(`/api/admin/bots/${botId}/${action}`, {
+        const res = await authFetch(`/api/admin/bots/${botId}/${action}`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j?.error ?? res.statusText);
@@ -80,38 +71,27 @@ export function AdminBotManagerPanel() {
         setActionLoading(null);
       }
     },
-    [fetchBots]
+    [fetchBots],
   );
 
-  const openLogs = useCallback(
-    async (botId: string) => {
-      setLogsBotId(botId);
-      setLogsContent('');
-      setLogsLoading(true);
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) {
-        setLogsLoading(false);
+  const openLogs = useCallback(async (botId: string) => {
+    setLogsBotId(botId);
+    setLogsContent('');
+    setLogsLoading(true);
+    try {
+      const res = await authFetch(`/api/admin/bots/${botId}/logs?tail=2000`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLogsContent(`Ошибка: ${j?.error ?? res.statusText}`);
         return;
       }
-      try {
-        const res = await fetch(`/api/admin/bots/${botId}/logs?tail=2000`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setLogsContent(`Ошибка: ${j?.error ?? res.statusText}`);
-          return;
-        }
-        setLogsContent(j.logs ?? '');
-      } catch (e) {
-        setLogsContent(e instanceof Error ? e.message : 'Ошибка загрузки логов');
-      } finally {
-        setLogsLoading(false);
-      }
-    },
-    []
-  );
+      setLogsContent(j.logs ?? '');
+    } catch (e) {
+      setLogsContent(e instanceof Error ? e.message : 'Ошибка загрузки логов');
+    } finally {
+      setLogsLoading(false);
+    }
+  }, []);
 
   const botName = (id: string) => bots.find((b) => b.id === id)?.name ?? id;
   const actionHint = (bot: BotListItem, action: 'stop' | 'start') => {

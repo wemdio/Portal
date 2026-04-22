@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { saveAs } from 'file-saver';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson } from '@/lib/authFetch';
 import type {
   EmailSequenceBrief,
   EmailSequenceLetterRow,
@@ -38,41 +38,11 @@ const WRITER_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'gpt-5.2', label: 'gpt-5.2 (качество)' },
 ];
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
-async function authedFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const token = await getToken();
-  const headers = new Headers(init?.headers);
-  headers.set('Authorization', `Bearer ${token}`);
-  headers.set('Content-Type', 'application/json');
-  const res = await fetch(path, { ...init, headers });
-  const raw = await res.text().catch(() => '');
-  let parsed: unknown = {};
-  try {
-    parsed = raw ? (JSON.parse(raw) as unknown) : {};
-  } catch {
-    parsed = {};
-  }
-
-  if (!res.ok) {
-    const maybe = parsed as { error?: unknown } | null;
-    const fromJson = maybe?.error != null ? String(maybe.error) : '';
-    const fromText = raw && !fromJson ? raw.slice(0, 300) : '';
-    const msg = fromJson || fromText || `Request failed: ${res.status}`;
-    throw new Error(`${msg} (${res.status} ${res.statusText || 'HTTP'} · ${path})`);
-  }
-
-  return parsed as T;
-}
-
-async function authedFetchWithTimeout(path: string, init?: RequestInit, timeoutMs = 180_000) {
+async function authedFetchWithTimeout<T = unknown>(path: string, init?: RequestInit, timeoutMs = 180_000) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await authedFetch(path, { ...init, signal: controller.signal });
+    return await authFetchJson<T>(path, { ...init, signal: controller.signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
       throw new Error('Операция заняла слишком много времени. Попробуйте ещё раз.');
@@ -381,10 +351,10 @@ export function EmailSequenceView({ clientMode }: EmailSequenceViewProps = {}) {
   const [brief, setBrief] = useState<EmailSequenceBrief>({ ...EMPTY_BRIEF });
 
   const refresh = useCallback(async (runId?: string) => {
-    const data = await authedFetch<{ runs: EmailSequenceRunRow[] }>('/api/tools/email-sequence/runs', { method: 'GET' });
+    const data = await authFetchJson<{ runs: EmailSequenceRunRow[] }>('/api/tools/email-sequence/runs', { method: 'GET' });
     setRuns(data.runs ?? []);
     if (runId) {
-      const runData = await authedFetch<{
+      const runData = await authFetchJson<{
         run: EmailSequenceRunRow;
         segments: EmailSequenceSegmentRow[];
         letters: EmailSequenceLetterRow[];
@@ -533,7 +503,7 @@ export function EmailSequenceView({ clientMode }: EmailSequenceViewProps = {}) {
     setError(null);
     setBusy('create');
     try {
-      const data = await authedFetch<{ run: EmailSequenceRunRow }>('/api/tools/email-sequence/runs', {
+      const data = await authFetchJson<{ run: EmailSequenceRunRow }>('/api/tools/email-sequence/runs', {
         method: 'POST',
         body: JSON.stringify({ brief }),
       });

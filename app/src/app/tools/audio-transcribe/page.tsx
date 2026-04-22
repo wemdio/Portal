@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { getAccessToken, authFetch } from '@/lib/authFetch';
 import {
   AudioLines,
   Loader2,
@@ -39,19 +39,12 @@ interface HistoryItem {
   text: string;
 }
 
-async function getToken() {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
 async function uploadForTranscription(
   file: File,
   jobId: string,
   signal?: AbortSignal
 ): Promise<TranscribeResponse> {
-  const token = await getToken();
+  const token = await getAccessToken();
   const formData = new FormData();
   formData.append('file', file);
 
@@ -89,12 +82,8 @@ async function uploadForTranscription(
 }
 
 async function fetchTranscriptionProgress(jobId: string): Promise<TranscribeProgressResponse> {
-  const token = await getToken();
-  const res = await fetch(`/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(jobId)}`, {
+  const res = await authFetch(`/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(jobId)}`, {
     method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
     cache: 'no-store',
   });
   if (!res.ok) {
@@ -104,13 +93,8 @@ async function fetchTranscriptionProgress(jobId: string): Promise<TranscribeProg
 }
 
 async function cancelTranscription(jobId: string): Promise<void> {
-  const token = await getToken();
-  const res = await fetch('/api/tools/audio-transcribe/cancel', {
+  const res = await authFetch('/api/tools/audio-transcribe/cancel', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
     body: JSON.stringify({ jobId }),
   });
   if (!res.ok) {
@@ -150,17 +134,7 @@ export default function AudioTranscribeToolPage() {
   const fetchHistory = useCallback(async (): Promise<HistoryItem[]> => {
     setHistoryLoading(true);
     try {
-      const token = await getToken();
-      if (!token) {
-        setHistory([]);
-        return [];
-      }
-      const res = await fetch('/api/tools/audio-transcribe', {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const res = await authFetch('/api/tools/audio-transcribe', { method: 'GET' });
       if (!res.ok) {
         setHistory([]);
         return [];

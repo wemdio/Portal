@@ -9,6 +9,7 @@ import {
   Mail, Clock, Settings, Search, Users, Download, Trash2,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
+import { getAccessToken } from '@/lib/authFetch';
 import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, CustomTag, SequenceStep, Lead, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
 
@@ -220,9 +221,7 @@ export default function CampaignDetailPage() {
   const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
     setExporting(format);
     try {
-      const { supabase } = await import('@/lib/supabaseClient');
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData?.session?.access_token;
+      const token = await getAccessToken();
       if (!token) throw new Error('Нет авторизации');
 
       const res = await fetch(`/api/instantly/leads/export?campaign_id=${campaignId}&format=${format}`, {
@@ -251,9 +250,7 @@ export default function CampaignDetailPage() {
     setExportingEmails(format);
     setEmailsExportProgress({ fetched: 0 });
     try {
-      const { supabase } = await import('@/lib/supabaseClient');
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData?.session?.access_token;
+      const token = await getAccessToken();
       if (!token) throw new Error('Нет авторизации');
 
       const res = await fetch(`/api/instantly/emails/export?campaign_id=${campaignId}&format=${format}`, {

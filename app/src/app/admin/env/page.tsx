@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { useIsTma } from '@/lib/useIsTma';
 import {
   Save,
@@ -129,20 +129,11 @@ export default function AdminEnvPage() {
     }
   });
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? null;
-  }, []);
-
   const loadEnv = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/admin/env', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/admin/env');
       if (!res.ok) {
         const j = await res.json().catch(() => ({})) as { error?: string };
         throw new Error(j?.error ?? res.statusText);
@@ -157,7 +148,7 @@ export default function AdminEnvPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken]);
+  }, []);
 
   useEffect(() => { void loadEnv(); }, [loadEnv]);
 
@@ -166,15 +157,9 @@ export default function AdminEnvPage() {
     setError('');
     setSuccess('');
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Not authenticated');
       const content = rawMode ? rawContent : serializeEnv(entries);
-      const res = await fetch('/api/admin/env', {
+      const res = await authFetch('/api/admin/env', {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ content }),
       });
       if (!res.ok) {
@@ -195,19 +180,14 @@ export default function AdminEnvPage() {
     } finally {
       setSaving(false);
     }
-  }, [getToken, rawMode, rawContent, entries]);
+  }, [rawMode, rawContent, entries]);
 
   const reloadEnv = useCallback(async () => {
     setReloading(true);
     setError('');
     setSuccess('');
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/admin/env/reload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/admin/env/reload', { method: 'POST' });
       if (!res.ok) {
         const j = await res.json().catch(() => ({})) as { error?: string };
         throw new Error(j?.error ?? 'Ошибка применения');
@@ -224,7 +204,7 @@ export default function AdminEnvPage() {
     } finally {
       setReloading(false);
     }
-  }, [getToken]);
+  }, []);
 
   const updateEntry = useCallback((id: string, field: 'key' | 'value', val: string) => {
     setEntries((prev) => prev.map((e) => e.id === id ? { ...e, [field]: val } : e));

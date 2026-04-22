@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   Loader2,
   BarChart3,
@@ -162,36 +162,25 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   const [tgRecSending, setTgRecSending] = useState<string | null>(null);
   const [tgRecSent, setTgRecSent] = useState<Set<string>>(new Set());
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
-
   const fetchCampaigns = useCallback(async () => {
     try {
-      const token = await getToken();
-      const res = await fetch('/api/ai-caller/campaigns', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/ai-caller/campaigns');
       const data = await res.json();
       setCampaigns((data.campaigns ?? []) as Campaign[]);
     } catch { /* ignore */ }
-  }, [getToken]);
+  }, []);
 
   const fetchAnalyses = useCallback(async (campaignId?: string) => {
     setLoadingAnalyses(true);
     try {
-      const token = await getToken();
       const params = new URLSearchParams();
       if (campaignId && campaignId !== 'all') params.set('campaignId', campaignId);
-      const res = await fetch(`/api/ai-caller/analytics?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/ai-caller/analytics?${params.toString()}`);
       const data = await res.json();
       setAnalyses(data.analyses ?? []);
     } catch { /* ignore */ }
     setLoadingAnalyses(false);
-  }, [getToken]);
+  }, []);
 
   if (analysesLoaded.current == null) {
     analysesLoaded.current = true;
@@ -211,7 +200,6 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     setAnalyzing(true);
     setAnalyzeStatus('Подготовка...');
     try {
-      const token = await getToken();
       const payload: { callIds?: string[]; campaignId?: string } = {};
 
       if (selectedCampaign !== 'all') {
@@ -225,9 +213,8 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
       }
 
       setAnalyzeStatus('Анализирую звонки...');
-      const res = await fetch('/api/ai-caller/analytics', {
+      const res = await authFetch('/api/ai-caller/analytics', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -250,10 +237,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     if (transcriptCache[vapiCallId] !== undefined) return;
     setLoadingTranscript(vapiCallId);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/ai-caller/calls/${vapiCallId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/ai-caller/calls/${vapiCallId}`);
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
       const messages = call?.messages as Array<{ role: string; message: string }> | undefined;
@@ -301,10 +285,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
 
     setLoadingAudio(vapiCallId);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/ai-caller/calls/${vapiCallId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/ai-caller/calls/${vapiCallId}`);
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
       let url = (call?.recordingUrl as string)
@@ -313,6 +294,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
 
       if (!url) { setLoadingAudio(null); return; }
       if (url.startsWith('/api/')) {
+        const token = await getAccessToken();
         const sep = url.includes('?') ? '&' : '?';
         url = `${url}${sep}token=${encodeURIComponent(token)}`;
       }
@@ -358,10 +340,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     let url = recordingUrls[callId];
     if (!url) {
       try {
-        const token = await getToken();
-        const res = await fetch(`/api/ai-caller/calls/${callId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await authFetch(`/api/ai-caller/calls/${callId}`);
         const data = await res.json();
         const call = data.call as Record<string, unknown> | undefined;
         url = (call?.recordingUrl as string)
@@ -369,6 +348,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
           || '';
         if (url) {
           if (url.startsWith('/api/')) {
+            const token = await getAccessToken();
             const sep = url.includes('?') ? '&' : '?';
             url = `${url}${sep}token=${encodeURIComponent(token)}`;
           }
@@ -393,10 +373,7 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
   async function loadTgChats(force = false) {
     if (tgChatsLoaded && !force) return;
     try {
-      const token = await getToken();
-      const res = await fetch('/api/ai-caller/telegram/chats', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/ai-caller/telegram/chats');
       const data = await res.json();
       const chats = data.chats ?? [];
       setTgChats(chats);
@@ -420,8 +397,6 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     const key = `${analysis.id}-${chatId}`;
     setTgSending(key);
     try {
-      const token = await getToken();
-
       // Format date dd/mm/yy
       const d = new Date(analysis.analyzed_at);
       const dd = String(d.getDate()).padStart(2, '0');
@@ -446,12 +421,8 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
         recordingUrl: recordingUrls[analysis.vapi_call_id] || undefined,
       };
 
-      const res = await fetch('/api/ai-caller/telegram/send', {
+      const res = await authFetch('/api/ai-caller/telegram/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify(body),
       });
 
@@ -470,12 +441,9 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
     const key = `rec-${analysis.id}-${chatId}`;
     setTgRecSending(key);
     try {
-      const token = await getToken();
       let url = recordingUrls[analysis.vapi_call_id] || '';
       if (!url) {
-        const res = await fetch(`/api/ai-caller/calls/${analysis.vapi_call_id}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await authFetch(`/api/ai-caller/calls/${analysis.vapi_call_id}`);
         const data = await res.json();
         const call = data.call as Record<string, unknown> | undefined;
         url = (call?.recordingUrl as string)
@@ -486,9 +454,8 @@ export function AnalyticsTab({ calls, loading, onRefreshCalls }: Props) {
         }
       }
 
-      const res = await fetch('/api/ai-caller/telegram/send-recording', {
+      const res = await authFetch('/api/ai-caller/telegram/send-recording', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           chatId,
           vapiCallId: analysis.vapi_call_id,

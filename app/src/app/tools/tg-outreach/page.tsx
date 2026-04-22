@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   MessageSquareMore,
   Plus,
@@ -44,15 +44,6 @@ import {
 
 const API_BASE = '/api/tools/tg-outreach';
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
-function authHeaders(token: string) {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit', year: 'numeric',
@@ -86,8 +77,7 @@ function GlobalBlocklistSection() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/blocked-users`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/blocked-users`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachBlockedUser[] };
       setItems(d.items);
@@ -105,10 +95,8 @@ function GlobalBlocklistSection() {
     }
     setAdding(true);
     setError(null);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/blocked-users`, {
+    const res = await authFetch(`${API_BASE}/blocked-users`, {
       method: 'POST',
-      headers: authHeaders(token),
       body: JSON.stringify({
         tg_user_id: idNum,
         tg_username: addUsername.trim() ? addUsername.trim().replace(/^@/, '') : null,
@@ -125,11 +113,7 @@ function GlobalBlocklistSection() {
   };
 
   const remove = async (tgUserId: number) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/blocked-users/${tgUserId}`, {
-      method: 'DELETE',
-      headers: authHeaders(token),
-    });
+    await authFetch(`${API_BASE}/blocked-users/${tgUserId}`, { method: 'DELETE' });
     void load();
   };
 
@@ -366,8 +350,7 @@ function LogsTab({ campaignId }: { campaignId: string }) {
   const isAutoScroll = useRef(true);
 
   const fetchLogs = useCallback(async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/logs?limit=200`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/logs?limit=200`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachLog[] };
       setLogs(d.items.reverse());
@@ -441,8 +424,7 @@ function DialogsTab({ campaignId }: {
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/accounts?campaign_id=${campaignId}`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachAccount[] };
       setAccounts(d.items);
@@ -457,14 +439,13 @@ function DialogsTab({ campaignId }: {
 
   const fetchDialogs = useCallback(async () => {
     setLoading(true);
-    const token = await getToken();
     const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
     if (filterStatus) params.set('status', filterStatus);
     if (filterCanSend === 'enabled') params.set('can_send', 'true');
     if (filterCanSend === 'disabled') params.set('can_send', 'false');
     if (filterAudience === 'bots') params.set('tg_is_bot', 'true');
     if (filterAudience === 'users') params.set('tg_is_bot', 'false');
-    const res = await fetch(`${API_BASE}/dialogs?${params}`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
@@ -475,29 +456,25 @@ function DialogsTab({ campaignId }: {
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
 
   const updateDialog = async (id: string, patch: { status?: string; can_send?: boolean }) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/dialogs/${id}`, {
-      method: 'PUT', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/dialogs/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(patch),
     });
     void fetchDialogs();
   };
 
   const deleteDialog = async (id: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' });
     void fetchDialogs();
   };
 
   const addToBlacklist = async (dialog: OutreachDialog) => {
-    const token = await getToken();
     const username = (dialog.tg_username ?? '').toLowerCase().replace(/^@/, '');
     // Глобальный блок-лист по tg_user_id: запись применяется ко всем кампаниям и
     // аккаунтам пользователя; API сам выставит can_send=false на всех существующих
     // диалогах с этим tg_user_id (RLS отфильтрует только свои).
-    await fetch(`${API_BASE}/blocked-users`, {
+    await authFetch(`${API_BASE}/blocked-users`, {
       method: 'POST',
-      headers: authHeaders(token),
       body: JSON.stringify({
         tg_user_id: dialog.tg_user_id,
         tg_username: username || null,
@@ -509,9 +486,8 @@ function DialogsTab({ campaignId }: {
   const sendMessage = async (id: string) => {
     if (!sendText.trim()) return;
     setSending(true);
-    const token = await getToken();
-    await fetch(`${API_BASE}/dialogs/${id}/send`, {
-      method: 'POST', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/dialogs/${id}/send`, {
+      method: 'POST',
       body: JSON.stringify({ message: sendText }),
     });
     setSendText(''); setSending(false);
@@ -519,8 +495,7 @@ function DialogsTab({ campaignId }: {
   };
 
   const exportDialogs = async (format: 'json' | 'html') => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/dialogs/export?campaign_id=${campaignId}&format=${format}`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/dialogs/export?campaign_id=${campaignId}&format=${format}`);
     if (!res.ok) return;
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -682,8 +657,7 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/processed?campaign_id=${campaignId}&limit=200`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/processed?campaign_id=${campaignId}&limit=200`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachProcessed[]; total: number };
       setItems(d.items); setTotal(d.total);
@@ -694,17 +668,15 @@ function ProcessedTab({ campaignId }: { campaignId: string }) {
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
   const addProcessed = async () => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/processed`, {
-      method: 'POST', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/processed`, {
+      method: 'POST',
       body: JSON.stringify({ campaign_id: campaignId, tg_user_id: Number(addUserId), tg_username: addUsername || null }),
     });
     setAddUserId(''); setAddUsername(''); setShowAdd(false); void load();
   };
 
   const removeProcessed = async (id: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/processed?id=${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    await authFetch(`${API_BASE}/processed?id=${id}`, { method: 'DELETE' });
     void load();
   };
 
@@ -772,10 +744,9 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const token = await getToken();
     const [accRes, proxRes] = await Promise.all([
-      fetch(`${API_BASE}/accounts?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
-      fetch(`${API_BASE}/proxies?campaign_id=${campaignId}`, { headers: authHeaders(token) }),
+      authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
     ]);
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -793,9 +764,8 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   const addAccount = async () => {
     if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
     setSaving(true);
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts`, {
-      method: 'POST', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/accounts`, {
+      method: 'POST',
       body: JSON.stringify({
         campaign_id: campaignId,
         session_name: sessionName.trim(),
@@ -812,9 +782,8 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
   };
 
   const toggleActive = async (id: string, current: boolean) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${id}`, {
-      method: 'PUT', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/accounts/${id}`, {
+      method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
     void load();
@@ -822,15 +791,13 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
 
   const deleteAccount = async (id: string) => {
     if (!confirm('Удалить аккаунт?')) return;
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    await authFetch(`${API_BASE}/accounts/${id}`, { method: 'DELETE' });
     void load();
   };
 
   const assignProxy = async (accountId: string, newProxyId: string) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/accounts/${accountId}`, {
-      method: 'PUT', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/accounts/${accountId}`, {
+      method: 'PUT',
       body: JSON.stringify({ proxy_id: newProxyId || null }),
     });
     setAccounts(prev => prev.map(a => a.id === accountId ? { ...a, proxy_id: newProxyId || null } : a));
@@ -843,7 +810,7 @@ function CampaignAccountsTab({ campaignId }: { campaignId: string }) {
     setUploading(true);
     setUploadError(null);
     try {
-      const token = await getToken();
+      const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
       const res = await fetch(`${API_BASE}/accounts/bulk-files?campaign_id=${campaignId}`, {
@@ -1005,8 +972,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/proxies?campaign_id=${campaignId}`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachProxy[] };
       setProxies(d.items);
@@ -1019,9 +985,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const addProxy = async () => {
     if (!url.trim()) return;
     setSaving(true);
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies`, {
-      method: 'POST', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/proxies`, {
+      method: 'POST',
       body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
     });
     setSaving(false);
@@ -1033,10 +998,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     const lines = bulkText.split('\n').map(l => l.trim()).filter(Boolean);
     if (!lines.length) return;
     setSaving(true);
-    const token = await getToken();
     for (const line of lines) {
-      await fetch(`${API_BASE}/proxies`, {
-        method: 'POST', headers: authHeaders(token),
+      await authFetch(`${API_BASE}/proxies`, {
+        method: 'POST',
         body: JSON.stringify({ campaign_id: campaignId, url: line, name: '' }),
       });
     }
@@ -1046,9 +1010,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   };
 
   const toggleActive = async (id: string, current: boolean) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies/${id}`, {
-      method: 'PUT', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/proxies/${id}`, {
+      method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
     void load();
@@ -1056,8 +1019,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 
   const deleteProxy = async (id: string) => {
     if (!confirm('Удалить прокси? Аккаунты с этим прокси будут отвязаны.')) return;
-    const token = await getToken();
-    await fetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    await authFetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE' });
     void load();
   };
 
@@ -1184,9 +1146,8 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   useEffect(() => {
     if (!stopping) return;
     const poll = setInterval(async () => {
-      const token = await getToken();
       try {
-        const res = await fetch(`${API_BASE}/campaigns/${campaign.id}/status`, { headers: authHeaders(token) });
+        const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/status`);
         if (!res.ok) return;
         const body = await res.json() as { status: string; is_running: boolean };
         if (!body.is_running || body.status === 'stopped') {
@@ -1202,9 +1163,8 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   useEffect(() => {
     if (!refetchJobId) return;
     const poll = setInterval(async () => {
-      const token = await getToken();
       try {
-        const res = await fetch(`${API_BASE}/jobs/${refetchJobId}`, { headers: authHeaders(token) });
+        const res = await authFetch(`${API_BASE}/jobs/${refetchJobId}`);
         if (!res.ok) return;
         const job = await res.json() as {
           status: string;
@@ -1233,8 +1193,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 
   const doAction = async (action: 'start' | 'stop' | 'refetch') => {
     setActionLoading(true);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST', headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
     if (action === 'stop') {
       setStopping(true);
       stoppingRef.current = true;
@@ -1257,9 +1216,8 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   };
 
   const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings) => {
-    const token = await getToken();
-    await fetch(`${API_BASE}/campaigns/${campaign.id}`, {
-      method: 'PUT', headers: authHeaders(token),
+    await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
+      method: 'PUT',
       body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram }),
     });
     onUpdate();
@@ -1430,9 +1388,9 @@ function CampaignsSection() {
   const [creating, setCreating] = useState(false);
 
   const fetchCampaigns = useCallback(async () => {
-    const token = await getToken();
+    const token = await getAccessToken();
     if (!token) { setLoading(false); return; }
-    const res = await fetch(`${API_BASE}/campaigns`, { headers: authHeaders(token) });
+    const res = await authFetch(`${API_BASE}/campaigns`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachCampaign[] };
       setCampaigns(d.items);
@@ -1445,9 +1403,8 @@ function CampaignsSection() {
   const createCampaign = async () => {
     if (!newName.trim()) return;
     setCreating(true);
-    const token = await getToken();
-    const res = await fetch(`${API_BASE}/campaigns`, {
-      method: 'POST', headers: authHeaders(token),
+    const res = await authFetch(`${API_BASE}/campaigns`, {
+      method: 'POST',
       body: JSON.stringify({ name: newName.trim() }),
     });
     if (res.ok) {
@@ -1461,8 +1418,7 @@ function CampaignsSection() {
 
   const deleteCampaign = async (id: string) => {
     if (!confirm('Удалить кампанию? Это действие необратимо.')) return;
-    const token = await getToken();
-    await fetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE', headers: authHeaders(token) });
+    await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
     if (selectedId === id) setSelectedId(null);
     void fetchCampaigns();
   };

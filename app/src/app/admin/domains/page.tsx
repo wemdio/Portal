@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { useIsTma } from '@/lib/useIsTma';
 import { RefreshCw, AlertTriangle, Globe, ExternalLink } from 'lucide-react';
 
@@ -73,21 +73,12 @@ export default function AdminDomainsPage() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [filterAccount, setFilterAccount] = useState<string | null>(null);
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? null;
-  }, []);
-
   const loadDomains = useCallback(async () => {
     setLoading(true);
     setError('');
     setWarnings([]);
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/admin/domains', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/admin/domains');
       if (!res.ok) {
         const j = await res.json().catch(() => ({})) as { error?: string };
         throw new Error(j?.error ?? res.statusText);
@@ -101,7 +92,7 @@ export default function AdminDomainsPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken]);
+  }, []);
 
   useEffect(() => { void loadDomains(); }, [loadDomains]);
 

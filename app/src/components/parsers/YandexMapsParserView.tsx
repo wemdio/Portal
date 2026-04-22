@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson } from '@/lib/authFetch';
 import type { YandexMapsJob, YandexMapsLinkRow, YandexMapsOrganizationRow } from '@/types/parsers';
 import type { QueueStatusResponse } from '@/app/api/parsers/yandexmaps/queue-status/route';
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
@@ -63,29 +64,6 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
 
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
 
-  const getAccessToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? null;
-  }, []);
-
-  const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
-    const token = await getAccessToken();
-    if (!token) throw new Error('Not authenticated');
-    const res = await fetch(path, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || `Request failed: ${res.status}`);
-    }
-    return (await res.json()) as T;
-  }, [getAccessToken]);
-
   const refreshJobs = useCallback(async () => {
     try {
       const { data } = await supabase.from('yandex_maps_jobs').select('*').order('created_at', { ascending: false });
@@ -97,28 +75,28 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
 
   const refreshQueueStatus = useCallback(async () => {
     try {
-      const data = await apiFetch<QueueStatusResponse>('/api/parsers/yandexmaps/queue-status');
+      const data = await authFetchJson<QueueStatusResponse>('/api/parsers/yandexmaps/queue-status');
       setQueueStatus(data);
     } catch {
       // non-critical, ignore
     }
-  }, [apiFetch]);
+  }, []);
 
   const loadLinks = useCallback(async (jobId: string) => {
-    const data = await apiFetch<{ links: YandexMapsLinkRow[] }>(`/api/parsers/yandexmaps/${jobId}/links`);
+    const data = await authFetchJson<{ links: YandexMapsLinkRow[] }>(`/api/parsers/yandexmaps/${jobId}/links`);
     const lines = (data.links ?? []).map((l) => l.link).filter(Boolean);
     setLinksText(lines.join('\n'));
-  }, [apiFetch]);
+  }, []);
 
   const loadResults = useCallback(async (jobId: string) => {
     setLoadingResults(true);
     try {
-      const data = await apiFetch<{ results: YandexMapsOrganizationRow[] }>(`/api/parsers/yandexmaps/${jobId}/results?limit=1000&offset=0`);
+      const data = await authFetchJson<{ results: YandexMapsOrganizationRow[] }>(`/api/parsers/yandexmaps/${jobId}/results?limit=1000&offset=0`);
       setResults(data.results ?? []);
     } finally {
       setLoadingResults(false);
     }
-  }, [apiFetch]);
+  }, []);
 
   useEffect(() => {
     refreshJobs();
@@ -164,7 +142,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     setBusy(true);
     setError(null);
     try {
-      const data = await apiFetch<{ job: YandexMapsJob }>('/api/parsers/yandexmaps', {
+      const data = await authFetchJson<{ job: YandexMapsJob }>('/api/parsers/yandexmaps', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
@@ -173,7 +151,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       setActiveJobId(jobId);
 
       try {
-        await apiFetch(`/api/parsers/yandexmaps/${jobId}/collect-links`, { method: 'POST' });
+        await authFetchJson(`/api/parsers/yandexmaps/${jobId}/collect-links`, { method: 'POST' });
         await refreshJobs();
       } catch {
         // Job was already created in 'pending' — worker will pick it up
@@ -184,14 +162,14 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     } finally {
       setBusy(false);
     }
-  }, [apiFetch, refreshJobs]);
+  }, [refreshJobs]);
 
   const handleCollectLinks = useCallback(async () => {
     if (!activeJobId) return;
     setJobActionId(activeJobId);
     setError(null);
     try {
-      await apiFetch(`/api/parsers/yandexmaps/${activeJobId}/collect-links`, { method: 'POST' });
+      await authFetchJson(`/api/parsers/yandexmaps/${activeJobId}/collect-links`, { method: 'POST' });
       await refreshJobs();
       await loadLinks(activeJobId);
     } catch (e) {
@@ -200,7 +178,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     } finally {
       setJobActionId(null);
     }
-  }, [activeJobId, apiFetch, refreshJobs, loadLinks]);
+  }, [activeJobId, refreshJobs, loadLinks]);
 
   const handleSaveLinks = useCallback(async () => {
     if (!activeJobId) return;
@@ -209,7 +187,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     try {
       const raw = linksText.split('\n').map((s) => s.trim()).filter(Boolean);
       const links = normalizeYandexOrgUrls(raw);
-      await apiFetch(`/api/parsers/yandexmaps/${activeJobId}/links`, {
+      await authFetchJson(`/api/parsers/yandexmaps/${activeJobId}/links`, {
         method: 'PUT',
         body: JSON.stringify({ links }),
       });
@@ -222,14 +200,14 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     } finally {
       setJobActionId(null);
     }
-  }, [activeJobId, apiFetch, linksText, loadLinks, refreshJobs, triggerRefreshed]);
+  }, [activeJobId, linksText, loadLinks, refreshJobs, triggerRefreshed]);
 
   const handleParse = useCallback(async () => {
     if (!activeJobId) return;
     setJobActionId(activeJobId);
     setError(null);
     try {
-      await apiFetch(`/api/parsers/yandexmaps/${activeJobId}/parse`, { method: 'POST' });
+      await authFetchJson(`/api/parsers/yandexmaps/${activeJobId}/parse`, { method: 'POST' });
       await refreshJobs();
     } catch (e) {
       console.error(e);
@@ -237,7 +215,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     } finally {
       setJobActionId(null);
     }
-  }, [activeJobId, apiFetch, refreshJobs]);
+  }, [activeJobId, refreshJobs]);
 
   const stopJob = useCallback(async (jobId: string) => {
     setJobActionId(jobId);

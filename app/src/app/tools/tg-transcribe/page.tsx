@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import {
   Video,
   Loader2,
@@ -87,13 +87,6 @@ interface ScanJob {
   isOwner?: boolean;
 }
 
-async function getToken() {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
 function formatBytes(bytes: number | null) {
   if (bytes == null || !Number.isFinite(bytes)) return '';
   const sizes = ['Б', 'КБ', 'МБ', 'ГБ'];
@@ -164,11 +157,8 @@ function ScanVideoRow({ video }: { video: ScanVideoInfo }) {
 
     const poll = async () => {
       try {
-        const token = await getToken();
-        if (!token) return;
-        const res = await fetch(
+        const res = await authFetch(
           `/api/tools/audio-transcribe/progress?jobId=${encodeURIComponent(video.transcriptionJobId!)}`,
-          { headers: { Authorization: `Bearer ${token}` } },
         );
         if (res.ok) {
           const data = (await res.json()) as TranscriptionProgress;
@@ -380,11 +370,7 @@ export default function TgTranscribePage() {
 
   const fetchJobStatus = useCallback(async (): Promise<ScanJob | null> => {
     try {
-      const token = await getToken();
-      if (!token) return null;
-      const res = await fetch('/api/tools/tg-transcribe/scan', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/tools/tg-transcribe/scan');
       if (!res.ok) return null;
       const json = (await res.json()) as { job: ScanJob | null };
       return json.job;
@@ -446,11 +432,7 @@ export default function TgTranscribePage() {
   const fetchChats = useCallback(async () => {
     setChatsLoading(true);
     try {
-      const token = await getToken();
-      if (!token) return;
-      const res = await fetch('/api/tools/tg-transcribe/chats', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/tools/tg-transcribe/chats');
       if (!res.ok) return;
       const json = (await res.json()) as { chats: BotChat[] };
       setBotChats(json.chats ?? []);
@@ -473,11 +455,7 @@ export default function TgTranscribePage() {
     setManualTopicId('');
     setTopicNameInput('');
     try {
-      const token = await getToken();
-      if (!token) return;
-      const res = await fetch(`/api/tools/tg-transcribe/chats/topics?chatId=${chatId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/tools/tg-transcribe/chats/topics?chatId=${chatId}`);
       if (!res.ok) return;
       const json = (await res.json()) as {
         isForum: boolean;
@@ -503,12 +481,10 @@ export default function TgTranscribePage() {
     if (!chat) return;
     setDeleting(true);
     try {
-      const token = await getToken();
       const params = new URLSearchParams({ chatId: String(chat.chatId) });
       if (chat.topicId != null) params.set('topicId', String(chat.topicId));
-      const res = await fetch(`/api/tools/tg-transcribe/chats?${params}`, {
+      const res = await authFetch(`/api/tools/tg-transcribe/chats?${params}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         setSelectedChatId(null);
@@ -529,10 +505,8 @@ export default function TgTranscribePage() {
     const id = parseInt(addChatId, 10);
     if (!id) return;
     try {
-      const token = await getToken();
-      const res = await fetch('/api/tools/tg-transcribe/chats/add', {
+      const res = await authFetch('/api/tools/tg-transcribe/chats/add', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chatId: id,
           title: addChatTitle || undefined,
@@ -576,13 +550,8 @@ export default function TgTranscribePage() {
     setActiveJob(null);
 
     try {
-      const token = await getToken();
-      const res = await fetch('/api/tools/tg-transcribe/scan', {
+      const res = await authFetch('/api/tools/tg-transcribe/scan', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           chatId: selectedChatId,
           videoCount: count,
@@ -610,13 +579,8 @@ export default function TgTranscribePage() {
     if (!activeJob) return;
     setStopping(true);
     try {
-      const token = await getToken();
-      const res = await fetch('/api/tools/tg-transcribe/scan', {
+      const res = await authFetch('/api/tools/tg-transcribe/scan', {
         method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({ jobId: activeJob.id }),
       });
 
@@ -641,11 +605,7 @@ export default function TgTranscribePage() {
   const fetchAllItems = useCallback(async () => {
     setLoading(true);
     try {
-      const token = await getToken();
-      if (!token) { setAllItems([]); return; }
-      const res = await fetch('/api/tools/tg-transcribe?limit=200&offset=0', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/tools/tg-transcribe?limit=200&offset=0');
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
       setAllItems(json.items ?? []);
@@ -1158,12 +1118,7 @@ export default function TgTranscribePage() {
                       setExpandedId(item.id);
                       if (item.hasFullText && !fullTextCache.current[item.id]) {
                         setLoadingTextId(item.id);
-                        getToken().then((token) => {
-                          if (!token) return;
-                          return fetch(`/api/tools/tg-transcribe?id=${encodeURIComponent(item.id)}`, {
-                            headers: { Authorization: `Bearer ${token}` },
-                          });
-                        })
+                        authFetch(`/api/tools/tg-transcribe?id=${encodeURIComponent(item.id)}`)
                           .then((res) => res?.ok ? res.json() : null)
                           .then((json: { text?: string } | null) => {
                             if (json?.text) fullTextCache.current[item.id] = json.text;

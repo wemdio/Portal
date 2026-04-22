@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { Play, Loader2, Download, FileSpreadsheet, Database, AlertCircle } from 'lucide-react';
 import { saveAs } from 'file-saver';
 
@@ -43,11 +43,6 @@ function cellValue(v: unknown): string {
   return String(v ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
 }
 
-async function getAccessToken(): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
-
 export default function HabrCareerPage() {
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
@@ -67,18 +62,8 @@ export default function HabrCareerPage() {
     setCompanies([]);
 
     try {
-      const token = await getAccessToken();
-      if (!token) {
-        setError('Необходима авторизация');
-        return;
-      }
-
-      const res = await fetch('/api/tools/habr-career/scrape', {
+      const res = await authFetch('/api/tools/habr-career/scrape', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ url: trimmed }),
       });
 

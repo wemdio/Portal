@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 
 // ---- Types ------------------------------------------------------------------
 
@@ -112,26 +113,9 @@ const DEFAULT_CAMPAIGN_FORM = {
 
 // ---- Helpers ----------------------------------------------------------------
 
-async function getToken(): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
-
 async function api<T = unknown>(path: string, opts?: RequestInit & { json?: unknown }): Promise<T> {
-  const token = await getToken();
-  if (!token) throw new Error('Not authenticated');
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  let body: BodyInit | undefined;
-  if (opts?.json) {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(opts.json);
-  }
-  const res = await fetch(`/api/tools/li-outreach${path}`, { ...opts, headers: { ...headers, ...opts?.headers }, body: body ?? opts?.body });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+  const body = opts?.json ? JSON.stringify(opts.json) : opts?.body;
+  return authFetchJson<T>(`/api/tools/li-outreach${path}`, { ...opts, body });
 }
 
 // ---- Main page --------------------------------------------------------------
@@ -386,9 +370,7 @@ export default function LiOutreachPage() {
   };
 
   const exportLeadsCsv = async () => {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch('/api/tools/li-outreach/leads/export', { headers: { Authorization: `Bearer ${token}` } });
+    const res = await authFetch('/api/tools/li-outreach/leads/export');
     if (!res.ok) { alert('Ошибка экспорта'); return; }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -426,7 +408,7 @@ export default function LiOutreachPage() {
   const importLeadsCsv = async (file: File) => {
     setImporting(true);
     try {
-      const token = await getToken();
+      const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
       const fd = new FormData();
       fd.append('file', file);

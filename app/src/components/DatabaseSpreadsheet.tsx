@@ -7,6 +7,7 @@ import { useSearchParams } from 'next/navigation';
 import Papa from 'papaparse';
 
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
@@ -6558,38 +6559,6 @@ export function DatabaseSpreadsheet() {
     if (!activeTab || nameCleanup.isProcessing) return;
     flushSave();
 
-    let token = '';
-    let tokenExpiresAt = 0;
-    const TOKEN_REFRESH_SAFETY_MS = 2 * 60 * 1000;
-
-    const loadSessionToken = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) return null;
-      token = session.access_token;
-      tokenExpiresAt = session.expires_at ? session.expires_at * 1000 : 0;
-      return token;
-    };
-
-    const refreshAuthToken = async () => {
-      const { data: refreshed, error } = await supabase.auth.refreshSession();
-      if (error || !refreshed.session?.access_token) return null;
-      token = refreshed.session.access_token;
-      tokenExpiresAt = refreshed.session.expires_at ? refreshed.session.expires_at * 1000 : 0;
-      return token;
-    };
-
-    const ensureValidToken = async () => {
-      if (!token) {
-        const loaded = await loadSessionToken();
-        if (!loaded) return null;
-      }
-      if (tokenExpiresAt && Date.now() > tokenExpiresAt - TOKEN_REFRESH_SAFETY_MS) {
-        const refreshed = await refreshAuthToken();
-        if (!refreshed) return null;
-      }
-      return token;
-    };
-
     const dataRows = activeTab.data.slice(1).filter((row) => {
       const nameValue = row[nameCleanup.nameCol]?.trim();
       return nameValue && nameValue.length > 0;
@@ -6600,13 +6569,6 @@ export function DatabaseSpreadsheet() {
         ...prev,
         error: 'Нет данных для очистки в выбранной колонке',
       }));
-      return;
-    }
-
-    // Get a fresh auth token
-    const initialToken = await ensureValidToken();
-    if (!initialToken) {
-      setNameCleanup((prev) => ({ ...prev, error: 'Необходима авторизация' }));
       return;
     }
 
@@ -6663,36 +6625,12 @@ export function DatabaseSpreadsheet() {
         }));
 
         try {
-          const validToken = await ensureValidToken();
-          if (!validToken) {
-            throw new Error('Необходима авторизация');
-          }
-
-          let response = await fetch('/api/cleanup-names', {
+          const response = await authFetch('/api/cleanup-names', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${validToken}`,
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ companies }),
             signal: nameCleanupAbortRef.current?.signal,
           });
-
-          if (response.status === 401) {
-            const refreshedToken = await refreshAuthToken();
-            if (!refreshedToken) {
-              throw new Error('Необходима авторизация');
-            }
-            response = await fetch('/api/cleanup-names', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${refreshedToken}`,
-              },
-              body: JSON.stringify({ companies }),
-              signal: nameCleanupAbortRef.current?.signal,
-            });
-          }
 
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));

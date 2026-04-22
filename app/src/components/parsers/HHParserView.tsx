@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import type { HHSearchConfig, HHVacancyRow, ParserJob } from '@/types';
 import { HHParserForm } from '@/components/parsers/HHParserForm';
 import { JobsList } from '@/components/parsers/JobsList';
@@ -44,11 +45,6 @@ const exportHeader = [
   'published_at',
 ];
 
-async function getAccessToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
-
 function safeJsonParse<T>(text: string): T | null {
   try {
     return JSON.parse(text) as T;
@@ -58,17 +54,7 @@ function safeJsonParse<T>(text: string): T | null {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await getAccessToken();
-  if (!token) throw new Error('Not authenticated');
-
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  const res = await authFetch(path, init);
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');

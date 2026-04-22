@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import type { Session } from '@supabase/supabase-js';
 import { UserRole } from '@/types';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
@@ -150,16 +151,11 @@ export function UserProvider({
     let cancelled = false;
     void (async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const token = session?.access_token;
-        if (!token || cancelled) return;
-        const headers = { Authorization: `Bearer ${token}` };
-
         const [toolsRes, submittedRes, reworkRes, notifRes] = await Promise.all([
-          fetch('/api/user/tools', { headers }).then((r) => r.json()).catch(() => ({ toolIds: [] })),
-          fetch('/api/database-review/requests?status=submitted', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
-          fetch('/api/database-review/requests', { headers }).then((r) => r.json()).catch(() => ({ requests: [] })),
-          fetch('/api/notifications', { headers }).then((r) => r.json()).catch(() => ({ unread_count: 0 })),
+          authFetch('/api/user/tools').then((r) => r.json()).catch(() => ({ toolIds: [] })),
+          authFetch('/api/database-review/requests?status=submitted').then((r) => r.json()).catch(() => ({ requests: [] })),
+          authFetch('/api/database-review/requests').then((r) => r.json()).catch(() => ({ requests: [] })),
+          authFetch('/api/notifications').then((r) => r.json()).catch(() => ({ unread_count: 0 })),
         ]);
         if (cancelled) return;
         const tools = (toolsRes.toolIds ?? []) as string[];
@@ -187,12 +183,8 @@ export function UserProvider({
     }
     setAvatarTriedSigned(true);
     void (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) { setUserAvatarUrl(null); return; }
-      const res = await fetch('/api/profile/avatar/signed', {
+      const res = await authFetch('/api/profile/avatar/signed', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) { setUserAvatarUrl(null); return; }
       const data = (await res.json()) as { readUrl?: unknown };
@@ -211,12 +203,7 @@ export function UserProvider({
   const refreshNotifications = useCallback(() => {
     void (async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const token = session?.access_token;
-        if (!token) return;
-        const res = await fetch('/api/notifications', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await authFetch('/api/notifications');
         const data = await res.json();
         setUnreadNotifications(data.unread_count ?? 0);
       } catch { /* ignore */ }
@@ -230,15 +217,8 @@ export function UserProvider({
     localeUserIdRef.current = userId;
     setLocaleSaving(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) return;
-      await fetch('/api/user/locale', {
+      await authFetch('/api/user/locale', {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ locale: normalized }),
       });
     } catch (error) {

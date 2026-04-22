@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { useState } from 'react';
+import { authFetch } from '@/lib/authFetch';
 import {
   Loader2,
   PhoneOutgoing,
@@ -92,11 +92,6 @@ export function CallHistoryTab({
   const [detailCall, setDetailCall] = useState<VapiCall | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
-
   async function loadCallDetail(callId: string) {
     if (expandedId === callId) {
       setExpandedId(null);
@@ -108,10 +103,7 @@ export function CallHistoryTab({
     setLoadingDetail(true);
 
     try {
-      const token = await getToken();
-      const res = await fetch(`${apiBase}/calls/${callId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`${apiBase}/calls/${callId}`);
       const data = await res.json();
       if (data.call) setDetailCall(data.call as VapiCall);
     } catch {
