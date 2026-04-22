@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import { normalizeError, sanitizeContext, truncateMessage, type LogContext, type LogLevel } from '@/lib/logger';
 
 type ClientLogPayload = {
@@ -12,16 +12,8 @@ type ClientLogPayload = {
 
 async function postLog(payload: ClientLogPayload) {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const token = session?.access_token;
-    if (!token) return;
-
-    await fetch('/api/logs', {
+    await authFetch('/api/logs', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
       body: JSON.stringify(payload),
       keepalive: true,
     });

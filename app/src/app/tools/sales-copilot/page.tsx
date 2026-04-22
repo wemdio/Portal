@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { authFetch } from '@/lib/authFetch';
 import {
   Bot,
   Loader2,
@@ -36,15 +37,6 @@ import type {
 
 const API = '/api/sales-copilot';
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
-function authHeaders(token: string) {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
-
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit',
@@ -74,8 +66,7 @@ export default function SalesCopilotPage() {
 
   const loadConfigs = useCallback(async () => {
     try {
-      const token = await getToken();
-      const res = await fetch(`${API}/configs`, { headers: authHeaders(token) });
+      const res = await authFetch(`${API}/configs`);
       const data = await res.json();
       setConfigs(data.items ?? []);
       if (!selectedConfigId && data.items?.length) {
@@ -173,10 +164,8 @@ function EmptyState({ onCreated }: { onCreated: () => void }) {
     setLoading(true);
     setError('');
     try {
-      const token = await getToken();
-      const res = await fetch(`${API}/auth/send-code`, {
+      const res = await authFetch(`${API}/auth/send-code`, {
         method: 'POST',
-        headers: authHeaders(token),
         body: JSON.stringify({ phone }),
       });
       const data = await res.json();
@@ -196,12 +185,10 @@ function EmptyState({ onCreated }: { onCreated: () => void }) {
     setLoading(true);
     setError('');
     try {
-      const token = await getToken();
       const body: Record<string, string> = { phone, code };
       if (pwd) body.password = pwd;
-      const res = await fetch(`${API}/auth/verify-code`, {
+      const res = await authFetch(`${API}/auth/verify-code`, {
         method: 'POST',
-        headers: authHeaders(token),
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -335,10 +322,9 @@ function DraftsTab({ config }: { config: SalesCopilotConfig }) {
   const loadDrafts = useCallback(async () => {
     setLoading(true);
     try {
-      const token = await getToken();
       const [draftsRes, statsRes] = await Promise.all([
-        fetch(`${API}/configs/${config.id}/drafts?type=${subTab}&status=pending`, { headers: authHeaders(token) }),
-        fetch(`${API}/configs/${config.id}/drafts/stats`, { headers: authHeaders(token) }),
+        authFetch(`${API}/configs/${config.id}/drafts?type=${subTab}&status=pending`),
+        authFetch(`${API}/configs/${config.id}/drafts/stats`),
       ]);
       const draftsData = await draftsRes.json();
       const statsData = await statsRes.json();
@@ -352,29 +338,23 @@ function DraftsTab({ config }: { config: SalesCopilotConfig }) {
   useEffect(() => { void loadDrafts(); }, [loadDrafts]);
 
   const handleSend = async (draftId: string, editedText?: string) => {
-    const token = await getToken();
-    await fetch(`${API}/configs/${config.id}/drafts/${draftId}/send`, {
+    await authFetch(`${API}/configs/${config.id}/drafts/${draftId}/send`, {
       method: 'POST',
-      headers: authHeaders(token),
       body: JSON.stringify(editedText ? { edited_text: editedText } : {}),
     });
     void loadDrafts();
   };
 
   const handleDismiss = async (draftId: string) => {
-    const token = await getToken();
-    await fetch(`${API}/configs/${config.id}/drafts/${draftId}/dismiss`, {
+    await authFetch(`${API}/configs/${config.id}/drafts/${draftId}/dismiss`, {
       method: 'POST',
-      headers: authHeaders(token),
     });
     void loadDrafts();
   };
 
   const handleRegenerate = async (draftId: string): Promise<string | null> => {
-    const token = await getToken();
-    const res = await fetch(`${API}/configs/${config.id}/drafts/${draftId}/regenerate`, {
+    const res = await authFetch(`${API}/configs/${config.id}/drafts/${draftId}/regenerate`, {
       method: 'POST',
-      headers: authHeaders(token),
     });
     const data = await res.json();
     if (data.ok) return data.draft_text as string;
@@ -637,13 +617,11 @@ function SettingsTab({
     setSaving(true);
     setMsg('');
     try {
-      const token = await getToken();
       const { id, user_id, account_id, created_at, updated_at, session_data, phone, tg_first_name, tg_username, initial_sync_completed, initial_sync_offset, last_full_sync_at, ...body } = form;
       void id; void user_id; void account_id; void created_at; void updated_at; void session_data; void phone; void tg_first_name; void tg_username;
       void initial_sync_completed; void initial_sync_offset; void last_full_sync_at;
-      const res = await fetch(`${API}/configs/${config.id}`, {
+      const res = await authFetch(`${API}/configs/${config.id}`, {
         method: 'PATCH',
-        headers: authHeaders(token),
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -662,11 +640,9 @@ function SettingsTab({
   const handleToggle = async () => {
     setToggling(true);
     try {
-      const token = await getToken();
       const endpoint = config.is_enabled ? 'stop' : 'start';
-      await fetch(`${API}/configs/${config.id}/${endpoint}`, {
+      await authFetch(`${API}/configs/${config.id}/${endpoint}`, {
         method: 'POST',
-        headers: authHeaders(token),
       });
       onUpdated();
     } finally {
@@ -678,10 +654,8 @@ function SettingsTab({
     if (!confirm('Удалить этот copilot и все его черновики?')) return;
     setDeleting(true);
     try {
-      const token = await getToken();
-      await fetch(`${API}/configs/${config.id}`, {
+      await authFetch(`${API}/configs/${config.id}`, {
         method: 'DELETE',
-        headers: authHeaders(token),
       });
       onDeleted();
     } finally {
@@ -929,10 +903,9 @@ function LogsTab({ config }: { config: SalesCopilotConfig }) {
   const loadLogs = useCallback(async () => {
     setLoading(true);
     try {
-      const token = await getToken();
       const params = new URLSearchParams({ limit: '100' });
       if (levelFilter) params.set('level', levelFilter);
-      const res = await fetch(`${API}/configs/${config.id}/logs?${params}`, { headers: authHeaders(token) });
+      const res = await authFetch(`${API}/configs/${config.id}/logs?${params}`);
       const data = await res.json();
       setLogs(data.items ?? []);
     } catch { /* ignore */ } finally {

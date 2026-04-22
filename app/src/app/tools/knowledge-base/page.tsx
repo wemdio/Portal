@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson, getAccessToken } from '@/lib/authFetch';
 import {
   BookOpen,
   Upload,
@@ -28,23 +28,6 @@ import {
 import type { KbCategory, KbDocument } from '@/lib/knowledgeBase/types';
 import { KB_CATEGORIES } from '@/lib/knowledgeBase/types';
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
-async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
-  const token = await getToken();
-  const res = await fetch(path, {
-    ...opts,
-    headers: { ...opts?.headers, Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
 
 const CATEGORY_ICONS: Record<KbCategory | 'all', React.ElementType> = {
   all: Layers,
@@ -87,7 +70,7 @@ export default function KnowledgeBasePage() {
     setError(null);
     try {
       const cat = activeCategory === 'all' ? '' : `&category=${activeCategory}`;
-      const data = await apiFetch<{ documents: KbDocument[]; total: number }>(
+      const data = await authFetchJson<{ documents: KbDocument[]; total: number }>(
         `/api/knowledge-base/documents?per_page=100${cat}`,
       );
       setDocs(data.documents);
@@ -105,7 +88,7 @@ export default function KnowledgeBasePage() {
     if (!searchQuery.trim()) { setSearchResults(null); return; }
     setSearchLoading(true);
     try {
-      const data = await apiFetch<{ chunks: SearchResult[] }>(
+      const data = await authFetchJson<{ chunks: SearchResult[] }>(
         `/api/knowledge-base/search?q=${encodeURIComponent(searchQuery)}&limit=20`,
       );
       setSearchResults(data.chunks);
@@ -251,7 +234,7 @@ export default function KnowledgeBasePage() {
               doc={doc}
               onSelect={() => { setSelectedDoc(doc.id); setView('detail'); }}
               onDelete={async () => {
-                await apiFetch(`/api/knowledge-base/documents/${doc.id}`, { method: 'DELETE' });
+                await authFetchJson(`/api/knowledge-base/documents/${doc.id}`, { method: 'DELETE' });
                 fetchDocs();
               }}
             />
@@ -380,7 +363,7 @@ function UploadForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
       fd.append('title', title || file.name);
       fd.append('category', category);
       fd.append('description', description);
-      const token = await getToken();
+      const token = await getAccessToken();
       const res = await fetch('/api/knowledge-base/documents', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -476,7 +459,7 @@ function ManualForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
     setSaving(true);
     setErr('');
     try {
-      await apiFetch('/api/knowledge-base/documents', {
+      await authFetchJson('/api/knowledge-base/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, category, description, content_text: content }),
@@ -564,7 +547,7 @@ function ImportButton({ onDone }: { onDone: () => void }) {
     setLoading(source);
     setResult(null);
     try {
-      const data = await apiFetch<{ imported: number }>('/api/knowledge-base/import', {
+      const data = await authFetchJson<{ imported: number }>('/api/knowledge-base/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source }),
@@ -622,7 +605,7 @@ function DocDetailModal({ docId, onClose }: { docId: string; onClose: () => void
     (async () => {
       setLoading(true);
       try {
-        const data = await apiFetch<{ document: KbDocument; chunks: typeof chunks }>(
+        const data = await authFetchJson<{ document: KbDocument; chunks: typeof chunks }>(
           `/api/knowledge-base/documents/${docId}`,
         );
         setDoc(data.document);
@@ -711,7 +694,7 @@ function BriefPanel() {
     (async () => {
       setLoading(true);
       try {
-        const data = await apiFetch<{ brief: string; token_count: number; updated_at: string | null }>(
+        const data = await authFetchJson<{ brief: string; token_count: number; updated_at: string | null }>(
           '/api/knowledge-base/brief',
         );
         setBrief(data.brief);
@@ -725,7 +708,7 @@ function BriefPanel() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const data = await apiFetch<{ token_count: number }>(
+      const data = await authFetchJson<{ token_count: number }>(
         '/api/knowledge-base/brief',
         {
           method: 'PUT',

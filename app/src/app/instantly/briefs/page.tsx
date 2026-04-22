@@ -7,7 +7,7 @@ import {
   ChevronLeft, Loader2, Plus, Trash2, FileText, Link2, Upload, X, Check,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson, getAccessToken } from '@/lib/authFetch';
 import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
 
 type BriefCampaign = { id: string; campaign_id: string };
@@ -20,21 +20,6 @@ type Brief = {
   created_at: string;
   instantly_brief_campaigns: BriefCampaign[];
 };
-
-async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T> {
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token;
-  if (!token) throw new Error('Not authenticated');
-  const res = await fetch(path, {
-    ...options,
-    headers: { Authorization: `Bearer ${token}`, ...options?.headers },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body?.error ?? `Error ${res.status}`);
-  }
-  return (await res.json()) as T;
-}
 
 function CampaignSelector({
   campaigns,
@@ -128,9 +113,8 @@ function BriefCard({
   const handleSaveCampaigns = async (ids: string[]) => {
     setSaving(true);
     try {
-      await fetchWithAuth(`/api/instantly/briefs/${brief.id}/campaigns`, {
+      await authFetchJson(`/api/instantly/briefs/${brief.id}/campaigns`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ campaign_ids: ids }),
       });
       onCampaignsUpdated();
@@ -146,7 +130,7 @@ function BriefCard({
     if (!confirm('Удалить бриф?')) return;
     setDeleting(true);
     try {
-      await fetchWithAuth(`/api/instantly/briefs/${brief.id}`, { method: 'DELETE' });
+      await authFetchJson(`/api/instantly/briefs/${brief.id}`, { method: 'DELETE' });
       onDelete(brief.id);
     } catch (err) {
       console.error(err);
@@ -259,7 +243,7 @@ export default function BriefsPage() {
     setLoading(true);
     setError('');
     try {
-      const data = await fetchWithAuth<{ items: Brief[] }>('/api/instantly/briefs');
+      const data = await authFetchJson<{ items: Brief[] }>('/api/instantly/briefs');
       setBriefs(data.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
@@ -293,8 +277,7 @@ export default function BriefsPage() {
       formData.append('name', uploadName.trim());
       formData.append('file', uploadFile);
 
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
+      const token = await getAccessToken();
       if (!token) throw new Error('Not authenticated');
 
       const res = await fetch('/api/instantly/briefs', {

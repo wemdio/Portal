@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetchJson } from '@/lib/authFetch';
 import {
   Monitor,
   Play,
@@ -14,27 +14,16 @@ import {
   AlarmClock,
 } from 'lucide-react';
 
-async function getToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? '';
-}
-
 async function api<T = unknown>(
   path: string,
   opts: RequestInit = {},
 ): Promise<{ data?: T; error?: string }> {
-  const token = await getToken();
-  const res = await fetch(`/api/tools/rdp${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...opts.headers,
-    },
-  });
-  const json = await res.json();
-  if (!res.ok) return { error: json.error ?? 'Ошибка запроса' };
-  return { data: json };
+  try {
+    const data = await authFetchJson<T>(`/api/tools/rdp${path}`, opts);
+    return { data };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Ошибка запроса' };
+  }
 }
 
 interface ActiveSession {

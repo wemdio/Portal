@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
 
 type ImportJob = {
@@ -55,10 +55,6 @@ type ContactRow = {
   created_at: string;
 };
 
-async function getToken(): Promise<string | null> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
 
 function _phoneToWhatsApp(phone: string): string | null {
   const digits = phone.replace(/\D/g, '');
@@ -181,11 +177,7 @@ export default function CisLeadFinderPage() {
   }, [selectedJob]);
 
   async function refreshJobs() {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch('/api/tools/cis-leads/jobs', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await authFetch('/api/tools/cis-leads/jobs');
     if (!res.ok) return;
     const data = (await res.json()) as { jobs?: ImportJob[] };
     const items = Array.isArray(data.jobs) ? data.jobs : [];
@@ -196,11 +188,8 @@ export default function CisLeadFinderPage() {
   }
 
   async function loadCompanies(jobId: string, resetSearch = false) {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch(
+    const res = await authFetch(
       `/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/companies?page=1&page_size=500`,
-      { headers: { Authorization: `Bearer ${token}` } },
     );
     if (!res.ok) return;
     const data = (await res.json()) as { companies?: CompanyRow[] };
@@ -221,11 +210,7 @@ export default function CisLeadFinderPage() {
   }, [companies, companySearch]);
 
   async function loadContacts(companyId: string) {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch(`/api/tools/cis-leads/companies/${encodeURIComponent(companyId)}/contacts`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await authFetch(`/api/tools/cis-leads/companies/${encodeURIComponent(companyId)}/contacts`);
     if (!res.ok) return;
     const data = (await res.json()) as { contacts?: ContactRow[] };
     setContacts(Array.isArray(data.contacts) ? data.contacts : []);
@@ -235,7 +220,7 @@ export default function CisLeadFinderPage() {
     if (!file) return;
     setUploading(true);
     try {
-      const token = await getToken();
+      const token = await getAccessToken();
       if (!token) return;
       const fd = new FormData();
       fd.set('file', file);
@@ -273,11 +258,8 @@ export default function CisLeadFinderPage() {
     if (!deleteTarget) return;
     const jobId = deleteTarget.id;
     setDeleteTarget(null);
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch(`/api/tools/cis-leads/jobs?id=${encodeURIComponent(jobId)}`, {
+    const res = await authFetch(`/api/tools/cis-leads/jobs?id=${encodeURIComponent(jobId)}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -294,11 +276,8 @@ export default function CisLeadFinderPage() {
   }, [deleteTarget, selectedJobId]);
 
   async function stopJob(jobId: string) {
-    const token = await getToken();
-    if (!token) return;
-    const res = await fetch('/api/tools/cis-leads/jobs', {
+    const res = await authFetch('/api/tools/cis-leads/jobs', {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: jobId, action: 'stop' }),
     });
     if (!res.ok) {
@@ -313,11 +292,7 @@ export default function CisLeadFinderPage() {
     if (exporting) return;
     setExporting(format);
     try {
-      const token = await getToken();
-      if (!token) return;
-      const res = await fetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export?format=${format}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/tools/cis-leads/jobs/${encodeURIComponent(jobId)}/export?format=${format}`);
       if (!res.ok) return;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);

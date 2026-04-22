@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from 'react';
 import { Download, Trash2, Sparkles, FileText, AlertCircle } from 'lucide-react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import { ProjectBriefUploader } from './ProjectBriefUploader';
 import { LeadSourceHypothesesView } from './LeadSourceHypothesesView';
@@ -31,11 +31,6 @@ interface BriefApiResponse {
   lead_source_hypotheses?: string | null;
   lead_source_hypotheses_generated_at?: string | null;
   lead_source_hypotheses_error?: string | null;
-}
-
-async function authHeaders(): Promise<Record<string, string>> {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
 }
 
 function SectionCard({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
@@ -85,13 +80,13 @@ export function ProjectBriefSection({
     setBusy('uploading');
 
     try {
-      const headers = await authHeaders();
+      const token = await getAccessToken();
       const fd = new FormData();
       fd.append('file', pendingFile);
 
       const res = await fetch(`/api/projects/${projectId}/brief`, {
         method: 'POST',
-        headers,
+        headers: { Authorization: `Bearer ${token}` },
         body: fd,
       });
       const payload = (await res.json().catch(() => ({}))) as BriefApiResponse & { error?: string };
@@ -119,8 +114,7 @@ export function ProjectBriefSection({
     setError(null);
     setBusy('deleting');
     try {
-      const headers = await authHeaders();
-      const res = await fetch(`/api/projects/${projectId}/brief`, { method: 'DELETE', headers });
+      const res = await authFetch(`/api/projects/${projectId}/brief`, { method: 'DELETE' });
       if (!res.ok) {
         const payload = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${res.status}`);
@@ -142,8 +136,7 @@ export function ProjectBriefSection({
     setError(null);
     setBusy('downloading');
     try {
-      const headers = await authHeaders();
-      const res = await fetch(`/api/projects/${projectId}/brief`, { headers });
+      const res = await authFetch(`/api/projects/${projectId}/brief`);
       if (!res.ok) {
         const payload = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `HTTP ${res.status}`);

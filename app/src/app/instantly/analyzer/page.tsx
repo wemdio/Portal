@@ -8,6 +8,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
+import { authFetchJson } from '@/lib/authFetch';
 import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
@@ -153,17 +154,10 @@ export default function CompletedCampaignAnalyzer() {
     setClearing(campaignId);
     setConfirmClear(null);
     try {
-      const token = (await (await import('@/lib/supabaseClient')).supabase.auth.getSession()).data.session?.access_token ?? '';
-      const res = await fetch('/api/instantly/leads', {
+      const result = await authFetchJson<{ count?: number }>('/api/instantly/leads', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'delete-by-campaign', campaign_id: campaignId }),
       });
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(errBody?.error ?? `HTTP ${res.status}`);
-      }
-      const result = await res.json();
       const deleted = result?.count ?? 0;
       setRows((prev) => prev.map((r) => r.id === campaignId ? { ...r, leadsCount: Math.max(0, r.leadsCount - deleted) } : r));
     } catch (err) {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
   Plus,
   Play,
@@ -92,23 +92,15 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   const [sendingTgRec, setSendingTgRec] = useState<string | null>(null);
   const [tgRecSuccess, setTgRecSuccess] = useState<string | null>(null);
 
-  const getToken = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? '';
-  }, []);
-
   const fetchCampaigns = useCallback(async (silent = false) => {
     if (!silent) setLoadingCampaigns(true);
     try {
-      const token = await getToken();
-      const res = await fetch('/api/ai-caller/campaigns', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch('/api/ai-caller/campaigns');
       const data = await res.json();
       setCampaigns(data.campaigns ?? []);
     } catch { /* ignore */ }
     if (!silent) setLoadingCampaigns(false);
-  }, [getToken]);
+  }, []);
 
   if (campaignsLoaded.current == null) {
     campaignsLoaded.current = true;
@@ -123,18 +115,14 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       fetchCampaigns(true);
       const runningCamp = campaigns.find((c) => c.status === 'running');
       if (expandedId && runningCamp && expandedId === runningCamp.id) {
-        getToken().then((token) =>
-          fetch(`/api/ai-caller/campaigns/${expandedId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-            .then((r) => r.json())
-            .then((data) => setContacts(data.contacts ?? []))
-            .catch(() => {})
-        );
+        authFetch(`/api/ai-caller/campaigns/${expandedId}`)
+          .then((r) => r.json())
+          .then((data) => setContacts(data.contacts ?? []))
+          .catch(() => {});
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [hasRunning, expandedId, campaigns, fetchCampaigns, getToken]);
+  }, [hasRunning, expandedId, campaigns, fetchCampaigns]);
 
   // Derived defaults
   const effectiveAssistant = formAssistant || (assistants.length ? assistants[0].id : '');
@@ -199,10 +187,9 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setCreating(true);
     setError('');
     try {
-      const token = await getToken();
-      const res = await fetch('/api/ai-caller/campaigns', {
+      const res = await authFetch('/api/ai-caller/campaigns', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: formName,
           assistantId: effectiveAssistant,
@@ -235,20 +222,18 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   // ── Run Campaign (server-driven via worker) ──
 
   async function startCampaign(id: string) {
-    const token = await getToken();
-    await fetch(`/api/ai-caller/campaigns/${id}`, {
+    await authFetch(`/api/ai-caller/campaigns/${id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'running' }),
     });
     fetchCampaigns(true);
   }
 
   async function pauseCampaign(id: string) {
-    const token = await getToken();
-    await fetch(`/api/ai-caller/campaigns/${id}`, {
+    await authFetch(`/api/ai-caller/campaigns/${id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'paused' }),
     });
     fetchCampaigns(true);
@@ -256,10 +241,8 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
 
   async function deleteCampaign(id: string) {
     if (!confirm('Удалить кампанию?')) return;
-    const token = await getToken();
-    await fetch(`/api/ai-caller/campaigns/${id}`, {
+    await authFetch(`/api/ai-caller/campaigns/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
     });
     fetchCampaigns(true);
   }
@@ -269,10 +252,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
     setExpandedId(campaignId);
     setLoadingContacts(true);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/ai-caller/campaigns/${campaignId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/ai-caller/campaigns/${campaignId}`);
       const data = await res.json();
       setContacts(data.contacts ?? []);
     } catch { /* ignore */ }
@@ -299,10 +279,7 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
 
     setLoadingAudio(vapiCallId);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/ai-caller/calls/${vapiCallId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await authFetch(`/api/ai-caller/calls/${vapiCallId}`);
       const data = await res.json();
       const call = data.call as Record<string, unknown> | undefined;
       let url = (call?.recordingUrl as string)
@@ -315,8 +292,9 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
       }
 
       if (url.startsWith('/api/')) {
+        const tkn = await getAccessToken();
         const sep = url.includes('?') ? '&' : '?';
-        url = `${url}${sep}token=${encodeURIComponent(token)}`;
+        url = `${url}${sep}token=${encodeURIComponent(tkn)}`;
       }
 
       setRecordingUrls((prev) => ({ ...prev, [vapiCallId]: url }));
@@ -350,24 +328,19 @@ export function CampaignsTab({ assistants, phoneNumbers, loading }: Props) {
   useEffect(() => {
     if (tgLoadedRef.current) return;
     tgLoadedRef.current = true;
-    getToken().then((token) =>
-      fetch('/api/ai-caller/telegram/chats', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((r) => r.json())
-        .then((data) => setTgChats(data.chats ?? []))
-        .catch(() => {})
-    );
-  }, [getToken]);
+    authFetch('/api/ai-caller/telegram/chats')
+      .then((r) => r.json())
+      .then((data) => setTgChats(data.chats ?? []))
+      .catch(() => {});
+  }, []);
 
   async function sendRecordingToTelegram(vapiCallId: string, phone: string, chatId: number) {
     setSendingTgRec(vapiCallId);
     setTgRecSuccess(null);
     try {
-      const token = await getToken();
-      const tgRes = await fetch('/api/ai-caller/telegram/send-recording', {
+      const tgRes = await authFetch('/api/ai-caller/telegram/send-recording', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chatId, vapiCallId, phone }),
       });
       if (tgRes.ok) {

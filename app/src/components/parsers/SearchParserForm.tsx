@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { Loader2, Play, Sparkles, Trash2 } from 'lucide-react';
-import { supabase } from '@/lib/supabaseClient';
+import { authFetch, getAccessToken } from '@/lib/authFetch';
 
 export type SearchParserStartPayload = {
   brief?: string;
@@ -32,11 +32,6 @@ export function SearchParserForm({ onStart, busy }: Props) {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const getAccessToken = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token ?? null;
-  };
 
   const handlePdfUpload = async (file: File) => {
     setPdfUploading(true);
@@ -78,14 +73,8 @@ export function SearchParserForm({ onStart, busy }: Props) {
     setGenerateError(null);
     setGeneratingQueries(true);
     try {
-      const token = await getAccessToken();
-      if (!token) throw new Error('Not authenticated');
-      const res = await fetch('/api/parsers/search/generate', {
+      const res = await authFetch('/api/parsers/search/generate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
         body: JSON.stringify({ brief: brief.trim() }),
       });
       if (!res.ok) {
