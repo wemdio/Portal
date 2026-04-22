@@ -1,5 +1,4 @@
 import { UserRole } from '@/types';
-import { supabase } from './supabaseClient';
 import type { Locale } from '@/lib/i18n';
 
 export const ROLE_LABELS: Record<UserRole, string> = {
@@ -85,6 +84,7 @@ export function isInternalRole(role: UserRole | null): boolean {
 }
 
 export async function getUserRole(userId: string): Promise<UserRole | null> {
+  const { supabase } = await import('./supabaseClient');
   const { data, error } = await supabase
     .from('profiles')
     .select('role')
@@ -96,6 +96,7 @@ export async function getUserRole(userId: string): Promise<UserRole | null> {
 }
 
 export async function getCurrentUserRole(): Promise<UserRole | null> {
+  const { supabase } = await import('./supabaseClient');
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.user?.id) return null;
   return getUserRole(session.user.id);

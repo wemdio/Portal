@@ -1,12 +1,29 @@
 -- Инициализация main-postgres для Portal.
 -- Выполняется один раз при первом запуске supabase/postgres (initdb).
--- Базовые роли (anon, authenticated, service_role, supabase_*) и схемы (auth, storage,
--- realtime, extensions, _realtime) уже созданы образом supabase/postgres.
+-- Часть ролей/схем в некоторых вариантах образа может отсутствовать на этапе init,
+-- поэтому ниже создаём минимум вручную.
 --
 -- Цель: подготовить БД `postgres` (стандартное имя у Supabase Cloud) для приёма
 -- дампа из старого Supabase. Имя БД одинаковое — ничего в коде Portal менять не нужно.
 
 -- Дополнительные расширения, нужные приложению Portal
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'postgres') then
+    create role postgres with login superuser createdb createrole replication bypassrls;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'anon') then
+    create role anon nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    create role service_role nologin noinherit bypassrls;
+  end if;
+end $$;
+
+create schema if not exists extensions;
 create extension if not exists "pgcrypto";
 create extension if not exists "pg_trgm";
 create extension if not exists vector with schema extensions;

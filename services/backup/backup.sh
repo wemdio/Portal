@@ -23,10 +23,16 @@
 # Все дампы: pg_dump --format=custom --compress=6 --no-owner --no-privileges
 # Restore:   pg_restore --clean --if-exists --no-owner --no-privileges -d <db>
 #
-# Storage layout (bucket из BACKUP_SUPABASE_URL/BACKUP_SUPABASE_KEY):
-#   deploy-backups/portal-main/portal-main-main-supabase-<TS>.dump
-#   deploy-backups/instantly/prod/instantly-instantly-prod-<TS>.dump
-#   deploy-backups/instantly/dev/instantly-instantly-dev-<TS>.dump
+# Storage layout (bucket из BACKUP_BUCKET, дефолт db-backups; проект из
+# BACKUP_SUPABASE_URL/BACKUP_SUPABASE_KEY):
+#   <bucket>/portal-main/portal-main-main-supabase-<TS>.dump
+#   <bucket>/instantly/prod/instantly-instantly-prod-<TS>.dump
+#   <bucket>/instantly/dev/instantly-instantly-dev-<TS>.dump
+#
+# Зачем отдельный db-backups: бакет deploy-backups держит мелкие конфиги
+# с Portal-сервера (.env, docker-compose.prod.yml, ~10 КБ каждый), его лимит
+# в Storage Settings — 50 МБ, чего хватает с запасом. БД-дампы — сотни МБ,
+# им нужен отдельный бакет с поднятым File size limit (см. RUNBOOK).
 #
 # При фейле pg_dump или non-2xx upload → Telegram-алерт через
 # TELEGRAM_HEALTH_BOT_TOKEN/CHAT_ID + exit 1 (cron-логи зафиксируют как failed).
@@ -70,7 +76,7 @@ send_alert() {
 # EXTRA_PG_DUMP_OPTS — флаги, специфичные для main-supabase (исключения схем).
 # PREFIX и SUBPATH собирают имя файла и путь в Storage:
 #   <PREFIX>-<INSTANCE>-<TS>.dump
-#   deploy-backups/<SUBPATH>/<file>
+#   <BACKUP_BUCKET>/<SUBPATH>/<file>
 
 PG_CONN_URL=""
 EXTRA_PG_DUMP_OPTS=""
@@ -160,23 +166,40 @@ echo "[backup] Dump complete: ${DUMP_FILE} (${DUMP_SIZE} bytes)"
 
 # ─── Upload to Supabase Storage ──────────────────────────────────────────────
 
+# Bucket для дампов вынесен в env: исторически использовался deploy-backups
+# с лимитом 50 МБ (хватает только конфигам), теперь дефолт — db-backups
+# с поднятым File size limit. Можно переопределить под отдельный backup-проект.
+BACKUP_BUCKET="${BACKUP_BUCKET:-db-backups}"
+
 upload_failed=0
 if [ -n "${BACKUP_SUPABASE_URL:-}" ] && [ -n "${BACKUP_SUPABASE_KEY:-}" ]; then
-  REMOTE_PATH="deploy-backups/${SUBPATH}/${PREFIX}-${INSTANCE}-${TS}.dump"
+  REMOTE_PATH="${BACKUP_BUCKET}/${SUBPATH}/${PREFIX}-${INSTANCE}-${TS}.dump"
   echo "[backup] Uploading to ${REMOTE_PATH}..."
+
+  # ВАЖНО: используем -T (--upload-file) вместо --data-binary @file.
+  # `--data-binary @file` грузит ВЕСЬ файл в RAM (см. curl/curl#18300), что
+  # на портал-бэкапе (256 МБ memory limit) приводит к OOM-kill curl-а через
+  # SIGKILL: stdout пустой → %{http_code} пустой → алерт «Upload FAILED (HTTP )».
+  # `-T` стримит с диска чанками, память плоская независимо от размера дампа.
+  # `-X POST` оставляем явно: Supabase Storage REST принимает POST + x-upsert
+  # для апсерта (это же делает supabase-js клиент).
+  curl_rc=0
   HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 600 \
     -X POST "${BACKUP_SUPABASE_URL}/storage/v1/object/${REMOTE_PATH}" \
     -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
     -H 'Content-Type: application/octet-stream' \
     -H 'x-upsert: true' \
-    --data-binary @"${DUMP_FILE}")
+    -T "${DUMP_FILE}") || curl_rc=$?
 
   case "$HTTP_CODE" in
     200|201)
       echo "[backup] Upload OK (HTTP ${HTTP_CODE})"
       ;;
     *)
-      msg="🚨 [backup ${INSTANCE}] Upload FAILED (HTTP ${HTTP_CODE}) for ${REMOTE_PATH}"
+      # Включаем curl_rc и size в текст: rc=137 → OOM/SIGKILL,
+      # rc=28 → таймаут, rc=7 → connect refused, rc=0+code 4xx → серверная
+      # ошибка. Без этого пустой HTTP_CODE не даёт никаких подсказок.
+      msg="🚨 [backup ${INSTANCE}] Upload FAILED (HTTP ${HTTP_CODE} rc=${curl_rc} size=${DUMP_SIZE}) for ${REMOTE_PATH}"
       echo "$msg" >&2
       send_alert "$msg"
       upload_failed=1
@@ -207,7 +230,7 @@ cleanup_remote() {
 
   list_response=$(mktemp)
   list_code=$(curl -sS -o "$list_response" -w '%{http_code}' --max-time 30 \
-    -X POST "${BACKUP_SUPABASE_URL}/storage/v1/object/list/deploy-backups" \
+    -X POST "${BACKUP_SUPABASE_URL}/storage/v1/object/list/${BACKUP_BUCKET}" \
     -H "Authorization: Bearer ${BACKUP_SUPABASE_KEY}" \
     -H 'Content-Type: application/json' \
     --data "{\"prefix\":\"${SUBPATH}\",\"limit\":1000,\"sortBy\":{\"column\":\"created_at\",\"order\":\"asc\"}}")
@@ -239,7 +262,7 @@ cleanup_remote() {
     fi
     # Лексикографическое сравнение ISO-8601 в UTC = сравнение по времени.
     if [ "$created" \< "$cutoff" ]; then
-      remote="deploy-backups/${SUBPATH}/${name}"
+      remote="${BACKUP_BUCKET}/${SUBPATH}/${name}"
       echo "[backup] Removing old object: ${remote} (created=${created})"
       del_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
         -X DELETE "${BACKUP_SUPABASE_URL}/storage/v1/object/${remote}" \

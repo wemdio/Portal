@@ -22,6 +22,7 @@ services:
       - NODE_ENV=production
       - BODY_SIZE_LIMIT=600mb
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_URL=${SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL}}
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
@@ -56,7 +57,7 @@ services:
       - TG_TARGET_API_HASH=${TG_TARGET_API_HASH}
       - TG_TARGET_SESSION=${TG_TARGET_SESSION}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -521,10 +522,13 @@ services:
       - MAIN_SUPABASE_DATABASE_URL=${MAIN_SUPABASE_DATABASE_URL:-${DATABASE_URL:-}}
       - INSTANTLY_DATABASE_URL=${INSTANTLY_DATABASE_URL:-}
       - INSTANTLY_DEV_DATABASE_URL=${INSTANTLY_DEV_DATABASE_URL:-}
-      # Куда грузим (bucket deploy-backups). По умолчанию — основной Supabase
-      # проект Portal (можно переопределить отдельным проектом-«хранилищем»).
+      # Куда грузим. Дефолт — основной Supabase проект Portal (можно
+      # переопределить отдельным проектом-«хранилищем» через .env).
       - BACKUP_SUPABASE_URL=${BACKUP_SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}
       - BACKUP_SUPABASE_KEY=${BACKUP_SUPABASE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}
+      # Bucket для дампов: db-backups создан вручную в Supabase Storage с
+      # File size limit 2 GB (deploy-backups оставлен под мелкие конфиги).
+      - BACKUP_BUCKET=${BACKUP_BUCKET:-db-backups}
       - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
       - BACKUP_REMOTE_RETENTION_DAYS=${BACKUP_REMOTE_RETENTION_DAYS:-30}
       # Алерты при падении pg_dump или upload.
@@ -535,8 +539,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.2'
+          # 1 ГБ + 1 CPU нужны pg_dump для главной Supabase БД (несколько ГБ
+          # данных, --compress=6 жмёт в один поток). Прежний лимит 256M убивал
+          # curl OOM-ом при стриминге (даже после перехода на -T --upload-file
+          # хочется иметь запас на pg_dump + tr/sed/find в cleanup_remote).
+          # См. services/backup/backup.sh комментарий про curl/curl#18300.
+          memory: 1G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
@@ -643,3 +652,4 @@ volumes:
 networks:
   portal-network:
     driver: bridge
+
