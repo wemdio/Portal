@@ -53,13 +53,14 @@ function extractBodyText(body: Email['body']): string {
 }
 
 /**
- * Builds export rows by joining emails with lead metadata.
+ * Builds export rows from emails, optionally enriched with lead metadata.
+ * When leadsById is empty/undefined, falls back to fields available on the Email object itself
+ * (from_address_email, from_address_json, i_status, to_address_email_list).
  * Emails are sorted chronologically ascending by timestamp_email (fallback: timestamp_created).
- * Uses only Instantly-provided interest_status — does not reference any portal LLM statuses.
  */
 export function buildEmailsExportRows(
   emails: Email[],
-  leadsById: Map<string, Lead>,
+  leadsById?: Map<string, Lead>,
 ): EmailExportRow[] {
   const sorted = [...emails].sort((a, b) => {
     const ta = a.timestamp_email ?? a.timestamp_created ?? '';
@@ -68,15 +69,22 @@ export function buildEmailsExportRows(
   });
 
   return sorted.map((email): EmailExportRow => {
-    const lead = email.lead ? leadsById.get(email.lead) : undefined;
-    const interestStatus = lead?.interest_status;
-    const name = [lead?.first_name, lead?.last_name].filter(Boolean).join(' ');
+    const lead = email.lead ? leadsById?.get(email.lead) : undefined;
+    const isReply = (email.ue_type ?? 1) >= 2;
+
+    const leadEmail = lead?.email
+      ?? (isReply ? email.from_address_email : email.to_address_email_list)
+      ?? '';
+    const leadName = lead
+      ? [lead.first_name, lead.last_name].filter(Boolean).join(' ')
+      : (isReply ? email.from_address_json?.[0]?.name : undefined) ?? '';
+    const interestStatus = lead?.interest_status ?? email.i_status;
 
     return {
       'Дата': email.timestamp_email ?? email.timestamp_created ?? '',
       'Тип': UE_TYPE_LABELS[email.ue_type ?? 1] ?? '',
-      'Email лида': lead?.email ?? '',
-      'Имя': name,
+      'Email лида': leadEmail,
+      'Имя': leadName,
       'Компания': lead?.company_name ?? '',
       'Должность': lead?.title ?? '',
       'Телефон': lead?.phone ?? '',

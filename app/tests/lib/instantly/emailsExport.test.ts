@@ -65,12 +65,20 @@ describe('buildEmailsExportRows', () => {
     expect(rows[0]['Текст']).toBe('Plain string body');
   });
 
-  it('handles missing lead gracefully (orphan email)', () => {
-    const email: Email = { ...baseEmail, id: 'em-3', lead: 'unknown-lead' };
+  it('handles missing lead gracefully — falls back to Email fields', () => {
+    const email: Email = {
+      ...baseEmail,
+      id: 'em-3',
+      lead: 'unknown-lead',
+      from_address_email: 'reply@lead.com',
+      from_address_json: [{ address: 'reply@lead.com', name: 'Jane Lead' }],
+      to_address_email_list: 'target@ourco.com',
+      i_status: 1,
+    };
     const rows = buildEmailsExportRows([email], new Map());
-    expect(rows[0]['Email лида']).toBe('');
-    expect(rows[0]['Имя']).toBe('');
-    expect(rows[0]['Статус Instantly']).toBe('');
+    expect(rows[0]['Email лида']).toBe('reply@lead.com');
+    expect(rows[0]['Имя']).toBe('Jane Lead');
+    expect(rows[0]['Статус Instantly']).toBe(INSTANTLY_INTEREST_LABELS[1]);
   });
 
   it('sorts emails chronologically ascending by timestamp_email', () => {
@@ -108,5 +116,47 @@ describe('buildEmailsExportRows', () => {
   it('returns empty array for empty input', () => {
     const rows = buildEmailsExportRows([], new Map());
     expect(rows).toHaveLength(0);
+  });
+
+  it('works without leadsById at all (undefined)', () => {
+    const email: Email = {
+      ...baseEmail,
+      id: 'em-no-leads',
+      from_address_email: 'lead@co.com',
+      from_address_json: [{ address: 'lead@co.com', name: 'Bob' }],
+      i_status: -1,
+    };
+    const rows = buildEmailsExportRows([email]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['Email лида']).toBe('lead@co.com');
+    expect(rows[0]['Имя']).toBe('Bob');
+    expect(rows[0]['Статус Instantly']).toBe(INSTANTLY_INTEREST_LABELS[-1]);
+    expect(rows[0]['Компания']).toBe('');
+  });
+
+  it('uses to_address_email_list for sent emails (ue_type=1) when no lead', () => {
+    const email: Email = {
+      ...baseEmail,
+      id: 'em-sent',
+      ue_type: 1,
+      lead: 'missing',
+      to_address_email_list: 'prospect@example.com',
+      from_address_email: 'our@sender.com',
+    };
+    const rows = buildEmailsExportRows([email]);
+    expect(rows[0]['Email лида']).toBe('prospect@example.com');
+  });
+
+  it('uses from_address_email for reply emails (ue_type=2) when no lead', () => {
+    const email: Email = {
+      ...baseEmail,
+      id: 'em-reply-nolead',
+      ue_type: 2,
+      lead: 'missing',
+      from_address_email: 'replier@external.com',
+      to_address_email_list: 'our@sender.com',
+    };
+    const rows = buildEmailsExportRows([email]);
+    expect(rows[0]['Email лида']).toBe('replier@external.com');
   });
 });

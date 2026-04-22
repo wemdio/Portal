@@ -1,11 +1,8 @@
-# pg_dump-клиент >= server-версии. Серверы:
-#   - Supabase managed PG 15.x
-#   - Instantly local PG 16-alpine
-# Берём 17, чтобы покрыть оба + запас на апгрейды.
 FROM postgres:17-alpine
 
-# curl для upload в Supabase Storage и Telegram-алертов
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl ca-certificates \
+    && curl -sSL -o /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc \
+    && chmod +x /usr/local/bin/mc
 
 COPY backup.sh /backup.sh
 RUN chmod +x /backup.sh

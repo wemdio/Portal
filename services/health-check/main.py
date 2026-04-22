@@ -704,28 +704,28 @@ async def _run_health_check_inner():
     db_ok, db_msg, db_cur, db_max = await check_db()
     _check(
         "db", not db_ok,
-        f"🔴 <b>БД (Supabase)</b>: {db_msg}",
-        "✅ <b>БД (Supabase)</b>: восстановлена",
+        f"🔴 <b>Main Postgres (35434)</b>: {db_msg}",
+        "✅ <b>Main Postgres (35434)</b>: восстановлена",
     )
     if db_ok and db_cur is not None and db_max is not None:
         usage_pct = db_cur / db_max * 100
         if usage_pct > 80:
             problems.append(
-                f"🟡 <b>БД Supabase connections</b>: {db_cur}/{db_max} ({usage_pct:.0f}%)"
+                f"🟡 <b>Main Postgres connections</b>: {db_cur}/{db_max} ({usage_pct:.0f}%)"
             )
 
     if INSTANTLY_DATABASE_URL:
         idb_ok, idb_msg, idb_cur, idb_max = await check_instantly_db()
         _check(
             "instantly_db", not idb_ok,
-            f"🔴 <b>БД (Instantly)</b>: {idb_msg}",
-            "✅ <b>БД (Instantly)</b>: восстановлена",
+            f"🔴 <b>Instantly Postgres (35432)</b>: {idb_msg}",
+            "✅ <b>Instantly Postgres (35432)</b>: восстановлена",
         )
         if idb_ok and idb_cur is not None and idb_max is not None:
             idb_pct = idb_cur / idb_max * 100
             if idb_pct > 80:
                 problems.append(
-                    f"🟡 <b>БД Instantly connections</b>: {idb_cur}/{idb_max} ({idb_pct:.0f}%)"
+                    f"🟡 <b>Instantly Postgres connections</b>: {idb_cur}/{idb_max} ({idb_pct:.0f}%)"
                 )
 
     proxy_results = await check_all_proxies()
@@ -1115,7 +1115,7 @@ def _format_heartbeat_caption(
 
     parts.append("")
     parts.extend(_format_db_section(
-        data, DISK_TOTAL_GB, _METRICS, "Supabase (основная)", "🟢",
+        data, DISK_TOTAL_GB, _METRICS, "Main Postgres (35434)", "🟢",
         include_sparklines=include_sparklines,
     ))
 
@@ -1123,7 +1123,7 @@ def _format_heartbeat_caption(
         parts.append("")
         parts.extend(_format_db_section(
             instantly_data, 0, _METRICS_INSTANTLY,
-            "Instantly DB", "🟠",
+            "Instantly Postgres (35432)", "🟠",
             include_sparklines=include_sparklines,
         ))
 
