@@ -11,18 +11,16 @@ import {
   buildBriefStoragePath,
   isProjectBriefPath,
 } from '@/lib/projectBriefHypotheses/storage';
-import { generateLeadSourceHypotheses } from '@/lib/projectBriefHypotheses/generateHypotheses';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// allow up to ~60s for upload + PDF parse + AI generation
-export const maxDuration = 60;
+// Раньше тут была генерация гипотез — теперь она вынесена в отдельный endpoint
+// (/brief/hypotheses), чтобы аплоад большого PDF (5–20 МБ) не упирался в общий
+// таймаут. Этот route отвечает только за загрузку файла + парсинг + запись в БД.
+export const maxDuration = 180;
 
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
 const SIGNED_URL_TTL_SECONDS = 5 * 60;
-const HYPOTHESES_TIMEOUT_MS = Number(process.env.PROJECT_HYPOTHESES_TIMEOUT_MS ?? '50000');
-
-const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -91,39 +89,67 @@ async function deleteStorageObject(path: string | null | undefined) {
   }
 }
 
-async function generateHypothesesSafe(briefText: string, projectId: string): Promise<{
-  hypotheses: string | null;
-  error: string | null;
-}> {
-  if (!OPENROUTER_BRIEF_API_KEY) {
-    return { hypotheses: null, error: 'OPENROUTER_BRIEF_API_KEY не настроен на сервере' };
+/**
+ * Заливает PDF в Supabase Storage напрямую через REST.
+ *
+ * Зачем не SDK: @supabase/storage-js на нашей сети до удалённого Storage VPS
+ * заметно медленнее (60s vs 20s на 6 МБ) и не отдаёт читабельную диагностику
+ * при abort'е. Прямой fetch с Buffer-телом стабильнее и быстрее.
+ */
+async function uploadBriefToStorage(
+  storagePath: string,
+  buffer: Buffer,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const supabaseUrl =
+    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  const serviceKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_KEY ?? '';
+  if (!supabaseUrl || !serviceKey) {
+    return { ok: false, status: 500, message: 'Storage REST: missing Supabase URL or service key' };
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), HYPOTHESES_TIMEOUT_MS);
+  const url = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/${BRIEF_BUCKET}/${storagePath}`;
 
+  let res: Response;
   try {
-    const result = await generateLeadSourceHypotheses({
-      apiKey: OPENROUTER_BRIEF_API_KEY,
-      briefText,
-      signal: controller.signal,
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceKey}`,
+        apikey: serviceKey,
+        'Content-Type': 'application/pdf',
+        'cache-control': '3600',
+        'x-upsert': 'false',
+      },
+      // Node's undici fetch принимает Buffer (через BodyInit), но DOM-типы
+      // об этом не знают, поэтому приводим к BodyInit.
+      body: buffer as unknown as BodyInit,
+      signal,
     });
-    return { hypotheses: result, error: null };
   } catch (err) {
+    const cause =
+      err instanceof Error && (err as { cause?: { code?: string; message?: string } }).cause;
+    const detail =
+      cause && typeof cause === 'object'
+        ? (cause as { code?: string; message?: string }).code ??
+          (cause as { code?: string; message?: string }).message ??
+          ''
+        : '';
     const message =
-      err instanceof Error
-        ? err.name === 'AbortError'
-          ? 'Превышен таймаут генерации гипотез'
-          : err.message
-        : 'Не удалось сгенерировать гипотезы';
-    await logError('projects.brief.hypotheses.failed', err, { projectId });
-    return { hypotheses: null, error: message };
-  } finally {
-    clearTimeout(timeoutId);
+      err instanceof Error ? `${err.message}${detail ? ` (${detail})` : ''}` : 'unknown';
+    return { ok: false, status: 502, message: `Storage REST upload failed: ${message}` };
   }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    return { ok: false, status: res.status, message: text.slice(0, 500) || `HTTP ${res.status}` };
+  }
+  return { ok: true };
 }
 
-// ─── POST: upload brief PDF + (optionally) generate hypotheses ────────────────
+// ─── POST: upload brief PDF (без генерации гипотез) ──────────────────────────
+// Гипотезы генерируются отдельным запросом — POST /api/projects/[id]/brief/hypotheses
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     if (!supabaseAdmin) return jsonError('Server misconfigured: missing service role key', 500);
@@ -134,9 +160,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const { id: projectId } = await ctx.params;
     if (!projectId) return jsonError('Missing project id', 400);
-
-    const url = new URL(req.url);
-    const regenerate = url.searchParams.get('regenerate') === '1';
 
     const existing = await fetchProjectRow(projectId);
     if (!existing) return jsonError('Project not found', 404);
@@ -170,18 +193,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       return jsonError('Файл не является валидным PDF', 400);
     }
 
-    // ── Storage upload ─────────────────────────────────────────────────────────
+    // ── Storage upload через raw fetch (быстрее, чем supabase-js SDK) ─────────
     const storagePath = buildBriefStoragePath({ projectId, fileName });
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from(BRIEF_BUCKET)
-      .upload(storagePath, buffer, {
-        contentType: 'application/pdf',
-        cacheControl: '3600',
-        upsert: false,
-      });
-    if (uploadError) {
-      await logError('projects.brief.storage.upload_failed', uploadError, { projectId, storagePath });
-      return jsonError(`Ошибка загрузки в хранилище: ${uploadError.message}`, 502);
+    const uploadResult = await uploadBriefToStorage(storagePath, buffer);
+    if (!uploadResult.ok) {
+      await logError(
+        'projects.brief.storage.upload_failed',
+        new Error(uploadResult.message),
+        { projectId, storagePath, status: uploadResult.status },
+      );
+      return jsonError(`Ошибка загрузки в хранилище: ${uploadResult.message}`, 502);
     }
 
     // ── Extract text ───────────────────────────────────────────────────────────
@@ -216,6 +237,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       brief_text: briefText,
       brief_uploaded_at: uploadedAt,
       updated_at: uploadedAt,
+      // Сбрасываем предыдущую ошибку гипотез — новая попытка пойдёт чистой.
+      lead_source_hypotheses_error: null,
     };
 
     const { error: updateError } = await supabaseAdmin
@@ -235,47 +258,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       bytes: buffer.length,
     });
 
-    // ── Hypotheses generation ─────────────────────────────────────────────────
-    const shouldGenerate = regenerate || !existing.lead_source_hypotheses;
-    let hypotheses: string | null = existing.lead_source_hypotheses;
-    let hypothesesError: string | null = null;
-    let hypothesesGeneratedAt: string | null = existing.lead_source_hypotheses_generated_at;
-
-    if (shouldGenerate) {
-      const generated = await generateHypothesesSafe(briefText, projectId);
-      hypotheses = generated.hypotheses ?? null;
-      hypothesesError = generated.error ?? null;
-      hypothesesGeneratedAt = generated.hypotheses ? new Date().toISOString() : hypothesesGeneratedAt;
-
-      const { error: hUpdateError } = await supabaseAdmin
-        .from('projects')
-        .update({
-          lead_source_hypotheses: hypotheses,
-          lead_source_hypotheses_generated_at: hypothesesGeneratedAt,
-          lead_source_hypotheses_error: hypothesesError,
-        })
-        .eq('id', projectId);
-
-      if (hUpdateError) {
-        await logError('projects.brief.hypotheses.persist_failed', hUpdateError, { projectId });
-      } else if (generated.hypotheses) {
-        void logAudit('projects.brief.hypotheses.success', 'Lead-source hypotheses generated', {
-          projectId,
-          regenerate,
-        });
-      }
-    }
-
     return NextResponse.json({
       ok: true,
       brief_file_path: storagePath,
       brief_file_name: fileName,
       brief_uploaded_at: uploadedAt,
       brief_text_chars: briefText.length,
-      lead_source_hypotheses: hypotheses,
-      lead_source_hypotheses_generated_at: hypothesesGeneratedAt,
-      lead_source_hypotheses_error: hypothesesError,
-      regenerated: regenerate,
+      // Гипотезы сохраняем как есть из БД — клиент решит, нужно ли их перегенерировать.
+      lead_source_hypotheses: existing.lead_source_hypotheses,
+      lead_source_hypotheses_generated_at: existing.lead_source_hypotheses_generated_at,
+      lead_source_hypotheses_error: null,
+      // Подсказка для клиента: можно ли запустить генерацию гипотез.
+      hypotheses_pending: !existing.lead_source_hypotheses,
     });
   } catch (err) {
     await logError('projects.brief.post.unexpected', err);

@@ -14,6 +14,15 @@ import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
+import {
+  ALL_EXTRACTOR_KEYS,
+  CASCADE_RULES,
+  EXTRACTOR_LABELS,
+  type ExtractorKey,
+  type SignalPresetId,
+} from '@/lib/enrich/extractors/types';
+import { formatExtraValue } from '@/lib/enrich/extractors/formatExtraValue';
+import SignalEnrichmentModal from '@/components/SignalEnrichmentModal';
 
 type Sheet = {
   id: string;
@@ -265,6 +274,8 @@ type DetectedSignalJob = {
   result_col_header: string | null;
   result_col_index_2: number | null;
   result_col_header_2: string | null;
+  /** Per-extractor extra spreadsheet columns persisted on the job row. */
+  extra_cols?: Array<{ key: ExtractorKey; colIndex: number; header: string }> | null;
 };
 
 type SignalEnrichmentState = {
@@ -277,7 +288,49 @@ type SignalEnrichmentState = {
   error: string | null;
   jobId: string | null;
   detectedJob: DetectedSignalJob | null;
+  /**
+   * Atomic extractors the user has enabled. Always includes 'stack' and
+   * 'profile' (rendered as the legacy stack/profile pair on the sheet) so
+   * that turning everything else off still produces the original behavior.
+   */
+  selectedExtractors: ExtractorKey[];
+  /** Active built-in/custom preset id (`null` when manually edited). */
+  presetId: SignalPresetId | string | null;
+  /** Custom presets persisted to localStorage. */
+  customPresets: Array<{ id: string; name: string; extractors: ExtractorKey[] }>;
+  /** Toast message shown when cascade auto-enables a dependency. */
+  cascadeToast: string | null;
 };
+
+const SIGNAL_DEFAULT_EXTRACTORS: ExtractorKey[] = ['stack', 'profile'];
+const SIGNAL_PRESETS_STORAGE_KEY = 'signal-enrichment-presets-v1';
+const SIGNAL_LAST_SELECTION_STORAGE_KEY = 'signal-enrichment-last-selection-v1';
+
+/**
+ * Whitelist incoming extractor keys (e.g. from localStorage) against the known
+ * set, deduplicate, and ensure stack+profile are always present so the legacy
+ * pair of result columns is always written.
+ */
+function sanitizeExtractorList(keys: unknown): ExtractorKey[] {
+  const valid = new Set<ExtractorKey>(SIGNAL_DEFAULT_EXTRACTORS);
+  if (Array.isArray(keys)) {
+    for (const k of keys) {
+      if (typeof k === 'string' && (ALL_EXTRACTOR_KEYS as string[]).includes(k)) {
+        valid.add(k as ExtractorKey);
+      }
+    }
+  }
+  // Preserve canonical order from ALL_EXTRACTOR_KEYS.
+  return ALL_EXTRACTOR_KEYS.filter((k) => valid.has(k));
+}
+
+/**
+ * Compute the list of "extra" extractors (everything beyond stack+profile).
+ * These map 1:1 to extra spreadsheet columns to the right of "Профиль".
+ */
+function getExtraExtractors(selected: ExtractorKey[]): ExtractorKey[] {
+  return selected.filter((k) => k !== 'stack' && k !== 'profile');
+}
 
 const DADATA_FIELDS: DadataFieldOption[] = [
   { key: 'full_name', label: 'Полное название' },
@@ -1279,6 +1332,10 @@ export function DatabaseSpreadsheet() {
     error: null,
     jobId: null,
     detectedJob: null,
+    selectedExtractors: SIGNAL_DEFAULT_EXTRACTORS,
+    presetId: 'basic',
+    customPresets: [],
+    cascadeToast: null,
   });
   const signalAbortRef = useRef<AbortController | null>(null);
 
@@ -6998,8 +7055,17 @@ export function DatabaseSpreadsheet() {
     profileColIndex: number;
     totalRowsFallback: number;
     initialToken?: string | null;
+    extraCols?: Array<{ key: ExtractorKey; colIndex: number; header: string }>;
   }) => {
-    const { jobId, tabId, stackColIndex, profileColIndex, totalRowsFallback, initialToken } = params;
+    const {
+      jobId,
+      tabId,
+      stackColIndex,
+      profileColIndex,
+      totalRowsFallback,
+      initialToken,
+      extraCols,
+    } = params;
 
     const token = initialToken ?? (await getFreshToken());
     if (!token) {
@@ -7077,6 +7143,11 @@ export function DatabaseSpreadsheet() {
         }>(res, 'signals.results');
 
         if (data.results?.length) {
+          // Compute the right edge across extra columns once so we can grow
+          // each row to a consistent width before writing.
+          const maxColIdx = extraCols && extraCols.length > 0
+            ? Math.max(profileColIndex, ...extraCols.map((c) => c.colIndex))
+            : profileColIndex;
           setTabs((prev) =>
             prev.map((tab) => {
               if (tab.id !== tabId) return tab;
@@ -7084,17 +7155,33 @@ export function DatabaseSpreadsheet() {
               for (const result of data.results) {
                 const ri = result.row_index;
                 if (ri < 1 || ri >= nextData.length) continue;
-                while (nextData[ri].length <= profileColIndex) nextData[ri].push('');
+                while (nextData[ri].length <= maxColIdx) nextData[ri].push('');
                 if (result.status === 'completed') {
                   const parsed = parseSignalResultText(result.result_text);
                   if (parsed) {
                     nextData[ri][stackColIndex] = parsed.stack;
                     nextData[ri][profileColIndex] = parsed.profile;
                   }
+                  // Render extra extractor columns from the same JSON payload.
+                  if (extraCols && extraCols.length > 0 && result.result_text) {
+                    let raw: Record<string, unknown> | null = null;
+                    try {
+                      raw = JSON.parse(result.result_text) as Record<string, unknown>;
+                    } catch {
+                      raw = null;
+                    }
+                    if (raw) {
+                      for (const extra of extraCols) {
+                        nextData[ri][extra.colIndex] = formatExtraValue(extra.key, raw[extra.key]);
+                      }
+                    }
+                  }
                 } else if (result.status === 'failed' || result.status === 'skipped') {
                   nextData[ri][stackColIndex] = SIGNAL_ERROR_MARKER;
                   nextData[ri][profileColIndex] = result.last_error ?? 'Ошибка';
                   errorCount += 1;
+                  // Leave extra columns blank on failure rather than spam the
+                  // marker across N cells per row.
                 }
               }
               return { ...tab, data: nextData };
@@ -7159,6 +7246,145 @@ export function DatabaseSpreadsheet() {
     }
   }, [getFreshToken, setLastAction, setSignalEnrichment, setTabs]);
 
+  // Load custom presets + last selection from localStorage when the modal
+  // becomes visible (lazy — no need to read storage on every mount).
+  useEffect(() => {
+    if (!signalEnrichment.isOpen) return;
+    if (typeof window === 'undefined') return;
+    try {
+      const presetsRaw = window.localStorage.getItem(SIGNAL_PRESETS_STORAGE_KEY);
+      const customPresets = presetsRaw
+        ? (JSON.parse(presetsRaw) as Array<{ id: string; name: string; extractors: ExtractorKey[] }>)
+        : [];
+      const lastRaw = window.localStorage.getItem(SIGNAL_LAST_SELECTION_STORAGE_KEY);
+      const lastSelection = lastRaw
+        ? (JSON.parse(lastRaw) as { extractors: ExtractorKey[]; presetId: string | null })
+        : null;
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        customPresets: Array.isArray(customPresets) ? customPresets : [],
+        selectedExtractors:
+          lastSelection?.extractors && Array.isArray(lastSelection.extractors)
+            ? sanitizeExtractorList(lastSelection.extractors)
+            : prev.selectedExtractors,
+        presetId: lastSelection?.presetId ?? prev.presetId,
+      }));
+    } catch {
+      /* corrupt JSON in localStorage — ignore and keep defaults */
+    }
+  }, [signalEnrichment.isOpen]);
+
+  // Persist user's selection so the next time they open the modal they don't
+  // have to reconfigure. Only writes after the user actually interacted (i.e.
+  // not the very first open with defaults).
+  useEffect(() => {
+    if (!signalEnrichment.isOpen) return;
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(
+        SIGNAL_LAST_SELECTION_STORAGE_KEY,
+        JSON.stringify({
+          extractors: signalEnrichment.selectedExtractors,
+          presetId: signalEnrichment.presetId,
+        }),
+      );
+    } catch {
+      /* localStorage unavailable (private mode) — silently ignore */
+    }
+  }, [signalEnrichment.isOpen, signalEnrichment.selectedExtractors, signalEnrichment.presetId]);
+
+  const toggleSignalExtractor = useCallback((key: ExtractorKey) => {
+    if (key === 'stack' || key === 'profile') return; // base pair is mandatory
+    setSignalEnrichment((prev) => {
+      const isOn = prev.selectedExtractors.includes(key);
+      let next: ExtractorKey[];
+      let cascadeMessage: string | null = null;
+
+      if (isOn) {
+        next = prev.selectedExtractors.filter((k) => k !== key);
+      } else {
+        next = [...prev.selectedExtractors, key];
+        const deps = CASCADE_RULES[key] ?? [];
+        const added: ExtractorKey[] = [];
+        for (const dep of deps) {
+          if (!next.includes(dep)) {
+            next.push(dep);
+            added.push(dep);
+          }
+        }
+        if (added.length > 0) {
+          cascadeMessage = `Также включено: ${added.map((k) => EXTRACTOR_LABELS[k]).join(', ')}`;
+        }
+      }
+
+      return {
+        ...prev,
+        selectedExtractors: next,
+        presetId: null, // user diverged from preset
+        cascadeToast: cascadeMessage,
+      };
+    });
+  }, []);
+
+  const applySignalPreset = useCallback(
+    (preset: { id: string; extractors: ExtractorKey[] }) => {
+      setSignalEnrichment((prev) => ({
+        ...prev,
+        selectedExtractors: sanitizeExtractorList(preset.extractors),
+        presetId: preset.id,
+        cascadeToast: null,
+      }));
+    },
+    [],
+  );
+
+  const saveCustomSignalPreset = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    const name = window.prompt('Название пресета:');
+    if (!name || !name.trim()) return;
+    const id = `custom-${Date.now()}`;
+    setSignalEnrichment((prev) => {
+      const nextCustom = [
+        ...prev.customPresets,
+        { id, name: name.trim(), extractors: prev.selectedExtractors },
+      ];
+      try {
+        window.localStorage.setItem(SIGNAL_PRESETS_STORAGE_KEY, JSON.stringify(nextCustom));
+      } catch {
+        /* ignore */
+      }
+      return { ...prev, customPresets: nextCustom, presetId: id };
+    });
+  }, []);
+
+  const deleteCustomSignalPreset = useCallback((id: string) => {
+    setSignalEnrichment((prev) => {
+      const nextCustom = prev.customPresets.filter((p) => p.id !== id);
+      try {
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(SIGNAL_PRESETS_STORAGE_KEY, JSON.stringify(nextCustom));
+        }
+      } catch {
+        /* ignore */
+      }
+      return {
+        ...prev,
+        customPresets: nextCustom,
+        presetId: prev.presetId === id ? null : prev.presetId,
+      };
+    });
+  }, []);
+
+  // Auto-clear the cascade toast after 3 seconds.
+  useEffect(() => {
+    if (!signalEnrichment.cascadeToast) return;
+    const timer = setTimeout(
+      () => setSignalEnrichment((prev) => ({ ...prev, cascadeToast: null })),
+      3000,
+    );
+    return () => clearTimeout(timer);
+  }, [signalEnrichment.cascadeToast]);
+
   const handleStartSignalEnrichment = async () => {
     if (!activeTab || signalEnrichment.isProcessing) return;
     flushSave();
@@ -7186,6 +7412,31 @@ export function DatabaseSpreadsheet() {
       while (!isColumnEmpty(stackCol)) stackCol += 1;
     }
     const profileCol = stackCol + 1;
+
+    // Resolve extra extractor columns. We try to reuse pre-existing columns
+    // by header name (so re-runs with the same extractors don't sprawl new
+    // ones); unrecognized extractors get appended after the existing tail.
+    const extraExtractors = getExtraExtractors(signalEnrichment.selectedExtractors);
+    const extraCols: Array<{ key: ExtractorKey; colIndex: number; header: string }> = [];
+    let tailCol = profileCol; // last column index considered "owned" by signals
+    for (const key of extraExtractors) {
+      const header = EXTRACTOR_LABELS[key];
+      // Look right of profileCol for an existing column with this header.
+      let foundIdx = -1;
+      for (let c = profileCol + 1; c < headerRow.length; c++) {
+        if (String(headerRow[c] ?? '').trim() === header) {
+          foundIdx = c;
+          break;
+        }
+      }
+      if (foundIdx === -1) {
+        tailCol += 1;
+        foundIdx = tailCol;
+      } else if (foundIdx > tailCol) {
+        tailCol = foundIdx;
+      }
+      extraCols.push({ key, colIndex: foundIdx, header });
+    }
 
     // Process only rows whose stack cell is empty or contains the ⚠ marker
     // when reusing existing columns; otherwise process every row with a URL.
@@ -7216,12 +7467,19 @@ export function DatabaseSpreadsheet() {
 
     setUndoSnapshot('Сигналы с сайтов');
 
+    // Pre-extend the spreadsheet so headers + placeholders show up immediately.
+    const maxCol = Math.max(profileCol, ...extraCols.map((e) => e.colIndex));
     const baseData = activeTab.data.map((row, rowIndex) => {
       const nextRow = [...row];
-      while (nextRow.length <= profileCol) nextRow.push('');
+      while (nextRow.length <= maxCol) nextRow.push('');
       if (rowIndex === 0) {
         if (!String(nextRow[stackCol] ?? '').trim()) nextRow[stackCol] = 'Стек';
         if (!String(nextRow[profileCol] ?? '').trim()) nextRow[profileCol] = 'Профиль';
+        for (const extra of extraCols) {
+          if (!String(nextRow[extra.colIndex] ?? '').trim()) {
+            nextRow[extra.colIndex] = extra.header;
+          }
+        }
       }
       return nextRow;
     });
@@ -7256,6 +7514,8 @@ export function DatabaseSpreadsheet() {
           result_col_header: 'Стек',
           result_col_index_2: profileCol,
           result_col_header_2: 'Профиль',
+          extractors: signalEnrichment.selectedExtractors,
+          extra_cols: extraCols,
         }),
       });
 
@@ -7287,6 +7547,7 @@ export function DatabaseSpreadsheet() {
         profileColIndex: profileCol,
         totalRowsFallback: startData.total ?? rowsToProcess.length,
         initialToken: currentToken,
+        extraCols: extraCols.length > 0 ? extraCols : undefined,
       });
     } catch (err) {
       setSignalEnrichment((prev) => ({
@@ -7346,6 +7607,7 @@ export function DatabaseSpreadsheet() {
       profileColIndex: detected.result_col_index_2,
       totalRowsFallback: detected.total,
       initialToken: currentToken,
+      extraCols: detected.extra_cols ?? undefined,
     });
   };
 
@@ -11813,125 +12075,21 @@ export function DatabaseSpreadsheet() {
 
       {/* Signal enrichment modal */}
       {signalEnrichment.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm transition-all">
-          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
-            <div className="border-b border-gray-100 px-6 py-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-lg font-bold text-indigo-600">
-                  S
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-gray-900">Сигналы с сайтов</h3>
-                  <p className="text-xs text-gray-500 font-medium">Анализ технологического стека и профиля</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="px-6 py-5 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1.5">Колонка с сайтами</label>
-                <select
-                  value={signalEnrichment.sourceCol}
-                  onChange={(e) =>
-                    setSignalEnrichment((prev) => ({
-                      ...prev,
-                      sourceCol: Number(e.target.value),
-                      error: null,
-                    }))
-                  }
-                  disabled={signalEnrichment.isProcessing}
-                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 disabled:opacity-60"
-                >
-                  {headerLabels.map((label, index) => (
-                    <option key={`signal-col-${index}`} value={index}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-3 text-xs text-indigo-800 space-y-1">
-                <p className="font-semibold">Что будет найдено:</p>
-                <p>Рекламные пиксели, CRM, чат-виджеты, платёжные системы, маркетплейсы, email-рассылки, CMS и другие технологии</p>
-                <p className="text-indigo-600 mt-1">Результат: 2 новые колонки — «Стек» и «Профиль»</p>
-                <p className="text-indigo-600">Можно закрыть страницу — задача продолжит работу в фоне</p>
-              </div>
-
-              {signalEnrichment.detectedJob && !signalEnrichment.isProcessing && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 space-y-2">
-                  <div>
-                    <p className="font-semibold">Найдена активная задача анализа сигналов</p>
-                    <p>Прогресс: {signalEnrichment.detectedJob.processed} / {signalEnrichment.detectedJob.total} ({signalEnrichment.detectedJob.progress}%)</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void handleResumeSignalEnrichment()}
-                      className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-amber-700"
-                    >
-                      Подключиться
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleStopSignalEnrichment()}
-                      className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
-                    >
-                      Остановить
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {signalEnrichment.isProcessing && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs text-gray-600">
-                    <span>Обработано: {signalEnrichment.currentRow} / {signalEnrichment.totalRows}</span>
-                    <span className="font-semibold">{signalEnrichment.progress}%</span>
-                  </div>
-                  <div className="h-2 w-full rounded-full bg-gray-200 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-indigo-500 transition-all duration-300"
-                      style={{ width: `${signalEnrichment.progress}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {signalEnrichment.error && (
-                <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
-                  {signalEnrichment.error}
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-end gap-2 border-t border-gray-100 px-6 py-4 bg-gray-50/50">
-              <button
-                type="button"
-                onClick={closeSignalModal}
-                className="rounded-lg px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 hover:text-gray-900"
-              >
-                Закрыть
-              </button>
-              {signalEnrichment.isProcessing ? (
-                <button
-                  type="button"
-                  onClick={() => void handleStopSignalEnrichment()}
-                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-red-700"
-                >
-                  Остановить
-                </button>
-              ) : !signalEnrichment.detectedJob && (
-                <button
-                  type="button"
-                  onClick={() => void handleStartSignalEnrichment()}
-                  className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow transition hover:bg-indigo-700"
-                >
-                  Запустить
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <SignalEnrichmentModal
+          state={signalEnrichment}
+          headerLabels={headerLabels}
+          onChangeSourceCol={(idx) =>
+            setSignalEnrichment((prev) => ({ ...prev, sourceCol: idx, error: null }))
+          }
+          onTogglePreset={applySignalPreset}
+          onSavePreset={saveCustomSignalPreset}
+          onDeletePreset={deleteCustomSignalPreset}
+          onToggleExtractor={toggleSignalExtractor}
+          onClose={closeSignalModal}
+          onStart={() => void handleStartSignalEnrichment()}
+          onResume={() => void handleResumeSignalEnrichment()}
+          onStop={() => void handleStopSignalEnrichment()}
+        />
       )}
 
       {/* FNS Revenue modal */}

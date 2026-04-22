@@ -1126,7 +1126,12 @@ export async function fetchAndExtract(
   return combined;
 }
 
-export { extractInnFromText, extractInnFromHtml } from '@/lib/enrich/innExtractor';
+import {
+  extractInnFromText as extractInnFromTextImpl,
+  extractInnFromHtml as extractInnFromHtmlImpl,
+} from '@/lib/enrich/innExtractor';
+
+export { extractInnFromTextImpl as extractInnFromText, extractInnFromHtmlImpl as extractInnFromHtml };
 
 const LEGAL_PATHS_PRIORITY = [
   '/contacts', '/kontakty', '/контакты',
@@ -1146,7 +1151,11 @@ export async function fetchInnFromWebsite(
   options?: { timeout?: number; signal?: AbortSignal },
 ): Promise<string | null> {
   const url = normalizeUrl(rawUrl);
-  const { extractInnFromText: extract, extractInnFromHtml } = await import(/* webpackIgnore: true */ './innExtractor');
+  // NB: do NOT use `await import('./innExtractor')` with bundler-ignore hints here —
+  // the Next.js prod bundler then refuses to emit a chunk and the runtime fails with
+  // `Cannot find module .../chunks/innExtractor`. Use the static import above instead.
+  const extract = extractInnFromTextImpl;
+  const extractInnFromHtml = extractInnFromHtmlImpl;
   const timeout = options?.timeout ?? 12_000;
   const signal = options?.signal;
 

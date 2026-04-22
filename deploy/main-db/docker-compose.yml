@@ -46,7 +46,7 @@ services:
 
   # ─── GoTrue: Supabase Auth ────────────────────────────────────────────────────
   auth:
-    image: supabase/gotrue:v2.179.0
+    image: supabase/gotrue:v2.188.1
     container_name: main-auth
     restart: unless-stopped
     depends_on:
