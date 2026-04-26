@@ -8,6 +8,10 @@
  *  - Bugor retry:   08:00 UTC — exactly 4h after collect, gives one more SMTP
  *                   chance to leads stuck in 'unknown' (proxy timeouts, tarpits).
  *  - Nash retry:    09:00 UTC — same logic for Russian pipeline.
+ *  - Project contacts sync: 07:00 UTC (10:00 MSK) — PROJECT_CONTACTS_SYNC_HOUR_UTC.
+ *                   Pulls SUM(new_leads_contacted_count) from instantly_campaign_catalog
+ *                   per linked project (project_instantly_campaigns) and writes
+ *                   projects.contacts_done. См. lib/projectContactsSync.ts.
  */
 
 import { runBugorSmtpValidation, retryUnknownBugorLeads } from '@/lib/bugorOutreach/smtpValidationWorker';
@@ -19,6 +23,8 @@ import { enrichRawLeads as enrichBugorRaw } from '@/lib/bugorOutreach/enrichLead
 import { findEmailsForLeads } from '@/lib/bugorOutreach/findEmails';
 import { validateLeadEmails } from '@/lib/bugorOutreach/validateEmails';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
+import { syncProjectContactsFromInstantly } from '@/lib/projectContactsSync';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -27,6 +33,7 @@ const NASH_COLLECT_HOUR_UTC = Number(process.env.NASH_COLLECT_HOUR_UTC ?? '5');
 const RETRY_DELAY_HOURS = Number(process.env.OUTREACH_RETRY_DELAY_HOURS ?? '4');
 const BUGOR_RETRY_HOUR_UTC = (BUGOR_COLLECT_HOUR_UTC + RETRY_DELAY_HOURS) % 24;
 const NASH_RETRY_HOUR_UTC = (NASH_COLLECT_HOUR_UTC + RETRY_DELAY_HOURS) % 24;
+const PROJECT_CONTACTS_SYNC_HOUR_UTC = Number(process.env.PROJECT_CONTACTS_SYNC_HOUR_UTC ?? '7');
 const WORKER_ID = `outreach-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
@@ -493,6 +500,79 @@ async function nashRetryScheduler(): Promise<void> {
   }
 }
 
+/**
+ * Catch-up для project-contacts sync: тот же принцип, что у wasTodaysCollectMissed,
+ * но смотрим не таблицу лидов, а MAX(contacts_done_synced_at) в `projects`.
+ * Если сегодняшний 07:00 UTC уже прошёл, а синхронизации после него не было —
+ * запускаем сразу. Без этого рестарт контейнера после 07:00 UTC пропустит день.
+ */
+async function wasTodaysProjectContactsSyncMissed(): Promise<boolean> {
+  const db = requireSupabaseAdmin(log);
+  if (!db) return false;
+  const now = new Date();
+  const todayScheduled = new Date(now);
+  todayScheduled.setUTCHours(PROJECT_CONTACTS_SYNC_HOUR_UTC, 0, 0, 0);
+  if (now.getTime() < todayScheduled.getTime()) return false;
+  const { data, error } = await db
+    .from('projects')
+    .select('contacts_done_synced_at')
+    .gte('contacts_done_synced_at', todayScheduled.toISOString())
+    .limit(1);
+  if (error) {
+    log('warn', `project-contacts-sync catch-up check failed: ${error.message}`);
+    return false;
+  }
+  return !data || data.length === 0;
+}
+
+async function runProjectContactsSync(): Promise<void> {
+  const mainDb = requireSupabaseAdmin(log);
+  if (!mainDb) return;
+  if (!supabaseInstantly) {
+    log('warn', 'project-contacts-sync skipped: INSTANTLY_SUPABASE_URL is not set');
+    return;
+  }
+  log('info', 'project-contacts-sync starting...');
+  try {
+    const result = await syncProjectContactsFromInstantly({
+      mainDb,
+      instantlyDb: supabaseInstantly,
+      now: new Date(),
+      log: (level, msg, extra) => log(level, `[project-contacts-sync] ${msg}`, extra),
+    });
+    log(
+      'info',
+      `project-contacts-sync done: updated ${result.projectsUpdated}/${result.projectsWithLinks} projects, ` +
+        `campaigns resolved ${result.campaignsResolved}, ` +
+        `missing projects ${result.projectsMissing.length}, missing campaigns ${result.campaignsMissing.length}`,
+    );
+  } catch (err) {
+    log('error', 'project-contacts-sync failed', err);
+  }
+}
+
+async function projectContactsSyncScheduler(): Promise<void> {
+  if (await wasTodaysProjectContactsSyncMissed()) {
+    log(
+      'info',
+      `project-contacts-sync: catch-up — today's ${PROJECT_CONTACTS_SYNC_HOUR_UTC}:00 UTC run was missed, running now`,
+    );
+    try {
+      await runProjectContactsSync();
+    } catch (err) {
+      log('error', 'project-contacts-sync catch-up failed', err);
+    }
+  }
+  while (!_shuttingDown) {
+    const waitMs = getNextRunMs(PROJECT_CONTACTS_SYNC_HOUR_UTC);
+    const nextRun = new Date(Date.now() + waitMs).toISOString();
+    log('info', `project-contacts-sync: next run at ${nextRun} (in ${Math.round(waitMs / 60_000)} min)`);
+    await sleep(waitMs);
+    if (_shuttingDown) break;
+    await runProjectContactsSync();
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Outreach worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
@@ -509,6 +589,7 @@ async function main(): Promise<void> {
   void nashCollectScheduler();
   void bugorRetryScheduler();
   void nashRetryScheduler();
+  void projectContactsSyncScheduler();
 
   await pollLoop({
     log,
