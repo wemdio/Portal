@@ -90,8 +90,11 @@ async function fetchCampaignContacts(
   const map = new Map<string, number>();
   if (ids.length === 0) return map;
 
-  // .in() supports up to ~1000 args reliably; chunk to be safe.
-  const CHUNK = 500;
+  // Размер чанка ограничен не PostgREST'ом, а Node native fetch (undici):
+  // его дефолтный --max-http-header-size = 16 KB включает request line.
+  // UUID длиной 36 символов + URL-кодирование запятой (`%2C`) даёт ≈40 байт
+  // на id, плюс остальной URL. 100 id → URL ≈ 4 KB, с большим запасом.
+  const CHUNK = 100;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     const { data, error } = await db
