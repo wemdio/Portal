@@ -1523,9 +1523,24 @@ export function ProjectList() {
                             );
                           }
 
+                          const syncedAt = project.contacts_done_synced_at
+                            ? new Date(project.contacts_done_synced_at)
+                            : null;
+                          const syncTitle = syncedAt && !isNaN(syncedAt.getTime())
+                            ? `Автозаполнение из Instantly ${syncedAt.toLocaleString('ru-RU', {
+                                day: '2-digit',
+                                month: '2-digit',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                timeZone: 'Europe/Moscow',
+                              })} МСК. Можно перезаписать вручную — следующее обновление в 10:00 МСК.`
+                            : undefined;
+
                           return (
                             <div
                               className={canEdit ? 'cursor-pointer hover:bg-zinc-100 rounded-md px-1 py-0.5 -mx-1 transition-colors' : ''}
+                              title={syncTitle}
                               onClick={() => {
                                 if (!canEdit || isSaving) return;
                                 setEditingContactsValue(project.contacts_done || '0');
