@@ -146,18 +146,30 @@ async function connectionConfigWithIPv4(dbUrl, ssl) {
 /**
  * Применяет все непримененные SQL-файлы из migrationsDir к указанной БД.
  * Состояние применённых миграций хранится в таблице trackingTable.
+ *
+ * Возвращает число фактически применённых миграций — нужно вызывающему,
+ * чтобы решить, посылать ли PostgREST'у NOTIFY на перечитку schema cache.
+ * Без NOTIFY свежедобавленные колонки/таблицы остаются невидимыми для REST
+ * до перезапуска postgrest-контейнера: это известная проблема Supabase
+ * self-hosted и причина бага «Could not find the 'X' column of 'projects'
+ * in the schema cache» сразу после деплоя миграции.
+ *
+ * NOTIFY шлётся в то же соединение, в котором применялись миграции, до
+ * client.end() — без отдельного connect/disconnect. Если используется
+ * pgbouncer в transaction mode, NOTIFY до конца транзакции не доедет;
+ * на self-hosted Supabase соединение прямое к postgres, поэтому работает.
  */
 async function runMigrations(dbUrl, migrationsDir, trackingTable) {
   if (!dbUrl) {
     console.warn(`[db] Не задан URL базы данных (${trackingTable}). Пропускаем миграции.`);
-    return;
+    return 0;
   }
 
   try {
     await fs.access(migrationsDir);
   } catch {
     console.warn(`[db] Папка миграций не найдена: ${migrationsDir}. Пропускаем.`);
-    return;
+    return 0;
   }
 
   if (process.env.NODE_ENV === 'production' && dbUrl.includes(':5432') && !dbUrl.includes(':6543')) {
@@ -189,6 +201,7 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
       let files = await fs.readdir(migrationsDir);
       files = files.filter((file) => file.endsWith('.sql')).sort();
 
+      let appliedCount = 0;
       for (const file of files) {
         if (applied.has(file)) continue;
         const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
@@ -205,14 +218,28 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
             [file],
           );
           await client.query('commit');
+          appliedCount += 1;
         } catch (err) {
           await client.query('rollback');
           throw err;
         }
       }
 
+      // Перечитка schema cache PostgREST'ом — только если что-то реально
+      // применили. Лишний NOTIFY безвреден, но мусорит в логах.
+      if (appliedCount > 0) {
+        try {
+          await client.query("notify pgrst, 'reload schema'");
+          console.log(`[db] PostgREST schema cache reload requested (${trackingTable}, ${appliedCount} migration(s))`);
+        } catch (notifyErr) {
+          // Не критично: ALTER уже закоммитился. PostgREST подхватит при
+          // ближайшем рестарте/таймауте кеша. Логируем, чтобы не молчать.
+          console.warn(`[db] NOTIFY pgrst failed (${trackingTable}): ${notifyErr.message}`);
+        }
+      }
+
       await client.end();
-      return;
+      return appliedCount;
     } catch (err) {
       await client.end().catch(() => {});
       lastError = err;
@@ -230,6 +257,29 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
     }
   }
   throw lastError;
+}
+
+/**
+ * Если same-connection NOTIFY внутри runMigrations не сработал (например,
+ * соединение шло через pgbouncer transaction mode и NOTIFY не доехал),
+ * вызывающий может явно дёрнуть отдельным короткоживущим клиентом.
+ * Сейчас не используется — оставлено как помощник на случай миграции
+ * на pooler в будущем.
+ */
+async function notifyPostgrestReload(dbUrl, label) {
+  if (!dbUrl) return;
+  const ssl = shouldUseSsl(dbUrl) ? { rejectUnauthorized: false } : undefined;
+  const clientConfig = await connectionConfigWithIPv4(dbUrl, ssl);
+  const client = new Client(clientConfig);
+  try {
+    await client.connect();
+    await client.query("notify pgrst, 'reload schema'");
+    console.log(`[db] PostgREST schema cache reload requested (${label})`);
+  } catch (err) {
+    console.warn(`[db] NOTIFY pgrst failed (${label}): ${err.message}`);
+  } finally {
+    await client.end().catch(() => {});
+  }
 }
 
 async function ensureDatabase() {
@@ -291,4 +341,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { ensureDatabase };
+module.exports = { ensureDatabase, notifyPostgrestReload };

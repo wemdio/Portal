@@ -65,6 +65,7 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
       let files = await fs.readdir(migrationsDir);
       files = files.filter((f) => f.endsWith('.sql')).sort();
 
+      let appliedCount = 0;
       for (const file of files) {
         if (applied.has(file)) continue;
         const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
@@ -79,14 +80,28 @@ async function runMigrations(dbUrl, migrationsDir, trackingTable) {
             [file],
           );
           await client.query('commit');
+          appliedCount += 1;
         } catch (err) {
           await client.query('rollback');
           throw err;
         }
       }
 
+      // Tell PostgREST to reload its schema cache after any DDL change.
+      // Without this, freshly added columns/tables stay invisible to REST
+      // callers until postgrest-restart or the cache TTL expires (Supabase
+      // self-hosted issue: "Could not find the 'X' column in schema cache").
+      if (appliedCount > 0) {
+        try {
+          await client.query("notify pgrst, 'reload schema'");
+          console.log(`[db] PostgREST schema cache reload requested (${trackingTable}, ${appliedCount} migration(s))`);
+        } catch (notifyErr) {
+          console.warn(`[db] NOTIFY pgrst failed (${trackingTable}): ${notifyErr.message}`);
+        }
+      }
+
       await client.end();
-      return;
+      return appliedCount;
     } catch (err) {
       await client.end().catch(() => {});
       lastError = err;
