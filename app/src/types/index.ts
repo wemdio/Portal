@@ -61,6 +61,7 @@ export interface Project {
   payment_date?: string;
   contacts_obligation?: string;
   contacts_done?: string;
+  contacts_done_synced_at?: string | null;
 
   client_user_id?: string | null;
 
