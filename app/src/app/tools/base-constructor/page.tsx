@@ -450,6 +450,17 @@ export default function BaseConstructorPage() {
   const BRIEF_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
   const MAX_BRIEF_FILE = 20 * 1024 * 1024;
 
+  /**
+   * Supabase Storage отбивает ключи с кириллицей/пробелами/скобками
+   * с ошибкой "Invalid key". Поэтому в путь идёт только санитизированное
+   * имя — оригинальное `file.name` сохраняем отдельно для UI и для
+   * fileName-параметра в parse-pdf API.
+   */
+  function safeStorageName(name: string): string {
+    const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 200);
+    return cleaned || 'brief.pdf';
+  }
+
   async function handleBriefPdfUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -468,7 +479,7 @@ export default function BaseConstructorPage() {
     }
 
     try {
-      const uploadPath = `brief-scoring/${Date.now()}_${file.name}`;
+      const uploadPath = `brief-scoring/${Date.now()}_${safeStorageName(file.name)}`;
       const { error: upErr } = await supabase.storage.from(BRIEF_BUCKET).upload(uploadPath, file);
       if (upErr) throw upErr;
 
