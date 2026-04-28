@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useParams } from 'next/navigation';
+import { Pause, Play, Loader2 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
-import type { Campaign, CampaignAnalytics, CampaignStepAnalytics, SequenceStep } from '@/lib/instantly/types';
+import { CampaignStatus, CampaignStatusLabels, type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep } from '@/lib/instantly/types';
 
 function MetricCard({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
   return (
@@ -42,6 +43,8 @@ export default function ClientCampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<'overview' | 'steps'>('overview');
+  const [actionPending, setActionPending] = useState<'pause' | 'activate' | null>(null);
+  const [actionError, setActionError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,6 +66,21 @@ export default function ClientCampaignDetailPage() {
   }, [campaignId]);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleToggle = useCallback(async (action: 'pause' | 'activate') => {
+    setActionPending(action);
+    setActionError('');
+    try {
+      await clientApiFetch<{ ok: true; status: string }>(`/campaigns/${campaignId}/${action}`, {
+        method: 'POST',
+      });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Не удалось выполнить действие');
+    } finally {
+      setActionPending(null);
+    }
+  }, [campaignId, load]);
 
   if (loading) {
     return (
@@ -107,8 +125,42 @@ export default function ClientCampaignDetailPage() {
         ← Кампании
       </Link>
 
-      <h1 className="text-lg sm:text-xl font-extrabold mb-1 break-words">{campaign.name}</h1>
-      <p className="text-[10px] sm:text-xs mb-4 sm:mb-6 truncate" style={{ color: 'var(--cp-text-l)' }}>ID: {campaign.id}</p>
+      <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+        <h1 className="text-lg sm:text-xl font-extrabold break-words flex-1 min-w-0">{campaign.name}</h1>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="neu-well px-3 py-1.5 text-[10px] sm:text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+            {CampaignStatusLabels[campaign.status] ?? `Статус ${campaign.status}`}
+          </span>
+          {campaign.status === CampaignStatus.Active && (
+            <button
+              type="button"
+              onClick={() => handleToggle('pause')}
+              disabled={actionPending !== null}
+              className="neu-pill inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+              style={{ color: 'var(--cp-text-m)' }}
+            >
+              {actionPending === 'pause' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
+              Пауза
+            </button>
+          )}
+          {campaign.status === CampaignStatus.Paused && (
+            <button
+              type="button"
+              onClick={() => handleToggle('activate')}
+              disabled={actionPending !== null}
+              className="neu-btn inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+            >
+              {actionPending === 'activate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              Запустить
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="text-[10px] sm:text-xs mb-1 truncate" style={{ color: 'var(--cp-text-l)' }}>ID: {campaign.id}</p>
+      {actionError && (
+        <p className="text-xs mb-3" style={{ color: 'var(--cp-danger)' }}>{actionError}</p>
+      )}
+      <div className="mb-4 sm:mb-6" />
 
       <div className="flex gap-2 mb-4 sm:mb-6">
         {(['overview', 'steps'] as const).map((t) => (

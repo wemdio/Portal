@@ -21,6 +21,7 @@ const clientNav = [
   { name: 'Проекты', nameEn: 'Projects', href: '/client/projects' },
   { name: 'Лиды', nameEn: 'Leads', href: '/client/leads' },
   { name: 'Базы', nameEn: 'Databases', href: '/client/bases' },
+  { name: 'Подготовить базу к запуску', nameEn: 'Prepare database', href: '/client/base-constructor' },
   { name: 'Отчёты', nameEn: 'Reports', href: '/client/reports' },
   { name: 'Парсеры', nameEn: 'Parsers', href: '/client/parsers' },
   { name: 'Запуск кампаний', nameEn: 'Launch campaigns', href: '/client/launch' },
