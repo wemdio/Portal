@@ -170,12 +170,28 @@ export async function syncProjectContactsFromInstantly(
     updated += 1;
   }
 
+  // 5. Write daily snapshot for pace/velocity analysis
+  const today = now.toISOString().slice(0, 10);
+  const historyRows = [...sumByProject.entries()]
+    .filter(([pid]) => !missing.includes(pid))
+    .map(([pid, sum]) => ({ project_id: pid, contacts_done: sum, recorded_at: today }));
+
+  if (historyRows.length > 0) {
+    const { error: histErr } = await mainDb
+      .from('project_contacts_history')
+      .upsert(historyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
+    if (histErr) {
+      log('error', `contacts history upsert failed: ${histErr.message}`);
+    }
+  }
+
   log('info', 'project contacts sync complete', {
     projectsWithLinks: sumByProject.size,
     campaignsResolved: contactsByCampaign.size,
     projectsUpdated: updated,
     projectsMissing: missing.length,
     campaignsMissing: campaignsMissing.length,
+    historyWritten: historyRows.length,
   });
 
   return {
