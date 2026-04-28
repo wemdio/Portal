@@ -9355,7 +9355,7 @@ export function DatabaseSpreadsheet() {
         </div>
 
         {rightPanelOpen && (
-        <aside className="rounded border border-gray-200 bg-white p-2 h-fit text-xs overflow-y-auto">
+        <aside className="rounded border border-gray-200 bg-white p-2 text-xs overflow-y-auto" style={{ maxHeight: 'calc(100vh - 160px)' }}>
           <div className="flex items-center gap-1 rounded bg-gray-50 p-0.5 text-[10px] mb-2">
             <button
               type="button"
