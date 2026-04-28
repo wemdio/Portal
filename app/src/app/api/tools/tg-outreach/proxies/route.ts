@@ -43,8 +43,10 @@ export async function POST(req: NextRequest) {
       const campaignId = body.campaign_id as string;
       if (!campaignId) return jsonError('campaign_id обязателен', 400);
 
-      const url = (body.url as string)?.trim();
+      let url = (body.url as string)?.trim();
       if (!url) return jsonError('url обязателен', 400);
+      if (url.startsWith('http://')) url = url.replace('http://', 'socks5://');
+      if (!url.includes('://')) url = 'socks5://' + url;
 
       const { data, error } = await auth.supabase
         .from('tg_outreach_proxies')

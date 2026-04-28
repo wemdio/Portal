@@ -42,6 +42,8 @@ interface StepDef {
   producesColumns?: string[];
   recommendedAfter?: StepKey[];
   benefitsFrom?: BenefitsFrom[];
+  /** Steps that MUST be included when this step is selected (auto-added). */
+  autoAdds?: StepKey[];
 }
 
 interface ConstructorJob {
@@ -70,12 +72,12 @@ const STEPS: StepDef[] = [
   { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
   { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
   { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['find_emails'] },
-  { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'] },
-  { key: 'validate_emails', label: 'Валидация Email', description: 'SMTP-проверка, удаляет невалидные и одноразовые', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'] },
+  { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'], autoAdds: ['split_emails'] },
+  { key: 'validate_emails', label: 'Валидация Email', description: 'SMTP-проверка, удаляет невалидные и одноразовые', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'], autoAdds: ['split_emails'] },
   { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
   { key: 'enrich_descriptions', label: 'Обогатить описаниями', description: 'Парсит описание компании с сайта', icon: FileText, category: 'enrich', cost: 'cheap', priority: 65, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
-  { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу, оставляет 7–10', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'], benefitsFrom: [{ step: 'enrich_descriptions', columns: ['описание', 'description', 'about'], hint: 'Добавьте «Обогатить описаниями» — оценка будет точнее' }] },
-  { key: 'personalization', label: 'Персонализация', description: 'AI пишет персональное предложение', icon: PenLine, needsConfig: 'prompt', category: 'ai', cost: 'ai', priority: 90, recommendedAfter: ['enrich_descriptions', 'clean_names'], benefitsFrom: [{ step: 'enrich_descriptions', columns: ['описание', 'description', 'about'], hint: 'Добавьте «Обогатить описаниями» — персонализация будет лучше' }] },
+  { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу, оставляет 7–10', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'], autoAdds: ['enrich_descriptions'] },
+  { key: 'personalization', label: 'Персонализация', description: 'AI пишет персональное предложение', icon: PenLine, needsConfig: 'prompt', category: 'ai', cost: 'ai', priority: 90, recommendedAfter: ['enrich_descriptions', 'clean_names'], autoAdds: ['enrich_descriptions'] },
 ];
 
 const STEP_MAP = new Map(STEPS.map((s) => [s.key, s]));
@@ -424,11 +426,31 @@ export default function BaseConstructorPage() {
 
   /* ─── Step toggling (auto-sorted by optimal order) ─── */
 
+  function getStepsThatRequire(dep: StepKey, selected: StepKey[]): StepKey[] {
+    return selected.filter((k) => STEP_MAP.get(k)?.autoAdds?.includes(dep));
+  }
+
   function toggleStep(key: StepKey) {
     setSelectedSteps((prev) => {
-      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
-      return sortByPriority(next);
+      if (prev.includes(key)) {
+        const dependents = getStepsThatRequire(key, prev);
+        if (dependents.length > 0) return prev;
+        return sortByPriority(prev.filter((k) => k !== key));
+      }
+      const next = new Set([...prev, key]);
+      const def = STEP_MAP.get(key);
+      if (def?.autoAdds) {
+        for (const dep of def.autoAdds) next.add(dep);
+      }
+      return sortByPriority([...next]);
     });
+  }
+
+  function isRequiredByOther(key: StepKey): string | null {
+    const dependents = getStepsThatRequire(key, selectedSteps);
+    if (dependents.length === 0) return null;
+    const labels = dependents.map((k) => STEP_MAP.get(k)?.label ?? k).join(', ');
+    return `Нужен для: ${labels}`;
   }
 
   function selectPreset(preset: 'clean' | 'full') {
@@ -450,6 +472,17 @@ export default function BaseConstructorPage() {
   const BRIEF_BUCKET = process.env.NEXT_PUBLIC_BRIEF_STORAGE_BUCKET ?? 'briefs';
   const MAX_BRIEF_FILE = 20 * 1024 * 1024;
 
+  /**
+   * Supabase Storage отбивает ключи с кириллицей/пробелами/скобками
+   * с ошибкой "Invalid key". Поэтому в путь идёт только санитизированное
+   * имя — оригинальное `file.name` сохраняем отдельно для UI и для
+   * fileName-параметра в parse-pdf API.
+   */
+  function safeStorageName(name: string): string {
+    const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 200);
+    return cleaned || 'brief.pdf';
+  }
+
   async function handleBriefPdfUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -468,7 +501,7 @@ export default function BaseConstructorPage() {
     }
 
     try {
-      const uploadPath = `brief-scoring/${Date.now()}_${file.name}`;
+      const uploadPath = `brief-scoring/${Date.now()}_${safeStorageName(file.name)}`;
       const { error: upErr } = await supabase.storage.from(BRIEF_BUCKET).upload(uploadPath, file);
       if (upErr) throw upErr;
 
@@ -749,14 +782,16 @@ export default function BaseConstructorPage() {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                         {STEPS.filter((s) => s.category === cat.key).map((step) => {
                           const isSelected = selectedSteps.includes(step.key);
+                          const lockedReason = isSelected ? isRequiredByOther(step.key) : null;
                           const Icon = step.icon;
                           return (
                             <button
                               key={step.key}
                               onClick={() => toggleStep(step.key)}
+                              title={lockedReason ?? undefined}
                               className={`group relative flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
                                 isSelected
-                                  ? 'border-gray-900 bg-gray-50 shadow-sm'
+                                  ? lockedReason ? 'border-gray-900 bg-gray-100 shadow-sm opacity-80' : 'border-gray-900 bg-gray-50 shadow-sm'
                                   : 'border-gray-100 bg-white hover:border-gray-300 hover:shadow-sm'
                               }`}
                             >
@@ -788,6 +823,11 @@ export default function BaseConstructorPage() {
                                     {columnWarnings.get(step.key)}
                                   </p>
                                 )}
+                                {isSelected && lockedReason && (
+                                  <p className="text-[11px] text-gray-500 mt-1 flex items-center gap-1">
+                                    🔒 {lockedReason}
+                                  </p>
+                                )}
                                 {isSelected && !columnWarnings.has(step.key) && stepHints.has(step.key) && (
                                   <p className="text-[11px] text-blue-500 mt-1 flex items-center gap-1">
                                     <Zap className="w-3 h-3 flex-shrink-0" />
@@ -817,9 +857,11 @@ export default function BaseConstructorPage() {
                           if (!step) return null;
                           const hasWarning = columnWarnings.has(key);
                           const hasHint = !hasWarning && stepHints.has(key);
+                          const locked = isRequiredByOther(key);
                           return (
                             <span
                               key={key}
+                              title={locked ?? undefined}
                               className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg ${
                                 hasWarning ? 'bg-amber-50 text-amber-700 border border-amber-200'
                                 : hasHint ? 'bg-blue-50 text-blue-700 border border-blue-200'
@@ -832,12 +874,16 @@ export default function BaseConstructorPage() {
                               {step.label}
                               {hasWarning && <AlertTriangle className="w-3 h-3 text-amber-500" />}
                               {hasHint && <Zap className="w-3 h-3 text-blue-500" />}
+                              {locked ? (
+                                <span className="ml-0.5 text-gray-300 cursor-not-allowed" title={locked}>🔒</span>
+                              ) : (
                               <button
                                 onClick={(e) => { e.stopPropagation(); toggleStep(key); }}
                                 className="ml-0.5 text-gray-400 hover:text-gray-600"
                               >
                                 <X className="w-3 h-3" />
                               </button>
+                              )}
                             </span>
                           );
                         })}
