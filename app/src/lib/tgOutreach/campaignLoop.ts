@@ -922,7 +922,18 @@ export async function runCampaignLoop(
               .update({ is_active: false, cooldown_until: null })
               .eq('id', account.id);
             log('warning', `${account.session_name}: аккаунт деактивирован (${errMsg.includes('AUTH_KEY_UNREGISTERED') ? 'AUTH_KEY_UNREGISTERED' : 'USER_DEACTIVATED'})`);
-          } else if (errMsg.includes('offset') && errMsg.includes('out of range')) {
+          } else if (
+            // Only treat "offset out of range" as session damage when it
+            // originated in our SQLite session reader, NOT in gramJS MTProto
+            // decoder (which throws the same RangeError on transient bad
+            // network packets and would falsely deactivate healthy accounts).
+            errMsg.includes('offset') && errMsg.includes('out of range')
+            && (errMsg.includes('readSqliteSession') || errMsg.includes('.session'))
+            && !errMsg.includes('decryptMessageData')
+            && !errMsg.includes('MTProtoState')
+            && !errMsg.includes('BinaryReader')
+            && !errMsg.includes('tgReadObject')
+          ) {
             const count = (offsetErrorCounts.get(account.id) ?? 0) + 1;
             offsetErrorCounts.set(account.id, count);
             if (count >= 2) {
@@ -937,6 +948,9 @@ export async function runCampaignLoop(
               (account as OutreachAccount).cooldown_until = cooldownUntil;
               log('warning', `${account.session_name}: повреждённая сессия (offset out of range × ${count}) → cooldown 1ч. Деактивация после 2-й попытки.`);
             }
+          } else if (errMsg.includes('out of range') || errMsg.includes('TIMEOUT') || errMsg.includes('Constructor ID')) {
+            // Transient MTProto/network issue — log but do not punish account
+            log('warning', `${account.session_name}: транзиентная ошибка MTProto, пропускаем итерацию: ${errMsg.slice(0, 150)}`);
           } else {
             log('error', `${account.session_name}: ${errMsg}`);
           }
