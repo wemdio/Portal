@@ -170,11 +170,30 @@ export async function syncProjectContactsFromInstantly(
     updated += 1;
   }
 
-  // 5. Write daily snapshot for pace/velocity analysis
+  // 5. Write daily snapshot for pace/velocity analysis (contacts + kpi)
   const today = now.toISOString().slice(0, 10);
-  const historyRows = [...sumByProject.entries()]
-    .filter(([pid]) => !missing.includes(pid))
-    .map(([pid, sum]) => ({ project_id: pid, contacts_done: sum, recorded_at: today }));
+
+  const projectIds = [...sumByProject.keys()].filter((pid) => !missing.includes(pid));
+  let kpiByProject = new Map<string, number>();
+  if (projectIds.length > 0) {
+    const { data: kpiRows } = await mainDb
+      .from('projects')
+      .select('id, kpi_fact')
+      .in('id', projectIds);
+    if (kpiRows) {
+      for (const r of kpiRows) {
+        const v = parseInt(r.kpi_fact ?? '', 10);
+        if (!isNaN(v)) kpiByProject.set(r.id, v);
+      }
+    }
+  }
+
+  const historyRows = projectIds.map((pid) => ({
+    project_id: pid,
+    contacts_done: sumByProject.get(pid) ?? 0,
+    kpi_fact: kpiByProject.get(pid) ?? null,
+    recorded_at: today,
+  }));
 
   if (historyRows.length > 0) {
     const { error: histErr } = await mainDb

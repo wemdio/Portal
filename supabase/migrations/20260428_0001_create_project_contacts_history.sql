@@ -5,6 +5,7 @@ create table if not exists public.project_contacts_history (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects(id) on delete cascade,
   contacts_done integer not null,
+  kpi_fact integer,
   recorded_at date not null default current_date,
   unique(project_id, recorded_at)
 );

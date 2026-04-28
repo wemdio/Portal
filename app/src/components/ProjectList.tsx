@@ -15,6 +15,111 @@ import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
+/* ── KPI pace tooltip (hover on KPI Факт cell) ── */
+
+function KpiPaceTooltip({
+  projectId, kpiPlan, kpiFact, deadline, children,
+}: {
+  projectId: string; kpiPlan: number; kpiFact: number; deadline: string | null;
+  children: React.ReactNode;
+}) {
+  const [pace, setPace] = useState<PaceData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [show, setShow] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadPace = async () => {
+    if (pace || loading || kpiPlan <= 0) return;
+    setLoading(true);
+    try {
+      const { data } = await supabase
+        .from('project_contacts_history')
+        .select('kpi_fact, recorded_at')
+        .eq('project_id', projectId)
+        .not('kpi_fact', 'is', null)
+        .order('recorded_at', { ascending: true })
+        .limit(90);
+      if (data) {
+        const mapped = data
+          .filter((r: { kpi_fact: number | null }) => r.kpi_fact !== null)
+          .map((r: { kpi_fact: number | null; recorded_at: string }) => ({
+            contacts_done: r.kpi_fact!,
+            recorded_at: r.recorded_at,
+          }));
+        setPace(computePace(mapped, kpiPlan, kpiFact, deadline));
+      }
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
+
+  const handleEnter = () => {
+    timerRef.current = setTimeout(() => { setShow(true); void loadPace(); }, 400);
+  };
+  const handleLeave = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setShow(false);
+  };
+
+  if (kpiPlan <= 0) return <>{children}</>;
+
+  return (
+    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && (
+        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none">
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-white" />
+          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+          {loading ? (
+            <div className="text-center text-zinc-400">Загрузка...</div>
+          ) : !pace || pace.dataPoints < 2 ? (
+            <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="font-semibold text-zinc-900 text-[13px]">Анализ KPI</div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Темп</span>
+                <span className="font-medium tabular-nums">~{pace.avgPerDay}/день</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Осталось</span>
+                <span className="font-medium tabular-nums">{pace.remaining}</span>
+              </div>
+              {pace.forecastDays !== null && pace.forecastDays > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Прогноз</span>
+                  <span className="font-medium tabular-nums">{pace.forecastDays} дн. ({pace.forecastDate})</span>
+                </div>
+              )}
+              {pace.forecastDays === 0 && (
+                <div className="text-emerald-600 font-medium">KPI выполнен</div>
+              )}
+              {pace.deadline && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-zinc-500">Дедлайн</span>
+                    <span className="font-medium">{new Date(pace.deadline).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</span>
+                  </div>
+                  {pace.onTrack !== null && (
+                    <div className={`flex items-center gap-1 font-medium ${pace.onTrack ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {pace.onTrack ? '✓ Успеваем' : '✗ Не успеваем'}
+                      {!pace.onTrack && pace.requiredPace !== null && (
+                        <span className="text-zinc-400 font-normal ml-1">(нужно ~{pace.requiredPace}/день)</span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="text-[10px] text-zinc-400 pt-0.5 border-t border-zinc-100">
+                На основе {pace.periodDays} дн. ({pace.dataPoints} точек)
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Contacts pace tooltip (hover on contacts cell) ── */
 
 interface PaceData {
@@ -1608,7 +1713,16 @@ export function ProjectList() {
                             disabled={isDisabled}
                             placeholder="Факт"
                           />
-                        ) : (
+                        ) : (() => {
+                          const kpiPlanNum = parseInt(project.kpi_plan ?? '0', 10) || 0;
+                          const kpiFactNum = parseInt(project.kpi_fact ?? '0', 10) || 0;
+                          return (
+                          <KpiPaceTooltip
+                            projectId={project.id}
+                            kpiPlan={kpiPlanNum}
+                            kpiFact={kpiFactNum}
+                            deadline={project.deadline ?? null}
+                          >
                           <div className="flex items-center gap-1">
                             <span className="text-zinc-900 tabular-nums">{readOnlyKpiFact}</span>
                             {canEdit && (
@@ -1644,7 +1758,9 @@ export function ProjectList() {
                               </div>
                             )}
                           </div>
-                        )}
+                          </KpiPaceTooltip>
+                          );
+                        })()}
                       </td>
                       <td className="px-2 py-3 align-top">
                         {(() => {
