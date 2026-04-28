@@ -8,6 +8,7 @@ import {
   ALWAYS_ON_STEPS_FOR_CLIENT,
   CLIENT_ROW_LIMIT,
 } from '@/lib/tools/baseConstructorClientGuard';
+import { parseCSV } from '@/lib/spreadsheet/parseCSV';
 import {
   Eraser, CopyMinus, MailMinus, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
@@ -274,36 +275,6 @@ function getStepHints(steps: StepKey[], header: string[]): Map<StepKey, string> 
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
-
-function parseCSV(text: string): string[][] {
-  const rows: string[][] = [];
-  let current: string[] = [];
-  let cell = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { cell += '"'; i++; }
-        else inQuotes = false;
-      } else { cell += ch; }
-    } else {
-      if (ch === '"') { inQuotes = true; }
-      else if (ch === ',' || ch === ';' || ch === '\t') { current.push(cell); cell = ''; }
-      else if (ch === '\n' || ch === '\r') {
-        if (ch === '\r' && text[i + 1] === '\n') i++;
-        current.push(cell);
-        cell = '';
-        if (current.some((c) => c.trim())) rows.push(current);
-        current = [];
-      } else { cell += ch; }
-    }
-  }
-  current.push(cell);
-  if (current.some((c) => c.trim())) rows.push(current);
-  return rows;
 }
 
 /* ═══════════════════════════════════════════

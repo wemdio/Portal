@@ -926,6 +926,14 @@ export default function UsersPage() {
                   >
                     Сменить пароль
                   </button>
+                  {modalRole === 'client' && actionModalUserId && (
+                    <Link
+                      href={{ pathname: '/admin/clients/[id]/preset', query: { id: actionModalUserId } }}
+                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                    >
+                      Пресет запуска кампаний
+                    </Link>
+                  )}
                   {actionModalUserId !== currentUserId && (
                     <button
                       type="button"

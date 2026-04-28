@@ -1,0 +1,1 @@
+export const CLIENT_LAUNCH_ROW_LIMIT = 10_000;
