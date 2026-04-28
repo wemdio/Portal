@@ -18,6 +18,7 @@ import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator'
 
 export type ProgressFn = (progress: number) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
+export type CheckpointFn = (data: string[][]) => Promise<void>;
 
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY || '';
 const OPENROUTER_PERSONALIZATION_API_KEY =
@@ -270,6 +271,7 @@ export async function stepEnrich(
   data: string[][],
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  onCheckpoint?: CheckpointFn,
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
@@ -291,6 +293,7 @@ export async function stepEnrich(
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
   let done = 0;
+  const checkpointEvery = 250;
   await processInPool(toProcess, ENRICH_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
     try {
@@ -300,6 +303,9 @@ export async function stepEnrich(
     done++;
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
+    }
+    if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
+      await onCheckpoint([newHeader, ...newBody]);
     }
   });
 
