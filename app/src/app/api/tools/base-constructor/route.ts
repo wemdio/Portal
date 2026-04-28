@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
+import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
 
 const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
@@ -12,6 +13,15 @@ async function getUser(req: NextRequest) {
   if (!token) return null;
   const { data } = await admin.auth.getUser(token);
   return data.user;
+}
+
+async function getUserRole(userId: string): Promise<string | null> {
+  const { data } = await admin
+    .from('profiles')
+    .select('role')
+    .eq('id', userId)
+    .single();
+  return (data?.role as string | null) ?? null;
 }
 
 export async function POST(req: NextRequest) {
@@ -36,6 +46,17 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      const role = await getUserRole(user.id);
+      const guard = applyClientGuard({
+        role,
+        selectedSteps: selected_steps as StepKey[],
+        rowCount: data.length - 1,
+      });
+      if (!guard.ok) {
+        return NextResponse.json({ error: guard.error }, { status: 400 });
+      }
+      const finalSteps = guard.selectedSteps;
+
       const { data: existing } = await admin
         .from('base_constructor_jobs')
         .select('id')
@@ -54,10 +75,10 @@ export async function POST(req: NextRequest) {
           user_id: user.id,
           file_name: file_name || null,
           data,
-          selected_steps,
+          selected_steps: finalSteps,
           step_config: step_config || {},
           initial_row_count: data.length - 1,
-          total_steps: selected_steps.length,
+          total_steps: finalSteps.length,
         })
         .select()
         .single();

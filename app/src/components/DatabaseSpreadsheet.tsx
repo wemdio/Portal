@@ -937,6 +937,7 @@ const getRowEmail = (row: string[], emailColumns: number[]) => {
 export function DatabaseSpreadsheet() {
   const searchParams = useSearchParams();
   const importId = searchParams.get('import');
+  const constructorJobId = searchParams.get('constructorJobId');
   const importHandledRef = useRef<string | null>(null);
 
   const [tabs, setTabs] = useState<Sheet[]>(() => [createSheet('Вкладка 1')]);
@@ -2285,6 +2286,36 @@ export function DatabaseSpreadsheet() {
       cleanUrl();
     }
   }, [importId, isHydrated, applyRowsToNewTab, showCopyNotice]);
+
+  useEffect(() => {
+    if (!isHydrated || !constructorJobId) return;
+    if (importHandledRef.current === `cj:${constructorJobId}`) return;
+    importHandledRef.current = `cj:${constructorJobId}`;
+
+    const cleanUrl = () => {
+      try { window.history.replaceState(null, '', window.location.pathname); } catch { /* */ }
+    };
+
+    (async () => {
+      try {
+        const res = await authFetch(`/api/tools/base-constructor/${constructorJobId}/data`);
+        if (!res.ok) { showCopyNotice('Не удалось загрузить данные из конструктора', 'error'); cleanUrl(); return; }
+        const { data } = await res.json() as { data: string[][] | null };
+        if (!data || data.length === 0) { showCopyNotice('Данные конструктора пусты', 'error'); cleanUrl(); return; }
+        const MAX_ROWS = 10_000;
+        const MAX_COLS = 80;
+        const limited = data.slice(0, MAX_ROWS).map((row) =>
+          (Array.isArray(row) ? row : []).slice(0, MAX_COLS).map((c) => String(c ?? '')),
+        );
+        applyRowsToNewTab(limited, `constructor_${constructorJobId.slice(0, 8)}.csv`);
+        showCopyNotice(`Импортировано из конструктора: ${limited.length} строк`, 'success');
+        cleanUrl();
+      } catch (e) {
+        showCopyNotice(e instanceof Error ? e.message : 'Ошибка импорта из конструктора', 'error');
+        cleanUrl();
+      }
+    })();
+  }, [constructorJobId, isHydrated, applyRowsToNewTab, showCopyNotice]);
 
   const finalizeImport = (status: ImportStatus['status'], filename?: string, message?: string) => {
     const progress = status === 'done' ? 100 : 0;
