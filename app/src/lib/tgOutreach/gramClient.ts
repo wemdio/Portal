@@ -1,4 +1,5 @@
 import { TelegramClient } from 'telegram';
+import { ConnectionTCPObfuscated } from 'telegram/network';
 import { StringSession } from 'telegram/sessions';
 import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import type { OutreachAccount, OutreachProxy } from './types';
@@ -49,9 +50,11 @@ export async function createGramClient(
       ? { proxy: { ...proxyConfig, socksType: proxyConfig.socksType } }
       : {};
 
+  const useProxy = Object.keys(proxyParams).length > 0;
   const client = new TelegramClient(session, account.api_id, account.api_hash, {
     connectionRetries: 3,
     ...proxyParams,
+    ...(useProxy ? { connection: ConnectionTCPObfuscated } : {}),
   });
 
   await client.connect();

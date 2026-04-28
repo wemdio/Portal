@@ -29,12 +29,17 @@ export async function POST(req: NextRequest) {
       
         if (lines.length === 0) return jsonError('Нет прокси для добавления', 400);
       
-        const rows = lines.map((url, i) => ({
-          campaign_id: campaignId,
-          url,
-          name: `Прокси ${i + 1}`,
-          is_active: true,
-        }));
+        const rows = lines.map((raw, i) => {
+          let url = raw;
+          if (url.startsWith('http://')) url = url.replace('http://', 'socks5://');
+          if (!url.includes('://')) url = 'socks5://' + url;
+          return {
+            campaign_id: campaignId,
+            url,
+            name: `Прокси ${i + 1}`,
+            is_active: true,
+          };
+        });
       
         const { data, error } = await auth.supabase
           .from('tg_outreach_proxies')

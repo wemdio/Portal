@@ -23,6 +23,7 @@ interface StepConfig {
   brief?: string;
   prompt?: string;
   column_mapping?: string;
+  onCheckpoint?: (data: string[][]) => Promise<void>;
 }
 
 const CANONICAL_NAMES: Record<string, string> = {
@@ -88,7 +89,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
   split_emails: (data, prog) => stepSplitEmails(data, prog),
   validate_emails: (data, prog) => stepValidateEmails(data, prog),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
-  enrich_descriptions: (data, prog, cancel) => stepEnrich(data, prog, cancel),
+  enrich_descriptions: (data, prog, cancel, cfg) => stepEnrich(data, prog, cancel, cfg.onCheckpoint),
   ta_scoring: (data, prog, cancel, cfg) => stepTAScore(data, cfg.brief || '', prog, cancel),
   personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
 };
@@ -132,9 +133,27 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       const progressFn: ProgressFn = (progress) => updateJobProgress(jobId, i, stepKey, progress);
       await progressFn(0);
 
-      data = await runner(data, progressFn, cancelCheck, stepConfig);
+      const effectiveStepConfig: StepConfig =
+        stepKey === 'enrich_descriptions'
+          ? {
+              ...stepConfig,
+              onCheckpoint: async (checkpointData) => {
+                await admin.from('base_constructor_jobs').update({ data: checkpointData }).eq('id', jobId);
+              },
+            }
+          : stepConfig;
 
-      await admin.from('base_constructor_jobs').update({ data }).eq('id', jobId);
+      data = await runner(data, progressFn, cancelCheck, effectiveStepConfig);
+
+      const isLast = i === selectedSteps.length - 1;
+      if (!isLast) {
+        // Persist intermediate data so the next step has it on resume.
+        await admin.from('base_constructor_jobs').update({ data }).eq('id', jobId);
+      }
+      // For the last step we skip the intermediate write and let the final
+      // atomic update below set both `data` and `status='completed'` together —
+      // otherwise a process restart between the two writes would leave the job
+      // stuck in 'processing' at 100% with no result_stats.
     }
 
     const header = data[0] || [];

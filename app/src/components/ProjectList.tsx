@@ -15,6 +15,266 @@ import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
+/* ── KPI pace tooltip (hover on KPI Факт cell) ── */
+
+function KpiPaceTooltip({
+  projectId, kpiPlan, kpiFact, deadline, children,
+}: {
+  projectId: string; kpiPlan: number; kpiFact: number; deadline: string | null;
+  children: React.ReactNode;
+}) {
+  const [pace, setPace] = useState<PaceData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [show, setShow] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadPace = async () => {
+    if (pace || loading || kpiPlan <= 0) return;
+    setLoading(true);
+    try {
+      const { data } = await supabase
+        .from('project_contacts_history')
+        .select('kpi_fact, recorded_at')
+        .eq('project_id', projectId)
+        .not('kpi_fact', 'is', null)
+        .order('recorded_at', { ascending: true })
+        .limit(90);
+      if (data) {
+        const mapped = data
+          .filter((r: { kpi_fact: number | null }) => r.kpi_fact !== null)
+          .map((r: { kpi_fact: number | null; recorded_at: string }) => ({
+            contacts_done: r.kpi_fact!,
+            recorded_at: r.recorded_at,
+          }));
+        setPace(computePace(mapped, kpiPlan, kpiFact, deadline));
+      }
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
+
+  const handleEnter = () => {
+    timerRef.current = setTimeout(() => { setShow(true); void loadPace(); }, 400);
+  };
+  const handleLeave = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setShow(false);
+  };
+
+  if (kpiPlan <= 0) return <>{children}</>;
+
+  return (
+    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && (
+        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none">
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-white" />
+          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+          {loading ? (
+            <div className="text-center text-zinc-400">Загрузка...</div>
+          ) : !pace || pace.dataPoints < 2 ? (
+            <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="font-semibold text-zinc-900 text-[13px]">Анализ KPI</div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Темп</span>
+                <span className="font-medium tabular-nums">~{pace.avgPerDay}/день</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Осталось</span>
+                <span className="font-medium tabular-nums">{pace.remaining}</span>
+              </div>
+              {pace.forecastDays !== null && pace.forecastDays > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Прогноз</span>
+                  <span className="font-medium tabular-nums">{pace.forecastDays} дн. ({pace.forecastDate})</span>
+                </div>
+              )}
+              {pace.forecastDays === 0 && (
+                <div className="text-emerald-600 font-medium">KPI выполнен</div>
+              )}
+              {pace.deadline && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-zinc-500">Дедлайн</span>
+                    <span className="font-medium">{new Date(pace.deadline).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</span>
+                  </div>
+                  {pace.onTrack !== null && (
+                    <div className={`flex items-center gap-1 font-medium ${pace.onTrack ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {pace.onTrack ? '✓ Успеваем' : '✗ Не успеваем'}
+                      {!pace.onTrack && pace.requiredPace !== null && (
+                        <span className="text-zinc-400 font-normal ml-1">(нужно ~{pace.requiredPace}/день)</span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="text-[10px] text-zinc-400 pt-0.5 border-t border-zinc-100">
+                На основе {pace.periodDays} дн. ({pace.dataPoints} точек)
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Contacts pace tooltip (hover on contacts cell) ── */
+
+interface PaceData {
+  avgPerDay: number;
+  remaining: number;
+  forecastDays: number | null;
+  forecastDate: string | null;
+  deadline: string | null;
+  onTrack: boolean | null;
+  requiredPace: number | null;
+  dataPoints: number;
+  periodDays: number;
+}
+
+function computePace(
+  history: { contacts_done: number; recorded_at: string }[],
+  obligation: number,
+  currentDone: number,
+  deadline: string | null,
+): PaceData {
+  const sorted = [...history].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
+  const remaining = Math.max(0, obligation - currentDone);
+  const base: PaceData = {
+    avgPerDay: 0, remaining, forecastDays: null, forecastDate: null,
+    deadline, onTrack: null, requiredPace: null, dataPoints: sorted.length, periodDays: 0,
+  };
+  if (sorted.length < 2) return base;
+
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const daysDiff = Math.max(1, Math.round(
+    (new Date(last.recorded_at).getTime() - new Date(first.recorded_at).getTime()) / 86400000,
+  ));
+  const delta = last.contacts_done - first.contacts_done;
+  const avgPerDay = Math.round(delta / daysDiff);
+  base.avgPerDay = avgPerDay;
+  base.periodDays = daysDiff;
+
+  if (avgPerDay > 0 && remaining > 0) {
+    const forecastDays = Math.ceil(remaining / avgPerDay);
+    const forecastDate = new Date(Date.now() + forecastDays * 86400000);
+    base.forecastDays = forecastDays;
+    base.forecastDate = forecastDate.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  } else if (remaining === 0) {
+    base.forecastDays = 0;
+    base.forecastDate = 'выполнено';
+  }
+
+  if (deadline) {
+    const dlDate = new Date(deadline);
+    if (!isNaN(dlDate.getTime())) {
+      const daysUntilDeadline = Math.max(0, Math.ceil((dlDate.getTime() - Date.now()) / 86400000));
+      base.requiredPace = daysUntilDeadline > 0 ? Math.ceil(remaining / daysUntilDeadline) : null;
+      if (base.forecastDays !== null) {
+        base.onTrack = base.forecastDays <= daysUntilDeadline;
+      }
+    }
+  }
+  return base;
+}
+
+function ContactsPaceTooltip({
+  projectId, obligation, done, deadline, children,
+}: {
+  projectId: string; obligation: number; done: number; deadline: string | null;
+  children: React.ReactNode;
+}) {
+  const [pace, setPace] = useState<PaceData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [show, setShow] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadPace = async () => {
+    if (pace || loading || obligation <= 0) return;
+    setLoading(true);
+    try {
+      const { data } = await supabase
+        .from('project_contacts_history')
+        .select('contacts_done, recorded_at')
+        .eq('project_id', projectId)
+        .order('recorded_at', { ascending: true })
+        .limit(90);
+      if (data) setPace(computePace(data, obligation, done, deadline));
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
+
+  const handleEnter = () => {
+    timerRef.current = setTimeout(() => { setShow(true); void loadPace(); }, 400);
+  };
+  const handleLeave = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setShow(false);
+  };
+
+  if (obligation <= 0) return <>{children}</>;
+
+  return (
+    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && (
+        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-xl text-xs text-zinc-700 pointer-events-none">
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-white" />
+          <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+          {loading ? (
+            <div className="text-center text-zinc-400">Загрузка...</div>
+          ) : !pace || pace.dataPoints < 2 ? (
+            <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="font-semibold text-zinc-900 text-[13px]">Анализ темпа</div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Темп</span>
+                <span className="font-medium tabular-nums">~{pace.avgPerDay}/день</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Осталось</span>
+                <span className="font-medium tabular-nums">{pace.remaining.toLocaleString('ru-RU')}</span>
+              </div>
+              {pace.forecastDays !== null && pace.forecastDays > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Прогноз</span>
+                  <span className="font-medium tabular-nums">{pace.forecastDays} дн. ({pace.forecastDate})</span>
+                </div>
+              )}
+              {pace.forecastDays === 0 && (
+                <div className="text-emerald-600 font-medium">Обязательство выполнено</div>
+              )}
+              {pace.deadline && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-zinc-500">Дедлайн</span>
+                    <span className="font-medium">{new Date(pace.deadline).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</span>
+                  </div>
+                  {pace.onTrack !== null && (
+                    <div className={`flex items-center gap-1 font-medium ${pace.onTrack ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {pace.onTrack ? '✓ Успеваем' : '✗ Не успеваем'}
+                      {!pace.onTrack && pace.requiredPace !== null && (
+                        <span className="text-zinc-400 font-normal ml-1">(нужно ~{pace.requiredPace}/день)</span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="text-[10px] text-zinc-400 pt-0.5 border-t border-zinc-100">
+                На основе {pace.periodDays} дн. ({pace.dataPoints} точек)
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
 const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
@@ -1453,7 +1713,16 @@ export function ProjectList() {
                             disabled={isDisabled}
                             placeholder="Факт"
                           />
-                        ) : (
+                        ) : (() => {
+                          const kpiPlanNum = parseInt(project.kpi_plan ?? '0', 10) || 0;
+                          const kpiFactNum = parseInt(project.kpi_fact ?? '0', 10) || 0;
+                          return (
+                          <KpiPaceTooltip
+                            projectId={project.id}
+                            kpiPlan={kpiPlanNum}
+                            kpiFact={kpiFactNum}
+                            deadline={project.deadline ?? null}
+                          >
                           <div className="flex items-center gap-1">
                             <span className="text-zinc-900 tabular-nums">{readOnlyKpiFact}</span>
                             {canEdit && (
@@ -1489,7 +1758,9 @@ export function ProjectList() {
                               </div>
                             )}
                           </div>
-                        )}
+                          </KpiPaceTooltip>
+                          );
+                        })()}
                       </td>
                       <td className="px-2 py-3 align-top">
                         {(() => {
@@ -1538,6 +1809,12 @@ export function ProjectList() {
                             : undefined;
 
                           return (
+                            <ContactsPaceTooltip
+                              projectId={project.id}
+                              obligation={obligation}
+                              done={done}
+                              deadline={project.deadline ?? null}
+                            >
                             <div
                               className={canEdit ? 'cursor-pointer hover:bg-zinc-100 rounded-md px-1 py-0.5 -mx-1 transition-colors' : ''}
                               title={syncTitle}
@@ -1563,6 +1840,7 @@ export function ProjectList() {
                                 <span className="text-zinc-300">—</span>
                               )}
                             </div>
+                            </ContactsPaceTooltip>
                           );
                         })()}
                       </td>
