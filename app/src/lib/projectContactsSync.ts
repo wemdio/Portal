@@ -174,7 +174,7 @@ export async function syncProjectContactsFromInstantly(
   const today = now.toISOString().slice(0, 10);
 
   const projectIds = [...sumByProject.keys()].filter((pid) => !missing.includes(pid));
-  let kpiByProject = new Map<string, number>();
+  const kpiByProject = new Map<string, number>();
   if (projectIds.length > 0) {
     const { data: kpiRows } = await mainDb
       .from('projects')
