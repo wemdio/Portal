@@ -337,19 +337,21 @@ async function processInviteStep(
     await client.sendInvite(providerId, message);
   } catch (e) {
     const cooldown = detectAccountCooldownError(e);
-    if (cooldown && accountDbId) {
-      const until = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
-      const untilHuman = new Date(until).toLocaleString('ru-RU');
-      log(
-        'warning',
-        `LinkedIn вернул сигнал «${cooldown.kind}» — аккаунт уходит в отлёжку до ${untilHuman}`,
-        lead.name,
-        stepIdx,
-      );
-
+    if (cooldown) {
+      // `already_invited` is a per-lead signal, NOT an account-wide back-off.
+      // It just means LinkedIn still has a pending invitation from us to this
+      // specific person. Mark the lead as invited, advance the campaign step,
+      // and let the tick continue to the next lead. We saw in prod (Apr 2026)
+      // that parking the whole account for 15 min on every such hit dropped
+      // throughput from 25/day to ~1/15min on lists with historically-invited
+      // contacts. See bug log + accountCooldown.ts.
       if (cooldown.kind === 'already_invited') {
-        // Lead is in fact already invited on LI — record that and advance the
-        // campaign step so we don't retry this lead again on the next tick.
+        log(
+          'warning',
+          `LinkedIn вернул «already_invited» — лид помечен invited и пропущен (аккаунт НЕ паркуется, тик продолжается)`,
+          lead.name,
+          stepIdx,
+        );
         await db.from('li_leads').update({ status: 'invited', updated_at: now }).eq('id', lead.id);
         await db
           .from('li_campaign_leads')
@@ -360,11 +362,24 @@ async function processInviteStep(
             updated_at: now,
           })
           .eq('id', cl.id);
+        return;
       }
-      // For invitation_limit / account_restricted we leave the lead in pending
-      // state on purpose so it gets picked up again once cooldown expires.
 
-      throw new AccountCooldownTriggered(cooldown.kind);
+      // invitation_limit / account_restricted — these ARE account-wide signals.
+      // Park the account so every campaign + scraper using it stops hammering
+      // the API for COOLDOWN_MINUTES[kind] minutes; abort the rest of the tick.
+      if (accountDbId) {
+        const until = await applyCooldownToAccount(db, accountDbId, cooldown.kind);
+        const untilHuman = new Date(until).toLocaleString('ru-RU');
+        log(
+          'warning',
+          `LinkedIn вернул сигнал «${cooldown.kind}» — аккаунт уходит в отлёжку до ${untilHuman}`,
+          lead.name,
+          stepIdx,
+        );
+        // Lead stays pending on purpose so it gets picked up again once cooldown expires.
+        throw new AccountCooldownTriggered(cooldown.kind);
+      }
     }
     throw e;
   }
@@ -455,6 +470,47 @@ async function processMessageStep(
   const now = new Date().toISOString();
 
   if (!lead.chat_id) {
+    // Connection guard. Without it, after a 2-day `wait` step we used to call
+    // startChat() blindly and LinkedIn returned `errors/no_connection_with_recipient`
+    // for ~1499 leads in a single prod week (Apr 2026). Branch on lead.status:
+    //
+    //   - 'invited'              → invite sent but accept not yet observed via webhook;
+    //                              defer one day so a late accept can still be picked up.
+    //   - 'new'                  → we never even sent an invite — something went sideways
+    //                              earlier, skip permanently.
+    //   - 'connected' / others   → fall through to startChat — chat just wasn't opened yet.
+    if (lead.status === 'invited') {
+      const deferAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      await db
+        .from('li_campaign_leads')
+        .update({ status: 'waiting', next_action_at: deferAt, updated_at: now })
+        .eq('id', cl.id);
+      log(
+        'info',
+        `Шаг message пропущен: коннект ещё не подтверждён (lead.status=invited). Повторим ${new Date(deferAt).toLocaleString('ru-RU')}.`,
+        lead.name,
+        stepIdx,
+      );
+      return;
+    }
+    if (lead.status === 'new') {
+      await db
+        .from('li_campaign_leads')
+        .update({
+          status: 'skipped',
+          error_message: 'No invite recorded (lead.status=new) — message step skipped',
+          updated_at: now,
+        })
+        .eq('id', cl.id);
+      log(
+        'warning',
+        `Шаг message пропущен: для лида не зафиксирован инвайт (lead.status=new) → skipped.`,
+        lead.name,
+        stepIdx,
+      );
+      return;
+    }
+
     if (lead.linkedin_id) {
       log('info', 'Нет chat_id — попытка начать чат через Unipile', lead.name, stepIdx);
       try {
