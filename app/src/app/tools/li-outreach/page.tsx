@@ -20,6 +20,7 @@ type LiAccount = {
   created_at: string;
   cooldown_until: string | null;
   cooldown_reason: LiAccountCooldownReason | null;
+  proxy_url: string | null;
 };
 
 const COOLDOWN_REASON_LABELS: Record<LiAccountCooldownReason, string> = {
@@ -1167,30 +1168,9 @@ export default function LiOutreachPage() {
           </div>
           {accounts.length === 0 ? (
             <div className="text-sm text-gray-500">Нет аккаунтов. Настройте Unipile и нажмите «Синхронизировать».</div>
-          ) : accounts.map((a) => {
-            const cooling = isAccountInCooldown(a);
-            return (
-              <div key={a.id} className={`rounded-xl border px-3 py-2 text-sm flex items-center justify-between ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{a.name || a.unipile_account_id}</span>
-                    {a.headline && <span className="text-xs text-gray-500">{a.headline}</span>}
-                  </div>
-                  {cooling && (
-                    <div
-                      className="text-xs text-amber-700 mt-0.5"
-                      title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. Это значит LinkedIn вернул сигнал «${a.cooldown_reason}» — мы автоматически приостановили все кампании и скрапинг с этого аккаунта, чтобы не схватить бан. Когда таймер истечёт, кампании продолжатся с того же места.`}
-                    >
-                      💤 В отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} — {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
-                    </div>
-                  )}
-                </div>
-                <span className={`text-xs px-2 py-0.5 rounded shrink-0 ml-3 ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                  {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
-                </span>
-              </div>
-            );
-          })}
+          ) : accounts.map((a) => (
+            <AccountCard key={a.id} account={a} onUpdated={loadAccounts} />
+          ))}
         </div>
       )}
 
@@ -1220,6 +1200,75 @@ export default function LiOutreachPage() {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Account card -----------------------------------------------------------
+
+function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated: () => void }) {
+  const cooling = isAccountInCooldown(a);
+  const [proxyDraft, setProxyDraft] = useState(a.proxy_url ?? '');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const dirty = proxyDraft !== (a.proxy_url ?? '');
+
+  const save = async () => {
+    setSaving(true);
+    setMsg(null);
+    try {
+      await api(`/accounts/${a.id}`, { method: 'PATCH', json: { proxy_url: proxyDraft || null } });
+      setMsg('Сохранено');
+      onUpdated();
+    } catch (e) {
+      setMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${cooling ? 'border-amber-300 bg-amber-50/60' : 'border-gray-200'}`}>
+      <div className="flex items-center justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-medium">{a.name || a.unipile_account_id}</span>
+            {a.headline && <span className="text-xs text-gray-500 truncate">{a.headline}</span>}
+          </div>
+          {cooling && (
+            <div
+              className="text-xs text-amber-700 mt-0.5"
+              title={`Аккаунт в отлёжке до ${new Date(a.cooldown_until!).toLocaleString('ru-RU')}. LinkedIn вернул «${a.cooldown_reason}».`}
+            >
+              В отлёжке ещё {formatCooldownRemaining(a.cooldown_until!)} — {a.cooldown_reason ? COOLDOWN_REASON_LABELS[a.cooldown_reason] : '—'}
+            </div>
+          )}
+        </div>
+        <span className={`text-xs px-2 py-0.5 rounded shrink-0 ml-3 ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+          {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
+        </span>
+      </div>
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <label className="text-xs text-gray-500">Proxy (ip:port:user:pass)</label>
+          <input
+            type="text"
+            placeholder="154.81.199.122:63310:VtVmt51R:7GnJr2Yb"
+            value={proxyDraft}
+            onChange={(e) => { setProxyDraft(e.target.value); setMsg(null); }}
+            className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm mt-0.5 font-mono"
+          />
+        </div>
+        <button
+          onClick={() => void save()}
+          disabled={saving || !dirty}
+          className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium disabled:opacity-40 shrink-0"
+        >
+          {saving ? '...' : 'Сохранить'}
+        </button>
+      </div>
+      {msg && <div className={`text-xs ${msg.startsWith('Ошибка') ? 'text-red-600' : 'text-green-600'}`}>{msg}</div>}
     </div>
   );
 }

@@ -80,6 +80,7 @@ export interface LiAccount {
    */
   cooldown_until: string | null;
   cooldown_reason: 'invitation_limit' | 'already_invited' | 'account_restricted' | null;
+  proxy_url: string | null;
 }
 
 export interface LiLeadList {
