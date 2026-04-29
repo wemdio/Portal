@@ -57,7 +57,13 @@ export async function createGramClient(
     ...(useProxy ? { connection: ConnectionTCPObfuscated } : {}),
   });
 
-  await client.connect();
+  const CONNECT_TIMEOUT_MS = 30_000;
+  await Promise.race([
+    client.connect(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`connect timeout (${CONNECT_TIMEOUT_MS / 1000}s)`)), CONNECT_TIMEOUT_MS),
+    ),
+  ]);
   return client;
 }
 
