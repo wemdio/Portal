@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Check, AlertCircle, Loader2, Save } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, AlertCircle, Loader2, Save, Sparkles } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
 import {
@@ -17,16 +17,31 @@ import type {
   ClientBriefPriceTier,
   ClientBriefSocialProofKey,
 } from '@/lib/clientBrief';
+import { LeadSourceHypothesesView } from '@/components/projects/LeadSourceHypothesesView';
 
 interface ClientBriefFormProps {
   /** API endpoint that supports GET/PUT for the brief */
   endpoint: string;
+  /**
+   * Optional API endpoint for hypothesis generation (GET / POST + ?regenerate=1).
+   * When provided, renders the «Гипотезы по сбору базы» section under the form,
+   * auto-triggers generation on first save and supports manual re-generation.
+   */
+  hypothesesEndpoint?: string;
   /** Optional title shown above the form */
   title?: string;
   /** Optional subtitle line */
   subtitle?: string;
   /** Audit-log event prefix, e.g. 'client.brief' or 'admin.client-brief' */
   auditPrefix: string;
+}
+
+interface HypothesesApiResponse {
+  ok?: boolean;
+  error?: string;
+  lead_source_hypotheses: string | null;
+  lead_source_hypotheses_generated_at: string | null;
+  lead_source_hypotheses_error: string | null;
 }
 
 interface BriefApiResponse {
@@ -185,12 +200,115 @@ function SocialProofGrid({
   );
 }
 
-export function ClientBriefForm({ endpoint, title, subtitle, auditPrefix }: ClientBriefFormProps) {
+interface HypothesesSectionProps {
+  text: string | null;
+  generatedAt: string | null;
+  error: string | null;
+  generating: boolean;
+  briefSaved: boolean;
+  onGenerate: () => void;
+}
+
+function HypothesesSection({
+  text,
+  generatedAt,
+  error,
+  generating,
+  briefSaved,
+  onGenerate,
+}: HypothesesSectionProps) {
+  const hasResult = !!text;
+  const formattedAt = generatedAt
+    ? new Date(generatedAt).toLocaleString('ru-RU', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
+  return (
+    <section className={SECTION_BASE}>
+      <header className={`${HEADER_BASE} flex items-center gap-2`}>
+        <Sparkles className="h-4 w-4 text-indigo-600" />
+        Гипотезы по сбору базы (AI)
+      </header>
+      <div className="p-6 space-y-4">
+        <p className="text-xs text-gray-600">
+          На основе сохранённого брифа AI предлагает 5–10 конкретных гипотез по сбору
+          базы потенциальных клиентов: какой источник использовать, какие фильтры/запросы
+          задать и какой объём ожидать.
+        </p>
+
+        {generating && (
+          <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Генерируем гипотезы — это занимает 30–60 секунд…
+          </div>
+        )}
+
+        {error && !generating && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {!briefSaved && !hasResult && !generating && (
+          <p className="text-xs text-gray-500">
+            Сначала сохраните бриф — после первого сохранения генерация запустится автоматически.
+          </p>
+        )}
+
+        {hasResult && (
+          <div className="space-y-2">
+            {formattedAt && (
+              <p className="text-[11px] text-gray-500">
+                Сгенерировано: {formattedAt}
+              </p>
+            )}
+            <LeadSourceHypothesesView markdown={text!} />
+          </div>
+        )}
+
+        {briefSaved && (hasResult || error) && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onGenerate}
+              disabled={generating}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-300 bg-white px-4 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              {hasResult ? 'Сгенерировать заново' : 'Сгенерировать ещё раз'}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export function ClientBriefForm({
+  endpoint,
+  hypothesesEndpoint,
+  title,
+  subtitle,
+  auditPrefix,
+}: ClientBriefFormProps) {
   const [fields, setFields] = useState<ClientBriefFields>(EMPTY_BRIEF_FIELDS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [savedAt, setSavedAt] = useState<string | null>(null);
+
+  // Hypotheses (only used when hypothesesEndpoint is provided).
+  const [hypothesesText, setHypothesesText] = useState<string | null>(null);
+  const [hypothesesAt, setHypothesesAt] = useState<string | null>(null);
+  const [hypothesesError, setHypothesesError] = useState<string | null>(null);
+  const [hypothesesGenerating, setHypothesesGenerating] = useState(false);
+  // Tracks "we already auto-triggered after a save" to avoid loops on errors.
+  const autoTriggeredRef = useRef(false);
 
   const apiFetch = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -239,6 +357,54 @@ export function ClientBriefForm({ endpoint, title, subtitle, auditPrefix }: Clie
     };
   }, [endpoint, apiFetch, auditPrefix]);
 
+  // Load existing hypotheses on mount (read-only — won't generate).
+  useEffect(() => {
+    if (!hypothesesEndpoint) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await apiFetch<HypothesesApiResponse>(hypothesesEndpoint);
+        if (cancelled) return;
+        setHypothesesText(data.lead_source_hypotheses);
+        setHypothesesAt(data.lead_source_hypotheses_generated_at);
+        setHypothesesError(data.lead_source_hypotheses_error);
+      } catch (err) {
+        if (!cancelled) {
+          void logError(`${auditPrefix}.hypotheses.load.failed`, err);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hypothesesEndpoint, apiFetch, auditPrefix]);
+
+  const generateHypotheses = useCallback(
+    async (opts: { regenerate?: boolean } = {}) => {
+      if (!hypothesesEndpoint) return;
+      setHypothesesGenerating(true);
+      setHypothesesError(null);
+      try {
+        const url = opts.regenerate ? `${hypothesesEndpoint}?regenerate=1` : hypothesesEndpoint;
+        const data = await apiFetch<HypothesesApiResponse>(url, { method: 'POST' });
+        setHypothesesText(data.lead_source_hypotheses);
+        setHypothesesAt(data.lead_source_hypotheses_generated_at);
+        setHypothesesError(data.lead_source_hypotheses_error);
+        if (data.lead_source_hypotheses) {
+          void logAudit(`${auditPrefix}.hypotheses.generated`, 'Hypotheses generated', {
+            regenerate: !!opts.regenerate,
+          });
+        }
+      } catch (err) {
+        void logError(`${auditPrefix}.hypotheses.generate.failed`, err);
+        setHypothesesError(err instanceof Error ? err.message : 'Не удалось сгенерировать гипотезы');
+      } finally {
+        setHypothesesGenerating(false);
+      }
+    },
+    [hypothesesEndpoint, apiFetch, auditPrefix],
+  );
+
   async function handleSave() {
     setSaving(true);
     setError('');
@@ -252,6 +418,17 @@ export function ClientBriefForm({ endpoint, title, subtitle, auditPrefix }: Clie
         setSavedAt(data.brief.updated_at);
       }
       void logAudit(`${auditPrefix}.save.success`, 'Brief saved');
+
+      // Auto-trigger hypotheses generation on first save (no existing result, no recent error).
+      if (
+        hypothesesEndpoint &&
+        !hypothesesText &&
+        !hypothesesError &&
+        !autoTriggeredRef.current
+      ) {
+        autoTriggeredRef.current = true;
+        void generateHypotheses();
+      }
     } catch (err) {
       void logError(`${auditPrefix}.save.failed`, err);
       setError(err instanceof Error ? err.message : 'Ошибка сохранения');
@@ -502,6 +679,17 @@ export function ClientBriefForm({ endpoint, title, subtitle, auditPrefix }: Clie
           />
         </div>
       </section>
+
+      {hypothesesEndpoint && (
+        <HypothesesSection
+          text={hypothesesText}
+          generatedAt={hypothesesAt}
+          error={hypothesesError}
+          generating={hypothesesGenerating}
+          briefSaved={!!savedAt}
+          onGenerate={() => void generateHypotheses({ regenerate: !!hypothesesText })}
+        />
+      )}
 
       <div className="sticky bottom-4 bg-white rounded-xl border border-gray-200 shadow-lg p-4 flex items-center justify-end gap-3">
         <span className="text-xs text-gray-500 mr-auto">
