@@ -366,7 +366,7 @@ export default function ClientLaunchPage() {
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             {result.instantly_campaign_id && (
               <Link
-                href={{ pathname: '/client/campaigns/[id]', query: { id: result.instantly_campaign_id } }}
+                href={`/client/campaigns/${result.instantly_campaign_id}`}
                 className="neu-btn px-6 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2"
               >
                 Перейти к кампании <ExternalLink className="h-4 w-4" />
@@ -647,7 +647,7 @@ export default function ClientLaunchPage() {
                 </span>
                 {h.instantly_campaign_id && (
                   <Link
-                    href={{ pathname: '/client/campaigns/[id]', query: { id: h.instantly_campaign_id } }}
+                    href={`/client/campaigns/${h.instantly_campaign_id}`}
                     className="shrink-0 p-2 rounded-lg" aria-label="Открыть кампанию"
                     style={{ color: 'var(--cp-accent)' }}
                   >
