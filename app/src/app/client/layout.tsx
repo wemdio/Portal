@@ -25,6 +25,7 @@ const clientNav = [
   { name: 'Отчёты', nameEn: 'Reports', href: '/client/reports' },
   { name: 'Парсеры', nameEn: 'Parsers', href: '/client/parsers' },
   { name: 'Запуск кампаний', nameEn: 'Launch campaigns', href: '/client/launch' },
+  { name: 'Бриф', nameEn: 'Brief', href: '/client/brief' },
 ] as const;
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
