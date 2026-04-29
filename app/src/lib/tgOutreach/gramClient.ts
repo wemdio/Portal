@@ -2,6 +2,7 @@ import { TelegramClient } from 'telegram';
 import { ConnectionTCPObfuscated } from 'telegram/network';
 import { StringSession } from 'telegram/sessions';
 import { readSqliteSession } from '@/lib/telegram/sessionUtils';
+import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
 
 export interface ActiveClient {
@@ -9,10 +10,19 @@ export interface ActiveClient {
   account: OutreachAccount;
 }
 
-function parseProxyUrl(url: string): { ip: string; port: number; username?: string; password?: string; socksType?: 4 | 5 } | undefined {
+interface ParsedProxy {
+  ip: string;
+  port: number;
+  username?: string;
+  password?: string;
+  socksType?: 4 | 5;
+  protocol: 'http' | 'https' | 'socks4' | 'socks5';
+}
+
+function parseProxyUrl(url: string): ParsedProxy | undefined {
   try {
     const u = new URL(url);
-    const protocol = u.protocol.replace(':', '');
+    const protocol = u.protocol.replace(':', '') as ParsedProxy['protocol'];
     if (!['socks4', 'socks5', 'http', 'https'].includes(protocol)) return undefined;
 
     return {
@@ -21,6 +31,7 @@ function parseProxyUrl(url: string): { ip: string; port: number; username?: stri
       username: u.username || undefined,
       password: u.password || undefined,
       socksType: protocol === 'socks4' ? 4 : protocol === 'socks5' ? 5 : undefined,
+      protocol,
     };
   } catch {
     return undefined;
@@ -45,17 +56,30 @@ export async function createGramClient(
   }
 
   const proxyConfig = proxy ? parseProxyUrl(proxy.url) : undefined;
-  const proxyParams =
-    proxyConfig && (proxyConfig.socksType === 4 || proxyConfig.socksType === 5)
-      ? { proxy: { ...proxyConfig, socksType: proxyConfig.socksType } }
-      : {};
+  const isHttp = proxyConfig && (proxyConfig.protocol === 'http' || proxyConfig.protocol === 'https');
+  const isSocks = proxyConfig && (proxyConfig.socksType === 4 || proxyConfig.socksType === 5);
 
-  const useProxy = Object.keys(proxyParams).length > 0;
-  const client = new TelegramClient(session, account.api_id, account.api_hash, {
+  const clientOpts: ConstructorParameters<typeof TelegramClient>[3] = {
     connectionRetries: 3,
-    ...proxyParams,
-    ...(useProxy ? { connection: ConnectionTCPObfuscated } : {}),
-  });
+  };
+
+  if (isHttp && proxyConfig) {
+    // HTTP CONNECT tunnel: pass our custom socket class that handles CONNECT handshake
+    const httpProxy = {
+      ip: proxyConfig.ip,
+      port: proxyConfig.port,
+      username: proxyConfig.username,
+      password: proxyConfig.password,
+    };
+    clientOpts.networkSocket = class extends HttpConnectSocket {
+      constructor() { super(httpProxy); }
+    } as never;
+  } else if (isSocks && proxyConfig) {
+    clientOpts.proxy = { ...proxyConfig, socksType: proxyConfig.socksType! };
+    clientOpts.connection = ConnectionTCPObfuscated;
+  }
+
+  const client = new TelegramClient(session, account.api_id, account.api_hash, clientOpts);
 
   const CONNECT_TIMEOUT_MS = 30_000;
   await Promise.race([
