@@ -275,6 +275,44 @@ export class UnipileClient {
   async deleteWebhook(webhookId: string): Promise<void> {
     await this.request('DELETE', `webhooks/${webhookId}`, { addAccountId: false });
   }
+
+  /**
+   * Patch an account's proxy settings in Unipile.
+   * proxyStr format: "ip:port:user:pass" (HTTP proxy).
+   * Pass null/empty to remove proxy (revert to Unipile default pool).
+   */
+  async patchAccountProxy(
+    unipileAccountId: string,
+    proxyStr: string | null,
+  ): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {};
+    if (proxyStr) {
+      const parts = proxyStr.split(':');
+      if (parts.length === 4) {
+        body.proxy = {
+          host: parts[0],
+          port: Number(parts[1]),
+          username: parts[2],
+          password: parts[3],
+          protocol: 'http',
+        };
+      } else if (parts.length === 2) {
+        body.proxy = {
+          host: parts[0],
+          port: Number(parts[1]),
+          protocol: 'http',
+        };
+      } else {
+        throw new Error(`Invalid proxy format: expected ip:port or ip:port:user:pass, got "${proxyStr}"`);
+      }
+    } else {
+      body.proxy = null;
+    }
+    return this.request('PATCH', `accounts/${unipileAccountId}`, {
+      body,
+      addAccountId: false,
+    });
+  }
 }
 
 // ---- Static helpers ---------------------------------------------------
