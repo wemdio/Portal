@@ -1,11 +1,12 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
-import { qualifyReply, getBodyText } from './leadQualifier';
+import { qualifyReply, getBodyText, fetchBriefByCampaign } from './leadQualifier';
 import * as instantly from './client';
 import type { Email } from './types';
 
 const EMAILS_PER_CAMPAIGN = 50;
 const MAX_QUALIFY_PER_TICK = 20;
+const briefCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
   process.env.OPENROUTER_BRIEF_API_KEY ??
@@ -187,9 +188,15 @@ async function qualifyOneReply(
 
   if (!campaignId || !leadEmail) return;
 
+  if (!briefCache.has(campaignId)) {
+    briefCache.set(campaignId, await fetchBriefByCampaign(campaignId));
+  }
+  const cachedBrief = briefCache.get(campaignId) ?? null;
+
   const result = await qualifyReply(campaignId, leadEmail, reply.thread_id, {
     apiKey,
     model: MODEL,
+    briefText: cachedBrief,
   });
 
   const campaignName = reply._campaignName ?? null;
