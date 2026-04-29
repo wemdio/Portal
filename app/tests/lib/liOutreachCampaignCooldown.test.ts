@@ -8,7 +8,9 @@
  *   2) On Unipile invitation_limit error → account is parked for 60 min,
  *      lead returns to pending (current_step does not advance), tick aborts.
  *   3) On Unipile already_invited error → lead is marked invited and step
- *      advances, account gets a short 15-min cooldown, tick aborts.
+ *      advances, account is NOT parked, and the tick continues with the
+ *      next lead (per-lead skip semantics — `already_invited` is a per-lead
+ *      signal, NOT an account-wide back-off).
  *   4) Generic UnipileErrors (5xx / validation) do NOT set cooldown; the
  *      offending lead is marked error and the tick continues with the next
  *      lead — preserving today's behaviour.
@@ -313,25 +315,36 @@ describe('runCampaignTick — account cooldown', () => {
     }
   });
 
-  it('on already_invited error: marks lead invited, advances step, sets short cooldown ~15min', async () => {
+  it('on already_invited error: marks lead invited, advances step, does NOT park account, tick continues to next lead', async () => {
     seedBase();
 
-    sendInviteImpl = async () => {
-      throw new UnipileError('Unipile 400', 400, 'cannot_resend_yet: wait 3 weeks');
+    // First lead returns already_invited, second lead succeeds.
+    // The whole point of the new behaviour: a single already_invited must NOT
+    // throw an AccountCooldownTriggered that aborts the tick — otherwise on
+    // a lead list with many historically-invited contacts we burn an entire
+    // 15-min account window per such lead.
+    let calls = 0;
+    sendInviteImpl = async (providerId) => {
+      calls++;
+      if (providerId === 'provider-1') {
+        throw new UnipileError('Unipile 400', 400, 'cannot_resend_yet: wait 3 weeks');
+      }
+      return { id: 'invite-ok' };
     };
 
-    const before = Date.now();
-    await runCampaignTick(CAMPAIGN_ID, USER_ID);
+    const result = await runCampaignTick(CAMPAIGN_ID, USER_ID);
 
-    const cdUpdate = findAccountCooldownUpdate();
-    expect(cdUpdate).not.toBeNull();
-    expect(cdUpdate!.data.cooldown_reason).toBe('already_invited');
+    // Both leads should have been attempted in the same tick.
+    expect(calls).toBe(2);
+    // Lead-1's invite "failure" is intentional skip, not a counted error;
+    // lead-2 succeeded. Allow either accounting model — both processed.
+    expect(result.processed + result.errors).toBeGreaterThanOrEqual(2);
 
-    const cdMs = new Date(String(cdUpdate!.data.cooldown_until)).getTime() - before;
-    expect(cdMs).toBeGreaterThanOrEqual(10 * 60 * 1000);
-    expect(cdMs).toBeLessThanOrEqual(20 * 60 * 1000);
+    // The account must NOT have been parked for already_invited.
+    expect(findAccountCooldownUpdate()).toBeNull();
 
-    // Lead should be marked invited and the campaign-lead step advanced.
+    // Lead-1 should be marked invited and its campaign-lead step advanced
+    // so we never retry it on the next tick.
     const leadUpdates = findLeadUpdates().filter((u) => u.filters.id === 'lead-1');
     expect(leadUpdates.some((u) => u.data.status === 'invited')).toBe(true);
 

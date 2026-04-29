@@ -55,6 +55,13 @@ async function handleMessageReceived(payload: Record<string, unknown>): Promise<
   );
   const accountId = String(data.account_id ?? '');
 
+  // Unipile fires `message_received` for BOTH directions — incoming AND outgoing.
+  // Without this guard, every message we send via the campaign runner (or
+  // every message the operator sends manually from LinkedIn web) would mark
+  // the recipient as `user_replied=true` and trigger `stop_on_reply` →
+  // campaigns silently die. See bug log Apr 2026 + li_webhook_logs sample.
+  if (data.is_sender === true || data.is_sender === 'true') return;
+
   if (!chatId || !text) return;
 
   // Find lead by chat_id
