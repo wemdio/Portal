@@ -144,6 +144,20 @@ export function isAutoReplyOrUnsubscribe(text: string): boolean {
   return AUTO_REPLY_PATTERNS.some((p) => p.test(text));
 }
 
+const JUNK_REPLY_EXACT = new Set([
+  'нет', 'no', 'не интересует', 'не актуально', 'не надо', 'спасибо не надо',
+  'ок', 'ok', 'ясно', 'понятно', 'спс', 'спасибо', 'thanks', 'благодарю',
+  '+', '-', '.', '..', '...', '?', '!', 'да', 'yes', 'угу', 'ага',
+]);
+
+export function isJunkReply(text: string): boolean {
+  if (!text) return true;
+  const normalized = text.trim().toLowerCase().replace(/[.!?,;:«»"'`\s]+$/g, '').trim();
+  if (normalized.length < 3) return true;
+  if (normalized.length > 50) return false;
+  return JUNK_REPLY_EXACT.has(normalized);
+}
+
 export function isProposalMessage(text: string): boolean {
   if (!text) return false;
   return text.length >= 200;
@@ -153,7 +167,7 @@ export function isProposalMessage(text: string): boolean {
 
 function buildSystemPrompt(briefText?: string | null): string {
   const briefSection = briefText
-    ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 8000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
+    ? `\n\nКОНТЕКСТ ПРЕДЛОЖЕНИЯ (бриф клиента):\n---\n${briefText.slice(0, 2000)}\n---\nИспользуй этот контекст для определения возражений и генерации черновика ответа.`
     : '';
 
   return `Ты — эксперт по квалификации лидов в B2B email-аутриче. Тебе дан контекст переписки: наше последнее исходящее письмо и ответ потенциального клиента.${briefSection}
@@ -400,7 +414,7 @@ export async function classifyWithAI(
             { role: 'user', content: userMessage },
           ],
           temperature: 0.1,
-          max_tokens: 1500,
+          max_tokens: 600,
           response_format: { type: 'json_object' },
         }),
       });
@@ -473,6 +487,20 @@ export async function qualifyReply(
       interestSignals: [],
       reason: 'Автоответ или отписка',
       confidence: 0.95,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: ctx,
+    };
+  }
+
+  if (isJunkReply(replyText)) {
+    return {
+      isLead: false,
+      proposalSeen: false,
+      interestSignals: [],
+      reason: 'Слишком короткий или неинформативный ответ',
+      confidence: 0.9,
       needsReview: false,
       objectionHandleable: false,
       objectionDraft: null,

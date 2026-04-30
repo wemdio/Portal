@@ -305,9 +305,15 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   const [selectedSteps, setSelectedSteps] = useState<StepKey[]>([]);
   const [brief, setBrief] = useState('');
-  const [briefInputMode, setBriefInputMode] = useState<'pdf' | 'text'>('pdf');
+  const [briefInputMode, setBriefInputMode] = useState<'pdf' | 'text' | 'saved'>(
+    clientMode ? 'saved' : 'pdf',
+  );
   const [briefFileName, setBriefFileName] = useState('');
   const [briefUploading, setBriefUploading] = useState(false);
+  const [savedBriefLoading, setSavedBriefLoading] = useState(false);
+  const [savedBriefAvailable, setSavedBriefAvailable] = useState<boolean | null>(null);
+  const [savedBriefError, setSavedBriefError] = useState('');
+  const [savedBriefText, setSavedBriefText] = useState('');
   const [prompt, setPrompt] = useState('');
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [showPreview, setShowPreview] = useState(true);
@@ -348,6 +354,46 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       return sortByPriority([...set]);
     });
   }, [clientMode, fileData]);
+
+  /* ─── Client mode: auto-fetch saved brief on mount (used when user picks 'saved' tab) ─── */
+
+  useEffect(() => {
+    if (!clientMode) return;
+    let cancelled = false;
+    void (async () => {
+      setSavedBriefLoading(true);
+      setSavedBriefError('');
+      try {
+        const res = await authFetch('/api/client/brief');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { compiled_brief_text?: string };
+        if (cancelled) return;
+        const text = (data.compiled_brief_text ?? '').trim();
+        setSavedBriefText(text);
+        setSavedBriefAvailable(text.length > 0);
+        if (text && briefInputMode === 'saved') setBrief(text);
+      } catch (err) {
+        if (!cancelled) {
+          setSavedBriefAvailable(false);
+          setSavedBriefError(err instanceof Error ? err.message : 'Не удалось загрузить сохранённый бриф');
+        }
+      } finally {
+        if (!cancelled) setSavedBriefLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // briefInputMode intentionally excluded — we only fetch once per mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientMode]);
+
+  // Sync `brief` to the cached saved text every time user switches into 'saved' mode.
+  useEffect(() => {
+    if (briefInputMode === 'saved' && savedBriefText) {
+      setBrief(savedBriefText);
+    }
+  }, [briefInputMode, savedBriefText]);
 
   /* ─── Polling ─── */
 
@@ -1017,6 +1063,22 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         Бриф для оценки ЦА
                       </label>
                       <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-3 w-fit">
+                        {clientMode && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBriefInputMode('saved');
+                              setBriefFileName('');
+                            }}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                              briefInputMode === 'saved'
+                                ? 'bg-white text-gray-900 shadow-sm'
+                                : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                          >
+                            Сохранённый бриф
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setBriefInputMode('pdf')}
@@ -1040,7 +1102,42 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           Текст
                         </button>
                       </div>
-                      {briefInputMode === 'pdf' ? (
+                      {clientMode && briefInputMode === 'saved' ? (
+                        <div>
+                          {savedBriefLoading ? (
+                            <div className="flex items-center gap-2 px-3 py-3 text-sm border border-gray-200 bg-gray-50 rounded-xl text-gray-500">
+                              <Loader2 size={14} className="animate-spin" />
+                              Загружаем сохранённый бриф…
+                            </div>
+                          ) : savedBriefAvailable ? (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2 px-3 py-2.5 text-sm border border-emerald-200 bg-emerald-50 rounded-xl">
+                                <Check size={14} className="text-emerald-600 shrink-0" />
+                                <span className="text-emerald-800">Сохранённый бриф будет использован</span>
+                                <a
+                                  href="/client/brief"
+                                  className="ml-auto text-xs text-emerald-700 underline hover:text-emerald-900"
+                                >
+                                  Открыть и отредактировать
+                                </a>
+                              </div>
+                              <p className="text-[11px] text-gray-500">
+                                Хотите подгрузить разовый бриф вместо сохранённого — переключитесь на «PDF файл» или «Текст».
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 px-3 py-3 text-sm border border-amber-200 bg-amber-50 rounded-xl text-amber-800">
+                              Бриф ещё не заполнен.{' '}
+                              <a href="/client/brief" className="underline hover:text-amber-900">
+                                Заполнить сейчас
+                              </a>
+                              {savedBriefError && (
+                                <span className="ml-2 text-[11px] text-amber-700">({savedBriefError})</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ) : briefInputMode === 'pdf' ? (
                         <div>
                           <input
                             ref={briefFileRef}

@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import type { Route } from 'next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { UserRole, UserProfile } from '@/types';
@@ -927,12 +928,20 @@ export default function UsersPage() {
                     Сменить пароль
                   </button>
                   {modalRole === 'client' && actionModalUserId && (
-                    <Link
-                      href={`/admin/clients/${actionModalUserId}/preset`}
-                      className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
-                    >
-                      Пресет запуска кампаний
-                    </Link>
+                    <>
+                      <Link
+                        href={`/admin/clients/${actionModalUserId}/preset` as Route}
+                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                      >
+                        Пресет запуска кампаний
+                      </Link>
+                      <Link
+                        href={`/admin/clients/${actionModalUserId}/brief` as Route}
+                        className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg text-sm hover:bg-blue-50"
+                      >
+                        Бриф клиента
+                      </Link>
+                    </>
                   )}
                   {actionModalUserId !== currentUserId && (
                     <button
