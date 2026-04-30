@@ -1,9 +1,15 @@
+import fs from 'fs';
 import { TelegramClient } from 'telegram';
 import { ConnectionTCPObfuscated } from 'telegram/network';
 import { StringSession } from 'telegram/sessions';
 import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
+
+const HEARTBEAT_PATH = '/tmp/tg-outreach-heartbeat';
+function writeHeartbeat() {
+  try { fs.writeFileSync(HEARTBEAT_PATH, Date.now().toString()); } catch { /* ignore */ }
+}
 
 export interface ActiveClient {
   client: TelegramClient;
@@ -101,6 +107,7 @@ export async function buildClients(
   const clients: ActiveClient[] = [];
 
   for (const acc of accounts) {
+    writeHeartbeat();
     if (!acc.is_active) continue;
     const hasSession = (acc.session_data?.trim()) || (acc.session_file_path && downloadSessionFile);
     if (!hasSession) {

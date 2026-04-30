@@ -829,7 +829,7 @@ export async function runCampaignLoop(
 
   try {
     while (!shouldStop()) {
-      try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* ignore */ }
+      try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         log('info', 'Спящий период — пауза 60 сек');
