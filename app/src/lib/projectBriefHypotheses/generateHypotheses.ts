@@ -1,6 +1,6 @@
 import { callOpenRouterChat } from '@/lib/openrouter/client';
 import { EXPORT_BASE_CATALOG } from './exportBaseCatalog';
-import { buildHypothesesPrompt, selectRelevantCatalog } from './sources';
+import { buildHypothesesPrompt, selectRelevantCatalog, type HypothesesAudience } from './sources';
 
 export const DEFAULT_HYPOTHESES_MODEL =
   process.env.PROJECT_HYPOTHESES_MODEL ?? 'policy/gemini-flash';
@@ -15,6 +15,8 @@ export interface GenerateLeadSourceHypothesesOptions {
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   maxRetries?: number;
+  /** Кому пойдёт результат — 'client' исключает источники из CLIENT_EXCLUDED_SOURCE_IDS. */
+  audience?: HypothesesAudience;
 }
 
 /**
@@ -33,6 +35,7 @@ export async function generateLeadSourceHypotheses(
     signal,
     fetchImpl,
     maxRetries = 2,
+    audience = 'internal',
   } = options;
 
   if (!apiKey) throw new Error('OPENROUTER_BRIEF_API_KEY is not configured');
@@ -41,7 +44,7 @@ export async function generateLeadSourceHypotheses(
   }
 
   const catalog = selectRelevantCatalog(briefText, EXPORT_BASE_CATALOG, catalogLimit);
-  const { system, user } = buildHypothesesPrompt({ briefText, catalog });
+  const { system, user } = buildHypothesesPrompt({ briefText, catalog, audience });
 
   const content = await callOpenRouterChat({
     apiKey,

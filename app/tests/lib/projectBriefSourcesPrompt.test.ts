@@ -3,6 +3,9 @@ import {
   LEAD_SOURCES_KNOWLEDGE,
   buildHypothesesPrompt,
   selectRelevantCatalog,
+  renderLeadSourcesKnowledge,
+  CLIENT_EXCLUDED_SOURCE_IDS,
+  LEAD_SOURCES,
 } from '@/lib/projectBriefHypotheses/sources';
 
 // Sanity: the constant must export every source we care about.
@@ -74,5 +77,70 @@ describe('projectBriefHypotheses prompt', () => {
     const result = selectRelevantCatalog('строительство ремонт мебель медицина', EXPORT_BASE_CATALOG, 50);
     const urls = result.map((r) => r.url);
     expect(new Set(urls).size).toBe(urls.length);
+  });
+});
+
+describe('renderLeadSourcesKnowledge & client-mode prompt (no «Сигналы»)', () => {
+  it('LEAD_SOURCES (structured array) cодержит все обязательные источники по name', () => {
+    for (const name of REQUIRED_SOURCE_NAMES) {
+      const needle: string = name;
+      const found = LEAD_SOURCES.some((s) => (s.name as string).includes(needle));
+      expect(found).toBe(true);
+    }
+  });
+
+  it('LEAD_SOURCES_KNOWLEDGE (default export) === renderLeadSourcesKnowledge() (no regression)', () => {
+    expect(renderLeadSourcesKnowledge()).toBe(LEAD_SOURCES_KNOWLEDGE);
+  });
+
+  it('CLIENT_EXCLUDED_SOURCE_IDS включает «signals» (Сигналы)', () => {
+    expect(CLIENT_EXCLUDED_SOURCE_IDS).toContain('signals');
+  });
+
+  it('renderLeadSourcesKnowledge({ exclude: ["signals"] }) НЕ содержит «Сигналы» секции', () => {
+    const text = renderLeadSourcesKnowledge({ exclude: ['signals'] });
+    expect(text).not.toMatch(/##\s+\d+\.\s+Сигналы/);
+    // Тело секции про Сигналы тоже исчезло
+    expect(text).not.toContain('кнопка «Сигналы»');
+  });
+
+  it('renderLeadSourcesKnowledge({ exclude: ["signals"] }) перенумеровывает оставшиеся источники без пропусков', () => {
+    const text = renderLeadSourcesKnowledge({ exclude: ['signals'] });
+    const headings = [...text.matchAll(/^##\s+(\d+)\./gm)].map((m) => Number(m[1]));
+    expect(headings.length).toBeGreaterThan(0);
+    // Должна быть последовательность 1, 2, 3, ... без пропусков
+    headings.forEach((n, i) => expect(n).toBe(i + 1));
+  });
+
+  it('buildHypothesesPrompt({ audience: "client" }) НЕ упоминает «Сигналы»', () => {
+    const { system, user } = buildHypothesesPrompt({
+      briefText: 'тестовый бриф',
+      catalog: EXPORT_BASE_CATALOG.slice(0, 5),
+      audience: 'client',
+    });
+    const combined = `${system}\n${user}`;
+    expect(combined).not.toMatch(/##\s+\d+\.\s+Сигналы/);
+    expect(combined).not.toContain('кнопка «Сигналы»');
+  });
+
+  it('buildHypothesesPrompt() default (без audience) — поведение не меняется, «Сигналы» присутствуют', () => {
+    const { system } = buildHypothesesPrompt({
+      briefText: 'тестовый бриф',
+      catalog: EXPORT_BASE_CATALOG.slice(0, 5),
+    });
+    expect(system).toMatch(/##\s+\d+\.\s+Сигналы/);
+  });
+
+  it('buildHypothesesPrompt({ audience: "client" }) всё ещё содержит остальные обязательные источники', () => {
+    const { system, user } = buildHypothesesPrompt({
+      briefText: 'test',
+      catalog: EXPORT_BASE_CATALOG.slice(0, 5),
+      audience: 'client',
+    });
+    const combined = `${system}\n${user}`;
+    const stillRequired = REQUIRED_SOURCE_NAMES.filter((n) => n !== 'Сигналы');
+    for (const source of stillRequired) {
+      expect(combined).toContain(source);
+    }
   });
 });

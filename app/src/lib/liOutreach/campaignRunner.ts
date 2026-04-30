@@ -292,6 +292,30 @@ async function processInviteStep(
 ): Promise<void> {
   const now = new Date().toISOString();
 
+  // If the lead is already invited/connected/messaged/replied, skip the API
+  // call entirely and just advance the campaign step. Before this guard the
+  // runner was calling sendInvite for every lead on step 0 regardless of
+  // their status — LinkedIn returned `already_invited` 235 times/day, which
+  // looks like spam to their abuse detector even though no real invite goes
+  // out. See prod Apr 30, 2026: 160 API calls in one day at a limit of 30.
+  if (['invited', 'connected', 'messaged', 'replied'].includes(lead.status)) {
+    log(
+      'info',
+      `Лид уже в статусе «${lead.status}» — пропуск инвайта без обращения к API`,
+      lead.name,
+      stepIdx,
+    );
+    await db
+      .from('li_campaign_leads')
+      .update({
+        current_step: stepIdx + 1,
+        status: stepIdx + 1 < (campaign.steps?.length ?? 0) ? 'in_progress' : 'completed',
+        updated_at: now,
+      })
+      .eq('id', cl.id);
+    return;
+  }
+
   if (campaign.invites_sent_today >= campaign.daily_invite_limit) {
     log('warning', `Дневной лимит инвайтов достигнут (${campaign.invites_sent_today}/${campaign.daily_invite_limit}) — пропуск`, lead.name, stepIdx);
     return;

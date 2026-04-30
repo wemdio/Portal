@@ -352,6 +352,29 @@ describe('runCampaignTick — account cooldown', () => {
     expect(clUpdates.some((u) => u.data.current_step === 1)).toBe(true);
   });
 
+  it('skips leads already in status=invited without calling sendInvite at all', async () => {
+    seedBase();
+    // Mark lead-1 as already invited (e.g. from a previous tick or backfill).
+    dbState.rows.li_leads[0].status = 'invited';
+
+    let calls = 0;
+    sendInviteImpl = async () => {
+      calls++;
+      return { id: 'invite-ok' };
+    };
+
+    const result = await runCampaignTick(CAMPAIGN_ID, USER_ID);
+
+    // Only lead-2 (status=new) should have triggered a sendInvite call.
+    expect(calls).toBe(1);
+    expect(result.processed).toBeGreaterThanOrEqual(2);
+
+    // lead-1's campaign_lead should have been advanced past step 0 without
+    // any Unipile API call.
+    const clUpdates = findCampaignLeadUpdates().filter((u) => u.filters.id === 'cl-1');
+    expect(clUpdates.some((u) => u.data.current_step === 1)).toBe(true);
+  });
+
   it('on a regular UnipileError (e.g. 500): does NOT set cooldown, marks lead error, tick continues to next lead', async () => {
     seedBase();
 
