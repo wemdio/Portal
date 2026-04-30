@@ -30,3 +30,26 @@ export interface ClientRepliesPage {
   items: ClientReply[];
   next_starting_after: string | null;
 }
+
+/**
+ * Direction-aware shape used by the thread view (single conversation).
+ * - 'outbound' = sent by us / the campaign (ue_type=1 initial, ue_type=3 manual reply)
+ * - 'inbound'  = received from the lead (ue_type=2)
+ */
+export type ThreadDirection = 'inbound' | 'outbound';
+
+export interface ThreadMessage {
+  id: string;
+  direction: ThreadDirection;
+  timestamp: string | null;
+  subject: string | null;
+  from_email: string | null;
+  from_name: string | null;
+  body_text: string | null;
+}
+
+export interface ClientReplyThread {
+  thread_id: string | null;
+  messages: ThreadMessage[];
+}
+

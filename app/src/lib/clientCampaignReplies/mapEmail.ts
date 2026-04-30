@@ -1,5 +1,5 @@
 import type { Email } from '@/lib/instantly/types';
-import type { ClientReply } from './types';
+import type { ClientReply, ThreadMessage } from './types';
 
 /** Hard cap on body text we return to the browser. */
 const MAX_BODY_TEXT_CHARS = 20_000;
@@ -80,6 +80,32 @@ export function mapInstantlyEmailToReply(email: Email): ClientReply {
     is_unread: isUnread,
     ai_interest_value: aiInterest,
     content_preview: preview,
+    body_text: bodyText,
+  };
+}
+
+/**
+ * Convert a raw Instantly Email into a direction-aware ThreadMessage for the
+ * conversation view. Outbound messages (ue_type 1 or 3) display the eaccount
+ * as the sender; inbound (ue_type 2) display the lead's address.
+ */
+export function mapInstantlyEmailToThreadMessage(email: Email): ThreadMessage {
+  const ueType = typeof email.ue_type === 'number' ? email.ue_type : 1;
+  const direction: ThreadMessage['direction'] = ueType === 2 ? 'inbound' : 'outbound';
+  const bodyText = clamp(extractBodyText(email.body), MAX_BODY_TEXT_CHARS);
+
+  const fromEmail =
+    direction === 'outbound'
+      ? (email.eaccount as string | undefined) ?? email.from_address_email ?? null
+      : email.from_address_email ?? null;
+
+  return {
+    id: email.id,
+    direction,
+    timestamp: email.timestamp_email ?? email.timestamp_created ?? null,
+    subject: email.subject ?? null,
+    from_email: fromEmail,
+    from_name: extractFromName(email),
     body_text: bodyText,
   };
 }
