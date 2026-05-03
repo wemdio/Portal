@@ -213,6 +213,14 @@ async function pollOnce(): Promise<boolean> {
 }
 
 export async function resumeRunningCampaigns() {
+  // On worker boot, also rescue campaigns stuck in `error` from previous runs
+  // (e.g. transient DB/proxy/network outages that flipped status to error and
+  // then got cleared, but nothing brought the campaigns back).
+  await db
+    .from('tg_outreach_campaigns')
+    .update({ status: 'paused', updated_at: new Date().toISOString() })
+    .eq('status', 'error');
+
   const { data: running } = await db
     .from('tg_outreach_campaigns')
     .select('id, user_id')
