@@ -790,6 +790,7 @@ export async function runCampaignLoop(
 
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'OPENROUTER_TG_OUTREACH_API_KEY не задан в .env');
+    // Hard config error — leave in error so we don't loop on it forever
     await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
     return;
   }
@@ -801,8 +802,10 @@ export async function runCampaignLoop(
     .eq('is_active', true);
 
   if (!accounts?.length) {
-    log('error', 'Нет активных аккаунтов');
-    await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
+    log('error', 'Нет активных аккаунтов — кампания в paused, авто-возобновится когда появятся аккаунты');
+    // Use paused (not error) so resumeRunningCampaigns retries us automatically
+    // once accounts become active again, instead of leaving the campaign stuck.
+    await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
     return;
   }
 
@@ -818,8 +821,10 @@ export async function runCampaignLoop(
   const clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
 
   if (clients.length === 0) {
-    log('error', 'Ни один аккаунт не подключился');
-    await db.from('tg_outreach_campaigns').update({ status: 'error' }).eq('id', campaignId);
+    log('error', 'Ни один аккаунт не подключился — кампания в paused, повторим попытку');
+    // Transient: proxy outage, network blip, Telegram unreachable. Use paused
+    // so the next worker tick will auto-resume instead of requiring manual fix.
+    await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
     return;
   }
 
