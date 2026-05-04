@@ -54,6 +54,11 @@ docs/*.xlsx
 doc_*.env
 *.env.bak
 
+# Локальные исходники брифов/офферов заказчика. Эталонные .txt-версии для
+# инструмента «Цепочки писем 2.0» лежат в S3 (MAIN_S3_BUCKET под
+# tools/email-sequence-v2/reference/...), сами PDF/DOCX в репо не нужны.
+offers_example/
+
 # python
 **/__pycache__/
 *.py[cod]
