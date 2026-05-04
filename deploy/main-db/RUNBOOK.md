@@ -63,7 +63,9 @@ cat >> .env <<'EOF'
 MAIN_PG_PASSWORD=<тот же пароль, что в /opt/main-db/.env>
 # JWT для встроенного в supabase/postgres ENV (используется pgjwt extension)
 MAIN_JWT_SECRET=<вывод generate-keys.mjs>
-MAIN_JWT_EXP=3600
+# 21600 = 6 часов. Старое значение 3600 (1 час) приводило к выкидыванию
+# с портала каждый час при переходе по вкладкам.
+MAIN_JWT_EXP=21600
 EOF
 
 sed -i 's/\r$//' .env
@@ -346,3 +348,42 @@ EOF
   В `supabase/postgres` это уже включено по умолчанию.
 - **`pg_cron` не работает** — расширение работает только в БД `postgres` (а не `portal`).
   В нашем init скрипте мы используем именно `postgres`.
+
+---
+
+## Изменение TTL сессии (access/refresh)
+
+По умолчанию access-токен GoTrue живёт 1 час, что приводит к выкидыванию
+пользователей с портала (видно как редирект на `/login` при переходе по
+вкладкам). Текущие значения в `deploy/main-db/.env.example`:
+
+| Переменная | Значение | Что делает |
+|------------|----------|-----------|
+| `MAIN_JWT_EXP` | `21600` (6 ч) | TTL access-токена (`GOTRUE_JWT_EXP`, `PGRST_APP_SETTINGS_JWT_EXP`, и `JWT_EXP` у `main-postgres`). |
+| `MAIN_SESSIONS_INACTIVITY_TIMEOUT` | `604800s` (7 дн) | Refresh выкидывается, если им не пользовались N времени (`GOTRUE_SESSIONS_INACTIVITY_TIMEOUT`). У активного юзера обновляется на каждом авто-рефреше. |
+
+### Как раскатить на проде
+
+```bash
+# DB-хост (там, где self-hosted Supabase):
+ssh root@144.31.54.166
+
+cd /opt/main-db
+# 1. Поправить значения в .env
+sed -i 's/^MAIN_JWT_EXP=.*/MAIN_JWT_EXP=21600/' .env
+grep -q '^MAIN_SESSIONS_INACTIVITY_TIMEOUT=' .env \
+  || echo 'MAIN_SESSIONS_INACTIVITY_TIMEOUT=604800s' >> .env
+
+# 2. Пересоздать только GoTrue, REST и main-postgres (БД-volume сохранится)
+docker compose -p main-supabase --env-file .env up -d --force-recreate auth rest
+
+# Postgres-контейнер живёт в /opt/instantly-db (там же main-postgres):
+cd /opt/instantly-db
+sed -i 's/^MAIN_JWT_EXP=.*/MAIN_JWT_EXP=21600/' .env
+docker compose -p instantly-db --env-file .env up -d --force-recreate main-postgres
+```
+
+После этого новые токены, которые GoTrue выдаёт, будут жить 6 часов.
+Существующие сессии останутся валидными (refresh-токены продолжат работать),
+ничего пересоздавать у пользователей не нужно — они просто перестанут так
+часто упираться в редирект на `/login`.
