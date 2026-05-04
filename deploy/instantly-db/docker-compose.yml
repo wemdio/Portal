@@ -217,7 +217,7 @@ services:
       PGPASSWORD: ${MAIN_PG_PASSWORD}
       PGDATABASE: postgres
       JWT_SECRET: ${MAIN_JWT_SECRET}
-      JWT_EXP: ${MAIN_JWT_EXP:-3600}
+      JWT_EXP: ${MAIN_JWT_EXP:-21600}
     volumes:
       - main-supabase-pg-data:/var/lib/postgresql/data
       - ./main-init:/docker-entrypoint-initdb.d:ro
