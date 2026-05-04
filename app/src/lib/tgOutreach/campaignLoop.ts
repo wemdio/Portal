@@ -818,14 +818,19 @@ export async function runCampaignLoop(
   log('info', `Запуск кампании "${campaign.name}": ${accounts.length} аккаунтов, ${proxies?.length ?? 0} прокси`);
 
   const downloadSessionFile = (storagePath: string) => downloadSessionToTemp(db, storagePath);
-  const clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
+  let clients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
 
   if (clients.length === 0) {
-    log('error', 'Ни один аккаунт не подключился — кампания в paused, повторим попытку');
-    // Transient: proxy outage, network blip, Telegram unreachable. Use paused
-    // so the next worker tick will auto-resume instead of requiring manual fix.
-    await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
-    return;
+    log('warning', 'Ни один аккаунт не подключился — жду 60 сек и пробую заново');
+    await interruptibleSleep(60_000, shouldStop);
+    if (shouldStop()) return;
+    const retryClients = await buildClients(accounts, proxies ?? [], log, downloadSessionFile);
+    if (retryClients.length === 0) {
+      log('error', 'Повторная попытка подключения не удалась — кампания в paused');
+      await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      return;
+    }
+    clients = retryClients;
   }
 
   await db.from('tg_outreach_campaigns').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', campaignId);
