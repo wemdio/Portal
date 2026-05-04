@@ -64,8 +64,14 @@ services:
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
-      GOTRUE_JWT_EXP: ${MAIN_JWT_EXP:-3600}
+      GOTRUE_JWT_EXP: ${MAIN_JWT_EXP:-21600}
       GOTRUE_JWT_SECRET: ${MAIN_JWT_SECRET}
+      # Refresh-токен в GoTrue по умолчанию бессрочный (single-use). Чтобы
+      # выкидывать тех, кто реально не заходил неделю, ставим
+      # SESSIONS_INACTIVITY_TIMEOUT = 7d. У активного пользователя refresh
+      # обновляется на каждом авто-рефреше access_token, так что неделя
+      # «без активности» означает буквально «не открывал портал 7 дней».
+      GOTRUE_SESSIONS_INACTIVITY_TIMEOUT: ${MAIN_SESSIONS_INACTIVITY_TIMEOUT:-604800s}
       GOTRUE_EXTERNAL_EMAIL_ENABLED: ${MAIN_ENABLE_EMAIL_SIGNUP:-true}
       GOTRUE_MAILER_AUTOCONFIRM: ${MAIN_ENABLE_EMAIL_AUTOCONFIRM:-true}
       GOTRUE_SMTP_ADMIN_EMAIL: ${MAIN_SMTP_ADMIN_EMAIL:-}
@@ -103,7 +109,7 @@ services:
       PGRST_JWT_SECRET: ${MAIN_JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: ${MAIN_JWT_SECRET}
-      PGRST_APP_SETTINGS_JWT_EXP: ${MAIN_JWT_EXP:-3600}
+      PGRST_APP_SETTINGS_JWT_EXP: ${MAIN_JWT_EXP:-21600}
       PGRST_DB_POOL: 30
       PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
     command: ["postgrest"]
