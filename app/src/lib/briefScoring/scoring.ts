@@ -155,7 +155,7 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
       { role: 'user', content: userMessage },
     ],
     temperature: 0.2,
-    maxTokens: 2000,
+    maxTokens: 4000,
     responseFormat: { type: 'json_object' },
     signal,
     fetchImpl,

@@ -11,6 +11,10 @@ import { Mutex } from 'async-mutex';
 const mutex = new Mutex();
 const closeError = new Error('NetSocket was closed');
 
+function proxyLog(msg: string) {
+  console.log(`[HttpConnectSocket] ${msg}`);
+}
+
 interface HttpProxy {
   ip: string;
   port: number;
@@ -68,7 +72,9 @@ export class HttpConnectSocket {
     this.closed = false;
 
     if (this.proxy) {
+      proxyLog(`connecting via CONNECT to ${ip}:${port} through ${this.proxy.ip}:${this.proxy.port}`);
       this.client = await this._httpConnect(this.proxy, ip, port);
+      proxyLog(`CONNECT tunnel established to ${ip}:${port}`);
     } else {
       this.client = new net.Socket();
       await new Promise<void>((resolve, reject) => {
@@ -87,12 +93,18 @@ export class HttpConnectSocket {
       }
     });
 
-    this.client.on('error', () => { /* handled by close */ });
-    this.client.on('close', () => {
+    this.client.on('error', (err) => {
+      proxyLog(`socket error: ${err.message}`);
+    });
+    this.client.on('close', (hadError) => {
+      proxyLog(`socket closed (hadError=${hadError}, destroyed=${this.client?.destroyed})`);
       if (this.client?.destroyed) {
         this.resolveRead?.(false);
         this.closed = true;
       }
+    });
+    this.client.on('end', () => {
+      proxyLog('socket end (remote closed connection)');
     });
 
     return this;
@@ -124,6 +136,7 @@ export class HttpConnectSocket {
           connectReq += `Proxy-Authorization: Basic ${creds}\r\n`;
         }
         connectReq += '\r\n';
+        proxyLog(`sending CONNECT ${destIp}:${destPort} to ${proxy.ip}:${proxy.port}`);
         socket.write(connectReq);
       });
 
@@ -136,23 +149,32 @@ export class HttpConnectSocket {
         socket.removeListener('data', onData);
 
         const statusLine = responseBuffer.split('\r\n')[0];
+        const allHeaders = responseBuffer.slice(0, headerEnd);
         const statusCode = parseInt(statusLine.split(' ')[1], 10);
+
+        proxyLog(`CONNECT response: ${statusCode} | headers: ${allHeaders.replace(/\r\n/g, ' | ')}`);
 
         if (statusCode === 200) {
           const remaining = Buffer.from(responseBuffer.slice(headerEnd + 4));
           if (remaining.length > 0) {
+            proxyLog(`CONNECT had ${remaining.length} trailing bytes`);
             socket.unshift(remaining);
           }
           resolve(socket);
         } else {
+          proxyLog(`CONNECT FAILED: ${allHeaders}`);
           socket.destroy();
           reject(new Error(`HTTP CONNECT failed: ${statusLine}`));
         }
       };
 
       socket.on('data', onData);
-      socket.on('error', (err) => reject(err));
+      socket.on('error', (err) => {
+        proxyLog(`CONNECT socket error: ${err.message}`);
+        reject(err);
+      });
       socket.setTimeout(15000, () => {
+        proxyLog(`CONNECT timeout after 15s to ${destIp}:${destPort}`);
         socket.destroy();
         reject(new Error('HTTP CONNECT timeout'));
       });
