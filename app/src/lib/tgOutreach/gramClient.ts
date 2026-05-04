@@ -87,7 +87,7 @@ export async function createGramClient(
 
   const client = new TelegramClient(session, account.api_id, account.api_hash, clientOpts);
 
-  const CONNECT_TIMEOUT_MS = 30_000;
+  const CONNECT_TIMEOUT_MS = 15_000;
   await Promise.race([
     client.connect(),
     new Promise((_, reject) =>
