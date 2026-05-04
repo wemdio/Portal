@@ -30,7 +30,10 @@ type JobRow = {
 type QueueStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 const WORKER_BATCH_SIZE = Number(process.env.BRIEF_SCORING_WORKER_BATCH_SIZE ?? '40');
-const MODEL_BATCH_SIZE = Number(process.env.BRIEF_SCORING_MODEL_BATCH_SIZE ?? '10');
+// Smaller per-AI-call batch keeps each response well under the model's
+// max_tokens ceiling — even if one batch truncates, the salvage parser in
+// `parseBriefScoringContent` rescues whatever items finished.
+const MODEL_BATCH_SIZE = Number(process.env.BRIEF_SCORING_MODEL_BATCH_SIZE ?? '5');
 const MAX_ATTEMPTS = Number(process.env.BRIEF_SCORING_MAX_ATTEMPTS ?? '3');
 const STALE_PROCESSING_MINUTES = Number(process.env.BRIEF_SCORING_STALE_MINUTES ?? '5');
 const OPENROUTER_BRIEF_API_KEY = process.env.OPENROUTER_BRIEF_API_KEY ?? '';
