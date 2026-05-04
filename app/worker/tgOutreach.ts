@@ -270,10 +270,19 @@ export async function resumeRunningCampaigns() {
     .eq('status', 'paused');
 }
 
+const RESUME_CHECK_INTERVAL_MS = 5 * 60_000;
+
 async function main() {
   log('info', 'TG Outreach worker starting...');
   await resetStuckJobs();
   await resumeRunningCampaigns();
+
+  const resumeTimer = setInterval(() => {
+    if (shouldStop()) return;
+    resumeRunningCampaigns().catch((err) =>
+      log('error', `Periodic resume check failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }, RESUME_CHECK_INTERVAL_MS);
 
   await pollLoop({
     log,
@@ -282,6 +291,8 @@ async function main() {
     pollOnce,
     realtimeTables: ['tg_outreach_jobs'],
   });
+
+  clearInterval(resumeTimer);
 
   log('info', 'Waiting for running campaigns to finish...');
   const promises = Array.from(runningCampaigns.values()).map(r => {
