@@ -97,16 +97,23 @@ export async function callOpenRouterChat(options: OpenRouterChatOptions): Promis
     }
 
     if (response.ok) {
-      const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
+      const rawText = await response.text();
+      let data: { choices?: Array<{ message?: { content?: string } }> };
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error(`AI вернул невалидный ответ: ${rawText.slice(0, 200)}`);
+        data = JSON.parse(jsonMatch[0]);
+      }
       const content = data.choices?.[0]?.message?.content?.trim() ?? '';
       return content;
     }
 
     let errorMessage = `API error: ${response.status}`;
     try {
-      const errorData = (await response.json()) as { error?: { message?: string } };
+      const rawErr = await response.text();
+      const errorData = JSON.parse(rawErr) as { error?: { message?: string } };
       errorMessage = errorData.error?.message || errorMessage;
     } catch {
       // ignore parsing errors
