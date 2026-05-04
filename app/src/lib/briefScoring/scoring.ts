@@ -76,11 +76,25 @@ export function parseBriefScoringContent(content: string): BriefScoringResult[] 
   try {
     parsed = tryParse(trimmed);
   } catch {
-    const jsonMatch = trimmed.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error('AI вернул некорректный JSON');
+    // Try extracting from markdown code block
+    const codeBlock = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const cleaned = codeBlock ? codeBlock[1].trim() : trimmed;
+    try {
+      parsed = tryParse(cleaned);
+    } catch {
+      // Try finding JSON array anywhere in the text
+      const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        // Last resort: try finding JSON object with array inside
+        const objMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (!objMatch) {
+          throw new Error('AI вернул некорректный JSON');
+        }
+        parsed = tryParse(objMatch[0]);
+      } else {
+        parsed = tryParse(jsonMatch[0]);
+      }
     }
-    parsed = tryParse(jsonMatch[0]);
   }
 
   const arrayCandidate = extractArrayCandidate(parsed);
@@ -141,7 +155,7 @@ export async function scoreBriefCompanies(options: ScoreBriefCompaniesOptions): 
       { role: 'user', content: userMessage },
     ],
     temperature: 0.2,
-    maxTokens: 4000,
+    maxTokens: 2000,
     responseFormat: { type: 'json_object' },
     signal,
     fetchImpl,
