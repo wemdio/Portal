@@ -5,10 +5,10 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   ChevronLeft, Loader2, Search, Trash2, ExternalLink, AlertTriangle,
-  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert,
+  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, Clock,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
-import { authFetchJson } from '@/lib/authFetch';
+import { authFetch, authFetchJson } from '@/lib/authFetch';
 import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
@@ -64,7 +64,31 @@ function formatAgo(dateStr: string): { label: string; days: number } {
 type SortKey = 'leadsCount' | 'sentCount' | 'inactiveDays' | 'name';
 type SortDir = 'asc' | 'desc';
 
+type DataSource = 'db' | 'api' | 'db-fallback';
+
+interface AnalyticsMeta {
+  source: DataSource;
+  freshness: string | null;
+  apiError: string | null;
+}
+
 const ANALYZABLE_SET = new Set<number>(ANALYZABLE_STATUSES as unknown as number[]);
+
+const FRESHNESS_WARN_MS = 6 * 60 * 60 * 1000;
+
+function formatFreshness(iso: string | null): string {
+  if (!iso) return 'неизвестно';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'неизвестно';
+  const diffMs = Date.now() - d.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return 'только что';
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.floor(hours / 24);
+  return `${days} дн. назад`;
+}
 
 export default function CompletedCampaignAnalyzer() {
   const { userRole } = useUser();
@@ -85,6 +109,7 @@ export default function CompletedCampaignAnalyzer() {
 
   const [clearing, setClearing] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState<{ id: string; name: string; count: number } | null>(null);
+  const [meta, setMeta] = useState<AnalyticsMeta | null>(null);
 
   const toggleStatus = (status: number) => {
     setStatusFilters((prev) => {
@@ -98,10 +123,29 @@ export default function CompletedCampaignAnalyzer() {
     setLoading(true);
     setError('');
     try {
-      const [campData, analyticsRaw] = await Promise.all([
+      // Use authFetch (not authFetchJson) for analytics so we can read the
+      // X-Data-Source / X-Data-Freshness headers the route now exposes; the
+      // body shape is unchanged (an array). source=api keeps the live-data
+      // path; the route transparently falls back to the cache if Instantly's
+      // bulk endpoint 5xx's.
+      const [campData, analyticsRes] = await Promise.all([
         instantlyFetch<{ items: Campaign[] }>('/campaigns?limit=all'),
-        instantlyFetch<CampaignAnalytics[] | { data: CampaignAnalytics[] }>('/analytics?type=campaigns&source=api'),
+        authFetch('/api/instantly/analytics?type=campaigns&source=api'),
       ]);
+
+      if (!analyticsRes.ok) {
+        const body = await analyticsRes.json().catch(() => ({ error: analyticsRes.statusText }));
+        throw new Error(body?.error ?? `Error ${analyticsRes.status}`);
+      }
+
+      const analyticsRaw = (await analyticsRes.json()) as
+        | CampaignAnalytics[]
+        | { data: CampaignAnalytics[] };
+      setMeta({
+        source: (analyticsRes.headers.get('X-Data-Source') as DataSource | null) ?? 'api',
+        freshness: analyticsRes.headers.get('X-Data-Freshness'),
+        apiError: analyticsRes.headers.get('X-Api-Error'),
+      });
 
       const campaigns = campData.items ?? [];
       const relevant = campaigns.filter((c) => ANALYZABLE_SET.has(c.status));
@@ -258,6 +302,29 @@ export default function CompletedCampaignAnalyzer() {
       {error && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
       )}
+
+      {meta && meta.source !== 'api' && (() => {
+        const ageMs = meta.freshness ? Date.now() - new Date(meta.freshness).getTime() : Infinity;
+        const isStale = meta.source === 'db-fallback' || ageMs > FRESHNESS_WARN_MS;
+        if (!isStale) return null;
+        return (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 flex items-start gap-2">
+            <Clock className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-medium">
+                {meta.source === 'db-fallback'
+                  ? 'Instantly API недоступен — показываем данные из кэша'
+                  : 'Данные могли устареть'}
+              </p>
+              <p className="mt-0.5 text-xs text-amber-700">
+                Кэш обновлялся {formatFreshness(meta.freshness)}
+                {meta.freshness ? ` (${new Date(meta.freshness).toLocaleString('ru-RU')})` : ''}.
+                {meta.apiError ? ` Ошибка API: ${meta.apiError.slice(0, 200)}` : ''}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
 
       {loading ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3">
