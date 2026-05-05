@@ -87,7 +87,10 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
-      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      # HH parser jobs routinely scrape tens of thousands of vacancies; 15min was
+      # a copy-paste leftover from email-validation that started killing real jobs
+      # at 44-68% progress. Bumped to 180 (3h) — matches stop_grace_period above.
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${HH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
       - WORKER_KIND=hh
     stop_grace_period: 3h
     deploy:
@@ -115,7 +118,8 @@ services:
       - HH_MAX_RETRIES=${HH_MAX_RETRIES}
       - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
-      - WORKER_DRAIN_TIMEOUT_MINUTES=${WORKER_DRAIN_TIMEOUT_MINUTES:-15}
+      # Search parser drains huge result sets too — same reasoning as worker-hh.
+      - WORKER_DRAIN_TIMEOUT_MINUTES=${SEARCH_WORKER_DRAIN_TIMEOUT_MINUTES:-180}
       - WORKER_KIND=search
     stop_grace_period: 30m
     deploy:
