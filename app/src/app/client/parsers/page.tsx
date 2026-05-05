@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { HHParserView } from '@/components/parsers/HHParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
-import { EmailSequenceView } from '@/components/email-sequence/EmailSequenceView';
+import { EmailSequenceV2View } from '@/components/email-sequence-v2/EmailSequenceV2View';
 
 type Tab = 'hh' | 'search' | 'yandexmaps' | 'email-sequence';
 
@@ -72,7 +72,7 @@ export default function ClientParsersPage() {
       {activeTab === 'hh' && <HHParserView clientMode />}
       {activeTab === 'search' && <SearchParserView clientMode />}
       {activeTab === 'yandexmaps' && <YandexMapsParserView clientMode />}
-      {activeTab === 'email-sequence' && <EmailSequenceView clientMode />}
+      {activeTab === 'email-sequence' && <EmailSequenceV2View />}
     </div>
   );
 }
