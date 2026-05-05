@@ -1,7 +1,7 @@
 -- Таблица для хранения контактных баз компаний,
 -- импортированных из xlsx-файлов (папка PortalBazaBaz).
 
-create table if not exists public.company_contacts (
+create table if not exists public.companies_directory (
   id bigint generated always as identity primary key,
 
   name             text,              -- Название
@@ -30,14 +30,14 @@ create table if not exists public.company_contacts (
   created_at       timestamptz not null default now()
 );
 
-create index if not exists idx_company_contacts_inn on public.company_contacts(inn);
-create index if not exists idx_company_contacts_ogrn on public.company_contacts(ogrn);
-create index if not exists idx_company_contacts_activity on public.company_contacts(activity_type);
+create index if not exists idx_companies_directory_inn on public.companies_directory(inn);
+create index if not exists idx_companies_directory_ogrn on public.companies_directory(ogrn);
+create index if not exists idx_companies_directory_activity on public.companies_directory(activity_type);
 
-alter table public.company_contacts enable row level security;
+alter table public.companies_directory enable row level security;
 
 create policy "service_role_full_access"
-  on public.company_contacts
+  on public.companies_directory
   for all
   using (true)
   with check (true);

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Одноразовый скрипт импорта контактных баз компаний из xlsx-файлов
- * в таблицу company_contacts.
+ * в таблицу companies_directory.
  *
  * Запуск (из директории app/):
  *   node scripts/db/importCompanyContacts.js /path/to/xlsx-folder
@@ -67,7 +67,7 @@ function buildInsertSQL(batchSize) {
     }
     rows.push(`(${placeholders.join(',')})`);
   }
-  return `INSERT INTO public.company_contacts (${cols}) VALUES ${rows.join(',')}`;
+  return `INSERT INTO public.companies_directory (${cols}) VALUES ${rows.join(',')}`;
 }
 
 function parseCell(val) {

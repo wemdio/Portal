@@ -26,6 +26,7 @@ const clientNav = [
   { name: 'Парсеры', nameEn: 'Parsers', href: '/client/parsers' },
   { name: 'Запуск кампаний', nameEn: 'Launch campaigns', href: '/client/launch' },
   { name: 'Бриф', nameEn: 'Brief', href: '/client/brief' },
+  { name: 'Собрать базу', nameEn: 'Build database', href: '/client/companies-search' },
 ] as const;
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
@@ -90,7 +91,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           </span>
 
           <div className="relative flex-1 min-w-0">
-            <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto no-scrollbar">
+            <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto pb-1">
               {clientNav.map((item) => {
                 const active = isActive(item.href);
                 return (
@@ -105,11 +106,6 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
                 );
               })}
             </nav>
-            <div
-              className="pointer-events-none absolute right-0 top-0 bottom-0 w-8"
-              style={{ background: 'linear-gradient(to left, var(--cp-bg, #f0eeec) 30%, transparent)' }}
-              aria-hidden="true"
-            />
           </div>
           <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1">
             <button

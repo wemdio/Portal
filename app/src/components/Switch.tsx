@@ -42,6 +42,7 @@ export function Switch({
           disabled={disabled}
           onChange={(e) => onCheckedChange(e.target.checked)}
           className="sr-only"
+          style={{ position: 'absolute', width: 1, height: 1, margin: -1, overflow: 'hidden' }}
         />
         <span
           aria-hidden="true"
