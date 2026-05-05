@@ -105,6 +105,56 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(payload.sequences?.[0].steps[0].wait_days).toBe(0);
     expect(payload.sequences?.[0].steps[1].wait_days).toBe(3);
   });
+
+  it('preserves empty subject for follow-up steps (continues thread)', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          { subject: '', body: 'b2', wait_days: 3 },
+        ],
+      },
+    });
+    expect(payload.sequences?.[0].steps[1].subject).toBe('');
+  });
+
+  it('passes A/B variants through to payload.sequences[].steps[].variants', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A subj',
+            body: 'A body',
+            wait_days: 0,
+            variants: [
+              { subject: 'B subj', body: 'B body' },
+              { subject: 'C subj', body: 'C body' },
+            ],
+          },
+        ],
+      },
+    });
+    const step = payload.sequences?.[0].steps[0];
+    expect(step?.subject).toBe('A subj');
+    expect(step?.body).toBe('A body');
+    expect(step?.variants).toHaveLength(2);
+    expect(step?.variants?.[0].subject).toBe('B subj');
+    expect(step?.variants?.[0].body).toBe('B body');
+    expect(step?.variants?.[1].subject).toBe('C subj');
+    expect(step?.variants?.[1].body).toBe('C body');
+  });
+
+  it('omits variants key when no variants are provided', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: validSequence,
+    });
+    expect(payload.sequences?.[0].steps[0].variants).toBeUndefined();
+  });
 });
 
 describe('validateClientLaunchInput', () => {
@@ -149,7 +199,7 @@ describe('validateClientLaunchInput', () => {
     expect(result.error).toMatch(/шаг/i);
   });
 
-  it('rejects sequence step missing subject', () => {
+  it('rejects step 1 missing subject', () => {
     const result = validateClientLaunchInput({
       preset: validPreset,
       sequence: { name: 'X', steps: [{ subject: '', body: 'b', wait_days: 0 }] },
@@ -159,6 +209,160 @@ describe('validateClientLaunchInput', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/тем/i);
+  });
+
+  it('accepts step 2+ with empty subject (continues thread)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          { subject: '', body: 'b2', wait_days: 3 },
+          { subject: '   ', body: 'b3', wait_days: 5 },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts step with extra A/B variants', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A subj',
+            body: 'A body',
+            wait_days: 0,
+            variants: [
+              { subject: 'B subj', body: 'B body' },
+              { subject: 'C subj', body: 'C body' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects variant with empty body', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 's',
+            body: 'b',
+            wait_days: 0,
+            variants: [{ subject: 'B', body: '' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/вариант/i);
+  });
+
+  it('rejects step 1 variant with empty subject', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 's',
+            body: 'b',
+            wait_days: 0,
+            variants: [{ subject: '', body: 'B body' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/тем/i);
+  });
+
+  it('accepts step 2 variant with empty subject', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          {
+            subject: '',
+            body: 'b2',
+            wait_days: 3,
+            variants: [{ subject: '', body: 'b2 alt' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects when variants exceed maximum (max 3 total per step → 2 extra)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A',
+            body: 'a',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'b' },
+              { subject: 'C', body: 'c' },
+              { subject: 'D', body: 'd' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/вариант/i);
+  });
+
+  it('accepts exactly 2 extra variants (3 total: A + B + C)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A',
+            body: 'a',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'b' },
+              { subject: 'C', body: 'c' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
   });
 
   it('rejects sequence step missing body', () => {

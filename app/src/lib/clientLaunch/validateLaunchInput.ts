@@ -1,8 +1,9 @@
 import { CLIENT_LAUNCH_ROW_LIMIT } from './constants';
-import type {
-  ClientCampaignPreset,
-  ClientLaunchColumnMapping,
-  ClientLaunchSequence,
+import {
+  CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
+  type ClientCampaignPreset,
+  type ClientLaunchColumnMapping,
+  type ClientLaunchSequence,
 } from './types';
 
 export interface ValidateClientLaunchInput {
@@ -45,11 +46,39 @@ export function validateClientLaunchInput(
 
   for (let i = 0; i < sequence.steps.length; i++) {
     const step = sequence.steps[i];
-    if (!step.subject || !step.subject.trim()) {
+    const isFirstStep = i === 0;
+
+    if (isFirstStep && (!step.subject || !step.subject.trim())) {
       return { ok: false, error: `Шаг ${i + 1}: укажите тему письма.` };
     }
     if (!step.body || !step.body.trim()) {
       return { ok: false, error: `Шаг ${i + 1}: укажите текст письма.` };
+    }
+
+    if (step.variants && step.variants.length > 0) {
+      const totalVariants = 1 + step.variants.length;
+      if (totalVariants > CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP) {
+        return {
+          ok: false,
+          error: `Шаг ${i + 1}: максимум ${CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP} вариантов на шаг (A/B/C).`,
+        };
+      }
+      for (let v = 0; v < step.variants.length; v++) {
+        const variant = step.variants[v];
+        const variantLetter = String.fromCharCode(66 + v); // B, C, ...
+        if (isFirstStep && (!variant.subject || !variant.subject.trim())) {
+          return {
+            ok: false,
+            error: `Шаг ${i + 1}, вариант ${variantLetter}: укажите тему письма.`,
+          };
+        }
+        if (!variant.body || !variant.body.trim()) {
+          return {
+            ok: false,
+            error: `Шаг ${i + 1}, вариант ${variantLetter}: укажите текст письма.`,
+          };
+        }
+      }
     }
   }
 

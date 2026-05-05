@@ -1,4 +1,9 @@
-import type { CampaignCreatePayload, CampaignScheduleDays } from '@/lib/instantly/types';
+import type {
+  CampaignCreatePayload,
+  CampaignScheduleDays,
+  SequenceStep,
+  SequenceVariant,
+} from '@/lib/instantly/types';
 import type { ClientCampaignPreset, ClientLaunchSequence } from './types';
 
 export interface BuildCampaignPayloadInput {
@@ -36,12 +41,21 @@ export function buildCampaignPayloadFromPreset(
     },
     sequences: [
       {
-        steps: sequence.steps.map((s) => ({
-          type: 'email',
-          subject: s.subject,
-          body: s.body,
-          wait_days: s.wait_days,
-        })),
+        steps: sequence.steps.map<SequenceStep>((s) => {
+          const step: SequenceStep = {
+            type: 'email',
+            subject: s.subject,
+            body: s.body,
+            wait_days: s.wait_days,
+          };
+          if (s.variants && s.variants.length > 0) {
+            step.variants = s.variants.map<SequenceVariant>((v) => ({
+              subject: v.subject ?? '',
+              body: v.body,
+            }));
+          }
+          return step;
+        }),
       },
     ],
     email_list: [...preset.email_account_ids],
