@@ -81,7 +81,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <GlobalTextTranslator locale={locale} />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-5 sm:pb-2 md:px-8">
-        <div className="neu-card flex items-center gap-2 sm:gap-4 px-3 py-2.5 sm:px-6 sm:py-3.5 max-w-5xl mx-auto">
+        <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 max-w-6xl mx-auto">
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
             style={{ color: 'var(--cp-accent)' }}
@@ -89,21 +89,28 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             Portal
           </span>
 
-          <nav className="flex-1 flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar">
-            {clientNav.map((item) => {
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href as Route}
-                  className={`neu-pill px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-[13px] font-semibold whitespace-nowrap ${active ? 'active' : ''}`}
-                  style={!active ? { color: 'var(--cp-text-m)' } : undefined}
-                >
-                  {locale === 'en' ? item.nameEn : item.name}
-                </Link>
-              );
-            })}
-          </nav>
+          <div className="relative flex-1 min-w-0">
+            <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto no-scrollbar">
+              {clientNav.map((item) => {
+                const active = isActive(item.href);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href as Route}
+                    className={`neu-pill shrink-0 px-2.5 py-1 sm:px-3 sm:py-1.5 text-[11px] sm:text-xs font-semibold whitespace-nowrap ${active ? 'active' : ''}`}
+                    style={!active ? { color: 'var(--cp-text-m)' } : undefined}
+                  >
+                    {locale === 'en' ? item.nameEn : item.name}
+                  </Link>
+                );
+              })}
+            </nav>
+            <div
+              className="pointer-events-none absolute right-0 top-0 bottom-0 w-8"
+              style={{ background: 'linear-gradient(to left, var(--cp-bg, #f0eeec) 30%, transparent)' }}
+              aria-hidden="true"
+            />
+          </div>
           <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1">
             <button
               type="button"
@@ -128,7 +135,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               router.push('/login' as Route);
               router.refresh();
             }}
-            className="neu-pill px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-[13px] font-semibold shrink-0"
+            className="neu-pill px-2.5 py-1 sm:px-3 sm:py-1.5 text-[11px] sm:text-xs font-semibold shrink-0"
             style={{ color: 'var(--cp-text-l)' }}
           >
             {dict(commonDictionary.signOut, locale)}

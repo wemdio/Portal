@@ -70,7 +70,11 @@ export async function createGramClient(
   };
 
   if (isHttp && proxyConfig) {
-    // HTTP CONNECT tunnel: pass our custom socket class that handles CONNECT handshake
+    // HTTP CONNECT tunnel: pass our custom socket class that handles CONNECT handshake.
+    // CRITICAL: also use ConnectionTCPObfuscated (port 443, TLS-looking traffic).
+    // Without it, gramJS defaults to ConnectionTCPFull on port 80 — which is the
+    // HTTP port from the proxy provider's perspective. Infatica/etc see "non-HTTP
+    // bytes on port 80" via DPI, log err_protocol, and auto-block our IP.
     const httpProxy = {
       ip: proxyConfig.ip,
       port: proxyConfig.port,
@@ -80,6 +84,7 @@ export async function createGramClient(
     clientOpts.networkSocket = class extends HttpConnectSocket {
       constructor() { super(httpProxy); }
     } as never;
+    clientOpts.connection = ConnectionTCPObfuscated;
   } else if (isSocks && proxyConfig) {
     clientOpts.proxy = { ...proxyConfig, socksType: proxyConfig.socksType! };
     clientOpts.connection = ConnectionTCPObfuscated;
@@ -87,7 +92,7 @@ export async function createGramClient(
 
   const client = new TelegramClient(session, account.api_id, account.api_hash, clientOpts);
 
-  const CONNECT_TIMEOUT_MS = 30_000;
+  const CONNECT_TIMEOUT_MS = 15_000;
   await Promise.race([
     client.connect(),
     new Promise((_, reject) =>

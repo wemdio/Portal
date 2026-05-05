@@ -362,7 +362,16 @@ export async function stepTAScore(
         { role: 'user', content: userMsg },
       ], { temperature: 0.2, json: true, title: 'Portal - Base Constructor TA Scoring' });
 
-      const scores: { idx: number; score: number; reason: string }[] = JSON.parse(content);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const raw = codeBlock ? codeBlock[1].trim() : content.trim();
+        const arrMatch = raw.match(/\[[\s\S]*\]/);
+        parsed = arrMatch ? JSON.parse(arrMatch[0]) : JSON.parse(raw);
+      }
+      const scores = (Array.isArray(parsed) ? parsed : []) as { idx: number; score: number; reason: string }[];
       const scoreMap = new Map(scores.map((s) => [s.idx, s]));
 
       for (let i = 0; i < chunk.length; i++) {

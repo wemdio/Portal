@@ -4,15 +4,19 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } fro
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
-  Upload, Trash2, Plus, Send, AlertTriangle, CheckCircle2, Loader2, ExternalLink, Mail, Settings, FileText, X,
+  Upload, Trash2, Plus, Send, AlertTriangle, CheckCircle2, Loader2, ExternalLink, Mail, Settings, FileText, X, Copy, Check, Info,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
-import type {
-  ClientLaunchColumnMapping,
-  ClientLaunchSequenceStep,
+import {
+  CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
+  type ClientLaunchColumnMapping,
+  type ClientLaunchScheduleOverride,
+  type ClientLaunchSequenceStep,
+  type ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
+import { INSTANTLY_TIMEZONE_OPTIONS, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
 
 interface PresetSummary {
   id: string;
@@ -47,13 +51,25 @@ interface LaunchResult {
   skipped_rows: number;
 }
 
-const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean }[] = [
-  { key: 'email', label: 'Email', required: true },
-  { key: 'first_name', label: 'Имя' },
-  { key: 'last_name', label: 'Фамилия' },
-  { key: 'company_name', label: 'Компания' },
-  { key: 'website', label: 'Сайт' },
-  { key: 'phone', label: 'Телефон' },
+const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_variables_mapping'>; label: string; required?: boolean; variable: string }[] = [
+  { key: 'email', label: 'Email', required: true, variable: 'email' },
+  { key: 'first_name', label: 'Имя', variable: 'first_name' },
+  { key: 'last_name', label: 'Фамилия', variable: 'last_name' },
+  { key: 'company_name', label: 'Компания', variable: 'company_name' },
+  { key: 'website', label: 'Сайт', variable: 'website' },
+  { key: 'phone', label: 'Телефон', variable: 'phone' },
+];
+
+const PREVIEW_ROW_COUNT = 3;
+
+const WEEKDAYS: { value: number; label: string }[] = [
+  { value: 1, label: 'Пн' },
+  { value: 2, label: 'Вт' },
+  { value: 3, label: 'Ср' },
+  { value: 4, label: 'Чт' },
+  { value: 5, label: 'Пт' },
+  { value: 6, label: 'Сб' },
+  { value: 0, label: 'Вс' },
 ];
 
 function autoDetectMapping(headers: string[]): ClientLaunchColumnMapping {
@@ -122,6 +138,17 @@ export default function ClientLaunchPage() {
   const [sequenceSteps, setSequenceSteps] = useState<ClientLaunchSequenceStep[]>([
     { subject: '', body: '', wait_days: 0 },
   ]);
+  /** Active variant index per step. 0 = main step (Variant A), 1 = variants[0] (B), 2 = variants[1] (C). */
+  const [activeVariantIdx, setActiveVariantIdx] = useState<number[]>([0]);
+
+  // Schedule state — initialized from preset on load, editable per launch.
+  const [schedule, setSchedule] = useState<ClientLaunchScheduleOverride>({
+    from: '09:00',
+    to: '18:00',
+    days: [1, 2, 3, 4, 5],
+    timezone: 'Europe/Kirov',
+  });
+  const [scheduleHydrated, setScheduleHydrated] = useState(false);
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -136,6 +163,17 @@ export default function ClientLaunchPage() {
     try {
       const data = await clientApiFetch<{ preset: PresetSummary | null }>('/preset');
       setPreset(data.preset);
+      if (data.preset) {
+        setSchedule({
+          from: data.preset.schedule_from || '09:00',
+          to: data.preset.schedule_to || '18:00',
+          days: Array.isArray(data.preset.schedule_days) && data.preset.schedule_days.length > 0
+            ? data.preset.schedule_days
+            : [1, 2, 3, 4, 5],
+          timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
+        });
+        setScheduleHydrated(true);
+      }
     } catch (err) {
       setPresetError(err instanceof Error ? err.message : 'Не удалось загрузить пресет');
     } finally {
@@ -218,12 +256,57 @@ export default function ClientLaunchPage() {
   // ─── Sequence editor ────────────────────────────────────────────────────
   function addStep() {
     setSequenceSteps((prev) => [...prev, { subject: '', body: '', wait_days: 3 }]);
+    setActiveVariantIdx((prev) => [...prev, 0]);
   }
   function removeStep(idx: number) {
     setSequenceSteps((prev) => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev);
+    setActiveVariantIdx((prev) => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev);
   }
   function updateStep(idx: number, patch: Partial<ClientLaunchSequenceStep>) {
     setSequenceSteps((prev) => prev.map((s, i) => i === idx ? { ...s, ...patch } : s));
+  }
+
+  /** Update the currently active variant (Variant A = main step, B/C = variants[]). */
+  function updateActiveVariant(stepIdx: number, patch: Partial<ClientLaunchSequenceVariant>) {
+    const vIdx = activeVariantIdx[stepIdx] ?? 0;
+    setSequenceSteps((prev) => prev.map((s, i) => {
+      if (i !== stepIdx) return s;
+      if (vIdx === 0) {
+        return { ...s, ...patch };
+      }
+      const variants = [...(s.variants ?? [])];
+      variants[vIdx - 1] = { ...variants[vIdx - 1], ...patch };
+      return { ...s, variants };
+    }));
+  }
+
+  function addVariant(stepIdx: number) {
+    let newActiveIdx = 0;
+    setSequenceSteps((prev) => prev.map((s, i) => {
+      if (i !== stepIdx) return s;
+      const current = s.variants ?? [];
+      if (1 + current.length >= CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP) {
+        newActiveIdx = current.length;
+        return s;
+      }
+      newActiveIdx = current.length + 1;
+      return { ...s, variants: [...current, { subject: s.subject, body: '' }] };
+    }));
+    setActiveVariantIdx((prev) => prev.map((v, i) => i === stepIdx ? newActiveIdx : v));
+  }
+
+  function removeVariant(stepIdx: number, variantIdx: number) {
+    setSequenceSteps((prev) => prev.map((s, i) => {
+      if (i !== stepIdx) return s;
+      const variants = [...(s.variants ?? [])];
+      variants.splice(variantIdx, 1);
+      return { ...s, variants: variants.length > 0 ? variants : undefined };
+    }));
+    setActiveVariantIdx((prev) => prev.map((v, i) => i === stepIdx ? 0 : v));
+  }
+
+  function setActiveVariant(stepIdx: number, vIdx: number) {
+    setActiveVariantIdx((prev) => prev.map((v, i) => i === stepIdx ? vIdx : v));
   }
 
   // ─── Custom variables ───────────────────────────────────────────────────
@@ -267,10 +350,35 @@ export default function ClientLaunchPage() {
       setLaunchError('Укажите название кампании');
       return;
     }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.from) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.to)) {
+      setLaunchError('Расписание: некорректное время (используйте формат ЧЧ:ММ)');
+      return;
+    }
+    if (schedule.from >= schedule.to) {
+      setLaunchError('Расписание: время окончания должно быть позже времени начала');
+      return;
+    }
+    if (!schedule.days || schedule.days.length === 0) {
+      setLaunchError('Расписание: выберите хотя бы один день недели');
+      return;
+    }
     for (let i = 0; i < sequenceSteps.length; i++) {
       const s = sequenceSteps[i];
-      if (!s.subject.trim()) { setLaunchError(`Шаг ${i + 1}: укажите тему`); return; }
+      const isFirst = i === 0;
+      if (isFirst && !s.subject.trim()) { setLaunchError(`Шаг ${i + 1}: укажите тему`); return; }
       if (!s.body.trim()) { setLaunchError(`Шаг ${i + 1}: укажите текст`); return; }
+      if (s.variants && s.variants.length > 0) {
+        for (let v = 0; v < s.variants.length; v++) {
+          const variant = s.variants[v];
+          const letter = String.fromCharCode(66 + v);
+          if (isFirst && !(variant.subject ?? '').trim()) {
+            setLaunchError(`Шаг ${i + 1}, вариант ${letter}: укажите тему`); return;
+          }
+          if (!variant.body.trim()) {
+            setLaunchError(`Шаг ${i + 1}, вариант ${letter}: укажите текст`); return;
+          }
+        }
+      }
     }
 
     const customMap: Record<string, string> = {};
@@ -293,6 +401,7 @@ export default function ClientLaunchPage() {
           mapping: finalMapping,
           headers: fileHeaders,
           rows: fileRows,
+          schedule,
         }),
       });
       setResult(data.launch);
@@ -308,6 +417,7 @@ export default function ClientLaunchPage() {
     clearFile();
     setCampaignName('');
     setSequenceSteps([{ subject: '', body: '', wait_days: 0 }]);
+    setActiveVariantIdx([0]);
     setLaunchError('');
     setResult(null);
   }
@@ -436,18 +546,21 @@ export default function ClientLaunchPage() {
               />
             </label>
           ) : (
-            <div className="neu-inset rounded-2xl px-4 sm:px-5 py-3.5 flex items-center gap-3">
-              <FileText className="h-5 w-5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold truncate">{fileName}</p>
-                <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                  {fileRows.length.toLocaleString('ru-RU')} строк · {fileHeaders.length} колонок · валидных email: {validLeadsCount.toLocaleString('ru-RU')}
-                </p>
+            <>
+              <div className="neu-inset rounded-2xl px-4 sm:px-5 py-3.5 flex items-center gap-3">
+                <FileText className="h-5 w-5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold truncate">{fileName}</p>
+                  <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                    {fileRows.length.toLocaleString('ru-RU')} строк · {fileHeaders.length} колонок · валидных email: {validLeadsCount.toLocaleString('ru-RU')}
+                  </p>
+                </div>
+                <button type="button" onClick={clearFile} className="p-2 rounded-lg" aria-label="Удалить файл" style={{ color: 'var(--cp-text-m)' }}>
+                  <X className="h-4 w-4" />
+                </button>
               </div>
-              <button type="button" onClick={clearFile} className="p-2 rounded-lg" aria-label="Удалить файл" style={{ color: 'var(--cp-text-m)' }}>
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+              <BasePreview headers={fileHeaders} rows={fileRows.slice(0, PREVIEW_ROW_COUNT)} />
+            </>
           )}
           {parseError && (
             <div className="mt-3 text-xs flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
@@ -468,6 +581,7 @@ export default function ClientLaunchPage() {
                   required={field.required}
                   headers={fileHeaders}
                   value={mapping[field.key] ?? ''}
+                  variable={field.variable}
                   onChange={(v) => setMapping({ ...mapping, [field.key]: v })}
                 />
               ))}
@@ -521,7 +635,14 @@ export default function ClientLaunchPage() {
 
         {/* Step 3: Sequence */}
         {fileHeaders.length > 0 && (
-          <Section number={3} title="Цепочка писем" subtitle="Используйте переменные {{first_name}}, {{company_name}} и кастомные.">
+          <Section number={3} title="Цепочка писем" subtitle="Используйте переменные ниже, чтобы персонализировать сообщения.">
+            <VariableReference
+              mapping={mapping}
+              customVars={customVars}
+              fileHeaders={fileHeaders}
+              firstRow={fileRows[0]}
+            />
+
             <div className="mb-4">
               <label className="text-xs font-semibold uppercase tracking-wider block mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 Название кампании
@@ -537,48 +658,20 @@ export default function ClientLaunchPage() {
 
             <div className="space-y-4">
               {sequenceSteps.map((step, idx) => (
-                <div key={idx} className="neu-sm p-4">
-                  <div className="flex items-start gap-3 mb-3">
-                    <div className="neu-well flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
-                      {idx + 1}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <input
-                        type="text"
-                        value={step.subject}
-                        onChange={(e) => updateStep(idx, { subject: e.target.value })}
-                        placeholder="Тема письма"
-                        className="neu-input w-full px-3 py-2 text-sm"
-                      />
-                    </div>
-                    {idx > 0 && (
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>через</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={60}
-                          value={step.wait_days}
-                          onChange={(e) => updateStep(idx, { wait_days: Math.max(0, Math.min(60, Number(e.target.value) || 0)) })}
-                          className="neu-input w-14 px-2 py-1.5 text-sm text-center"
-                        />
-                        <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>дн.</span>
-                      </div>
-                    )}
-                    {sequenceSteps.length > 1 && (
-                      <button type="button" onClick={() => removeStep(idx)} className="p-1.5 rounded-lg shrink-0" style={{ color: 'var(--cp-text-m)' }} aria-label="Удалить шаг">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    )}
-                  </div>
-                  <textarea
-                    value={step.body}
-                    onChange={(e) => updateStep(idx, { body: e.target.value })}
-                    placeholder="Текст письма (поддерживает HTML)"
-                    rows={6}
-                    className="neu-input w-full px-3 py-2 text-sm font-sans resize-y"
-                  />
-                </div>
+                <SequenceStepEditor
+                  key={idx}
+                  stepIdx={idx}
+                  step={step}
+                  isFirstStep={idx === 0}
+                  canRemove={sequenceSteps.length > 1}
+                  activeVariant={activeVariantIdx[idx] ?? 0}
+                  onSetActiveVariant={(v) => setActiveVariant(idx, v)}
+                  onUpdateActive={(patch) => updateActiveVariant(idx, patch)}
+                  onUpdateStep={(patch) => updateStep(idx, patch)}
+                  onRemoveStep={() => removeStep(idx)}
+                  onAddVariant={() => addVariant(idx)}
+                  onRemoveVariant={(vIdx) => removeVariant(idx, vIdx)}
+                />
               ))}
               <button type="button" onClick={addStep} className="neu-pill w-full py-3 text-sm font-semibold inline-flex items-center justify-center gap-2" style={{ color: 'var(--cp-accent)' }}>
                 <Plus className="h-4 w-4" /> Добавить шаг
@@ -587,9 +680,20 @@ export default function ClientLaunchPage() {
           </Section>
         )}
 
-        {/* Step 4: Launch */}
+        {/* Step 4: Schedule */}
         {fileHeaders.length > 0 && (
-          <Section number={4} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
+          <Section number={4} title="Расписание" subtitle="Когда Instantly будет отправлять письма. По умолчанию — настройки вашего пресета.">
+            <ScheduleEditor
+              schedule={schedule}
+              onChange={setSchedule}
+              hydrated={scheduleHydrated}
+            />
+          </Section>
+        )}
+
+        {/* Step 5: Launch */}
+        {fileHeaders.length > 0 && (
+          <Section number={5} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
             {launchError && (
               <div className="mb-4 neu-inset rounded-2xl px-4 py-3 text-sm flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -710,19 +814,24 @@ function MappingRow({
   required,
   headers,
   value,
+  variable,
   onChange,
 }: {
   label: string;
   required?: boolean;
   headers: string[];
   value: string;
+  variable: string;
   onChange: (v: string) => void;
 }) {
   return (
     <div>
-      <label className="text-xs font-semibold block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
-        {label} {required && <span style={{ color: 'var(--cp-danger)' }}>*</span>}
-      </label>
+      <div className="flex items-center justify-between mb-1.5 gap-2">
+        <label className="text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+          {label} {required && <span style={{ color: 'var(--cp-danger)' }}>*</span>}
+        </label>
+        {value && <CopyVariableBadge variable={variable} />}
+      </div>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -731,6 +840,422 @@ function MappingRow({
         <option value="">— не использовать —</option>
         {headers.map((h) => <option key={h} value={h}>{h}</option>)}
       </select>
+    </div>
+  );
+}
+
+function CopyVariableBadge({ variable }: { variable: string }) {
+  const [copied, setCopied] = useState(false);
+  const text = `{{${variable}}}`;
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* noop */ }
+      }}
+      className="neu-pill inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono shrink-0"
+      style={{ color: copied ? 'var(--cp-accent)' : 'var(--cp-text-m)' }}
+      title="Скопировать переменную"
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {text}
+    </button>
+  );
+}
+
+function BasePreview({ headers, rows }: { headers: string[]; rows: string[][] }) {
+  if (headers.length === 0 || rows.length === 0) return null;
+  return (
+    <div className="mt-3 neu-inset rounded-2xl px-3 py-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--cp-text-l)' }}>
+        Превью первых {rows.length} строк
+      </p>
+      <div className="overflow-x-auto -mx-1 px-1">
+        <table className="w-full text-xs" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
+          <thead>
+            <tr>
+              {headers.map((h, i) => (
+                <th
+                  key={`${h}-${i}`}
+                  className="text-left font-semibold px-2 py-1.5 whitespace-nowrap"
+                  style={{ color: 'var(--cp-text-m)', borderBottom: '1px solid rgba(180,173,164,0.25)' }}
+                >
+                  {h || <span style={{ color: 'var(--cp-text-l)' }}>(пусто)</span>}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIdx) => (
+              <tr key={rowIdx}>
+                {headers.map((_, colIdx) => (
+                  <td
+                    key={colIdx}
+                    className="px-2 py-1.5 whitespace-nowrap font-mono"
+                    style={{ color: 'var(--cp-text)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    title={row[colIdx] ?? ''}
+                  >
+                    {(row[colIdx] ?? '').slice(0, 80) || <span className="font-sans" style={{ color: 'var(--cp-text-l)' }}>—</span>}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+interface VariableEntry {
+  variable: string;
+  source: string;
+  sample: string;
+}
+
+function buildAvailableVariables(
+  mapping: ClientLaunchColumnMapping,
+  customVars: { key: string; header: string }[],
+  fileHeaders: string[],
+  firstRow: string[] | undefined,
+): VariableEntry[] {
+  const entries: VariableEntry[] = [];
+  const usedKeys = new Set<string>();
+  const headerIdx = new Map<string, number>();
+  fileHeaders.forEach((h, i) => headerIdx.set(h, i));
+  const sampleFor = (header: string | undefined): string => {
+    if (!header || !firstRow) return '';
+    const idx = headerIdx.get(header);
+    if (idx === undefined) return '';
+    return (firstRow[idx] ?? '').toString().trim();
+  };
+
+  const standardKeys: { var: string; header: string | undefined }[] = [
+    { var: 'first_name', header: mapping.first_name },
+    { var: 'last_name', header: mapping.last_name },
+    { var: 'company_name', header: mapping.company_name },
+    { var: 'website', header: mapping.website },
+    { var: 'phone', header: mapping.phone },
+  ];
+  for (const { var: v, header } of standardKeys) {
+    if (header) {
+      entries.push({ variable: v, source: header, sample: sampleFor(header) });
+      usedKeys.add(v);
+    }
+  }
+  for (const cv of customVars) {
+    const key = cv.key.trim().replace(/[^a-zA-Z0-9_]/g, '_');
+    if (key && cv.header && !usedKeys.has(key)) {
+      entries.push({ variable: key, source: cv.header, sample: sampleFor(cv.header) });
+      usedKeys.add(key);
+    }
+  }
+  // Headers that are valid identifiers and not already mapped become auto custom vars.
+  const mappedHeaders = new Set<string>();
+  for (const k of ['email', 'first_name', 'last_name', 'company_name', 'website', 'phone'] as const) {
+    const h = mapping[k];
+    if (h) mappedHeaders.add(h);
+  }
+  for (const cv of customVars) if (cv.header) mappedHeaders.add(cv.header);
+  for (const h of fileHeaders) {
+    if (mappedHeaders.has(h)) continue;
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(h)) continue;
+    if (usedKeys.has(h)) continue;
+    entries.push({ variable: h, source: h, sample: sampleFor(h) });
+    usedKeys.add(h);
+  }
+  return entries;
+}
+
+function VariableReference({
+  mapping,
+  customVars,
+  fileHeaders,
+  firstRow,
+}: {
+  mapping: ClientLaunchColumnMapping;
+  customVars: { key: string; header: string }[];
+  fileHeaders: string[];
+  firstRow: string[] | undefined;
+}) {
+  const entries = useMemo(
+    () => buildAvailableVariables(mapping, customVars, fileHeaders, firstRow),
+    [mapping, customVars, fileHeaders, firstRow],
+  );
+  if (entries.length === 0) {
+    return (
+      <div className="neu-inset rounded-2xl px-4 py-3 mb-4 text-xs flex items-start gap-2" style={{ color: 'var(--cp-text-m)' }}>
+        <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+        Сопоставьте колонки на шаге 2 — здесь появятся доступные переменные.
+      </div>
+    );
+  }
+  return (
+    <div className="neu-inset rounded-2xl px-4 py-3 mb-4">
+      <div className="flex items-center gap-2 mb-2.5">
+        <Info className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cp-accent)' }} />
+        <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-m)' }}>
+          Доступные переменные · клик — копировать
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {entries.map((entry) => (
+          <VariableChip key={entry.variable} entry={entry} />
+        ))}
+      </div>
+      <p className="text-[10px] mt-2.5" style={{ color: 'var(--cp-text-l)' }}>
+        Если переменной нет у конкретного лида, Instantly подставит пустую строку.
+      </p>
+    </div>
+  );
+}
+
+function VariableChip({ entry }: { entry: VariableEntry }) {
+  const [copied, setCopied] = useState(false);
+  const text = `{{${entry.variable}}}`;
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* noop */ }
+      }}
+      className="neu-pill inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono"
+      style={{ color: copied ? 'var(--cp-accent)' : 'var(--cp-text-m)' }}
+      title={entry.sample ? `Колонка «${entry.source}» · пример: ${entry.sample}` : `Колонка «${entry.source}»`}
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {text}
+      {entry.sample && (
+        <span className="font-sans text-[10px] truncate max-w-[120px]" style={{ color: 'var(--cp-text-l)' }}>
+          · {entry.sample.slice(0, 24)}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ScheduleEditor({
+  schedule,
+  onChange,
+  hydrated,
+}: {
+  schedule: ClientLaunchScheduleOverride;
+  onChange: (next: ClientLaunchScheduleOverride) => void;
+  hydrated: boolean;
+}) {
+  const toggleDay = (day: number) => {
+    const next = schedule.days.includes(day)
+      ? schedule.days.filter((d) => d !== day)
+      : [...schedule.days, day].sort((a, b) => a - b);
+    onChange({ ...schedule, days: next });
+  };
+
+  const tzNormalized = normalizeInstantlyTimezone(schedule.timezone);
+  const tzLabel = INSTANTLY_TIMEZONE_OPTIONS.find((o) => o.value === tzNormalized)?.label ?? tzNormalized;
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Время начала
+          </label>
+          <input
+            type="time"
+            value={schedule.from}
+            onChange={(e) => onChange({ ...schedule, from: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Время окончания
+          </label>
+          <input
+            type="time"
+            value={schedule.to}
+            onChange={(e) => onChange({ ...schedule, to: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Часовой пояс
+          </label>
+          <select
+            value={tzNormalized}
+            onChange={(e) => onChange({ ...schedule, timezone: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          >
+            {INSTANTLY_TIMEZONE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-semibold uppercase tracking-wider block mb-2" style={{ color: 'var(--cp-text-m)' }}>
+          Дни недели
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {WEEKDAYS.map((d) => {
+            const checked = schedule.days.includes(d.value);
+            return (
+              <button
+                key={d.value}
+                type="button"
+                onClick={() => toggleDay(d.value)}
+                className={`neu-pill px-3 py-1.5 text-xs font-semibold ${checked ? 'active' : ''}`}
+                style={!checked ? { color: 'var(--cp-text-m)' } : undefined}
+              >
+                {d.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {hydrated && (
+        <p className="mt-3 text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          {schedule.days.length === 0
+            ? 'Выберите хотя бы один день — иначе кампания не будет отправляться.'
+            : `Письма будут уходить ${schedule.from}–${schedule.to} (${tzLabel}) в выбранные дни.`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SequenceStepEditor({
+  stepIdx,
+  step,
+  isFirstStep,
+  canRemove,
+  activeVariant,
+  onSetActiveVariant,
+  onUpdateActive,
+  onUpdateStep,
+  onRemoveStep,
+  onAddVariant,
+  onRemoveVariant,
+}: {
+  stepIdx: number;
+  step: ClientLaunchSequenceStep;
+  isFirstStep: boolean;
+  canRemove: boolean;
+  activeVariant: number;
+  onSetActiveVariant: (v: number) => void;
+  onUpdateActive: (patch: Partial<ClientLaunchSequenceVariant>) => void;
+  onUpdateStep: (patch: Partial<ClientLaunchSequenceStep>) => void;
+  onRemoveStep: () => void;
+  onAddVariant: () => void;
+  onRemoveVariant: (vIdx: number) => void;
+}) {
+  const variantsCount = 1 + (step.variants?.length ?? 0);
+  const activeContent: ClientLaunchSequenceVariant = activeVariant === 0
+    ? { subject: step.subject, body: step.body }
+    : (step.variants?.[activeVariant - 1] ?? { subject: '', body: '' });
+  const subjectRequired = isFirstStep;
+  const customSubjectOnFollowUp = !isFirstStep && (activeContent.subject ?? '').trim() !== '';
+  const canAddVariant = variantsCount < CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP;
+
+  return (
+    <div className="neu-sm p-4">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="neu-well flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
+          {stepIdx + 1}
+        </div>
+        <span className="text-sm font-semibold" style={{ color: 'var(--cp-text)' }}>
+          {isFirstStep ? 'Первое письмо' : `Письмо ${stepIdx + 1}`}
+        </span>
+        <div className="flex-1" />
+        {!isFirstStep && (
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>через</span>
+            <input
+              type="number"
+              min={0}
+              max={60}
+              value={step.wait_days}
+              onChange={(e) => onUpdateStep({ wait_days: Math.max(0, Math.min(60, Number(e.target.value) || 0)) })}
+              className="neu-input w-14 px-2 py-1.5 text-sm text-center"
+            />
+            <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>дн.</span>
+          </div>
+        )}
+        {canRemove && (
+          <button type="button" onClick={onRemoveStep} className="p-1.5 rounded-lg shrink-0" style={{ color: 'var(--cp-text-m)' }} aria-label="Удалить шаг">
+            <Trash2 className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
+      {/* Variant tabs */}
+      <div className="flex items-center gap-1 mb-3 flex-wrap">
+        {Array.from({ length: variantsCount }, (_, vIdx) => {
+          const letter = String.fromCharCode(65 + vIdx);
+          const isActive = vIdx === activeVariant;
+          return (
+            <div key={vIdx} className={`neu-pill inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold ${isActive ? 'active' : ''}`} style={!isActive ? { color: 'var(--cp-text-m)' } : undefined}>
+              <button type="button" onClick={() => onSetActiveVariant(vIdx)}>
+                Вариант {letter}
+              </button>
+              {vIdx > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onRemoveVariant(vIdx - 1)}
+                  className="ml-0.5 -mr-1 p-0.5 rounded-full hover:bg-black/5"
+                  style={{ color: 'var(--cp-text-l)' }}
+                  aria-label={`Удалить вариант ${letter}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          );
+        })}
+        {canAddVariant && (
+          <button
+            type="button"
+            onClick={onAddVariant}
+            className="neu-pill inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold"
+            style={{ color: 'var(--cp-accent)' }}
+          >
+            <Plus className="h-3 w-3" /> Вариант
+          </button>
+        )}
+        {variantsCount > 1 && (
+          <span className="ml-2 text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+            Instantly случайно выберет один вариант для каждого лида
+          </span>
+        )}
+      </div>
+
+      <input
+        type="text"
+        value={activeContent.subject ?? ''}
+        onChange={(e) => onUpdateActive({ subject: e.target.value })}
+        placeholder={subjectRequired ? 'Тема письма' : 'Та же тема — продолжение ветки'}
+        className="neu-input w-full px-3 py-2 text-sm"
+      />
+      {customSubjectOnFollowUp && (
+        <div className="mt-1.5 text-[11px] flex items-start gap-1.5" style={{ color: '#C49B4A' }}>
+          <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+          Новая тема создаст отдельную ветку — получатель не увидит историю переписки. Оставьте пустым, чтобы продолжить ту же ветку.
+        </div>
+      )}
+      {!isFirstStep && (activeContent.subject ?? '').trim() === '' && (
+        <div className="mt-1.5 text-[11px] flex items-start gap-1.5" style={{ color: 'var(--cp-text-l)' }}>
+          <Info className="h-3 w-3 shrink-0 mt-0.5" />
+          Будет отправлено в той же ветке, что и предыдущее письмо.
+        </div>
+      )}
+      <textarea
+        value={activeContent.body}
+        onChange={(e) => onUpdateActive({ body: e.target.value })}
+        placeholder="Текст письма (поддерживает HTML)"
+        rows={6}
+        className="neu-input w-full px-3 py-2 text-sm font-sans resize-y mt-3"
+      />
     </div>
   );
 }

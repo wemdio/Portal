@@ -15,6 +15,9 @@ create index if not exists idx_pch_project_date
 
 alter table public.project_contacts_history enable row level security;
 
+grant all on public.project_contacts_history to service_role;
+grant select on public.project_contacts_history to authenticated;
+
 do $$ begin
   if not exists (select 1 from pg_policies where policyname='pch_select_authenticated' and tablename='project_contacts_history') then
     create policy pch_select_authenticated on public.project_contacts_history for select to authenticated using (true);
