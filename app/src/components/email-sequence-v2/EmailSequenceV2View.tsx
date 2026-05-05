@@ -609,9 +609,6 @@ export function EmailSequenceV2View() {
       <div>
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-gray-900">Цепочки писем 2.0</h1>
-          <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-            улучшенная версия
-          </span>
         </div>
         <p className="text-sm text-gray-500 mt-1">
           Загрузите бриф → получите ценности → опишите сегмент и правки → сгенерируйте цепочку и доредактируйте письма.
