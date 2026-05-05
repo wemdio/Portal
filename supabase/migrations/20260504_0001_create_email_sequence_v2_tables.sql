@@ -164,3 +164,9 @@ create policy email_sequence_v2_letters_delete_own
         and r.user_id = auth.uid()
     )
   );
+
+-- GRANT'ы. Без них PostgREST для роли authenticated получает
+-- «permission denied for table» до проверки RLS policies — на нашем
+-- self-hosted ALTER DEFAULT PRIVILEGES для public не настроен.
+grant select, insert, update, delete on public.email_sequence_v2_runs to authenticated;
+grant select, insert, update, delete on public.email_sequence_v2_letters to authenticated;
