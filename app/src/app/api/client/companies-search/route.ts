@@ -149,7 +149,7 @@ export async function POST(req: NextRequest) {
     if (!wantCount && (count ?? 0) > 0) {
       const { data, error } = await buildQuery('rows').limit(limit);
       if (error) return jsonError(error.message, 500);
-      response.rows = data ?? [];
+      response.rows = (data as Record<string, unknown>[] | null) ?? [];
     }
 
     return NextResponse.json(response);
