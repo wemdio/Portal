@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
@@ -15,10 +16,13 @@ type AnalyticsRow = {
   new_leads_contacted_count: number | null;
   unsubscribed_count: number | null;
   leads_count: number | null;
+  analytics_synced_at: string | null;
 };
 
 const ANALYTICS_COLS =
-  'id,name,emails_sent_count,open_count,reply_count,bounced_count,new_leads_contacted_count,unsubscribed_count,leads_count';
+  'id,name,emails_sent_count,open_count,reply_count,bounced_count,new_leads_contacted_count,unsubscribed_count,leads_count,analytics_synced_at';
+
+type DataSource = 'db' | 'api' | 'db-fallback';
 
 function toNum(v: number | null | undefined): number {
   const x = Number(v);
@@ -37,6 +41,57 @@ function rowToAnalytics(row: AnalyticsRow) {
     unsubscribed_count: toNum(row.unsubscribed_count),
     leads_count: toNum(row.leads_count),
   };
+}
+
+/**
+ * Read analytics rows from `instantly_campaign_catalog` and compute the
+ * freshest `analytics_synced_at` across them so the caller can decide whether
+ * to warn about stale data.
+ */
+async function readAnalyticsFromDb(
+  db: SupabaseClient,
+  campaignId?: string,
+): Promise<{ items: ReturnType<typeof rowToAnalytics>[]; freshness: string | null }> {
+  let query = db.from('instantly_campaign_catalog').select(ANALYTICS_COLS);
+  if (campaignId) query = query.eq('id', campaignId);
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+
+  const rows = (data ?? []) as unknown as AnalyticsRow[];
+  const freshness = rows.reduce<string | null>((max, r) => {
+    const ts = r.analytics_synced_at ?? null;
+    if (!ts) return max;
+    if (!max || ts > max) return ts;
+    return max;
+  }, null);
+
+  return { items: rows.map(rowToAnalytics), freshness };
+}
+
+/**
+ * Build a JSON response and tag it with `X-Data-Source` / `X-Data-Freshness`
+ * so the analyzer UI can render a "stale data" banner without changing the
+ * body shape (kept as a flat array for backward compatibility with other
+ * consumers).
+ */
+function jsonWithSource<T>(
+  body: T,
+  source: DataSource,
+  freshness?: string | null,
+  apiError?: string,
+): NextResponse {
+  const res = NextResponse.json(body);
+  res.headers.set('X-Data-Source', source);
+  if (freshness) res.headers.set('X-Data-Freshness', freshness);
+  if (apiError) res.headers.set('X-Api-Error', apiError);
+  return res;
+}
+
+function normalizeApiList(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const data = (raw as { data?: unknown })?.data;
+  return Array.isArray(data) ? data : [];
 }
 
 export const GET = withAuth(async (req) => {
@@ -61,7 +116,7 @@ export const GET = withAuth(async (req) => {
           const { data, error } = await query;
           if (error) throw new Error(error.message);
 
-          const rows = (data ?? []) as AnalyticsRow[];
+          const rows = (data ?? []) as unknown as AnalyticsRow[];
           let totalSent = 0, totalOpened = 0, totalReplied = 0, totalBounced = 0, totalLeads = 0;
           for (const row of rows) {
             totalSent += toNum(row.emails_sent_count);
@@ -108,29 +163,45 @@ export const GET = withAuth(async (req) => {
     }
 
     default: {
-      // type=campaigns — read from DB (skip when source=api)
+      // type=campaigns
+      // ── Path A: DB-first (default). Fast, but can be stale (1h sync cycle).
       if (useDb && supabaseInstantly) {
         try {
-          let query = supabaseInstantly
-            .from('instantly_campaign_catalog')
-            .select(ANALYTICS_COLS);
-
-          if (campaign_id) query = query.eq('id', campaign_id);
-
-          const { data, error } = await query;
-          if (error) throw new Error(error.message);
-
-          const items = ((data ?? []) as AnalyticsRow[]).map(rowToAnalytics);
-          return NextResponse.json(items);
+          const { items, freshness } = await readAnalyticsFromDb(
+            supabaseInstantly as unknown as SupabaseClient,
+            campaign_id,
+          );
+          return jsonWithSource(items, 'db', freshness);
         } catch (dbErr) {
           console.error('[instantly-analytics] campaigns DB read failed:', dbErr);
         }
       }
 
-      // Fallback: Instantly API
-      const raw = await instantly.getCampaignAnalytics({ campaign_id });
-      const items = Array.isArray(raw) ? raw : Array.isArray((raw as { data?: unknown }).data) ? (raw as { data: unknown[] }).data : [];
-      return NextResponse.json(items);
+      // ── Path B: Instantly API (forced via ?source=api OR DB unavailable).
+      // The bulk /campaigns/analytics endpoint is known to return sporadic 5xx
+      // ("Unable to count leads") on workspaces with thousands of campaigns;
+      // when that happens we transparently fall back to the cache so the
+      // analyzer keeps working — the UI shows a freshness banner instead.
+      try {
+        const raw = await instantly.getCampaignAnalytics({ campaign_id });
+        return jsonWithSource(normalizeApiList(raw), 'api');
+      } catch (apiErr) {
+        if (supabaseInstantly) {
+          try {
+            const { items, freshness } = await readAnalyticsFromDb(
+              supabaseInstantly as unknown as SupabaseClient,
+              campaign_id,
+            );
+            const apiMessage =
+              apiErr instanceof Error ? apiErr.message : 'Instantly API error';
+            console.warn('[instantly-analytics] API failed, served stale cache:', apiMessage);
+            return jsonWithSource(items, 'db-fallback', freshness, apiMessage);
+          } catch (dbErr) {
+            console.error('[instantly-analytics] db-fallback read failed:', dbErr);
+          }
+        }
+        throw apiErr;
+      }
     }
   }
 });

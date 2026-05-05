@@ -75,6 +75,9 @@ NAME_MAX_LEN = 2000
 
 HTTP_TIMEOUT: int = int(os.environ.get("INSTANTLY_SYNC_HTTP_TIMEOUT_SEC", "30"))
 RETRY_ATTEMPTS: int = int(os.environ.get("INSTANTLY_SYNC_RETRY_ATTEMPTS", "3"))
+ANALYTICS_FALLBACK_CONCURRENCY: int = int(
+    os.environ.get("INSTANTLY_ANALYTICS_FALLBACK_CONCURRENCY", "8")
+)
 
 LEADS_PAGE_LIMIT = int(os.environ.get("INSTANTLY_LEADS_PAGE_LIMIT", "100"))
 LEADS_CONCURRENCY = int(os.environ.get("INSTANTLY_LEADS_CONCURRENCY", "2"))
@@ -358,12 +361,25 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
 
 # ── Instantly Analytics API ──────────────────────────────────────────────────
 
-async def fetch_campaign_analytics() -> list[dict]:
+async def fetch_campaign_analytics(
+    campaign_ids: list[str] | None = None,
+) -> list[dict]:
     """
     Fetch analytics for all campaigns from Instantly API.
-    Uses a longer timeout because leads_count computation is expensive on the
-    Instantly side.  Falls back to batched requests by campaign_id when the
-    bulk endpoint returns incomplete results.
+
+    Strategy:
+      1. Try the bulk endpoint  GET /campaigns/analytics  (cheap, one round-trip).
+      2. If bulk fails (5xx) OR returns an empty list, AND `campaign_ids` is
+         provided, fall back to per-id requests issued in parallel under a
+         semaphore (concurrency = ANALYTICS_FALLBACK_CONCURRENCY, default 8).
+         Per-id failures are logged and skipped — we return whatever loaded
+         successfully so the cache still gets refreshed for healthy campaigns.
+
+    Why per-id fallback exists: Instantly's bulk endpoint started returning
+    sporadic 500 ("Unable to count leads") on workspaces with ~1700 campaigns
+    around April 2026, leaving `instantly_campaign_catalog.analytics_synced_at`
+    stuck. Per-id requests are cheap (~400ms each) because they only count
+    leads for one campaign at a time.
     """
     ANALYTICS_TIMEOUT = max(HTTP_TIMEOUT, 120)
     headers = {"Authorization": f"Bearer {INSTANTLY_API_KEY}"}
@@ -377,7 +393,8 @@ async def fetch_campaign_analytics() -> list[dict]:
                     return data[key]
         return []
 
-    async def _bulk_fetch() -> list[dict]:
+    async def _bulk_fetch() -> list[dict] | None:
+        """Returns the bulk array on success (may be empty), or None on every-attempt failure."""
         last_err: Exception | None = None
         for attempt in range(RETRY_ATTEMPTS):
             try:
@@ -398,12 +415,54 @@ async def fetch_campaign_analytics() -> list[dict]:
                     )
                     await asyncio.sleep(delay)
         print(f"[sync] Analytics bulk fetch failed after {RETRY_ATTEMPTS} attempts: {last_err!r}")
+        return None
+
+    async def _fetch_one(
+        client: httpx.AsyncClient, sem: asyncio.Semaphore, cid: str
+    ) -> dict | None:
+        async with sem:
+            try:
+                r = await client.get(
+                    f"{INSTANTLY_BASE}/campaigns/analytics",
+                    params={"id": cid},
+                    headers=headers,
+                )
+                r.raise_for_status()
+                items = _parse_response(r.json())
+                if items:
+                    return items[0]
+            except Exception as e:
+                print(f"[sync] Analytics per-id fetch failed for {cid}: {e!r}")
+            return None
+
+    async def _per_id_fetch(ids: list[str]) -> list[dict]:
+        sem = asyncio.Semaphore(ANALYTICS_FALLBACK_CONCURRENCY)
+        async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+            results = await asyncio.gather(
+                *(_fetch_one(client, sem, cid) for cid in ids),
+                return_exceptions=False,
+            )
+        return [r for r in results if r is not None]
+
+    bulk_result = await _bulk_fetch()
+    if bulk_result:
+        print(f"[sync] Analytics bulk fetch returned {len(bulk_result)} campaigns")
+        return bulk_result
+
+    if not campaign_ids:
         return []
 
-    results = await _bulk_fetch()
-    if results:
-        print(f"[sync] Analytics bulk fetch returned {len(results)} campaigns")
-    return results
+    reason = "empty body" if bulk_result == [] else "bulk failed"
+    print(
+        f"[sync] {reason}; falling back to per-id analytics fetch for "
+        f"{len(campaign_ids)} campaigns (concurrency={ANALYTICS_FALLBACK_CONCURRENCY})…"
+    )
+    per_id_result = await _per_id_fetch(campaign_ids)
+    print(
+        f"[sync] Analytics per-id fetch returned {len(per_id_result)}/"
+        f"{len(campaign_ids)} campaigns"
+    )
+    return per_id_result
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -965,7 +1024,8 @@ async def run_sync(manual: bool = False) -> dict:
 
         analytics_count = 0
         try:
-            analytics = await fetch_campaign_analytics()
+            campaign_ids = [c["id"] for c in campaigns if isinstance(c.get("id"), str)]
+            analytics = await fetch_campaign_analytics(campaign_ids)
             print(f"[sync] Fetched analytics for {len(analytics)} campaigns")
             analytics_count = await sync_analytics_to_db(analytics)
             print(f"[sync] Analytics synced: {analytics_count} campaigns updated")
