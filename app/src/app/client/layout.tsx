@@ -81,7 +81,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <GlobalTextTranslator locale={locale} />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-5 sm:pb-2 md:px-8">
-        <div className="neu-card flex items-center gap-2 sm:gap-4 px-3 py-2.5 sm:px-6 sm:py-3.5 max-w-5xl mx-auto">
+        <div className="neu-card flex items-center gap-2 sm:gap-4 px-3 py-2.5 sm:px-6 sm:py-3.5 max-w-6xl mx-auto">
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
             style={{ color: 'var(--cp-accent)' }}
@@ -89,7 +89,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             Portal
           </span>
 
-          <nav className="flex-1 flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar">
+          <nav className="flex-1 min-w-0 flex flex-wrap items-center gap-1 sm:gap-1.5">
             {clientNav.map((item) => {
               const active = isActive(item.href);
               return (
