@@ -71,14 +71,21 @@ export class HttpConnectSocket {
     this.canRead = new Promise((resolve) => { this.resolveRead = resolve; });
     this.closed = false;
 
+    // gramJS hardcodes port 80 for non-WSS (and useWSS isn't allowed with proxies).
+    // Residential proxies (Infatica etc.) DPI-classify raw MTProto on :80 as
+    // err_protocol abuse and ban the source IP. Telegram MTProto-Obfuscated2
+    // accepts traffic on any port, so we redirect the CONNECT to :443 — looks
+    // like normal TLS to the proxy, behaves identically to Telegram.
+    const targetPort = port === 80 ? 443 : port;
+
     if (this.proxy) {
-      proxyLog(`connecting via CONNECT to ${ip}:${port} through ${this.proxy.ip}:${this.proxy.port}`);
-      this.client = await this._httpConnect(this.proxy, ip, port);
-      proxyLog(`CONNECT tunnel established to ${ip}:${port}`);
+      proxyLog(`connecting via CONNECT to ${ip}:${targetPort} (gramJS asked :${port}) through ${this.proxy.ip}:${this.proxy.port}`);
+      this.client = await this._httpConnect(this.proxy, ip, targetPort);
+      proxyLog(`CONNECT tunnel established to ${ip}:${targetPort}`);
     } else {
       this.client = new net.Socket();
       await new Promise<void>((resolve, reject) => {
-        this.client!.connect(port, ip, () => resolve());
+        this.client!.connect(targetPort, ip, () => resolve());
         this.client!.on('error', reject);
       });
     }
