@@ -1,9 +1,24 @@
-import type { CampaignCreatePayload, CampaignScheduleDays } from '@/lib/instantly/types';
-import type { ClientCampaignPreset, ClientLaunchSequence } from './types';
+import type {
+  CampaignCreatePayload,
+  CampaignScheduleDays,
+  SequenceStep,
+  SequenceVariant,
+} from '@/lib/instantly/types';
+import type {
+  ClientCampaignPreset,
+  ClientLaunchScheduleOverride,
+  ClientLaunchSequence,
+} from './types';
+import { normalizeInstantlyTimezone } from './timezones';
 
 export interface BuildCampaignPayloadInput {
   preset: ClientCampaignPreset;
   sequence: ClientLaunchSequence;
+  /**
+   * Optional per-launch schedule override. When present, replaces the preset's
+   * schedule_from/to/days/timezone in the resulting campaign payload.
+   */
+  scheduleOverride?: ClientLaunchScheduleOverride;
 }
 
 /**
@@ -13,10 +28,15 @@ export interface BuildCampaignPayloadInput {
 export function buildCampaignPayloadFromPreset(
   input: BuildCampaignPayloadInput,
 ): CampaignCreatePayload {
-  const { preset, sequence } = input;
+  const { preset, sequence, scheduleOverride } = input;
+
+  const fromValue = scheduleOverride?.from ?? preset.schedule_from;
+  const toValue = scheduleOverride?.to ?? preset.schedule_to;
+  const dayValues = scheduleOverride?.days ?? preset.schedule_days;
+  const tzValue = scheduleOverride?.timezone ?? preset.schedule_timezone;
 
   const days: CampaignScheduleDays = {};
-  for (const d of preset.schedule_days) {
+  for (const d of dayValues) {
     if (d >= 0 && d <= 6) {
       (days as Record<number, boolean>)[d] = true;
     }
@@ -28,20 +48,29 @@ export function buildCampaignPayloadFromPreset(
       schedules: [
         {
           name: 'Schedule',
-          timing: { from: preset.schedule_from, to: preset.schedule_to },
+          timing: { from: fromValue, to: toValue },
           days,
-          timezone: preset.schedule_timezone,
+          timezone: normalizeInstantlyTimezone(tzValue),
         },
       ],
     },
     sequences: [
       {
-        steps: sequence.steps.map((s) => ({
-          type: 'email',
-          subject: s.subject,
-          body: s.body,
-          wait_days: s.wait_days,
-        })),
+        steps: sequence.steps.map<SequenceStep>((s) => {
+          const step: SequenceStep = {
+            type: 'email',
+            subject: s.subject,
+            body: s.body,
+            wait_days: s.wait_days,
+          };
+          if (s.variants && s.variants.length > 0) {
+            step.variants = s.variants.map<SequenceVariant>((v) => ({
+              subject: v.subject ?? '',
+              body: v.body,
+            }));
+          }
+          return step;
+        }),
       },
     ],
     email_list: [...preset.email_account_ids],

@@ -1,6 +1,11 @@
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInput';
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
+import {
+  INSTANTLY_TIMEZONE_OPTIONS,
+  isInstantlyValidTimezone,
+  normalizeInstantlyTimezone,
+} from '@/lib/clientLaunch/timezones';
 import type {
   ClientCampaignPreset,
   ClientLaunchSequence,
@@ -105,6 +110,56 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(payload.sequences?.[0].steps[0].wait_days).toBe(0);
     expect(payload.sequences?.[0].steps[1].wait_days).toBe(3);
   });
+
+  it('preserves empty subject for follow-up steps (continues thread)', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          { subject: '', body: 'b2', wait_days: 3 },
+        ],
+      },
+    });
+    expect(payload.sequences?.[0].steps[1].subject).toBe('');
+  });
+
+  it('passes A/B variants through to payload.sequences[].steps[].variants', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A subj',
+            body: 'A body',
+            wait_days: 0,
+            variants: [
+              { subject: 'B subj', body: 'B body' },
+              { subject: 'C subj', body: 'C body' },
+            ],
+          },
+        ],
+      },
+    });
+    const step = payload.sequences?.[0].steps[0];
+    expect(step?.subject).toBe('A subj');
+    expect(step?.body).toBe('A body');
+    expect(step?.variants).toHaveLength(2);
+    expect(step?.variants?.[0].subject).toBe('B subj');
+    expect(step?.variants?.[0].body).toBe('B body');
+    expect(step?.variants?.[1].subject).toBe('C subj');
+    expect(step?.variants?.[1].body).toBe('C body');
+  });
+
+  it('omits variants key when no variants are provided', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: validSequence,
+    });
+    expect(payload.sequences?.[0].steps[0].variants).toBeUndefined();
+  });
 });
 
 describe('validateClientLaunchInput', () => {
@@ -149,7 +204,7 @@ describe('validateClientLaunchInput', () => {
     expect(result.error).toMatch(/шаг/i);
   });
 
-  it('rejects sequence step missing subject', () => {
+  it('rejects step 1 missing subject', () => {
     const result = validateClientLaunchInput({
       preset: validPreset,
       sequence: { name: 'X', steps: [{ subject: '', body: 'b', wait_days: 0 }] },
@@ -159,6 +214,160 @@ describe('validateClientLaunchInput', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toMatch(/тем/i);
+  });
+
+  it('accepts step 2+ with empty subject (continues thread)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          { subject: '', body: 'b2', wait_days: 3 },
+          { subject: '   ', body: 'b3', wait_days: 5 },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts step with extra A/B variants', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A subj',
+            body: 'A body',
+            wait_days: 0,
+            variants: [
+              { subject: 'B subj', body: 'B body' },
+              { subject: 'C subj', body: 'C body' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects variant with empty body', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 's',
+            body: 'b',
+            wait_days: 0,
+            variants: [{ subject: 'B', body: '' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/вариант/i);
+  });
+
+  it('rejects step 1 variant with empty subject', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 's',
+            body: 'b',
+            wait_days: 0,
+            variants: [{ subject: '', body: 'B body' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/тем/i);
+  });
+
+  it('accepts step 2 variant with empty subject', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          { subject: 'Hi', body: 'b1', wait_days: 0 },
+          {
+            subject: '',
+            body: 'b2',
+            wait_days: 3,
+            variants: [{ subject: '', body: 'b2 alt' }],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects when variants exceed maximum (max 3 total per step → 2 extra)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A',
+            body: 'a',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'b' },
+              { subject: 'C', body: 'c' },
+              { subject: 'D', body: 'd' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/вариант/i);
+  });
+
+  it('accepts exactly 2 extra variants (3 total: A + B + C)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: {
+        name: 'X',
+        steps: [
+          {
+            subject: 'A',
+            body: 'a',
+            wait_days: 0,
+            variants: [
+              { subject: 'B', body: 'b' },
+              { subject: 'C', body: 'c' },
+            ],
+          },
+        ],
+      },
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
   });
 
   it('rejects sequence step missing body', () => {
@@ -345,5 +554,339 @@ describe('mapCsvRowsToLeads', () => {
       mapping: { email: 'Email', first_name: 'fn' },
     });
     expect(leads[0].custom_variables).toBeUndefined();
+  });
+});
+
+/**
+ * Regression (May 2026): preset.schedule_timezone could contain values that
+ * Instantly's API rejects with
+ *   400 "body/campaign_schedule/schedules/0/timezone must be equal to one of the allowed values"
+ *
+ * Instantly's whitelist is fixed (~92 IANA-style ids); legacy preset values
+ * such as 'Europe/Moscow', 'Europe/Samara', 'Asia/Omsk', 'Asia/Novosibirsk',
+ * 'Asia/Yakutsk', 'Asia/Vladivostok', 'Asia/Magadan', 'UTC' are NOT in it.
+ *
+ * `normalizeInstantlyTimezone` maps each legacy id to the closest equivalent
+ * inside the whitelist (same UTC offset where possible). The mapping must:
+ *   - keep already-valid ids untouched
+ *   - never throw on unknown input — return as-is so Instantly's own 400
+ *     surfaces a precise error instead of silent corruption.
+ */
+describe('normalizeInstantlyTimezone', () => {
+  it('maps Europe/Moscow → Europe/Kirov (both MSK / UTC+3)', () => {
+    expect(normalizeInstantlyTimezone('Europe/Moscow')).toBe('Europe/Kirov');
+  });
+
+  it('maps Europe/Samara → Europe/Astrakhan (both UTC+4)', () => {
+    expect(normalizeInstantlyTimezone('Europe/Samara')).toBe('Europe/Astrakhan');
+  });
+
+  it('maps Asia/Omsk → Asia/Novokuznetsk (both UTC+7)', () => {
+    expect(normalizeInstantlyTimezone('Asia/Omsk')).toBe('Asia/Novokuznetsk');
+  });
+
+  it('maps Asia/Novosibirsk → Asia/Novokuznetsk (both UTC+7)', () => {
+    expect(normalizeInstantlyTimezone('Asia/Novosibirsk')).toBe('Asia/Novokuznetsk');
+  });
+
+  it('maps Asia/Yakutsk → Asia/Chita (both UTC+9)', () => {
+    expect(normalizeInstantlyTimezone('Asia/Yakutsk')).toBe('Asia/Chita');
+  });
+
+  it('maps Asia/Vladivostok → Asia/Sakhalin (closest available, UTC+11 vs UTC+10)', () => {
+    expect(normalizeInstantlyTimezone('Asia/Vladivostok')).toBe('Asia/Sakhalin');
+  });
+
+  it('maps Asia/Magadan → Asia/Sakhalin (both UTC+11)', () => {
+    expect(normalizeInstantlyTimezone('Asia/Magadan')).toBe('Asia/Sakhalin');
+  });
+
+  it('maps UTC → Africa/Abidjan (always UTC+0, no DST)', () => {
+    expect(normalizeInstantlyTimezone('UTC')).toBe('Africa/Abidjan');
+  });
+
+  it('keeps already-valid Instantly timezones unchanged', () => {
+    expect(normalizeInstantlyTimezone('Europe/Kaliningrad')).toBe('Europe/Kaliningrad');
+    expect(normalizeInstantlyTimezone('Europe/Kirov')).toBe('Europe/Kirov');
+    expect(normalizeInstantlyTimezone('Asia/Yekaterinburg')).toBe('Asia/Yekaterinburg');
+    expect(normalizeInstantlyTimezone('Asia/Krasnoyarsk')).toBe('Asia/Krasnoyarsk');
+    expect(normalizeInstantlyTimezone('Asia/Irkutsk')).toBe('Asia/Irkutsk');
+    expect(normalizeInstantlyTimezone('Asia/Kamchatka')).toBe('Asia/Kamchatka');
+  });
+
+  it('returns unknown / typo input unchanged so Instantly surfaces a clear error', () => {
+    expect(normalizeInstantlyTimezone('Bogus/Zone')).toBe('Bogus/Zone');
+    expect(normalizeInstantlyTimezone('')).toBe('');
+  });
+});
+
+describe('isInstantlyValidTimezone', () => {
+  it('accepts whitelisted ids', () => {
+    expect(isInstantlyValidTimezone('Europe/Kirov')).toBe(true);
+    expect(isInstantlyValidTimezone('Asia/Yekaterinburg')).toBe(true);
+    expect(isInstantlyValidTimezone('Africa/Abidjan')).toBe(true);
+  });
+
+  it('rejects legacy / unknown ids that Instantly would 400 on', () => {
+    expect(isInstantlyValidTimezone('Europe/Moscow')).toBe(false);
+    expect(isInstantlyValidTimezone('Asia/Vladivostok')).toBe(false);
+    expect(isInstantlyValidTimezone('UTC')).toBe(false);
+    expect(isInstantlyValidTimezone('Bogus/Zone')).toBe(false);
+  });
+});
+
+describe('INSTANTLY_TIMEZONE_OPTIONS', () => {
+  it('contains a Russia-relevant subset and every value passes isInstantlyValidTimezone', () => {
+    expect(INSTANTLY_TIMEZONE_OPTIONS.length).toBeGreaterThan(5);
+    for (const opt of INSTANTLY_TIMEZONE_OPTIONS) {
+      expect(opt).toEqual({
+        value: expect.any(String),
+        label: expect.any(String),
+      });
+      expect(isInstantlyValidTimezone(opt.value)).toBe(true);
+    }
+  });
+
+  it('includes Europe/Kirov as the recommended Moscow option', () => {
+    const moscow = INSTANTLY_TIMEZONE_OPTIONS.find((o) => o.value === 'Europe/Kirov');
+    expect(moscow).toBeDefined();
+    expect(moscow!.label).toMatch(/москв/i);
+  });
+
+  it('does NOT contain legacy values that Instantly rejects', () => {
+    const legacyValues = [
+      'Europe/Moscow',
+      'Europe/Samara',
+      'Asia/Omsk',
+      'Asia/Novosibirsk',
+      'Asia/Yakutsk',
+      'Asia/Vladivostok',
+      'Asia/Magadan',
+      'UTC',
+    ];
+    for (const legacy of legacyValues) {
+      const found = INSTANTLY_TIMEZONE_OPTIONS.find((o) => o.value === legacy);
+      expect(found).toBeUndefined();
+    }
+  });
+});
+
+/**
+ * Schedule override (May 2026): clients can edit schedule (from/to/days/timezone)
+ * per launch in the UI. The override is optional — if absent, preset values are
+ * used. Validation must reject malformed HH:MM, empty/invalid weekday lists,
+ * and timezone strings outside the Instantly whitelist.
+ */
+describe('validateClientLaunchInput — schedule override', () => {
+  const validMapping: ClientLaunchColumnMapping = {
+    email: 'Email',
+  };
+
+  it('passes when no override is provided (uses preset)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('passes a complete valid override', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '08:30',
+        to: '17:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Asia/Yekaterinburg',
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects malformed schedule_from (not HH:MM)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '8am',
+        to: '18:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Europe/Kirov',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/врем/i);
+  });
+
+  it('rejects schedule_to before schedule_from', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '18:00',
+        to: '09:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Europe/Kirov',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/окончани|раньше/i);
+  });
+
+  it('rejects empty days list', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '09:00',
+        to: '18:00',
+        days: [],
+        timezone: 'Europe/Kirov',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/день|дни/i);
+  });
+
+  it('rejects out-of-range day index', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '09:00',
+        to: '18:00',
+        days: [1, 9],
+        timezone: 'Europe/Kirov',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/день|дни/i);
+  });
+
+  it('rejects timezone outside Instantly whitelist (after legacy mapping)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '09:00',
+        to: '18:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Bogus/Zone',
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/часовой пояс|timezone/i);
+  });
+
+  it('accepts legacy timezone like Europe/Moscow (will be normalized downstream)', () => {
+    const result = validateClientLaunchInput({
+      preset: validPreset,
+      sequence: validSequence,
+      mapping: validMapping,
+      rowCount: 100,
+      scheduleOverride: {
+        from: '09:00',
+        to: '18:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Europe/Moscow',
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('buildCampaignPayloadFromPreset — schedule override', () => {
+  const validMapping: ClientLaunchColumnMapping = { email: 'Email' };
+  void validMapping;
+
+  it('uses override values instead of preset when provided', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: validSequence,
+      scheduleOverride: {
+        from: '08:30',
+        to: '17:00',
+        days: [2, 4, 6],
+        timezone: 'Asia/Yekaterinburg',
+      },
+    });
+    const entry = payload.campaign_schedule.schedules[0];
+    expect(entry.timing.from).toBe('08:30');
+    expect(entry.timing.to).toBe('17:00');
+    expect(entry.timezone).toBe('Asia/Yekaterinburg');
+    expect(entry.days[2]).toBe(true);
+    expect(entry.days[4]).toBe(true);
+    expect(entry.days[6]).toBe(true);
+    expect(entry.days[1]).toBeFalsy();
+  });
+
+  it('normalizes legacy timezone in override (Europe/Moscow → Europe/Kirov)', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: validSequence,
+      scheduleOverride: {
+        from: '09:00',
+        to: '18:00',
+        days: [1, 2, 3, 4, 5],
+        timezone: 'Europe/Moscow',
+      },
+    });
+    expect(payload.campaign_schedule.schedules[0].timezone).toBe('Europe/Kirov');
+  });
+
+  it('falls back to preset when no override is provided', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, schedule_timezone: 'Asia/Yekaterinburg', schedule_from: '07:00' },
+      sequence: validSequence,
+    });
+    const entry = payload.campaign_schedule.schedules[0];
+    expect(entry.timing.from).toBe('07:00');
+    expect(entry.timezone).toBe('Asia/Yekaterinburg');
+  });
+});
+
+describe('buildCampaignPayloadFromPreset — timezone normalization (regression)', () => {
+  it('rewrites legacy Europe/Moscow in preset to Europe/Kirov in the payload', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, schedule_timezone: 'Europe/Moscow' },
+      sequence: validSequence,
+    });
+    expect(payload.campaign_schedule.schedules[0].timezone).toBe('Europe/Kirov');
+  });
+
+  it('rewrites legacy Asia/Vladivostok to Asia/Sakhalin in the payload', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, schedule_timezone: 'Asia/Vladivostok' },
+      sequence: validSequence,
+    });
+    expect(payload.campaign_schedule.schedules[0].timezone).toBe('Asia/Sakhalin');
+  });
+
+  it('passes already-valid Asia/Yekaterinburg through unchanged', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, schedule_timezone: 'Asia/Yekaterinburg' },
+      sequence: validSequence,
+    });
+    expect(payload.campaign_schedule.schedules[0].timezone).toBe('Asia/Yekaterinburg');
   });
 });

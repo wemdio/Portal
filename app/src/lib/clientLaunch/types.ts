@@ -18,10 +18,40 @@ export interface ClientCampaignPreset {
   updated_at: string;
 }
 
+export interface ClientLaunchSequenceVariant {
+  subject?: string;
+  body: string;
+}
+
 export interface ClientLaunchSequenceStep {
   subject: string;
   body: string;
   wait_days: number;
+  /**
+   * Optional A/B/C variants. When present, Instantly randomises which variant
+   * is sent to each lead. The step's own `subject`+`body` is treated as
+   * Variant A, and `variants[]` are extra variants (max 2 → 3 total per step).
+   */
+  variants?: ClientLaunchSequenceVariant[];
+}
+
+/** Max total variants per step (Variant A is the step itself + N entries in variants[]). */
+export const CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP = 3;
+
+/**
+ * Schedule override that the client can submit per-launch from the launch UI.
+ * Defaults are pre-filled from the preset; override completely replaces preset
+ * schedule fields when present (no partial merge).
+ */
+export interface ClientLaunchScheduleOverride {
+  /** 'HH:MM' 24h. */
+  from: string;
+  /** 'HH:MM' 24h. */
+  to: string;
+  /** ISO weekdays Sunday=0..Saturday=6 (Instantly format). */
+  days: number[];
+  /** IANA timezone id. Legacy values (Europe/Moscow, …) will be normalized downstream. */
+  timezone: string;
 }
 
 export interface ClientLaunchSequence {
