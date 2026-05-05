@@ -9,6 +9,7 @@ import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
 import type {
   ClientCampaignPreset,
   ClientLaunchColumnMapping,
+  ClientLaunchScheduleOverride,
   ClientLaunchSequence,
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
@@ -23,6 +24,27 @@ interface LaunchBody {
   mapping?: unknown;
   headers?: unknown;
   rows?: unknown;
+  schedule?: unknown;
+}
+
+function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const from = typeof obj.from === 'string' ? obj.from : undefined;
+  const to = typeof obj.to === 'string' ? obj.to : undefined;
+  const days = Array.isArray(obj.days)
+    ? obj.days.filter((n): n is number => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 6)
+    : undefined;
+  const timezone = typeof obj.timezone === 'string' ? obj.timezone : undefined;
+  if (from === undefined && to === undefined && days === undefined && timezone === undefined) {
+    return undefined;
+  }
+  return {
+    from: from ?? '',
+    to: to ?? '',
+    days: days ?? [],
+    timezone: timezone ?? '',
+  };
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -113,11 +135,14 @@ export async function POST(req: NextRequest) {
 
   const preset = presetRow as ClientCampaignPreset | null;
 
+  const scheduleOverride = parseScheduleOverride(body.schedule);
+
   const validation = validateClientLaunchInput({
     preset,
     sequence,
     mapping,
     rowCount: rows.length,
+    scheduleOverride,
   });
 
   if (!validation.ok) {
@@ -155,7 +180,7 @@ export async function POST(req: NextRequest) {
   let instantlyCampaignId: string | null = null;
 
   try {
-    const payload = buildCampaignPayloadFromPreset({ preset: preset!, sequence });
+    const payload = buildCampaignPayloadFromPreset({ preset: preset!, sequence, scheduleOverride });
     const created = await createCampaign(payload);
     instantlyCampaignId = (created as { id?: string }).id ?? null;
     if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');

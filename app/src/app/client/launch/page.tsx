@@ -12,9 +12,11 @@ import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientLaunchColumnMapping,
+  type ClientLaunchScheduleOverride,
   type ClientLaunchSequenceStep,
   type ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
+import { INSTANTLY_TIMEZONE_OPTIONS, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
 
 interface PresetSummary {
   id: string;
@@ -59,6 +61,16 @@ const STANDARD_FIELDS: { key: keyof Omit<ClientLaunchColumnMapping, 'custom_vari
 ];
 
 const PREVIEW_ROW_COUNT = 3;
+
+const WEEKDAYS: { value: number; label: string }[] = [
+  { value: 1, label: 'Пн' },
+  { value: 2, label: 'Вт' },
+  { value: 3, label: 'Ср' },
+  { value: 4, label: 'Чт' },
+  { value: 5, label: 'Пт' },
+  { value: 6, label: 'Сб' },
+  { value: 0, label: 'Вс' },
+];
 
 function autoDetectMapping(headers: string[]): ClientLaunchColumnMapping {
   const lower = headers.map((h) => h.trim().toLowerCase());
@@ -129,6 +141,15 @@ export default function ClientLaunchPage() {
   /** Active variant index per step. 0 = main step (Variant A), 1 = variants[0] (B), 2 = variants[1] (C). */
   const [activeVariantIdx, setActiveVariantIdx] = useState<number[]>([0]);
 
+  // Schedule state — initialized from preset on load, editable per launch.
+  const [schedule, setSchedule] = useState<ClientLaunchScheduleOverride>({
+    from: '09:00',
+    to: '18:00',
+    days: [1, 2, 3, 4, 5],
+    timezone: 'Europe/Kirov',
+  });
+  const [scheduleHydrated, setScheduleHydrated] = useState(false);
+
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
   const [result, setResult] = useState<LaunchResult | null>(null);
@@ -142,6 +163,17 @@ export default function ClientLaunchPage() {
     try {
       const data = await clientApiFetch<{ preset: PresetSummary | null }>('/preset');
       setPreset(data.preset);
+      if (data.preset) {
+        setSchedule({
+          from: data.preset.schedule_from || '09:00',
+          to: data.preset.schedule_to || '18:00',
+          days: Array.isArray(data.preset.schedule_days) && data.preset.schedule_days.length > 0
+            ? data.preset.schedule_days
+            : [1, 2, 3, 4, 5],
+          timezone: normalizeInstantlyTimezone(data.preset.schedule_timezone || 'Europe/Kirov'),
+        });
+        setScheduleHydrated(true);
+      }
     } catch (err) {
       setPresetError(err instanceof Error ? err.message : 'Не удалось загрузить пресет');
     } finally {
@@ -318,6 +350,18 @@ export default function ClientLaunchPage() {
       setLaunchError('Укажите название кампании');
       return;
     }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.from) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.to)) {
+      setLaunchError('Расписание: некорректное время (используйте формат ЧЧ:ММ)');
+      return;
+    }
+    if (schedule.from >= schedule.to) {
+      setLaunchError('Расписание: время окончания должно быть позже времени начала');
+      return;
+    }
+    if (!schedule.days || schedule.days.length === 0) {
+      setLaunchError('Расписание: выберите хотя бы один день недели');
+      return;
+    }
     for (let i = 0; i < sequenceSteps.length; i++) {
       const s = sequenceSteps[i];
       const isFirst = i === 0;
@@ -357,6 +401,7 @@ export default function ClientLaunchPage() {
           mapping: finalMapping,
           headers: fileHeaders,
           rows: fileRows,
+          schedule,
         }),
       });
       setResult(data.launch);
@@ -635,9 +680,20 @@ export default function ClientLaunchPage() {
           </Section>
         )}
 
-        {/* Step 4: Launch */}
+        {/* Step 4: Schedule */}
         {fileHeaders.length > 0 && (
-          <Section number={4} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
+          <Section number={4} title="Расписание" subtitle="Когда Instantly будет отправлять письма. По умолчанию — настройки вашего пресета.">
+            <ScheduleEditor
+              schedule={schedule}
+              onChange={setSchedule}
+              hydrated={scheduleHydrated}
+            />
+          </Section>
+        )}
+
+        {/* Step 5: Launch */}
+        {fileHeaders.length > 0 && (
+          <Section number={5} title="Запуск" subtitle="Кампания будет создана в Instantly и сразу же активирована.">
             {launchError && (
               <div className="mb-4 neu-inset rounded-2xl px-4 py-3 text-sm flex items-start gap-2" style={{ color: 'var(--cp-danger)' }}>
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -975,6 +1031,97 @@ function VariableChip({ entry }: { entry: VariableEntry }) {
         </span>
       )}
     </button>
+  );
+}
+
+function ScheduleEditor({
+  schedule,
+  onChange,
+  hydrated,
+}: {
+  schedule: ClientLaunchScheduleOverride;
+  onChange: (next: ClientLaunchScheduleOverride) => void;
+  hydrated: boolean;
+}) {
+  const toggleDay = (day: number) => {
+    const next = schedule.days.includes(day)
+      ? schedule.days.filter((d) => d !== day)
+      : [...schedule.days, day].sort((a, b) => a - b);
+    onChange({ ...schedule, days: next });
+  };
+
+  const tzNormalized = normalizeInstantlyTimezone(schedule.timezone);
+  const tzLabel = INSTANTLY_TIMEZONE_OPTIONS.find((o) => o.value === tzNormalized)?.label ?? tzNormalized;
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Время начала
+          </label>
+          <input
+            type="time"
+            value={schedule.from}
+            onChange={(e) => onChange({ ...schedule, from: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Время окончания
+          </label>
+          <input
+            type="time"
+            value={schedule.to}
+            onChange={(e) => onChange({ ...schedule, to: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wider block mb-1.5" style={{ color: 'var(--cp-text-m)' }}>
+            Часовой пояс
+          </label>
+          <select
+            value={tzNormalized}
+            onChange={(e) => onChange({ ...schedule, timezone: e.target.value })}
+            className="neu-input w-full px-3 py-2 text-sm"
+          >
+            {INSTANTLY_TIMEZONE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-semibold uppercase tracking-wider block mb-2" style={{ color: 'var(--cp-text-m)' }}>
+          Дни недели
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {WEEKDAYS.map((d) => {
+            const checked = schedule.days.includes(d.value);
+            return (
+              <button
+                key={d.value}
+                type="button"
+                onClick={() => toggleDay(d.value)}
+                className={`neu-pill px-3 py-1.5 text-xs font-semibold ${checked ? 'active' : ''}`}
+                style={!checked ? { color: 'var(--cp-text-m)' } : undefined}
+              >
+                {d.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {hydrated && (
+        <p className="mt-3 text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          {schedule.days.length === 0
+            ? 'Выберите хотя бы один день — иначе кампания не будет отправляться.'
+            : `Письма будут уходить ${schedule.from}–${schedule.to} (${tzLabel}) в выбранные дни.`}
+        </p>
+      )}
+    </div>
   );
 }
 

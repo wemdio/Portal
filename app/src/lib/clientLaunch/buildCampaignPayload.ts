@@ -4,11 +4,21 @@ import type {
   SequenceStep,
   SequenceVariant,
 } from '@/lib/instantly/types';
-import type { ClientCampaignPreset, ClientLaunchSequence } from './types';
+import type {
+  ClientCampaignPreset,
+  ClientLaunchScheduleOverride,
+  ClientLaunchSequence,
+} from './types';
+import { normalizeInstantlyTimezone } from './timezones';
 
 export interface BuildCampaignPayloadInput {
   preset: ClientCampaignPreset;
   sequence: ClientLaunchSequence;
+  /**
+   * Optional per-launch schedule override. When present, replaces the preset's
+   * schedule_from/to/days/timezone in the resulting campaign payload.
+   */
+  scheduleOverride?: ClientLaunchScheduleOverride;
 }
 
 /**
@@ -18,10 +28,15 @@ export interface BuildCampaignPayloadInput {
 export function buildCampaignPayloadFromPreset(
   input: BuildCampaignPayloadInput,
 ): CampaignCreatePayload {
-  const { preset, sequence } = input;
+  const { preset, sequence, scheduleOverride } = input;
+
+  const fromValue = scheduleOverride?.from ?? preset.schedule_from;
+  const toValue = scheduleOverride?.to ?? preset.schedule_to;
+  const dayValues = scheduleOverride?.days ?? preset.schedule_days;
+  const tzValue = scheduleOverride?.timezone ?? preset.schedule_timezone;
 
   const days: CampaignScheduleDays = {};
-  for (const d of preset.schedule_days) {
+  for (const d of dayValues) {
     if (d >= 0 && d <= 6) {
       (days as Record<number, boolean>)[d] = true;
     }
@@ -33,9 +48,9 @@ export function buildCampaignPayloadFromPreset(
       schedules: [
         {
           name: 'Schedule',
-          timing: { from: preset.schedule_from, to: preset.schedule_to },
+          timing: { from: fromValue, to: toValue },
           days,
-          timezone: preset.schedule_timezone,
+          timezone: normalizeInstantlyTimezone(tzValue),
         },
       ],
     },

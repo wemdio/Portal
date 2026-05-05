@@ -1,8 +1,10 @@
 import { CLIENT_LAUNCH_ROW_LIMIT } from './constants';
+import { normalizeInstantlyTimezone, isInstantlyValidTimezone } from './timezones';
 import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientCampaignPreset,
   type ClientLaunchColumnMapping,
+  type ClientLaunchScheduleOverride,
   type ClientLaunchSequence,
 } from './types';
 
@@ -11,6 +13,47 @@ export interface ValidateClientLaunchInput {
   sequence: ClientLaunchSequence;
   mapping: ClientLaunchColumnMapping;
   rowCount: number;
+  scheduleOverride?: ClientLaunchScheduleOverride;
+}
+
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function timeToMinutes(value: string): number {
+  const [h, m] = value.split(':').map((n) => Number.parseInt(n, 10));
+  return h * 60 + m;
+}
+
+function validateScheduleOverride(
+  o: ClientLaunchScheduleOverride,
+): { ok: true } | { ok: false; error: string } {
+  if (typeof o.from !== 'string' || !TIME_RE.test(o.from)) {
+    return { ok: false, error: 'Расписание: время начала должно быть в формате ЧЧ:ММ.' };
+  }
+  if (typeof o.to !== 'string' || !TIME_RE.test(o.to)) {
+    return { ok: false, error: 'Расписание: время окончания должно быть в формате ЧЧ:ММ.' };
+  }
+  if (timeToMinutes(o.to) <= timeToMinutes(o.from)) {
+    return { ok: false, error: 'Расписание: время окончания должно быть позже времени начала.' };
+  }
+  if (!Array.isArray(o.days) || o.days.length === 0) {
+    return { ok: false, error: 'Расписание: выберите хотя бы один день недели.' };
+  }
+  for (const d of o.days) {
+    if (!Number.isInteger(d) || d < 0 || d > 6) {
+      return { ok: false, error: 'Расписание: дни должны быть числами 0–6 (вс–сб).' };
+    }
+  }
+  if (typeof o.timezone !== 'string' || !o.timezone.trim()) {
+    return { ok: false, error: 'Расписание: укажите часовой пояс.' };
+  }
+  // Accept either an already-valid id or a known legacy alias (it will be
+  // mapped at payload-build time). Reject unknown / typo timezones so the
+  // client gets a clear error before we hit Instantly's 400.
+  const normalized = normalizeInstantlyTimezone(o.timezone);
+  if (!isInstantlyValidTimezone(normalized)) {
+    return { ok: false, error: `Расписание: часовой пояс «${o.timezone}» не поддерживается.` };
+  }
+  return { ok: true };
 }
 
 export type ValidateClientLaunchResult =
@@ -20,7 +63,12 @@ export type ValidateClientLaunchResult =
 export function validateClientLaunchInput(
   input: ValidateClientLaunchInput,
 ): ValidateClientLaunchResult {
-  const { preset, sequence, mapping, rowCount } = input;
+  const { preset, sequence, mapping, rowCount, scheduleOverride } = input;
+
+  if (scheduleOverride) {
+    const r = validateScheduleOverride(scheduleOverride);
+    if (!r.ok) return r;
+  }
 
   if (!preset) {
     return {
