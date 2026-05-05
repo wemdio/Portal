@@ -342,6 +342,60 @@ assert_not_contains "$SB/curl.log" "/storage/v1/object/db-backups/" "no leak of 
 assert_not_contains "$SB/curl.log" "/storage/v1/object/deploy-backups/" "no leak of legacy bucket name"
 
 echo ""
+echo "── 13) dump_env.awk: roundtrip env через snapshot-файл ──"
+# Регрессия: cron-job /backup.sh main-supabase падал с rc=1 без причины,
+# потому что BusyBox crond передаёт ребёнку только базовый env. /entrypoint.sh
+# снапшотит env через dump_env.awk в /etc/backup.env, cron-job делает
+# `. /etc/backup.env` перед /backup.sh. Тест проверяет, что снапшот корректно
+# воспроизводит значения с одинарными кавычками, $, &, |, бэкслэшами.
+DUMP_AWK="$SCRIPT_DIR/dump_env.awk"
+if [ -f "$DUMP_AWK" ] && command -v awk >/dev/null 2>&1; then
+  SB="$TMP_ROOT/t13"; mkdir -p "$SB"
+  SNAP="$SB/snap.env"
+  ROUNDTRIP="$SB/roundtrip.txt"
+  EXPECTED="$SB/expected.txt"
+
+  TEST_SIMPLE='hello' \
+  TEST_QUOTED="hi 'world' end" \
+  TEST_DOLLAR='a$b=c d' \
+  TEST_AMP='x&y|z' \
+  TEST_BACKSLASH='a\b\\c' \
+  TEST_QUOTES_MULTI="''both''" \
+    awk -f "$DUMP_AWK" < /dev/null | grep -E '^export TEST_' > "$SNAP"
+  assert_contains "$SNAP" "TEST_SIMPLE=" "snapshot writes TEST_SIMPLE"
+  assert_contains "$SNAP" "TEST_DOLLAR=" "snapshot writes TEST_DOLLAR"
+  assert_contains "$SNAP" "TEST_QUOTED=" "snapshot writes TEST_QUOTED"
+
+  bash -c '
+    unset TEST_SIMPLE TEST_QUOTED TEST_DOLLAR TEST_AMP TEST_BACKSLASH TEST_QUOTES_MULTI
+    . "'"$SNAP"'"
+    for v in TEST_SIMPLE TEST_QUOTED TEST_DOLLAR TEST_AMP TEST_BACKSLASH TEST_QUOTES_MULTI; do
+      eval "echo \"$v=[\${$v}]\""
+    done
+  ' > "$ROUNDTRIP"
+
+  cat > "$EXPECTED" <<EOF
+TEST_SIMPLE=[hello]
+TEST_QUOTED=[hi 'world' end]
+TEST_DOLLAR=[a\$b=c d]
+TEST_AMP=[x&y|z]
+TEST_BACKSLASH=[a\\b\\\\c]
+TEST_QUOTES_MULTI=[''both'']
+EOF
+
+  if diff -u "$EXPECTED" "$ROUNDTRIP" >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  ✔ env roundtrip exact-match (quotes / \$ / & / | / \\)"
+  else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="$FAILED_NAMES\n    - env roundtrip mismatch"
+    echo "  ✘ env roundtrip mismatch:"
+    diff -u "$EXPECTED" "$ROUNDTRIP" | sed 's/^/      /' >&2 || true
+  fi
+else
+  echo "  (skipped: dump_env.awk not found or awk missing)"
+fi
+
+echo ""
 echo "═══════════════════════════════════════"
 echo "  TESTS:   passed=$PASS  failed=$FAIL"
 echo "═══════════════════════════════════════"
