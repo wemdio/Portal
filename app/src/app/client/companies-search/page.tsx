@@ -66,6 +66,50 @@ export default function CompaniesSearchPage() {
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  const [activityTypes, setActivityTypes] = useState<string[]>([]);
+  const [activityTypesLoading, setActivityTypesLoading] = useState(true);
+  const [activityTypesError, setActivityTypesError] = useState<string | null>(null);
+
+  // Грузим виды деятельности один раз при монтировании страницы — чтобы
+  // при открытии модалки список уже был готов и не было задержки.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) {
+          if (!cancelled) {
+            setActivityTypesError(t('Требуется авторизация', 'Authorization required', locale));
+            setActivityTypesLoading(false);
+          }
+          return;
+        }
+        const res = await fetch('/api/client/companies-search/activity-types', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: t('Ошибка', 'Error', locale) }));
+          setActivityTypesError(err.error || `HTTP ${res.status}`);
+          setActivityTypesLoading(false);
+          return;
+        }
+        const data = (await res.json()) as { types: string[] };
+        setActivityTypes(data.types);
+        setActivityTypesLoading(false);
+      } catch (err) {
+        if (!cancelled) {
+          setActivityTypesError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
+          setActivityTypesLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [locale]);
+
   const selectedRegionsCount = selectedRegions.size;
   const selectedActivitiesCount = selectedActivities.size;
 
@@ -539,6 +583,9 @@ export default function CompaniesSearchPage() {
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
+          types={activityTypes}
+          loading={activityTypesLoading}
+          error={activityTypesError}
         />
       )}
     </div>
@@ -701,52 +748,19 @@ function ActivitiesModal({
   selected,
   onChange,
   onClose,
+  types,
+  loading,
+  error,
 }: {
   locale: L;
   selected: Set<string>;
   onChange: (s: Set<string>) => void;
   onClose: () => void;
+  types: string[];
+  loading: boolean;
+  error: string | null;
 }) {
   const [search, setSearch] = useState('');
-  const [types, setTypes] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const token = session?.access_token;
-        if (!token) {
-          setError(t('Требуется авторизация', 'Authorization required', locale));
-          setLoading(false);
-          return;
-        }
-        const res = await fetch('/api/client/companies-search/activity-types', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (cancelled) return;
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: t('Ошибка', 'Error', locale) }));
-          setError(err.error || `HTTP ${res.status}`);
-          setLoading(false);
-          return;
-        }
-        const data = (await res.json()) as { types: string[] };
-        setTypes(data.types);
-        setLoading(false);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
-          setLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
