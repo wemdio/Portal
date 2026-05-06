@@ -104,6 +104,7 @@ export default function CompaniesSearchPage() {
     };
   };
 
+
   const handleCalculate = async () => {
     setCalcLoading(true);
     setCalcError(null);
@@ -187,6 +188,7 @@ export default function CompaniesSearchPage() {
       setExportLoading(null);
     }
   };
+
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">

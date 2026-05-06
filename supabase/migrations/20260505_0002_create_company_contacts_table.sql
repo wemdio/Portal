@@ -42,3 +42,15 @@ create policy "service_role_full_access"
   for all
   using (true)
   with check (true);
+
+create policy "authenticated_read_access"
+  on public.companies_directory
+  for select
+  to authenticated
+  using (true);
+
+create policy "anon_read_access"
+  on public.companies_directory
+  for select
+  to anon
+  using (true);
