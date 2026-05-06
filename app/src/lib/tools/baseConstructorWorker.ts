@@ -120,11 +120,41 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
 
     const cancelCheck: CancelCheckFn = () => isCancelled(jobId);
 
+    /**
+     * Persist `data` to the row, with timing + size + supabase error logging.
+     * Без этого факт «update вызвался, но в БД ничего не лежит» был невидимым:
+     * supabase-js при неудачном PATCH возвращает `{ error }`, не throw,
+     * а вызывающий код раньше его игнорировал. Теперь любая такая молчаливая
+     * потеря всплывёт в `[base-constructor]` логах, и можно будет искать
+     * по jobId в `docker logs portal`.
+     */
+    async function persistData(label: string, payload: string[][]): Promise<void> {
+      const t0 = Date.now();
+      const headerCols = payload[0]?.length ?? 0;
+      const rows = Math.max(0, payload.length - 1);
+      // Approximate size — JSON.stringify is O(n) but cheap relative to a network round-trip.
+      const approxBytes = JSON.stringify(payload).length;
+      const { error } = await admin
+        .from('base_constructor_jobs')
+        .update({ data: payload })
+        .eq('id', jobId);
+      const ms = Date.now() - t0;
+      if (error) {
+        console.error(
+          `[base-constructor][${jobId}] persistData(${label}) FAILED in ${ms}ms — ${error.message} (rows=${rows}, cols=${headerCols}, ~${approxBytes}B)`,
+        );
+      } else {
+        console.log(
+          `[base-constructor][${jobId}] persistData(${label}) OK in ${ms}ms (rows=${rows}, cols=${headerCols}, ~${approxBytes}B)`,
+        );
+      }
+    }
+
     for (let i = 0; i < selectedSteps.length; i++) {
       const stepKey = selectedSteps[i];
       const runner = STEP_RUNNERS[stepKey];
       if (!runner) {
-        console.warn(`[base-constructor] Unknown step: ${stepKey}, skipping`);
+        console.warn(`[base-constructor][${jobId}] Unknown step: ${stepKey}, skipping`);
         continue;
       }
 
@@ -138,17 +168,24 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
           ? {
               ...stepConfig,
               onCheckpoint: async (checkpointData) => {
-                await admin.from('base_constructor_jobs').update({ data: checkpointData }).eq('id', jobId);
+                await persistData(`checkpoint:${stepKey}`, checkpointData);
               },
             }
           : stepConfig;
 
+      const stepStart = Date.now();
+      console.log(
+        `[base-constructor][${jobId}] step ${i + 1}/${selectedSteps.length} '${stepKey}' starting (input rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
+      );
       data = await runner(data, progressFn, cancelCheck, effectiveStepConfig);
+      console.log(
+        `[base-constructor][${jobId}] step '${stepKey}' returned in ${Date.now() - stepStart}ms (output rows=${Math.max(0, data.length - 1)}, cols=${data[0]?.length ?? 0})`,
+      );
 
       const isLast = i === selectedSteps.length - 1;
       if (!isLast) {
         // Persist intermediate data so the next step has it on resume.
-        await admin.from('base_constructor_jobs').update({ data }).eq('id', jobId);
+        await persistData(`after:${stepKey}`, data);
       }
       // For the last step we skip the intermediate write and let the final
       // atomic update below set both `data` and `status='completed'` together —
@@ -165,7 +202,9 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
       ? body.reduce((s, r) => s + (parseInt(r[scoreIdx], 10) || 0), 0) / (body.length || 1)
       : 0;
 
-    await admin.from('base_constructor_jobs').update({
+    const finalStart = Date.now();
+    const finalApproxBytes = JSON.stringify(data).length;
+    const { error: finalErr } = await admin.from('base_constructor_jobs').update({
       data,
       status: 'completed',
       completed_at: new Date().toISOString(),
@@ -179,9 +218,18 @@ export async function runBaseConstructorJob(jobId: string): Promise<void> {
         columns: header.length,
       },
     }).eq('id', jobId);
+    if (finalErr) {
+      console.error(
+        `[base-constructor][${jobId}] FINAL update FAILED in ${Date.now() - finalStart}ms — ${finalErr.message} (rows=${body.length}, cols=${header.length}, ~${finalApproxBytes}B)`,
+      );
+      throw new Error(`Final update failed: ${finalErr.message}`);
+    }
+    console.log(
+      `[base-constructor][${jobId}] FINAL update OK in ${Date.now() - finalStart}ms — completed (rows=${body.length}, cols=${header.length}, emails=${emailsFound}, avg_ta=${Math.round(avgScore * 10) / 10})`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error(`[base-constructor] Job ${jobId} failed:`, message);
+    console.error(`[base-constructor][${jobId}] Job FAILED:`, message);
     await admin.from('base_constructor_jobs').update({
       status: 'failed',
       error_message: message.slice(0, 500),
