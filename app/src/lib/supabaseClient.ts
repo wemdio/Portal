@@ -27,4 +27,25 @@ if (!isValidHttpUrl(supabaseUrl) || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createBrowserClient(resolvedSupabaseUrl, resolvedSupabaseAnonKey);
+export const supabase = createBrowserClient(resolvedSupabaseUrl, resolvedSupabaseAnonKey, {
+  auth: {
+    lock: async <R>(name: string, acquireTimeout: number, fn: () => Promise<R>): Promise<R> => {
+      if (typeof navigator === 'undefined' || !navigator?.locks?.request) {
+        return await fn();
+      }
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), acquireTimeout);
+      try {
+        return await navigator.locks.request(
+          name,
+          { mode: 'exclusive', signal: ac.signal },
+          async () => fn(),
+        );
+      } catch {
+        return await fn();
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  },
+});
