@@ -29,7 +29,7 @@ if (!isValidHttpUrl(supabaseUrl) || !supabaseAnonKey) {
 
 export const supabase = createBrowserClient(resolvedSupabaseUrl, resolvedSupabaseAnonKey, {
   auth: {
-    lock: async (name: string, acquireTimeout: number, fn: () => Promise<any>) => {
+    lock: async (name: string, acquireTimeout: number, fn: () => Promise<unknown>) => {
       if (typeof navigator === 'undefined' || !navigator?.locks?.request) {
         return await fn();
       }
