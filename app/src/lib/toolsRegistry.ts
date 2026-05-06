@@ -45,6 +45,7 @@ export const ALL_TOOL_IDS = [
   'bugor-outreach',
   'nash-outreach',
   'reputation-finder',
+  'our-bases',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -294,6 +295,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badge: 'Beta',
     badgeVariant: 'amber',
   },
+  'our-bases': {
+    id: 'our-bases',
+    title: 'Наша база баз',
+    title_en: 'Our Lead Database',
+    description: 'Все собранные контакты из кампаний: email, имя, компания, сайт.',
+    description_en: 'All collected campaign contacts: email, name, company, website.',
+    href: '/tools/our-bases',
+    accentColor: 'blue',
+  },
 };
 
 export interface ToolGroup {
@@ -311,7 +321,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Базы и данные',
     label_en: 'Databases and data',
-    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review'],
+    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review', 'our-bases'],
   },
   {
     label: 'Парсеры и поиск лидов',

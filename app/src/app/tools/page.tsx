@@ -57,6 +57,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'bugor-outreach': Sparkles,
   'nash-outreach': Building2,
   'reputation-finder': ShieldAlert,
+  'our-bases': Database,
 };
 
 function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: 'ru' | 'en' }) {
