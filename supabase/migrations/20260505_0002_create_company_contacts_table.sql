@@ -1,5 +1,6 @@
--- Таблица для хранения контактных баз компаний,
--- импортированных из xlsx-файлов (папка PortalBazaBaz).
+-- Справочник компаний из xlsx-файлов (папка PortalBazaBaz).
+-- Имя companies_directory выбрано чтобы не конфликтовать с
+-- существующей public.company_contacts из CIS Lead Finder.
 
 create table if not exists public.companies_directory (
   id bigint generated always as identity primary key,

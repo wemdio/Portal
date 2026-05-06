@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  tg-reviewer:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    # First run: docker compose run --rm tg-reviewer (interactive, for auth)
+    # Then:      docker compose up -d
+    stdin_open: true
+    tty: true

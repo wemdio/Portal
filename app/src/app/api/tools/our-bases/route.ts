@@ -1,130 +1,113 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
-import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 export const dynamic = 'force-dynamic';
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+const admin = supabaseAdmin!;
+
+async function getUser(req: NextRequest) {
+  const token = req.headers.get('authorization')?.replace('Bearer ', '');
+  if (!token) return null;
+  const { data } = await admin.auth.getUser(token);
+  return data.user;
 }
 
-interface StoredLead {
-  email: string;
-  first_name: string | null;
-  last_name: string | null;
-  company_name: string | null;
-  website: string | null;
-  linkedin_url: string | null;
-}
+const MAX_LIMIT = 200;
 
-interface CampaignGroup {
-  id: string;
-  name: string;
-  leads_count: number;
-  leads_synced_at: string | null;
-  leads: StoredLead[];
-}
+export async function POST(req: NextRequest) {
+  const user = await getUser(req);
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-export async function GET(req: NextRequest) {
-  const token = getBearerToken(req.headers.get('authorization'));
-  if (!token) return jsonError('Необходима авторизация', 401);
+  let body: CompaniesSearchFilters;
+  try {
+    body = (await req.json()) as CompaniesSearchFilters;
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
 
-  const supabase = createAuthedSupabaseClient(token);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return jsonError('Необходима авторизация', 401);
+  const wantCount = body.countOnly === true;
+  const limit = Math.min(Math.max(Number(body.limit) || 25, 1), MAX_LIMIT);
 
-  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  const buildQuery = (mode: 'count' | 'rows') => {
+    let q = admin
+      .from('companies_directory')
+      .select(
+        mode === 'count'
+          ? 'id'
+          : 'id, name, inn, kpp, address, phones, email, employees_count, revenue, cost, activity_type, website, edo_id, egais, ogrn',
+        mode === 'count' ? { count: 'exact', head: true } : undefined,
+      );
 
-  const search = req.nextUrl.searchParams.get('search')?.trim().toLowerCase() ?? '';
+    if (body.regionCodes && body.regionCodes.length > 0) {
+      const tokens: string[] = [];
+      for (const code of body.regionCodes) {
+        const r = getRegionByCode(code);
+        if (r) for (const t of r.matchTokens) tokens.push(t);
+      }
+      if (tokens.length > 0) {
+        const orClause = tokens
+          .map((t) => `address.ilike.%${t.replace(/[%,]/g, '')}%`)
+          .join(',');
+        q = q.or(orClause);
+      }
+    }
+
+    if (body.activityTypes && body.activityTypes.length > 0) {
+      q = q.in('activity_type', body.activityTypes);
+    }
+
+    if (body.hasPhone) q = q.not('phones', 'is', null);
+    if (body.hasEmail) q = q.not('email', 'is', null);
+
+    if (body.legalForms && body.legalForms.length > 0) {
+      const orClause = body.legalForms
+        .map((f) => `name.ilike.${f.replace(/[%,]/g, '')}%`)
+        .join(',');
+      q = q.or(orClause);
+    }
+
+    if (body.hasWebsite) q = q.not('website', 'is', null);
+    if (body.hasEdo) q = q.not('edo_id', 'is', null);
+    if (body.hasEgais) q = q.not('egais', 'is', null);
+
+    if (body.includeIp === false) {
+      q = q.not('name', 'ilike', 'ИП %');
+    }
+
+    if (typeof body.revenueFrom === 'number') q = q.gte('revenue', body.revenueFrom);
+    if (typeof body.revenueTo === 'number') q = q.lte('revenue', body.revenueTo);
+    if (typeof body.costFrom === 'number') q = q.gte('cost', body.costFrom);
+    if (typeof body.costTo === 'number') q = q.lte('cost', body.costTo);
+
+    if (typeof body.employeesFrom === 'number') q = q.gte('employees_count', body.employeesFrom);
+    if (typeof body.employeesTo === 'number') q = q.lte('employees_count', body.employeesTo);
+
+    if (body.innList && body.innList.length > 0) {
+      q = q.in('inn', body.innList);
+    }
+
+    return q;
+  };
 
   try {
-    const [accessResult, catalogResult] = await Promise.all([
-      supabaseAdmin
-        .from('client_instantly_access')
-        .select('resource_id, leads_synced_at')
-        .eq('resource_type', 'campaign'),
-      supabaseAdmin
-        .from('instantly_campaign_catalog')
-        .select('id, name'),
-    ]);
+    const { count, error: countErr } = await buildQuery('count');
+    if (countErr) return NextResponse.json({ error: countErr.message }, { status: 500 });
 
-    const allCampaignIds = [
-      ...new Set((accessResult.data ?? []).map((r) => r.resource_id as string)),
-    ];
+    const response: { count: number; rows?: Array<Record<string, unknown>> } = { count: count ?? 0 };
 
-    if (allCampaignIds.length === 0) {
-      return NextResponse.json({ campaigns: [] });
+    if (!wantCount && (count ?? 0) > 0) {
+      const { data, error } = await buildQuery('rows').limit(limit);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      response.rows = (data as unknown as Record<string, unknown>[]) ?? [];
     }
 
-    const nameMap = new Map(
-      (catalogResult.data ?? []).map((c) => [c.id as string, c.name as string]),
-    );
-
-    const syncMap = new Map<string, string | null>();
-    for (const r of accessResult.data ?? []) {
-      const cid = r.resource_id as string;
-      const syncAt = r.leads_synced_at as string | null;
-      const existing = syncMap.get(cid);
-      if (!existing || (syncAt && syncAt > existing)) {
-        syncMap.set(cid, syncAt);
-      }
-    }
-
-    const leadsResult = await supabaseAdmin
-      .from('client_campaign_leads')
-      .select('campaign_id, email, first_name, last_name, company_name, website, linkedin_url')
-      .in('campaign_id', allCampaignIds);
-
-    const allLeads = (leadsResult.data ?? []) as (StoredLead & { campaign_id: string })[];
-
-    const seen = new Map<string, Set<string>>();
-    const grouped = new Map<string, StoredLead[]>();
-
-    for (const lead of allLeads) {
-      if (search) {
-        const hay = [lead.email, lead.first_name, lead.last_name, lead.company_name]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        if (!hay.includes(search)) continue;
-      }
-
-      let emailSet = seen.get(lead.campaign_id);
-      if (!emailSet) {
-        emailSet = new Set();
-        seen.set(lead.campaign_id, emailSet);
-      }
-      if (emailSet.has(lead.email)) continue;
-      emailSet.add(lead.email);
-
-      let arr = grouped.get(lead.campaign_id);
-      if (!arr) {
-        arr = [];
-        grouped.set(lead.campaign_id, arr);
-      }
-      arr.push({
-        email: lead.email,
-        first_name: lead.first_name,
-        last_name: lead.last_name,
-        company_name: lead.company_name,
-        website: lead.website,
-        linkedin_url: lead.linkedin_url,
-      });
-    }
-
-    const campaigns: CampaignGroup[] = allCampaignIds
-      .map((cid) => ({
-        id: cid,
-        name: nameMap.get(cid) ?? cid,
-        leads_count: grouped.get(cid)?.length ?? 0,
-        leads_synced_at: syncMap.get(cid) ?? null,
-        leads: grouped.get(cid) ?? [],
-      }))
-      .filter((c) => c.leads_count > 0 || !search);
-
-    return NextResponse.json({ campaigns });
+    return NextResponse.json(response);
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Ошибка загрузки';
-    return jsonError(message, 500);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Unknown error' },
+      { status: 500 },
+    );
   }
 }

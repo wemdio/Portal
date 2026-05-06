@@ -298,9 +298,9 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   'our-bases': {
     id: 'our-bases',
     title: 'Наша база баз',
-    title_en: 'Our Lead Database',
-    description: 'Все собранные контакты из кампаний: email, имя, компания, сайт.',
-    description_en: 'All collected campaign contacts: email, name, company, website.',
+    title_en: 'Company Directory',
+    description: 'Поиск компаний по реестру: регионы, виды деятельности, фильтры, ИНН.',
+    description_en: 'Company registry search: regions, activity types, filters, tax IDs.',
     href: '/tools/our-bases',
     accentColor: 'blue',
   },
