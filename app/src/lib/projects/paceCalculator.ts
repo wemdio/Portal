@@ -34,6 +34,11 @@ export interface PaceData {
   requiredPace: number | null;
   dataPoints: number;
   periodDays: number;
+  /**
+   * forecastDays - daysUntilDeadline. Positive ⇒ behind schedule; ≤0 ⇒ on time.
+   * `null` when there's no deadline / no forecast / not enough data.
+   */
+  behindDays: number | null;
 }
 
 /**
@@ -66,6 +71,7 @@ export function computePace(
     requiredPace: null,
     dataPoints: sorted.length,
     periodDays: 0,
+    behindDays: null,
   };
   if (sorted.length < 2) return base;
 
@@ -99,6 +105,7 @@ export function computePace(
       base.requiredPace = daysUntilDeadline > 0 ? Math.ceil(remaining / daysUntilDeadline) : null;
       if (base.forecastDays !== null) {
         base.onTrack = base.forecastDays <= daysUntilDeadline;
+        base.behindDays = base.forecastDays - daysUntilDeadline;
       }
     }
   }
@@ -119,6 +126,8 @@ export function computePace(
 export interface PaceQueryBuilder<T> {
   select(columns: string): PaceQueryBuilder<T>;
   eq(column: string, value: unknown): PaceQueryBuilder<T>;
+  in(column: string, values: readonly unknown[]): PaceQueryBuilder<T>;
+  gte(column: string, value: unknown): PaceQueryBuilder<T>;
   not(column: string, op: string, value: unknown): PaceQueryBuilder<T>;
   order(column: string, opts: { ascending: boolean }): PaceQueryBuilder<T>;
   limit(n: number): Promise<{ data: T[] | null; error: { message: string } | null }>;
@@ -205,3 +214,138 @@ export async function loadKpiPaceData(
     .map((r) => ({ value: r.kpi_fact as number, recorded_at: r.recorded_at }));
   return computePace(points, kpiPlan, kpiFact, deadline, params.now);
 }
+
+/* ── Bulk pace + risk summary (для индикатора риска в списке проектов) ── */
+
+/** Окно истории, в котором считаем темп. ~3 месяца — достаточно для большинства проектов. */
+export const PACE_HISTORY_WINDOW_DAYS = 90;
+
+export interface ProjectPaceInput {
+  projectId: string;
+  /** Плановый объём контактов (`projects.contacts_obligation`, после parseInt). 0 ⇒ ось контактов отключена. */
+  contactsObligation: number;
+  /** Текущий факт контактов (`projects.contacts_done`, после parseInt). */
+  contactsDone: number;
+  /** Плановый KPI лидов (`projects.kpi_plan`, после parseInt). 0 ⇒ ось KPI отключена. */
+  kpiPlan: number;
+  /** Текущий факт KPI (`projects.kpi_fact`, после parseInt). */
+  kpiFact: number;
+  deadline: string | null;
+}
+
+export interface ProjectPace {
+  /** `null` если у проекта нет contactsObligation (>0). */
+  contacts: PaceData | null;
+  /** `null` если у проекта нет kpiPlan (>0). */
+  kpi: PaceData | null;
+}
+
+export type RiskAxis = 'contacts' | 'kpi';
+
+export interface ProjectRiskSummary {
+  /** Какие оси не успевают (forecast > deadline). Пустой массив ⇒ риска нет. */
+  axes: RiskAxis[];
+  /** Максимальное отставание в днях по проблемным осям. 0 если рисков нет. */
+  daysBehind: number;
+}
+
+/**
+ * Один batch-запрос истории за последние `PACE_HISTORY_WINDOW_DAYS` дней
+ * для всех заданных проектов сразу. Группирует строки в JS и считает
+ * `computePace` для каждого проекта (отдельно по контактам и по KPI).
+ *
+ * Пишется специально под список проектов — один round-trip на всю страницу
+ * вместо on-hover запросов в существующих tooltip'ах.
+ */
+export async function loadAllProjectsPace(
+  client: PaceQueryClient,
+  inputs: readonly ProjectPaceInput[],
+  now: Date = new Date(),
+): Promise<Map<string, ProjectPace>> {
+  const result = new Map<string, ProjectPace>();
+  if (inputs.length === 0) return result;
+
+  const ids = inputs.map((i) => i.projectId);
+  const cutoffDate = new Date(now.getTime() - PACE_HISTORY_WINDOW_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+
+  type Row = {
+    project_id: string;
+    contacts_done: number;
+    kpi_fact: number | null;
+    recorded_at: string;
+  };
+
+  const builder = client.from('project_contacts_history') as PaceQueryBuilder<Row>;
+  const { data, error } = await builder
+    .select('project_id, contacts_done, kpi_fact, recorded_at')
+    .in('project_id', ids)
+    .gte('recorded_at', cutoffDate)
+    .order('recorded_at', { ascending: false })
+    // верхняя граница; в реальности per-project уже отсечено окном дат
+    .limit(ids.length * PACE_HISTORY_WINDOW_DAYS);
+  if (error || !data) return result;
+
+  const rowsByProject = new Map<string, Row[]>();
+  for (const row of data) {
+    const list = rowsByProject.get(row.project_id);
+    if (list) list.push(row);
+    else rowsByProject.set(row.project_id, [row]);
+  }
+
+  for (const input of inputs) {
+    const rows = rowsByProject.get(input.projectId) ?? [];
+    const contactsPoints: PaceHistoryPoint[] = rows.map((r) => ({
+      value: r.contacts_done,
+      recorded_at: r.recorded_at,
+    }));
+    const kpiPoints: PaceHistoryPoint[] = rows
+      .filter((r): r is Row & { kpi_fact: number } => r.kpi_fact !== null)
+      .map((r) => ({ value: r.kpi_fact, recorded_at: r.recorded_at }));
+
+    const contacts =
+      input.contactsObligation > 0
+        ? computePace(contactsPoints, input.contactsObligation, input.contactsDone, input.deadline, now)
+        : null;
+    const kpi =
+      input.kpiPlan > 0
+        ? computePace(kpiPoints, input.kpiPlan, input.kpiFact, input.deadline, now)
+        : null;
+    result.set(input.projectId, { contacts, kpi });
+  }
+
+  return result;
+}
+
+/**
+ * Сводка риска для строки проекта в UI.
+ * Возвращает пустые axes (риска нет), если:
+ *   - проект завершён/отменён,
+ *   - нет dедлайна или меньше 2 точек истории (`onTrack === null`),
+ *   - оба `onTrack === true`.
+ */
+export function summarizeProjectRisk(
+  pace: ProjectPace | undefined,
+  isCompleted: boolean,
+): ProjectRiskSummary {
+  const empty: ProjectRiskSummary = { axes: [], daysBehind: 0 };
+  if (!pace || isCompleted) return empty;
+
+  const axes: RiskAxis[] = [];
+  let daysBehind = 0;
+  if (pace.contacts && pace.contacts.onTrack === false) {
+    axes.push('contacts');
+    if (pace.contacts.behindDays !== null && pace.contacts.behindDays > daysBehind) {
+      daysBehind = pace.contacts.behindDays;
+    }
+  }
+  if (pace.kpi && pace.kpi.onTrack === false) {
+    axes.push('kpi');
+    if (pace.kpi.behindDays !== null && pace.kpi.behindDays > daysBehind) {
+      daysBehind = pace.kpi.behindDays;
+    }
+  }
+  return { axes, daysBehind };
+}
+
