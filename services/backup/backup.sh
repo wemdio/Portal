@@ -150,17 +150,62 @@ if [ -n "$S3_ENDPOINT" ] && [ -n "$S3_BUCKET" ] && [ -n "$S3_ACCESS_KEY" ] && [ 
   REMOTE_PATH="${S3_BUCKET}/${SUBPATH}/${FILENAME}"
   echo "[backup] Uploading to S3: ${S3_ENDPOINT}/${REMOTE_PATH}"
 
-  mc alias set backup "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" --api s3v4 >/dev/null 2>&1
-  MC_ENV="MC_REGION=${S3_REGION}"
+  # Stderr mc больше НЕ глушим: без него причина (AccessDenied / SignatureDoesNotMatch /
+  # EntityTooLarge / NoSuchBucket / RequestTimeout / quota) не попадала ни в логи
+  # контейнера, ни в Telegram-алерт — оставались только "rc=1".
+  MC_LOG="$(mktemp)"
+  trap 'rm -f "$MC_LOG"' EXIT INT TERM
 
-  if env $MC_ENV mc cp "$DUMP_FILE" "backup/${REMOTE_PATH}" >/dev/null 2>&1; then
-    echo "[backup] S3 upload OK"
-  else
-    mc_rc=$?
-    msg="🚨 [backup ${INSTANCE}] S3 upload FAILED (rc=${mc_rc} size=${DUMP_SIZE}) for ${REMOTE_PATH}"
+  alias_rc=0
+  mc alias set backup "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" --api s3v4 >>"$MC_LOG" 2>&1 || alias_rc=$?
+  if [ "$alias_rc" -ne 0 ]; then
+    alias_tail=$(tail -n 5 "$MC_LOG" | tr '\n' ' ' | cut -c1-500)
+    msg="🚨 [backup ${INSTANCE}] mc alias set FAILED (rc=${alias_rc}) for ${S3_ENDPOINT}: ${alias_tail}"
     echo "$msg" >&2
     send_alert "$msg"
     upload_failed=1
+  else
+    MC_ENV="MC_REGION=${S3_REGION}"
+
+    # Ретраи multipart upload. На TWC видели транзиентные «икоты» по 5–10s
+    # на служебных запросах (Initiate/Complete) — без ретрая один такой обрыв
+    # роняет весь дамп. 3 попытки с экспоненциальной паузой = ~45s суммарно
+    # в худшем случае, что укладывается в окно cron (раз в 6 часов).
+    UPLOAD_MAX_TRIES="${BACKUP_S3_UPLOAD_RETRIES:-3}"
+    UPLOAD_RETRY_PAUSE="${BACKUP_S3_UPLOAD_RETRY_PAUSE:-15}"
+    mc_rc=0
+    attempt=1
+    while [ "$attempt" -le "$UPLOAD_MAX_TRIES" ]; do
+      echo "[backup] mc cp attempt ${attempt}/${UPLOAD_MAX_TRIES}" >>"$MC_LOG"
+      mc_rc=0
+      env $MC_ENV mc cp "$DUMP_FILE" "backup/${REMOTE_PATH}" >>"$MC_LOG" 2>&1 || mc_rc=$?
+      if [ "$mc_rc" -eq 0 ]; then
+        break
+      fi
+      if [ "$attempt" -lt "$UPLOAD_MAX_TRIES" ]; then
+        pause=$((UPLOAD_RETRY_PAUSE * attempt))
+        echo "[backup] mc cp failed (rc=${mc_rc}), retrying in ${pause}s..." | tee -a "$MC_LOG" >&2
+        sleep "$pause"
+      fi
+      attempt=$((attempt + 1))
+    done
+
+    if [ "$mc_rc" -eq 0 ]; then
+      if [ "$attempt" -gt 1 ]; then
+        echo "[backup] S3 upload OK on attempt ${attempt}/${UPLOAD_MAX_TRIES}"
+      else
+        echo "[backup] S3 upload OK"
+      fi
+    else
+      # Берём последние ~5 строк stderr — там обычно код ошибки и URL запроса.
+      mc_tail=$(tail -n 5 "$MC_LOG" | tr '\n' ' ' | cut -c1-500)
+      msg="🚨 [backup ${INSTANCE}] S3 upload FAILED after ${UPLOAD_MAX_TRIES} tries (rc=${mc_rc} size=${DUMP_SIZE}) for ${REMOTE_PATH}: ${mc_tail}"
+      echo "$msg" >&2
+      echo "[backup] mc stderr (full):" >&2
+      cat "$MC_LOG" >&2 || true
+      send_alert "$msg"
+      upload_failed=1
+    fi
   fi
 
 # ─── Upload: Supabase Storage via curl (fallback) ────────────────────────────

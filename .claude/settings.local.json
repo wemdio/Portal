@@ -16,7 +16,13 @@
       "Bash(grep -r \"crypto_payment\\\\|cryptoPayment\" /g/PycharmProjects/Portal/supabase/migrations/*.sql)",
       "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]\")",
       "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]/stop\")",
-      "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]/resume\")"
+      "Bash(mkdir -p \"G:/PycharmProjects/Portal/app/src/app/api/parsers/crypto-payments/jobs/[id]/resume\")",
+      "Bash(node -e ' *)",
+      "PowerShell(New-Item -ItemType Directory -Path \"G:\\\\PycharmProjects\\\\Portal\\\\app\\\\src\\\\app\\\\api\\\\client\\\\companies-search\\\\export\" -Force)",
+      "Bash(git pull *)",
+      "WebFetch(domain:docs.google.com)",
+      "WebFetch(domain:doc-0k-7o-docstext.googleusercontent.com)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp"
     ]
   }
 }

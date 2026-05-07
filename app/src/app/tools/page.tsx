@@ -7,6 +7,7 @@ import {
   Database,
   Sparkles,
   Mail,
+  MailPlus,
   Search,
   PhoneCall,
   AudioLines,
@@ -40,6 +41,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'database-review': ClipboardCheck,
   parsers: Search,
   'email-sequence': Mail,
+  'email-sequence-v2': MailPlus,
   'auto-report': FileText,
   'audio-transcribe': Waves,
   'tg-transcribe': Video,
@@ -55,6 +57,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'bugor-outreach': Sparkles,
   'nash-outreach': Building2,
   'reputation-finder': ShieldAlert,
+  'our-bases': Database,
 };
 
 function ToolLinkCard({ toolId, locale }: { toolId: ToolId; locale: 'ru' | 'en' }) {

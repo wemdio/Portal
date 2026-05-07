@@ -29,6 +29,7 @@ export const ALL_TOOL_IDS = [
   'database-review',
   'parsers',
   'email-sequence',
+  'email-sequence-v2',
   'auto-report',
   'audio-transcribe',
   'tg-transcribe',
@@ -44,6 +45,7 @@ export const ALL_TOOL_IDS = [
   'bugor-outreach',
   'nash-outreach',
   'reputation-finder',
+  'our-bases',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -145,6 +147,18 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description_en: 'Generate segment research and cold email sequences.',
     href: '/tools/email-sequence',
     accentColor: 'blue',
+  },
+  'email-sequence-v2': {
+    id: 'email-sequence-v2',
+    title: 'Цепочки писем 2.0',
+    title_en: 'Email sequences 2.0',
+    description: 'Бриф → ценности → цепочка писем под сегмент. Многоступенчатый AI промптинг и редактор писем.',
+    description_en: 'Brief → values → email chain for the segment. Multi-step AI prompting with letter editor.',
+    href: '/tools/email-sequence-v2',
+    badge: 'Новое',
+    badge_en: 'New',
+    badgeVariant: 'emerald',
+    accentColor: 'emerald',
   },
   'auto-report': {
     id: 'auto-report',
@@ -281,6 +295,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badge: 'Beta',
     badgeVariant: 'amber',
   },
+  'our-bases': {
+    id: 'our-bases',
+    title: 'Наша база баз',
+    title_en: 'Company Directory',
+    description: 'Поиск компаний по реестру: регионы, виды деятельности, фильтры, ИНН.',
+    description_en: 'Company registry search: regions, activity types, filters, tax IDs.',
+    href: '/tools/our-bases',
+    accentColor: 'blue',
+  },
 };
 
 export interface ToolGroup {
@@ -293,12 +316,12 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach'],
   },
   {
     label: 'Базы и данные',
     label_en: 'Databases and data',
-    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review'],
+    toolIds: ['done-for-you', 'base-constructor', 'databases', 'database-review', 'our-bases'],
   },
   {
     label: 'Парсеры и поиск лидов',
