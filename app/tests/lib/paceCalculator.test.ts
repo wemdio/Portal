@@ -15,11 +15,16 @@
 
 import {
   computePace,
+  loadAllProjectsPace,
   loadContactsPaceData,
   loadKpiPaceData,
   PACE_HISTORY_LIMIT,
+  PACE_HISTORY_WINDOW_DAYS,
+  summarizeProjectRisk,
+  type PaceData,
   type PaceQueryBuilder,
   type PaceQueryClient,
+  type ProjectPace,
 } from '@/lib/projects/paceCalculator';
 
 const NOW = new Date('2026-05-01T00:00:00Z');
@@ -112,6 +117,14 @@ function makeRecordingClient<T>(rows: T[]): { client: PaceQueryClient; calls: Ca
       calls.push({ method: 'eq', args: [col, val] });
       return builder;
     },
+    in: (col, values) => {
+      calls.push({ method: 'in', args: [col, values] });
+      return builder;
+    },
+    gte: (col, val) => {
+      calls.push({ method: 'gte', args: [col, val] });
+      return builder;
+    },
     not: (col, op, val) => {
       calls.push({ method: 'not', args: [col, op, val] });
       return builder;
@@ -185,6 +198,8 @@ describe('loadContactsPaceData', () => {
     const builder: PaceQueryBuilder<unknown> = {
       select: () => builder,
       eq: () => builder,
+      in: () => builder,
+      gte: () => builder,
       not: () => builder,
       order: () => builder,
       limit: async () => ({ data: null, error: { message: 'boom' } }),
@@ -240,5 +255,195 @@ describe('loadKpiPaceData', () => {
     expect(pace!.dataPoints).toBe(2);
     expect(pace!.periodDays).toBe(29);
     expect(pace!.avgPerDay).toBe(1); // round((30-10)/29)
+  });
+});
+
+/* ── Bulk loader + risk summary ───────────────────────────────────────── */
+
+describe('loadAllProjectsPace', () => {
+  it('queries one batch with .in / .gte cutoff / DESC order', async () => {
+    const { client, calls } = makeRecordingClient<{
+      project_id: string;
+      contacts_done: number;
+      kpi_fact: number | null;
+      recorded_at: string;
+    }>([]);
+
+    await loadAllProjectsPace(
+      client,
+      [
+        { projectId: 'p1', contactsObligation: 100, contactsDone: 0, kpiPlan: 50, kpiFact: 0, deadline: null },
+        { projectId: 'p2', contactsObligation: 200, contactsDone: 0, kpiPlan: 0, kpiFact: 0, deadline: null },
+      ],
+      NOW,
+    );
+
+    // Cutoff = NOW - 90 days = 2026-02-01 (Feb 2026 has 28 days, so go back 90 from May 1)
+    const cutoff = new Date(NOW.getTime() - PACE_HISTORY_WINDOW_DAYS * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        { method: 'from', args: ['project_contacts_history'] },
+        { method: 'select', args: ['project_id, contacts_done, kpi_fact, recorded_at'] },
+        { method: 'in', args: ['project_id', ['p1', 'p2']] },
+        { method: 'gte', args: ['recorded_at', cutoff] },
+        { method: 'order', args: ['recorded_at', { ascending: false }] },
+      ]),
+    );
+  });
+
+  it('skips the query and returns empty map when inputs is empty', async () => {
+    const { client, calls } = makeRecordingClient([]);
+    const result = await loadAllProjectsPace(client, [], NOW);
+    expect(result.size).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('groups rows by project_id and computes contacts + KPI pace per project', async () => {
+    const rows = [
+      // p1 — растёт по контактам и KPI
+      { project_id: 'p1', contacts_done: 50, kpi_fact: 25, recorded_at: '2026-04-30' },
+      { project_id: 'p1', contacts_done: 10, kpi_fact: 5, recorded_at: '2026-04-01' },
+      // p2 — только контакты, KPI всегда null
+      { project_id: 'p2', contacts_done: 200, kpi_fact: null, recorded_at: '2026-04-30' },
+      { project_id: 'p2', contacts_done: 100, kpi_fact: null, recorded_at: '2026-04-01' },
+    ];
+    const { client } = makeRecordingClient(rows);
+
+    const result = await loadAllProjectsPace(
+      client,
+      [
+        { projectId: 'p1', contactsObligation: 200, contactsDone: 50, kpiPlan: 100, kpiFact: 25, deadline: null },
+        { projectId: 'p2', contactsObligation: 500, contactsDone: 200, kpiPlan: 0, kpiFact: 0, deadline: null },
+      ],
+      NOW,
+    );
+
+    const p1 = result.get('p1');
+    expect(p1?.contacts?.dataPoints).toBe(2);
+    expect(p1?.contacts?.avgPerDay).toBe(1); // round((50-10)/29)
+    expect(p1?.kpi?.dataPoints).toBe(2);
+    expect(p1?.kpi?.avgPerDay).toBe(1); // round((25-5)/29)
+
+    const p2 = result.get('p2');
+    expect(p2?.contacts?.dataPoints).toBe(2);
+    // p2 has kpiPlan=0 → KPI ось отключена
+    expect(p2?.kpi).toBeNull();
+  });
+
+  it('returns empty pace pair for projects without history rows', async () => {
+    const { client } = makeRecordingClient<{
+      project_id: string;
+      contacts_done: number;
+      kpi_fact: number | null;
+      recorded_at: string;
+    }>([]);
+
+    const result = await loadAllProjectsPace(
+      client,
+      [
+        { projectId: 'fresh', contactsObligation: 100, contactsDone: 0, kpiPlan: 50, kpiFact: 0, deadline: null },
+      ],
+      NOW,
+    );
+
+    const r = result.get('fresh');
+    expect(r?.contacts?.dataPoints).toBe(0);
+    expect(r?.contacts?.onTrack).toBeNull();
+    expect(r?.kpi?.dataPoints).toBe(0);
+    expect(r?.kpi?.onTrack).toBeNull();
+  });
+
+  it('returns empty map on Supabase error (graceful degradation, не валим всю страницу)', async () => {
+    const builder: PaceQueryBuilder<unknown> = {
+      select: () => builder,
+      eq: () => builder,
+      in: () => builder,
+      gte: () => builder,
+      not: () => builder,
+      order: () => builder,
+      limit: async () => ({ data: null, error: { message: 'down' } }),
+    };
+    const client: PaceQueryClient = { from: () => builder as unknown };
+
+    const result = await loadAllProjectsPace(
+      client,
+      [{ projectId: 'p1', contactsObligation: 100, contactsDone: 0, kpiPlan: 0, kpiFact: 0, deadline: null }],
+      NOW,
+    );
+    expect(result.size).toBe(0);
+  });
+});
+
+describe('summarizeProjectRisk', () => {
+  function paceWith(overrides: Partial<PaceData> = {}): PaceData {
+    return {
+      avgPerDay: 1,
+      remaining: 50,
+      forecastDays: 50,
+      forecastDate: 'тест',
+      deadline: '2026-05-15',
+      onTrack: true,
+      requiredPace: 1,
+      dataPoints: 5,
+      periodDays: 5,
+      behindDays: -5,
+      ...overrides,
+    };
+  }
+
+  it('returns no risk when pace is missing or project is completed', () => {
+    expect(summarizeProjectRisk(undefined, false)).toEqual({ axes: [], daysBehind: 0 });
+    const okPace: ProjectPace = { contacts: paceWith(), kpi: paceWith() };
+    expect(summarizeProjectRisk(okPace, true)).toEqual({ axes: [], daysBehind: 0 });
+  });
+
+  it('returns no risk when both axes are on track', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: true, behindDays: -3 }),
+      kpi: paceWith({ onTrack: true, behindDays: -1 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: [], daysBehind: 0 });
+  });
+
+  it('flags only contacts axis when KPI is on track', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: false, behindDays: 7 }),
+      kpi: paceWith({ onTrack: true, behindDays: -2 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['contacts'], daysBehind: 7 });
+  });
+
+  it('flags only KPI axis when contacts is on track', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: true, behindDays: 0 }),
+      kpi: paceWith({ onTrack: false, behindDays: 12 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 12 });
+  });
+
+  it('flags both axes and reports the worst behindDays when both miss', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: false, behindDays: 4 }),
+      kpi: paceWith({ onTrack: false, behindDays: 18 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['contacts', 'kpi'], daysBehind: 18 });
+  });
+
+  it('treats axis with onTrack=null (нет дедлайна / мало точек) as not at risk', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: null, behindDays: null, deadline: null }),
+      kpi: paceWith({ onTrack: false, behindDays: 5 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 5 });
+  });
+
+  it('treats null axis (отключена) as not at risk', () => {
+    const pace: ProjectPace = {
+      contacts: null,
+      kpi: paceWith({ onTrack: false, behindDays: 3 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 3 });
   });
 });
