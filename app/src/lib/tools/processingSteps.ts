@@ -364,11 +364,33 @@ const TA_SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенера�
 ФОРМАТ ОТВЕТА: Только JSON массив, без пояснений.
 [{"idx": 0, "score": 7, "reason": "краткое обоснование на русском"}]`;
 
+export interface StepTAScoreOptions {
+  /**
+   * Когда true — НЕ фильтровать по порогу 7+, оставить все оценённые строки
+   * с проставленными колонками «ЦА Балл» / «ЦА Причина». Полезно когда
+   * сотрудник хочет сам решить, кого оставить, или для дебага брифа
+   * (видно, что AI ставит большинству низкие баллы).
+   */
+  keepAllScored?: boolean;
+  /**
+   * Колбэк для телеметрии: pre_filter_rows / filtered_out / avg_score.
+   * Worker сохраняет это в `result_stats`, чтобы UI мог показать «AI оценил
+   * N компаний, средний балл X.X, ниже порога — отфильтровано M». Без этого
+   * пустой результат выглядел как «инструмент сломался».
+   */
+  onStats?: (stats: {
+    pre_filter_rows: number;
+    filtered_out_count: number;
+    pre_filter_avg_score: number;
+  }) => void;
+}
+
 export async function stepTAScore(
   data: string[][],
   brief: string,
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepTAScoreOptions,
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
@@ -415,9 +437,28 @@ export async function stepTAScore(
   }
 
   const TA_MIN_SCORE = 7;
-  const filtered = scored.filter((row) => {
-    const score = parseInt(row[newHeader.length - 2], 10);
-    return !isNaN(score) && score >= TA_MIN_SCORE;
+  const scoreColIdx = newHeader.length - 2;
+
+  // Pre-filter telemetry
+  const preFilterRows = scored.length;
+  let scoreSum = 0;
+  for (const row of scored) {
+    const v = parseInt(row[scoreColIdx], 10);
+    if (!isNaN(v)) scoreSum += v;
+  }
+  const preFilterAvg = preFilterRows > 0 ? scoreSum / preFilterRows : 0;
+
+  const filtered = options?.keepAllScored
+    ? scored
+    : scored.filter((row) => {
+        const score = parseInt(row[scoreColIdx], 10);
+        return !isNaN(score) && score >= TA_MIN_SCORE;
+      });
+
+  options?.onStats?.({
+    pre_filter_rows: preFilterRows,
+    filtered_out_count: preFilterRows - filtered.length,
+    pre_filter_avg_score: preFilterAvg,
   });
 
   await onProgress(100);
