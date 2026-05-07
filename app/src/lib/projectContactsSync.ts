@@ -118,20 +118,16 @@ export async function syncProjectContactsFromInstantly(
 
   // 1. All project↔campaign links.
   const links = await fetchAllLinks(instantlyDb);
-  if (links.length === 0) {
-    log('info', 'no project_instantly_campaigns links — nothing to sync');
-    return {
-      projectsWithLinks: 0,
-      campaignsResolved: 0,
-      projectsUpdated: 0,
-      projectsMissing: [],
-      campaignsMissing: [],
-    };
-  }
+  // NB: even when there are no Instantly links at all, we DO NOT early-return
+  // anymore — Колди/Тригга и прочие "ручные" проекты должны получить
+  // ежедневный snapshot из projects.contacts_done / kpi_fact (Bug 2).
 
   // 2. Аналитика по уникальным campaign_id.
   const allCampaignIds = [...new Set(links.map((l) => l.campaign_id))];
-  const contactsByCampaign = await fetchCampaignContacts(instantlyDb, allCampaignIds);
+  const contactsByCampaign =
+    allCampaignIds.length > 0
+      ? await fetchCampaignContacts(instantlyDb, allCampaignIds)
+      : new Map<string, number>();
   const campaignsMissing = allCampaignIds.filter((id) => !contactsByCampaign.has(id));
 
   // 3. SUM по project_id.
@@ -170,37 +166,59 @@ export async function syncProjectContactsFromInstantly(
     updated += 1;
   }
 
-  // 5. Write daily snapshot for pace/velocity analysis (contacts + kpi)
+  // 5. Write daily snapshot for pace/velocity analysis (contacts + kpi).
+  //
+  // Important: we snapshot ALL projects, not just the ones with Instantly
+  // links. Колди/Тригга и прочие "ручные" проекты обновляются специалистом
+  // 1-2 раза в неделю — без ежедневного снапшота tooltip "Темп" на странице
+  // "Проекты" видит максимум одну точку и говорит "недостаточно данных".
+  //
+  // Source of truth per project:
+  //   - Instantly-linked: projects.contacts_done was just UPDATEd above to
+  //     the synced sum, so reading projects.* gives the canonical value.
+  //   - Non-linked: projects.contacts_done is whatever the specialist last
+  //     wrote — that's exactly what we want to record.
+  //
+  // We skip projects whose contacts_done is empty / non-numeric (brand-new
+  // rows the specialist hasn't filled yet) — `contacts_done` in
+  // project_contacts_history is NOT NULL.
   const today = now.toISOString().slice(0, 10);
+  const { data: allProjects, error: projErr } = await mainDb
+    .from('projects')
+    .select('id, contacts_done, kpi_fact');
 
-  const projectIds = [...sumByProject.keys()].filter((pid) => !missing.includes(pid));
-  const kpiByProject = new Map<string, number>();
-  if (projectIds.length > 0) {
-    const { data: kpiRows } = await mainDb
-      .from('projects')
-      .select('id, kpi_fact')
-      .in('id', projectIds);
-    if (kpiRows) {
-      for (const r of kpiRows) {
-        const v = parseInt(r.kpi_fact ?? '', 10);
-        if (!isNaN(v)) kpiByProject.set(r.id, v);
-      }
+  let historyWritten = 0;
+  if (projErr) {
+    log('error', `projects read for history snapshot failed: ${projErr.message}`);
+  } else {
+    const historyRows: Array<{
+      project_id: string;
+      contacts_done: number;
+      kpi_fact: number | null;
+      recorded_at: string;
+    }> = [];
+
+    for (const p of allProjects ?? []) {
+      const contacts = parseInt(p.contacts_done ?? '', 10);
+      if (!Number.isFinite(contacts)) continue;
+      const kpi = parseInt(p.kpi_fact ?? '', 10);
+      historyRows.push({
+        project_id: p.id,
+        contacts_done: contacts,
+        kpi_fact: Number.isFinite(kpi) ? kpi : null,
+        recorded_at: today,
+      });
     }
-  }
 
-  const historyRows = projectIds.map((pid) => ({
-    project_id: pid,
-    contacts_done: sumByProject.get(pid) ?? 0,
-    kpi_fact: kpiByProject.get(pid) ?? null,
-    recorded_at: today,
-  }));
-
-  if (historyRows.length > 0) {
-    const { error: histErr } = await mainDb
-      .from('project_contacts_history')
-      .upsert(historyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
-    if (histErr) {
-      log('error', `contacts history upsert failed: ${histErr.message}`);
+    if (historyRows.length > 0) {
+      const { error: histErr } = await mainDb
+        .from('project_contacts_history')
+        .upsert(historyRows, { onConflict: 'project_id,recorded_at', ignoreDuplicates: false });
+      if (histErr) {
+        log('error', `contacts history upsert failed: ${histErr.message}`);
+      } else {
+        historyWritten = historyRows.length;
+      }
     }
   }
 
@@ -210,7 +228,7 @@ export async function syncProjectContactsFromInstantly(
     projectsUpdated: updated,
     projectsMissing: missing.length,
     campaignsMissing: campaignsMissing.length,
-    historyWritten: historyRows.length,
+    historyWritten,
   });
 
   return {
