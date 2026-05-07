@@ -14,6 +14,7 @@ import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
+import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
 import {
   ALL_EXTRACTOR_KEYS,
   CASCADE_RULES,
@@ -7823,15 +7824,16 @@ export function DatabaseSpreadsheet() {
 
     const innLabel = 'ИНН (найден)';
     const companyLabel = 'Компания (найдена)';
-    const targetLabels = [innLabel, companyLabel];
 
-    const existingHeaders = headerRow.map((h) => String(h ?? '').trim());
-    const colMap: Record<string, number> = {};
-    for (const label of targetLabels) {
-      const idx = existingHeaders.indexOf(label);
-      if (idx !== -1) colMap[label] = idx;
-    }
-    const missingLabels = targetLabels.filter((l) => !(l in colMap));
+    // Resolve target column indices SYNCHRONOUSLY before any setTabs call.
+    // Computing them inside the setTabs updater is unsafe — React 18 may
+    // defer the updater past the next statements, leaving the indices
+    // undefined and silently dropping every fetched INN.
+    const { innCol, compCol, missingLabels } = resolveInnLookupColumns(
+      headerRow,
+      innLabel,
+      companyLabel,
+    );
 
     const looksLikeUrl = (s: string) => /\./.test(s) || /^https?:\/\//i.test(s);
     const rowsToProcess = visibleRowIndices.filter((ri) => {
@@ -7868,7 +7870,6 @@ export function DatabaseSpreadsheet() {
             let nextCols = nextData[0].length;
             for (const label of missingLabels) {
               nextData[0][nextCols] = label;
-              colMap[label] = nextCols;
               nextCols++;
             }
             for (let r = 1; r < nextData.length; r++) {
@@ -7878,9 +7879,6 @@ export function DatabaseSpreadsheet() {
           }),
         );
       }
-
-      const innCol = colMap[innLabel]!;
-      const compCol = colMap[companyLabel]!;
 
       for (let i = 0; i < rowsToProcess.length; i += BATCH) {
         if (abortCtrl.signal.aborted) throw new Error('Отменено пользователем');
