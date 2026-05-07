@@ -54,7 +54,11 @@ export async function generateLeadSourceHypotheses(
       { role: 'user', content: user },
     ],
     temperature: 0.3,
-    maxTokens: 2400,
+    // Bumped from 2400 (May 2026): on briefs with structured ICP (ОКВЭД,
+    // regions, revenue bands) the model spent budget on the first 1–2
+    // hypotheses and got cut off, leaving the user with only one block.
+    // 4500 covers 7–8 hypotheses × 5 fields comfortably even with verbose RU.
+    maxTokens: 4500,
     signal,
     fetchImpl,
     maxRetries,
