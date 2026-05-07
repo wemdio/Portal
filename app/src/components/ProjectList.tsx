@@ -11,11 +11,16 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import {
+  loadAllProjectsPace,
   loadContactsPaceData,
   loadKpiPaceData,
+  summarizeProjectRisk,
   type PaceData,
+  type ProjectPace,
+  type ProjectPaceInput,
 } from '@/lib/projects/paceCalculator';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
@@ -316,6 +321,15 @@ function AssigneeAvatar({
 
 function isCompletedStatus(status: string | null | undefined): boolean {
   return normalizeStatus(status).includes('заверш');
+}
+
+function pluralizeDays(n: number): string {
+  const abs = Math.abs(n) % 100;
+  const last = abs % 10;
+  if (abs > 10 && abs < 20) return 'дн.';
+  if (last === 1) return 'день';
+  if (last >= 2 && last <= 4) return 'дня';
+  return 'дн.';
 }
 
 function getDeadlineStatus(deadline: string | null | undefined): 'overdue' | 'soon' | 'ok' | null {
@@ -621,6 +635,10 @@ export function ProjectList() {
   const [taskDeadlineDefaultAt, setTaskDeadlineDefaultAt] = useState('');
   const [taskDeadlineDefaultTime, setTaskDeadlineDefaultTime] = useState('12:00');
 
+  // Bulk-loaded pace per project (заполняется один раз после fetchProjects).
+  // Питает индикатор риска "не успеваем" между колонками KPI Факт и Контакты.
+  const [paceByProjectId, setPaceByProjectId] = useState<Map<string, ProjectPace>>(new Map());
+
   const [projectNotes, setProjectNotes] = useState<Record<string, ProjectNote[]>>({});
   const [notePopoverId, setNotePopoverId] = useState<string | null>(null);
   const [notePopoverPos, setNotePopoverPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
@@ -641,6 +659,44 @@ export function ProjectList() {
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Bulk-load pace для всех проектов. Один запрос к project_contacts_history
+  // → индикатор риска у строки получает данные мгновенно (без on-hover).
+  // Re-runs при изменении project IDs или их числовых KPI/contacts полей —
+  // редактирование тех же полей сразу обновляет иконку.
+  const paceInputsKey = projects
+    .map(
+      (p) =>
+        `${p.id}|${p.contacts_obligation ?? ''}|${p.contacts_done ?? ''}|${p.kpi_plan ?? ''}|${p.kpi_fact ?? ''}|${p.deadline ?? ''}`,
+    )
+    .join(';');
+  useEffect(() => {
+    if (projects.length === 0) {
+      setPaceByProjectId(new Map());
+      return;
+    }
+    let cancelled = false;
+    const inputs: ProjectPaceInput[] = projects.map((p) => ({
+      projectId: p.id,
+      contactsObligation: parseInt(p.contacts_obligation ?? '0', 10) || 0,
+      contactsDone: parseInt(p.contacts_done ?? '0', 10) || 0,
+      kpiPlan: parseInt(p.kpi_plan ?? '0', 10) || 0,
+      kpiFact: parseInt(p.kpi_fact ?? '0', 10) || 0,
+      deadline: p.deadline ?? null,
+    }));
+    void loadAllProjectsPace(supabase, inputs)
+      .then((result) => {
+        if (!cancelled) setPaceByProjectId(result);
+      })
+      .catch(() => {
+        // graceful: tooltip всё равно работает on-hover, индикатор просто не покажется
+        if (!cancelled) setPaceByProjectId(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paceInputsKey]);
 
   useEffect(() => {
     const interval = setInterval(() => void fetchSignedAvatars(), 30 * 60 * 1000);
@@ -1455,6 +1511,8 @@ export function ProjectList() {
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Deadline' : 'Дедлайн'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">{locale === 'en' ? 'KPI Plan' : 'KPI План'}</th>
                   <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[70px]">{locale === 'en' ? 'KPI Fact' : 'KPI Факт'}</th>
+                  {/* Risk indicator (Clock icon when project is behind schedule). Header пуст — иконка self-explanatory. */}
+                  <th className="px-1 py-3 w-6" aria-label={locale === 'en' ? 'Risk' : 'Риск'} />
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Contacts' : 'Контакты'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Specialist' : 'Специалист'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Lead (PM)' : 'Лид (PM)'}</th>
@@ -1696,6 +1754,36 @@ export function ProjectList() {
                             )}
                           </div>
                           </KpiPaceTooltip>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-1 py-3 align-middle text-center">
+                        {(() => {
+                          const risk = summarizeProjectRisk(
+                            paceByProjectId.get(project.id),
+                            isCompletedStatus(project.status),
+                          );
+                          if (risk.axes.length === 0) return null;
+                          const axisLabel =
+                            risk.axes.length === 2
+                              ? 'KPI и контактам'
+                              : risk.axes[0] === 'kpi'
+                              ? 'KPI'
+                              : 'контактам';
+                          const tail =
+                            risk.daysBehind > 0
+                              ? ` на ${risk.daysBehind} ${pluralizeDays(risk.daysBehind)}`
+                              : '';
+                          const tooltip = `Не успеваем по ${axisLabel}${tail}`;
+                          return (
+                            <span
+                              role="img"
+                              aria-label={tooltip}
+                              title={tooltip}
+                              className="inline-flex items-center justify-center cursor-help"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-red-500" strokeWidth={1.75} aria-hidden="true" />
+                            </span>
                           );
                         })()}
                       </td>
