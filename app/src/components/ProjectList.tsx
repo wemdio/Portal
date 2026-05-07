@@ -12,6 +12,11 @@ import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
+import {
+  loadContactsPaceData,
+  loadKpiPaceData,
+  type PaceData,
+} from '@/lib/projects/paceCalculator';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -32,22 +37,13 @@ function KpiPaceTooltip({
     if (pace || loading || kpiPlan <= 0) return;
     setLoading(true);
     try {
-      const { data } = await supabase
-        .from('project_contacts_history')
-        .select('kpi_fact, recorded_at')
-        .eq('project_id', projectId)
-        .not('kpi_fact', 'is', null)
-        .order('recorded_at', { ascending: true })
-        .limit(90);
-      if (data) {
-        const mapped = data
-          .filter((r: { kpi_fact: number | null }) => r.kpi_fact !== null)
-          .map((r: { kpi_fact: number | null; recorded_at: string }) => ({
-            contacts_done: r.kpi_fact!,
-            recorded_at: r.recorded_at,
-          }));
-        setPace(computePace(mapped, kpiPlan, kpiFact, deadline));
-      }
+      const result = await loadKpiPaceData(supabase, {
+        projectId,
+        kpiPlan,
+        kpiFact,
+        deadline,
+      });
+      if (result) setPace(result);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   };
@@ -122,65 +118,6 @@ function KpiPaceTooltip({
 
 /* ── Contacts pace tooltip (hover on contacts cell) ── */
 
-interface PaceData {
-  avgPerDay: number;
-  remaining: number;
-  forecastDays: number | null;
-  forecastDate: string | null;
-  deadline: string | null;
-  onTrack: boolean | null;
-  requiredPace: number | null;
-  dataPoints: number;
-  periodDays: number;
-}
-
-function computePace(
-  history: { contacts_done: number; recorded_at: string }[],
-  obligation: number,
-  currentDone: number,
-  deadline: string | null,
-): PaceData {
-  const sorted = [...history].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
-  const remaining = Math.max(0, obligation - currentDone);
-  const base: PaceData = {
-    avgPerDay: 0, remaining, forecastDays: null, forecastDate: null,
-    deadline, onTrack: null, requiredPace: null, dataPoints: sorted.length, periodDays: 0,
-  };
-  if (sorted.length < 2) return base;
-
-  const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  const daysDiff = Math.max(1, Math.round(
-    (new Date(last.recorded_at).getTime() - new Date(first.recorded_at).getTime()) / 86400000,
-  ));
-  const delta = last.contacts_done - first.contacts_done;
-  const avgPerDay = Math.round(delta / daysDiff);
-  base.avgPerDay = avgPerDay;
-  base.periodDays = daysDiff;
-
-  if (avgPerDay > 0 && remaining > 0) {
-    const forecastDays = Math.ceil(remaining / avgPerDay);
-    const forecastDate = new Date(Date.now() + forecastDays * 86400000);
-    base.forecastDays = forecastDays;
-    base.forecastDate = forecastDate.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-  } else if (remaining === 0) {
-    base.forecastDays = 0;
-    base.forecastDate = 'выполнено';
-  }
-
-  if (deadline) {
-    const dlDate = new Date(deadline);
-    if (!isNaN(dlDate.getTime())) {
-      const daysUntilDeadline = Math.max(0, Math.ceil((dlDate.getTime() - Date.now()) / 86400000));
-      base.requiredPace = daysUntilDeadline > 0 ? Math.ceil(remaining / daysUntilDeadline) : null;
-      if (base.forecastDays !== null) {
-        base.onTrack = base.forecastDays <= daysUntilDeadline;
-      }
-    }
-  }
-  return base;
-}
-
 function ContactsPaceTooltip({
   projectId, obligation, done, deadline, children,
 }: {
@@ -196,13 +133,13 @@ function ContactsPaceTooltip({
     if (pace || loading || obligation <= 0) return;
     setLoading(true);
     try {
-      const { data } = await supabase
-        .from('project_contacts_history')
-        .select('contacts_done, recorded_at')
-        .eq('project_id', projectId)
-        .order('recorded_at', { ascending: true })
-        .limit(90);
-      if (data) setPace(computePace(data, obligation, done, deadline));
+      const result = await loadContactsPaceData(supabase, {
+        projectId,
+        obligation,
+        done,
+        deadline,
+      });
+      if (result) setPace(result);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   };
