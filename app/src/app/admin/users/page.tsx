@@ -14,6 +14,28 @@ import { Check, ChevronDown, ChevronUp, MoreVertical, Plus } from 'lucide-react'
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
 
+type TariffType = 'standard' | 'pro' | 'custom';
+type TariffData = {
+  tariff_type: TariffType;
+  max_contacts: number | null;
+  max_rows: number | null;
+  max_chains_per_month: number | null;
+  max_domains: number | null;
+  max_emails: number | null;
+};
+const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
+  standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 3, max_domains: 4, max_emails: 16 },
+  pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 6, max_domains: 8, max_emails: 32 },
+};
+const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
+const LIMIT_LABELS: { key: keyof Omit<TariffData, 'tariff_type'>; label: string }[] = [
+  { key: 'max_contacts', label: 'Контакты Instantly' },
+  { key: 'max_rows', label: 'Строки для сбора + конструктор баз' },
+  { key: 'max_chains_per_month', label: 'Генерация цепочек / мес' },
+  { key: 'max_domains', label: 'Домены' },
+  { key: 'max_emails', label: 'Почты' },
+];
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
@@ -86,6 +108,14 @@ export default function UsersPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
   const [allCampaignsLoading, setAllCampaignsLoading] = useState(false);
   const [campaignSearch, setCampaignSearch] = useState('');
+
+  const [tariffType, setTariffType] = useState<TariffType>('standard');
+  const [customLimits, setCustomLimits] = useState<Omit<TariffData, 'tariff_type'>>({ ...TARIFF_DEFAULTS.pro });
+  const [subscriptionActive, setSubscriptionActive] = useState(false);
+  const [subscriptionSetup, setSubscriptionSetup] = useState(false);
+  const [paidUntil, setPaidUntil] = useState<string | null>(null);
+  const [setupUntil, setSetupUntil] = useState<string | null>(null);
+  const [activating, setActivating] = useState(false);
 
   type SortColumn = 'name' | 'email' | 'role';
   type SortDir = 'asc' | 'desc';
@@ -243,7 +273,7 @@ export default function UsersPage() {
     setCampaignSearch('');
     try {
       const isClient = user.role === 'client';
-      const [toolsRes, accessRes] = await Promise.all([
+      const [toolsRes, accessRes, tariffRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
         ),
@@ -252,10 +282,39 @@ export default function UsersPage() {
               `/api/admin/users/${user.id}/client-access`
             )
           : Promise.resolve({ rows: [] as Array<{ resource_type: string; resource_id: string }> }),
+        isClient
+          ? apiFetch<{ tariff: (TariffData & { is_active?: boolean; paid_until?: string | null; setup_until?: string | null }) | null }>(`/api/admin/users/${user.id}/tariff`)
+          : Promise.resolve({ tariff: null as (TariffData & { is_active?: boolean; paid_until?: string | null; setup_until?: string | null }) | null }),
       ]);
       setToolVisibility(toolsRes.visibility ?? {});
       const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
       setClientCampaigns(campaigns);
+      if (tariffRes.tariff) {
+        setTariffType(tariffRes.tariff.tariff_type);
+        setCustomLimits({
+          max_contacts: tariffRes.tariff.max_contacts ?? TARIFF_DEFAULTS.pro.max_contacts,
+          max_rows: tariffRes.tariff.max_rows ?? TARIFF_DEFAULTS.pro.max_rows,
+          max_chains_per_month: tariffRes.tariff.max_chains_per_month ?? TARIFF_DEFAULTS.pro.max_chains_per_month,
+          max_domains: tariffRes.tariff.max_domains ?? TARIFF_DEFAULTS.pro.max_domains,
+          max_emails: tariffRes.tariff.max_emails ?? TARIFF_DEFAULTS.pro.max_emails,
+        });
+        const now = new Date();
+        const isExpired = !tariffRes.tariff.paid_until || new Date(tariffRes.tariff.paid_until) <= now;
+        const inSetup = tariffRes.tariff.is_active === true && !isExpired
+          && !!tariffRes.tariff.setup_until && new Date(tariffRes.tariff.setup_until) > now;
+        const isAct = tariffRes.tariff.is_active === true && !isExpired && !inSetup;
+        setSubscriptionActive(isAct);
+        setSubscriptionSetup(inSetup);
+        setPaidUntil(tariffRes.tariff.paid_until ?? null);
+        setSetupUntil(tariffRes.tariff.setup_until ?? null);
+      } else {
+        setTariffType('standard');
+        setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+        setSubscriptionActive(false);
+        setSubscriptionSetup(false);
+        setPaidUntil(null);
+        setSetupUntil(null);
+      }
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -266,6 +325,12 @@ export default function UsersPage() {
     } catch {
       setToolVisibility({});
       setClientCampaigns([]);
+      setTariffType('standard');
+      setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+      setSubscriptionActive(false);
+      setSubscriptionSetup(false);
+      setPaidUntil(null);
+      setSetupUntil(null);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
@@ -397,6 +462,13 @@ export default function UsersPage() {
         await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/client-access`, {
           method: 'PUT',
           body: JSON.stringify({ campaigns: clientCampaigns }),
+        });
+        await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            tariff_type: tariffType,
+            ...(tariffType === 'custom' ? customLimits : {}),
+          }),
         });
       }
 
@@ -846,6 +918,173 @@ export default function UsersPage() {
                     </ul>
                   </div>
                 </div>
+
+                {modalRole === 'client' && (
+                  <div className="space-y-4 pt-2 border-t border-gray-200">
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-900 mb-2">Тариф клиента</h4>
+                      <div className="flex gap-2">
+                        {(['standard', 'pro', 'custom'] as TariffType[]).map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => {
+                              setTariffType(t);
+                              if (t === 'custom') setCustomLimits({ ...TARIFF_DEFAULTS.pro });
+                            }}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                              tariffType === t
+                                ? t === 'pro'
+                                  ? 'bg-violet-600 text-white border-violet-600'
+                                  : t === 'custom'
+                                    ? 'bg-zinc-800 text-white border-zinc-800'
+                                    : 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                            }`}
+                          >
+                            {TARIFF_LABELS[t]}
+                          </button>
+                        ))}
+                      </div>
+                      {tariffType !== 'custom' && (
+                        <div className="mt-3 rounded-lg border border-gray-100 bg-gray-50 overflow-hidden">
+                          {LIMIT_LABELS.map(({ key, label }) => (
+                            <div key={key} className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 last:border-b-0">
+                              <span className="text-xs text-gray-600">{label}</span>
+                              <span className="text-xs font-semibold text-gray-800 tabular-nums">
+                                {(TARIFF_DEFAULTS[tariffType as 'standard' | 'pro'][key] ?? 0).toLocaleString('ru-RU')}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {tariffType === 'custom' && (
+                        <div className="mt-3 space-y-2">
+                          {LIMIT_LABELS.map(({ key, label }) => (
+                            <div key={key} className="flex items-center gap-3">
+                              <label className="flex-1 text-xs text-gray-700">{label}</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={customLimits[key] ?? ''}
+                                onChange={(e) =>
+                                  setCustomLimits((prev) => ({
+                                    ...prev,
+                                    [key]: e.target.value === '' ? null : Math.max(0, Math.floor(Number(e.target.value))),
+                                  }))
+                                }
+                                className="w-28 px-2 py-1 border border-gray-300 rounded-lg text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="mt-4 pt-3 border-t border-gray-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-medium text-gray-700">Подписка</span>
+                          {subscriptionSetup ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-200/60">
+                              Настройка ЛК до {setupUntil ? new Date(setupUntil).toLocaleDateString('ru-RU') : '—'}
+                            </span>
+                          ) : subscriptionActive ? (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-[11px] font-semibold text-green-700 ring-1 ring-green-200/60">
+                              Активна до {paidUntil ? new Date(paidUntil).toLocaleDateString('ru-RU') : '—'}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
+                              Не оплачена
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          {!subscriptionActive && !subscriptionSetup && (
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={async () => {
+                                if (!actionModalUserId) return;
+                                setActivating(true);
+                                try {
+                                  const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    method: 'PUT',
+                                    body: JSON.stringify({ action: 'activate' }),
+                                  });
+                                  setSubscriptionSetup(true);
+                                  setSubscriptionActive(false);
+                                  setPaidUntil(res.paid_until ?? null);
+                                  setSetupUntil(res.setup_until ?? null);
+                                  setSaveSuccessMessage('Оплата отмечена, настройка ЛК начата');
+                                } catch (err: unknown) {
+                                  setError(getErrorMessage(err));
+                                } finally {
+                                  setActivating(false);
+                                }
+                              }}
+                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                            >
+                              {activating ? 'Активация...' : 'Отметить оплату'}
+                            </button>
+                          )}
+                          {subscriptionSetup && (
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={async () => {
+                                if (!actionModalUserId) return;
+                                setActivating(true);
+                                try {
+                                  const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    method: 'PUT',
+                                    body: JSON.stringify({ action: 'finish_setup' }),
+                                  });
+                                  setSubscriptionSetup(false);
+                                  setSubscriptionActive(true);
+                                  setPaidUntil(res.paid_until ?? null);
+                                  setSetupUntil(res.setup_until ?? null);
+                                  setSaveSuccessMessage('Настройка завершена, клиент активирован');
+                                } catch (err: unknown) {
+                                  setError(getErrorMessage(err));
+                                } finally {
+                                  setActivating(false);
+                                }
+                              }}
+                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-50 transition-colors"
+                            >
+                              {activating ? 'Завершение...' : 'Завершить настройку досрочно'}
+                            </button>
+                          )}
+                          {(subscriptionActive || subscriptionSetup) && (
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={async () => {
+                                if (!actionModalUserId) return;
+                                setActivating(true);
+                                try {
+                                  await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    method: 'PUT',
+                                    body: JSON.stringify({ action: 'deactivate' }),
+                                  });
+                                  setSubscriptionActive(false);
+                                  setSubscriptionSetup(false);
+                                  setSaveSuccessMessage('Подписка деактивирована');
+                                } catch (err: unknown) {
+                                  setError(getErrorMessage(err));
+                                } finally {
+                                  setActivating(false);
+                                }
+                              }}
+                              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+                            >
+                              Деактивировать
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {modalRole === 'client' && (
                   <div className="space-y-3 pt-2 border-t border-gray-200">

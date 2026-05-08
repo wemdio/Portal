@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireAdminAuth, jsonError } from '@/lib/adminApiHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { getClientTariffRow, resolveEffectiveLimits } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -113,6 +114,18 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const sanitized = sanitizeBody(body);
   if (!sanitized.ok) return jsonError(sanitized.error, 400);
+
+  if (Array.isArray(sanitized.data.email_account_ids)) {
+    const tariffRow = await getClientTariffRow(clientUserId);
+    const limits = resolveEffectiveLimits(tariffRow);
+    const count = (sanitized.data.email_account_ids as string[]).length;
+    if (count > limits.max_emails) {
+      return jsonError(
+        `Лимит почт для клиента: ${limits.max_emails}. Попытка назначить: ${count}.`,
+        400,
+      );
+    }
+  }
 
   const upsertRow = {
     client_user_id: clientUserId,

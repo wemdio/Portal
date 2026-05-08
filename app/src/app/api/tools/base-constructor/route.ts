@@ -4,6 +4,7 @@ import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
+import { getClientTariffRow, resolveEffectiveLimits, getClientStatus } from '@/lib/tariffs';
 
 const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
@@ -47,10 +48,29 @@ export async function POST(req: NextRequest) {
       }
 
       const role = await getUserRole(user.id);
+      let tariffMaxRows: number | undefined;
+      if (role === 'client') {
+        const tariffRow = await getClientTariffRow(user.id);
+        const clientStatus = getClientStatus(tariffRow);
+        if (clientStatus === 'setup') {
+          return NextResponse.json(
+            { error: 'Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.' },
+            { status: 403 },
+          );
+        }
+        if (clientStatus !== 'active') {
+          return NextResponse.json(
+            { error: 'Подписка не активна. Оплатите тариф для продолжения работы.' },
+            { status: 403 },
+          );
+        }
+        tariffMaxRows = resolveEffectiveLimits(tariffRow).max_rows;
+      }
       const guard = applyClientGuard({
         role,
         selectedSteps: selected_steps as StepKey[],
         rowCount: data.length - 1,
+        maxRows: tariffMaxRows,
       });
       if (!guard.ok) {
         return NextResponse.json({ error: guard.error }, { status: 400 });
