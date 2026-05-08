@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
   for (;;) {
     const { data, error } = await supabase
       .from('yandex_maps_organizations')
-      .select(COLUMNS.join(','))
+      .select('*')
       .eq('job_id', jobId)
       .order('created_at', { ascending: true })
       .range(offset, offset + PAGE - 1);
@@ -57,7 +57,8 @@ export async function GET(req: NextRequest) {
     if (!data || data.length === 0) break;
 
     for (const row of data) {
-      lines.push(COLUMNS.map((c) => esc((row as Record<string, unknown>)[c])).join(','));
+      const r = row as unknown as Record<string, unknown>;
+      lines.push(COLUMNS.map((c) => esc(r[c])).join(','));
     }
 
     offset += data.length;

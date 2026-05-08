@@ -117,7 +117,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       'admin.tariff.activate',
       'Client subscription activated',
       { targetUserId, setup_until: setupUntil.toISOString(), paid_until: paidUntil.toISOString() },
-      { userId: user.id, targetUserId },
+      { userId: user.id },
     );
 
     return NextResponse.json({
@@ -151,7 +151,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       'admin.tariff.finish_setup',
       'Client setup finished early',
       { targetUserId, paid_until: paidUntil.toISOString() },
-      { userId: user.id, targetUserId },
+      { userId: user.id },
     );
 
     return NextResponse.json({
@@ -180,7 +180,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       'admin.tariff.deactivate',
       'Client subscription deactivated',
       { targetUserId },
-      { userId: user.id, targetUserId },
+      { userId: user.id },
     );
 
     return NextResponse.json({ ok: true, action: 'deactivate' });
@@ -215,7 +215,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     'admin.tariff.put.success',
     'Client tariff updated',
     { tariffType, targetUserId },
-    { userId: user.id, targetUserId },
+    { userId: user.id },
   );
 
   return NextResponse.json({ ok: true, tariff_type: tariffType });
