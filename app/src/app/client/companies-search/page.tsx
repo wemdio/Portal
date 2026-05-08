@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES, getRegionByCode } from '@/lib/companiesSearch/regions';
+import { OkvedTreeModal } from '@/components/OkvedTreeModal';
 
 type Mode = 'activity' | 'inn';
 type L = 'ru' | 'en';
@@ -65,50 +66,6 @@ export default function CompaniesSearchPage() {
 
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
-
-  const [activityTypes, setActivityTypes] = useState<string[]>([]);
-  const [activityTypesLoading, setActivityTypesLoading] = useState(true);
-  const [activityTypesError, setActivityTypesError] = useState<string | null>(null);
-
-  // Грузим виды деятельности один раз при монтировании страницы — чтобы
-  // при открытии модалки список уже был готов и не было задержки.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        const token = session?.access_token;
-        if (!token) {
-          if (!cancelled) {
-            setActivityTypesError(t('Требуется авторизация', 'Authorization required', locale));
-            setActivityTypesLoading(false);
-          }
-          return;
-        }
-        const res = await fetch('/api/client/companies-search/activity-types', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (cancelled) return;
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: t('Ошибка', 'Error', locale) }));
-          setActivityTypesError(err.error || `HTTP ${res.status}`);
-          setActivityTypesLoading(false);
-          return;
-        }
-        const data = (await res.json()) as { types: string[] };
-        setActivityTypes(data.types);
-        setActivityTypesLoading(false);
-      } catch (err) {
-        if (!cancelled) {
-          setActivityTypesError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
-          setActivityTypesLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [locale]);
 
   const selectedRegionsCount = selectedRegions.size;
   const selectedActivitiesCount = selectedActivities.size;
@@ -578,14 +535,11 @@ export default function CompaniesSearchPage() {
         />
       )}
       {activitiesModalOpen && (
-        <ActivitiesModal
-          locale={locale}
+        <OkvedTreeModal
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
-          types={activityTypes}
-          loading={activityTypesLoading}
-          error={activityTypesError}
+          locale={locale}
         />
       )}
     </div>
@@ -742,103 +696,3 @@ function RegionsModal({
   );
 }
 
-// ── Activities modal ──────────────────────────────────────────────────
-function ActivitiesModal({
-  locale,
-  selected,
-  onChange,
-  onClose,
-  types,
-  loading,
-  error,
-}: {
-  locale: L;
-  selected: Set<string>;
-  onChange: (s: Set<string>) => void;
-  onClose: () => void;
-  types: string[];
-  loading: boolean;
-  error: string | null;
-}) {
-  const [search, setSearch] = useState('');
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return types;
-    return types.filter((tp) => tp.toLowerCase().includes(q));
-  }, [types, search]);
-
-  const toggle = (tp: string) => {
-    const next = new Set(selected);
-    if (next.has(tp)) next.delete(tp);
-    else next.add(tp);
-    onChange(next);
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">
-            {t('Виды деятельности', 'Activity types', locale)}
-          </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
-        </div>
-        <div className="px-5 pb-4">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('Быстрый поиск', 'Quick search', locale)}
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
-          />
-        </div>
-        <div className="flex-1 overflow-y-auto px-5 pb-5">
-          {loading && <div className="text-sm text-gray-500">{t('Загрузка...', 'Loading...', locale)}</div>}
-          {error && <div className="text-sm text-red-600">{error}</div>}
-          {!loading && !error && filtered.length === 0 && (
-            <div className="text-sm text-gray-500">
-              {types.length === 0
-                ? t('В базе пока нет данных. Список заполнится после импорта.', 'No data yet. The list will populate after import.', locale)
-                : t('Ничего не найдено', 'Nothing found', locale)}
-            </div>
-          )}
-          <div className="space-y-1">
-            {filtered.map((tp) => (
-              <label key={tp} className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={selected.has(tp)}
-                  onChange={() => toggle(tp)}
-                  className="w-4 h-4"
-                />
-                <span className="text-sm">{tp}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-        <div className="flex items-center justify-between p-4" style={{ boxShadow: '0 -1px 0 var(--cp-shadow-l, rgba(0,0,0,0.06))' }}>
-          <span className="text-sm text-gray-600">
-            {t(`Выбрано: ${selected.size}`, `Selected: ${selected.size}`, locale)}
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
-            >
-              {t('Очистить', 'Clear', locale)}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-            >
-              {t('Готово', 'Done', locale)}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}

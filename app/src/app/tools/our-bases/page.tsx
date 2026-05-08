@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { authFetch } from '@/lib/authFetch';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES, getRegionByCode } from '@/lib/companiesSearch/regions';
+import { OkvedTreeModal } from '@/components/OkvedTreeModal';
 
 type Mode = 'activity' | 'inn';
 
@@ -463,7 +464,7 @@ export default function OurBasesPage() {
         />
       )}
       {activitiesModalOpen && (
-        <ActivitiesModal
+        <OkvedTreeModal
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
@@ -623,125 +624,3 @@ function RegionsModal({
   );
 }
 
-function ActivitiesModal({
-  selected,
-  onChange,
-  onClose,
-}: {
-  selected: Set<string>;
-  onChange: (s: Set<string>) => void;
-  onClose: () => void;
-}) {
-  const [search, setSearch] = useState('');
-  const [types, setTypes] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await authFetch('/api/tools/our-bases/activity-types');
-        if (cancelled) return;
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: 'Ошибка' }));
-          setError(err.error || `HTTP ${res.status}`);
-          setLoading(false);
-          return;
-        }
-        const data = (await res.json()) as { types: string[] };
-        setTypes(data.types);
-        setLoading(false);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Ошибка');
-          setLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return types;
-    return types.filter((tp) => tp.toLowerCase().includes(q));
-  }, [types, search]);
-
-  const toggle = (tp: string) => {
-    const next = new Set(selected);
-    if (next.has(tp)) next.delete(tp);
-    else next.add(tp);
-    onChange(next);
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">Виды деятельности</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">
-            ×
-          </button>
-        </div>
-        <div className="px-5 pb-4">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Быстрый поиск"
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
-          />
-        </div>
-        <div className="flex-1 overflow-y-auto px-5 pb-5">
-          {loading && <div className="text-sm text-gray-500">Загрузка...</div>}
-          {error && <div className="text-sm text-red-600">{error}</div>}
-          {!loading && !error && filtered.length === 0 && (
-            <div className="text-sm text-gray-500">
-              {types.length === 0
-                ? 'В базе пока нет данных. Список заполнится после импорта.'
-                : 'Ничего не найдено'}
-            </div>
-          )}
-          <div className="space-y-1">
-            {filtered.map((tp) => (
-              <label key={tp} className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={selected.has(tp)}
-                  onChange={() => toggle(tp)}
-                  className="w-4 h-4"
-                />
-                <span className="text-sm">{tp}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-        <div
-          className="flex items-center justify-between p-4"
-          style={{ boxShadow: '0 -1px 0 rgba(0,0,0,0.06)' }}
-        >
-          <span className="text-sm text-gray-600">Выбрано: {selected.size}</span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
-            >
-              Очистить
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-            >
-              Готово
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
