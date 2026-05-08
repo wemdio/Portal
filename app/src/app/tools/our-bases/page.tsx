@@ -44,8 +44,46 @@ export default function OurBasesPage() {
   const [calcResult, setCalcResult] = useState<{ count: number } | null>(null);
   const [calcError, setCalcError] = useState<string | null>(null);
 
+  const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   const selectedRegionsCount = selectedRegions.size;
   const selectedActivitiesCount = selectedActivities.size;
+
+  const buildFilters = () => {
+    const parsedInnList =
+      mode === 'inn'
+        ? innList
+            .split(/[\s,;]+/)
+            .map((s) => s.trim())
+            .filter((s) => /^\d{10,12}$/.test(s))
+        : undefined;
+
+    return {
+      regionCodes:
+        mode === 'activity' && selectedRegionsCount !== ALL_REGION_CODES.length
+          ? Array.from(selectedRegions)
+          : undefined,
+      activityTypes:
+        mode === 'activity' && selectedActivitiesCount > 0
+          ? Array.from(selectedActivities)
+          : undefined,
+      hasPhone,
+      hasEmail,
+      legalForms: legalForm ? [legalForm] : undefined,
+      employeesFrom: employeesFrom ? Number(employeesFrom) : null,
+      employeesTo: employeesTo ? Number(employeesTo) : null,
+      revenueFrom: revenueFrom ? Number(revenueFrom) : null,
+      revenueTo: revenueTo ? Number(revenueTo) : null,
+      costFrom: costFrom ? Number(costFrom) : null,
+      costTo: costTo ? Number(costTo) : null,
+      hasWebsite,
+      hasEdo,
+      hasEgais,
+      includeIp,
+      innList: parsedInnList && parsedInnList.length > 0 ? parsedInnList : undefined,
+    };
+  };
 
   const handleCalculate = async () => {
     setCalcLoading(true);
@@ -53,44 +91,10 @@ export default function OurBasesPage() {
     setCalcResult(null);
 
     try {
-      const parsedInnList =
-        mode === 'inn'
-          ? innList
-              .split(/[\s,;]+/)
-              .map((s) => s.trim())
-              .filter((s) => /^\d{10,12}$/.test(s))
-          : undefined;
-
-      const filters = {
-        regionCodes:
-          mode === 'activity' && selectedRegionsCount !== ALL_REGION_CODES.length
-            ? Array.from(selectedRegions)
-            : undefined,
-        activityTypes:
-          mode === 'activity' && selectedActivitiesCount > 0
-            ? Array.from(selectedActivities)
-            : undefined,
-        hasPhone,
-        hasEmail,
-        legalForms: legalForm ? [legalForm] : undefined,
-        employeesFrom: employeesFrom ? Number(employeesFrom) : null,
-        employeesTo: employeesTo ? Number(employeesTo) : null,
-        revenueFrom: revenueFrom ? Number(revenueFrom) : null,
-        revenueTo: revenueTo ? Number(revenueTo) : null,
-        costFrom: costFrom ? Number(costFrom) : null,
-        costTo: costTo ? Number(costTo) : null,
-        hasWebsite,
-        hasEdo,
-        hasEgais,
-        includeIp,
-        innList: parsedInnList && parsedInnList.length > 0 ? parsedInnList : undefined,
-        countOnly: true,
-      };
-
       const res = await authFetch('/api/tools/our-bases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(filters),
+        body: JSON.stringify({ ...buildFilters(), countOnly: true }),
       });
 
       if (!res.ok) {
@@ -106,6 +110,40 @@ export default function OurBasesPage() {
       setCalcError(err instanceof Error ? err.message : 'Ошибка');
     } finally {
       setCalcLoading(false);
+    }
+  };
+
+  const handleExport = async (format: 'csv' | 'xlsx') => {
+    setExportLoading(format);
+    setExportError(null);
+
+    try {
+      const res = await authFetch(`/api/tools/our-bases/export?format=${format}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildFilters()),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Ошибка' }));
+        setExportError(err.error || `HTTP ${res.status}`);
+        setExportLoading(null);
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `companies_${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Ошибка');
+    } finally {
+      setExportLoading(null);
     }
   };
 
@@ -370,6 +408,49 @@ export default function OurBasesPage() {
           <div className="text-sm text-gray-700">
             Найдено компаний:{' '}
             <span className="font-bold">{calcResult.count.toLocaleString('ru-RU')}</span>
+          </div>
+        )}
+
+        {calcResult && calcResult.count > 0 && (
+          <div className="rounded-2xl border border-gray-200 bg-white p-6 w-full max-w-lg">
+            <h3 className="text-sm font-semibold text-gray-700 mb-4 text-center">
+              Скачать базу
+            </h3>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => handleExport('xlsx')}
+                disabled={exportLoading !== null}
+                className="flex flex-col items-center gap-2 border-2 border-green-500 bg-green-50 hover:bg-green-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+              >
+                <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25h6m-3-3v3" />
+                </svg>
+                <span className="text-sm font-semibold text-green-700">
+                  {exportLoading === 'xlsx' ? 'Формируем...' : 'Excel (.xlsx)'}
+                </span>
+                <span className="text-xs text-gray-500">Для работы в Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleExport('csv')}
+                disabled={exportLoading !== null}
+                className="flex flex-col items-center gap-2 border-2 border-blue-400 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+              >
+                <svg className="w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                </svg>
+                <span className="text-sm font-semibold text-blue-700">
+                  {exportLoading === 'csv' ? 'Формируем...' : 'CSV (.csv)'}
+                </span>
+                <span className="text-xs text-gray-500">Универсальный формат</span>
+              </button>
+            </div>
+            {exportError && (
+              <div className="text-sm text-red-600 text-center mt-3">{exportError}</div>
+            )}
           </div>
         )}
       </div>

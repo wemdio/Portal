@@ -5,7 +5,7 @@
  *   - automatically include a fixed set of "always-on" cleaning/enrichment steps
  *     (so the client doesn't have to think about them, and so the resulting base is
  *     consistently usable for outreach), and
- *   - reject jobs whose row count exceeds CLIENT_ROW_LIMIT (cost protection).
+ *   - reject jobs whose row count exceeds the client's tariff row limit.
  *
  * For all other roles we pass through unchanged.
  *
@@ -33,8 +33,7 @@ export const ALWAYS_ON_STEPS_FOR_CLIENT: readonly StepKey[] = [
 ] as const;
 
 /**
- * Maximum number of data rows (header excluded) a client may submit in a single
- * Base Constructor job. Protects us from runaway AI/API spend.
+ * Fallback per-job row cap when tariff limits are not available.
  */
 export const CLIENT_ROW_LIMIT = 10_000;
 
@@ -42,6 +41,8 @@ export type ApplyClientGuardInput = {
   role: string | null | undefined;
   selectedSteps: readonly StepKey[];
   rowCount: number;
+  /** If provided, overrides the default CLIENT_ROW_LIMIT. */
+  maxRows?: number;
 };
 
 export type ApplyClientGuardResult =
@@ -57,10 +58,11 @@ export function applyClientGuard(
     return { ok: true, selectedSteps: [...input.selectedSteps] };
   }
 
-  if (input.rowCount > CLIENT_ROW_LIMIT) {
+  const limit = input.maxRows ?? CLIENT_ROW_LIMIT;
+  if (input.rowCount > limit) {
     return {
       ok: false,
-      error: `Лимит 10 000 строк для клиентского доступа. В файле ${input.rowCount.toLocaleString('ru-RU')} строк.`,
+      error: `Лимит ${limit.toLocaleString('ru-RU')} строк для клиентского доступа. В файле ${input.rowCount.toLocaleString('ru-RU')} строк.`,
     };
   }
 
