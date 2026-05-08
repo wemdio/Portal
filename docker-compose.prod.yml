@@ -225,6 +225,14 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=tgoutreach
     stop_grace_period: 30m
+    # `autoheal=true` makes the autoheal sidecar (defined below) restart this
+    # container whenever the healthcheck reports `unhealthy`. Docker's
+    # `restart: unless-stopped` does NOT react to health status by itself —
+    # we learned the hard way after gramJS hung in `_recvLoop` on a corrupted
+    # MTProto packet and the worker sat unhealthy-but-running for ~36 hours
+    # (heartbeat stale, zero dialogs sent, but container stayed Up).
+    labels:
+      - autoheal=true
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/tg-outreach-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/tg-outreach-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
       interval: 60s
@@ -661,6 +669,28 @@ services:
     restart: unless-stopped
     networks:
       - portal-network
+
+  # Watches every container with `autoheal=true` label and restarts it
+  # whenever Docker's healthcheck flips it to `unhealthy`. Native Docker
+  # restart policies don't react to health state — only to crashes —
+  # so unhealthy-but-still-running workers (e.g. tg-outreach hung in
+  # gramJS recvLoop) used to need manual intervention.
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: portal-autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=180
+      - DOCKER_SOCK=/var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.1'
+    restart: unless-stopped
 
 volumes:
   telegram-bot-api-data:
