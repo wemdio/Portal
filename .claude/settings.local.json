@@ -22,7 +22,10 @@
       "Bash(git pull *)",
       "WebFetch(domain:docs.google.com)",
       "WebFetch(domain:doc-0k-7o-docstext.googleusercontent.com)",
-      "mcp__Claude_in_Chrome__tabs_context_mcp"
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "PowerShell(Set-Location \"G:\\\\PycharmProjects\\\\Portal\\\\app\"; if \\(Test-Path \"package-lock.json\"\\) { \"lock file exists, size: \" + \\(Get-Item \"package-lock.json\"\\).Length } else { \"no lock file yet\" })",
+      "Bash(git checkout *)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }

@@ -7,6 +7,8 @@ import { safeStr } from '@/lib/emailSequence/templating';
 import { PROMPT_LETTER_EXAMPLES } from '@/lib/emailSequence/promptLetterExamples.server';
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getClientTariffRow, resolveEffectiveLimits, getClientStatus, getBillingPeriodStart, countChains } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -210,6 +212,33 @@ export async function POST(
     pickWriterModel(brief.writer_model) ??
     process.env.EMAIL_SEQUENCE_WRITER_MODEL ??
     'gpt-5.2';
+
+  if (supabaseAdmin) {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+    if (profile?.role === 'client') {
+      const tariffRow = await getClientTariffRow(user.id);
+      const clientStatus = getClientStatus(tariffRow);
+      if (clientStatus === 'setup') {
+        return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
+      }
+      if (clientStatus !== 'active') {
+        return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+      }
+      const limits = resolveEffectiveLimits(tariffRow);
+      const periodStart = getBillingPeriodStart(tariffRow);
+      const usedThisPeriod = await countChains(user.id, periodStart);
+      if (usedThisPeriod >= limits.max_chains_per_month) {
+        return jsonError(
+          `Лимит генераций цепочек: ${limits.max_chains_per_month} / мес. Использовано: ${usedThisPeriod}.`,
+          429,
+        );
+      }
+    }
+  }
 
   let trace: Awaited<ReturnType<typeof startTrace>> | null = null;
 

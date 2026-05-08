@@ -6,6 +6,13 @@
       "runtimeExecutable": "G:\\NodeJs\\npm.cmd",
       "runtimeArgs": ["run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "next",
+      "runtimeExecutable": "G:\\NodeJs\\npm.cmd",
+      "runtimeArgs": ["run", "dev:next"],
+      "cwd": "app",
+      "port": 3000
     }
   ]
 }

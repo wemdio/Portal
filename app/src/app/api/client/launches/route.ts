@@ -14,6 +14,7 @@ import type {
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
+import { getClientTariffRow, resolveEffectiveLimits, getClientStatus, getBillingPeriodStart, countClientContacts } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -152,6 +153,28 @@ export async function POST(req: NextRequest) {
   const leads = mapCsvRowsToLeads({ headers, rows, mapping });
   if (leads.length === 0) {
     return jsonError('В файле нет валидных email-адресов', 400);
+  }
+
+  const tariffRow = await getClientTariffRow(userId);
+  const clientStatus = getClientStatus(tariffRow);
+  if (clientStatus === 'setup') {
+    return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
+  }
+  if (clientStatus !== 'active') {
+    return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+  }
+  const limits = resolveEffectiveLimits(tariffRow);
+  const periodStart = getBillingPeriodStart(tariffRow);
+  const usedContacts = await countClientContacts(userId, periodStart);
+  if (usedContacts + leads.length > limits.max_contacts) {
+    const remaining = Math.max(0, limits.max_contacts - usedContacts);
+    return jsonError(
+      `Лимит контактов: ${limits.max_contacts.toLocaleString('ru-RU')} / мес. ` +
+      `Использовано: ${usedContacts.toLocaleString('ru-RU')}. ` +
+      `Попытка добавить: ${leads.length.toLocaleString('ru-RU')}. ` +
+      `Осталось: ${remaining.toLocaleString('ru-RU')}.`,
+      400,
+    );
   }
 
   const { data: launchRow, error: insertErr } = await supabaseInstantly
