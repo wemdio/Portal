@@ -220,37 +220,54 @@ export default function CompaniesSearchPage() {
 
         {mode === 'activity' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <button
-                type="button"
-                onClick={() => setRegionsModalOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2.5 rounded inline-flex items-center gap-2"
-              >
-                {t('Регионы', 'Regions', locale)} <span>▼</span>
-              </button>
-              <div className="text-sm text-gray-700 mt-3 font-semibold">
-                {selectedRegionsCount === ALL_REGION_CODES.length
-                  ? t('Выбраны все регионы РФ', 'All regions selected', locale)
-                  : selectedRegionsCount === 0
-                    ? t('Не выбран ни один регион', 'No regions selected', locale)
-                    : t(`Выбрано регионов: ${selectedRegionsCount}`, `Regions selected: ${selectedRegionsCount}`, locale)}
+            <button
+              type="button"
+              onClick={() => setRegionsModalOpen(true)}
+              className="group flex items-center gap-3 w-full border border-gray-200 rounded-xl px-5 py-4 bg-white hover:border-blue-400 hover:shadow-sm transition-all text-left"
+            >
+              <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-100 transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
+                </svg>
               </div>
-            </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold text-gray-900">{t('Регионы', 'Regions', locale)}</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {selectedRegionsCount === ALL_REGION_CODES.length
+                    ? t('Выбраны все регионы РФ', 'All regions selected', locale)
+                    : selectedRegionsCount === 0
+                      ? t('Не выбран ни один регион', 'No regions selected', locale)
+                      : t(`Выбрано: ${selectedRegionsCount}`, `Selected: ${selectedRegionsCount}`, locale)}
+                </div>
+              </div>
+              <svg className="w-5 h-5 text-gray-400 group-hover:text-blue-500 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
 
-            <div>
-              <button
-                type="button"
-                onClick={() => setActivitiesModalOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2.5 rounded inline-flex items-center gap-2"
-              >
-                {t('Виды деятельности', 'Activity types', locale)} <span>▼</span>
-              </button>
-              <div className="text-sm text-gray-500 mt-3">
-                {selectedActivitiesCount === 0
-                  ? t('Не выбран ни один вид деятельности (= все)', 'No activity types selected (= all)', locale)
-                  : t(`Выбрано: ${selectedActivitiesCount}`, `Selected: ${selectedActivitiesCount}`, locale)}
+            <button
+              type="button"
+              onClick={() => setActivitiesModalOpen(true)}
+              className="group flex items-center gap-3 w-full border border-gray-200 rounded-xl px-5 py-4 bg-white hover:border-blue-400 hover:shadow-sm transition-all text-left"
+            >
+              <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0 group-hover:bg-amber-100 transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+                </svg>
               </div>
-            </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold text-gray-900">{t('Виды деятельности', 'Activity types', locale)}</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {selectedActivitiesCount === 0
+                    ? t('Не выбрано (= все виды)', 'Not selected (= all types)', locale)
+                    : t(`Выбрано: ${selectedActivitiesCount}`, `Selected: ${selectedActivitiesCount}`, locale)}
+                </div>
+              </div>
+              <svg className="w-5 h-5 text-gray-400 group-hover:text-blue-500 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
           </div>
         ) : (
           <div>
@@ -599,36 +616,49 @@ function RegionsModal({
   }, [search]);
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
+        <div className="flex items-center justify-between px-8 pt-6 pb-3">
+          <h3 className="text-base font-semibold text-gray-900">
             {t('Регионы и города', 'Regions and cities', locale)}
           </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+          <button
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
-        <div className="px-5 pb-4">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('Быстрый поиск', 'Quick search', locale)}
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
-          />
+        <div className="px-8 pb-4">
+          <div className="relative">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t('Быстрый поиск', 'Quick search', locale)}
+              className="w-full border border-gray-200 rounded-lg pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-shadow"
+            />
+          </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 pb-5">
+        <div className="flex-1 overflow-y-auto px-8 pb-4">
           {filtered.map((district) => {
             const codes = district.regions.map((r) => r.code);
             const selectedCount = codes.filter((c) => selected.has(c)).length;
             const allSelected = selectedCount === codes.length && codes.length > 0;
             const isOpen = expanded.has(district.name);
             return (
-              <div key={district.name} className="mb-2">
-                <div className="flex items-center gap-2">
+              <div key={district.name} className="mb-1">
+                <div className="flex items-center gap-2 py-1 hover:bg-gray-50 rounded-lg px-1 -mx-1">
                   <button
                     type="button"
                     onClick={() => toggleExpand(district.name)}
-                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700"
+                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700 flex-shrink-0"
                   >
                     {isOpen ? '−' : '+'}
                   </button>
@@ -639,21 +669,21 @@ function RegionsModal({
                       if (el) el.indeterminate = !allSelected && selectedCount > 0;
                     }}
                     onChange={() => toggleDistrict(district.name)}
-                    className="w-4 h-4 accent-green-500"
+                    className="w-4 h-4 accent-blue-600 flex-shrink-0"
                   />
-                  <span className="text-sm">{district.name}</span>
+                  <span className="text-sm font-medium">{district.name}</span>
                 </div>
                 {isOpen && (
-                  <div className="ml-12 mt-1 space-y-1">
+                  <div className="ml-12 mt-0.5 space-y-0.5">
                     {district.regions.map((r) => (
-                      <label key={r.code} className="flex items-center gap-2 cursor-pointer">
+                      <label key={r.code} className="flex items-center gap-2 cursor-pointer py-0.5 hover:bg-gray-50 rounded px-1 -mx-1">
                         <input
                           type="checkbox"
                           checked={selected.has(r.code)}
                           onChange={() => toggle(r.code)}
-                          className="w-4 h-4 accent-green-500"
+                          className="w-4 h-4 accent-blue-600 flex-shrink-0"
                         />
-                        <span className="text-sm font-bold mr-1">{r.code}</span>
+                        <span className="text-sm text-gray-500 font-semibold mr-1">{r.code}</span>
                         <span className="text-sm">{r.name}</span>
                       </label>
                     ))}
@@ -663,29 +693,29 @@ function RegionsModal({
             );
           })}
         </div>
-        <div className="flex items-center justify-between p-4" style={{ boxShadow: '0 -1px 0 var(--cp-shadow-l, rgba(0,0,0,0.06))' }}>
-          <span className="text-sm text-gray-600">
-            {t(`Выбрано регионов и городов: ${selected.size}`, `Regions selected: ${selected.size}`, locale)}
+        <div className="flex items-center justify-between px-8 py-5 border-t border-gray-100">
+          <span className="text-sm text-gray-500">
+            {t(`Выбрано: ${selected.size}`, `Selected: ${selected.size}`, locale)}
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={() => onChange(new Set(ALL_REGION_CODES))}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
               {t('Все', 'All', locale)}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              className="rounded-xl bg-gray-900 px-8 py-3 text-base font-medium text-white hover:bg-gray-800 transition-colors"
             >
               {t('Готово', 'Done', locale)}
             </button>

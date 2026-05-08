@@ -196,33 +196,41 @@ export function OkvedTreeModal({ selected, onChange, onClose, locale = 'ru' }: P
   }, [selected]);
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
+        <div className="flex items-center justify-between px-8 pt-6 pb-3">
+          <h3 className="text-base font-semibold text-gray-900">
             {t('Виды деятельности по ОКВЭД-2', 'Activity types (OKVED-2)', locale)}
           </h3>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-700 text-xl leading-none"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
           >
-            &times;
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
 
-        <div className="px-5 pb-3">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('Быстрый поиск', 'Quick search', locale)}
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
-          />
+        <div className="px-8 pb-4">
+          <div className="relative">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t('Быстрый поиск', 'Quick search', locale)}
+              className="w-full border border-gray-200 rounded-lg pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-shadow"
+            />
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 pb-5">
+        <div className="flex-1 overflow-y-auto px-8 pb-4">
           {filteredTree.length === 0 && (
-            <div className="text-sm text-gray-500 py-4">
+            <div className="text-sm text-gray-500 py-8 text-center">
               {t('Ничего не найдено', 'Nothing found', locale)}
             </div>
           )}
@@ -239,29 +247,26 @@ export function OkvedTreeModal({ selected, onChange, onClose, locale = 'ru' }: P
           ))}
         </div>
 
-        <div
-          className="flex items-center justify-between p-4"
-          style={{ boxShadow: '0 -1px 0 rgba(0,0,0,0.06)' }}
-        >
-          <span className="text-sm text-gray-600">
+        <div className="flex items-center justify-between px-8 py-5 border-t border-gray-100">
+          <span className="text-sm text-gray-500">
             {t(
-              `Выбрано видов деятельности: ${totalSelected}`,
-              `Activity types selected: ${totalSelected}`,
+              `Выбрано: ${totalSelected}`,
+              `Selected: ${totalSelected}`,
               locale,
             )}
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              className="rounded-xl bg-gray-900 px-8 py-3 text-base font-medium text-white hover:bg-gray-800 transition-colors"
             >
               {t('Готово', 'Done', locale)}
             </button>
