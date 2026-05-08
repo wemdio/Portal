@@ -33,6 +33,7 @@ export type ExtractorKey =
   | 'profile'
   | 'customers'
   | 'cases_count'
+  | 'case_industries'
   | 'enterprise_logos'
   | 'pricing_model'
   | 'pricing_min'
@@ -49,6 +50,7 @@ export const ALL_EXTRACTOR_KEYS: ExtractorKey[] = [
   'profile',
   'customers',
   'cases_count',
+  'case_industries',
   'enterprise_logos',
   'pricing_model',
   'pricing_min',
@@ -67,6 +69,7 @@ export const EXTRACTOR_TO_SUBPAGES: Record<ExtractorKey, SubpageKind[]> = {
   profile: [],
   customers: ['cases'],
   cases_count: ['cases'],
+  case_industries: ['cases'],
   enterprise_logos: ['cases'],
   pricing_model: ['pricing'],
   pricing_min: ['pricing'],
@@ -101,6 +104,7 @@ export const EXTRACTOR_LABELS: Record<ExtractorKey, string> = {
   profile: 'Профиль',
   customers: 'Клиенты',
   cases_count: 'Кол-во кейсов',
+  case_industries: 'Отрасли в кейсах',
   enterprise_logos: 'Enterprise-логотипы',
   pricing_model: 'Модель продаж',
   pricing_min: 'Цена min',
@@ -136,18 +140,27 @@ export const BUILTIN_PRESETS: Readonly<Record<SignalPresetId, SignalPreset>> = {
   outreach: {
     id: 'outreach',
     name: 'Outreach',
-    description: 'Стек + Профиль + клиенты, цены, найм — для персонализации писем.',
-    extractors: ['stack', 'profile', 'customers', 'pricing_model', 'hiring_roles', 'vacancies_count'],
+    description: 'Стек + Профиль + клиенты, отрасли в кейсах, цены, найм — для персонализации писем.',
+    extractors: [
+      'stack',
+      'profile',
+      'customers',
+      'case_industries',
+      'pricing_model',
+      'hiring_roles',
+      'vacancies_count',
+    ],
   },
   audit: {
     id: 'audit',
     name: 'Аудит',
-    description: 'Максимум сигналов: клиенты, кейсы, цены, интеграции, найм, возраст компании.',
+    description: 'Максимум сигналов: клиенты, кейсы, отрасли, цены, интеграции, найм, возраст компании.',
     extractors: [
       'stack',
       'profile',
       'customers',
       'cases_count',
+      'case_industries',
       'enterprise_logos',
       'pricing_model',
       'pricing_min',
@@ -182,7 +195,7 @@ export const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     id: 'customers',
     title: 'Клиенты и кейсы',
     description: 'Подгружает /cases, /clients, /portfolio.',
-    extractors: ['customers', 'cases_count', 'enterprise_logos'],
+    extractors: ['customers', 'cases_count', 'case_industries', 'enterprise_logos'],
   },
   {
     id: 'pricing',
@@ -228,6 +241,7 @@ export interface ExtractedData {
 
   customers?: string[];
   cases_count?: number;
+  case_industries?: string[];
   enterprise_logos?: boolean;
 
   pricing_model?: PricingModel;

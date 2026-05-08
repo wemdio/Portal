@@ -11,7 +11,17 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
+import { Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
+import {
+  loadAllProjectsPace,
+  loadContactsPaceData,
+  loadKpiPaceData,
+  summarizeProjectRisk,
+  type PaceData,
+  type ProjectPace,
+  type ProjectPaceInput,
+} from '@/lib/projects/paceCalculator';
 
 type ViewMode = 'table' | 'cards' | 'kanban';
 
@@ -32,22 +42,13 @@ function KpiPaceTooltip({
     if (pace || loading || kpiPlan <= 0) return;
     setLoading(true);
     try {
-      const { data } = await supabase
-        .from('project_contacts_history')
-        .select('kpi_fact, recorded_at')
-        .eq('project_id', projectId)
-        .not('kpi_fact', 'is', null)
-        .order('recorded_at', { ascending: true })
-        .limit(90);
-      if (data) {
-        const mapped = data
-          .filter((r: { kpi_fact: number | null }) => r.kpi_fact !== null)
-          .map((r: { kpi_fact: number | null; recorded_at: string }) => ({
-            contacts_done: r.kpi_fact!,
-            recorded_at: r.recorded_at,
-          }));
-        setPace(computePace(mapped, kpiPlan, kpiFact, deadline));
-      }
+      const result = await loadKpiPaceData(supabase, {
+        projectId,
+        kpiPlan,
+        kpiFact,
+        deadline,
+      });
+      if (result) setPace(result);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   };
@@ -122,65 +123,6 @@ function KpiPaceTooltip({
 
 /* ── Contacts pace tooltip (hover on contacts cell) ── */
 
-interface PaceData {
-  avgPerDay: number;
-  remaining: number;
-  forecastDays: number | null;
-  forecastDate: string | null;
-  deadline: string | null;
-  onTrack: boolean | null;
-  requiredPace: number | null;
-  dataPoints: number;
-  periodDays: number;
-}
-
-function computePace(
-  history: { contacts_done: number; recorded_at: string }[],
-  obligation: number,
-  currentDone: number,
-  deadline: string | null,
-): PaceData {
-  const sorted = [...history].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
-  const remaining = Math.max(0, obligation - currentDone);
-  const base: PaceData = {
-    avgPerDay: 0, remaining, forecastDays: null, forecastDate: null,
-    deadline, onTrack: null, requiredPace: null, dataPoints: sorted.length, periodDays: 0,
-  };
-  if (sorted.length < 2) return base;
-
-  const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  const daysDiff = Math.max(1, Math.round(
-    (new Date(last.recorded_at).getTime() - new Date(first.recorded_at).getTime()) / 86400000,
-  ));
-  const delta = last.contacts_done - first.contacts_done;
-  const avgPerDay = Math.round(delta / daysDiff);
-  base.avgPerDay = avgPerDay;
-  base.periodDays = daysDiff;
-
-  if (avgPerDay > 0 && remaining > 0) {
-    const forecastDays = Math.ceil(remaining / avgPerDay);
-    const forecastDate = new Date(Date.now() + forecastDays * 86400000);
-    base.forecastDays = forecastDays;
-    base.forecastDate = forecastDate.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-  } else if (remaining === 0) {
-    base.forecastDays = 0;
-    base.forecastDate = 'выполнено';
-  }
-
-  if (deadline) {
-    const dlDate = new Date(deadline);
-    if (!isNaN(dlDate.getTime())) {
-      const daysUntilDeadline = Math.max(0, Math.ceil((dlDate.getTime() - Date.now()) / 86400000));
-      base.requiredPace = daysUntilDeadline > 0 ? Math.ceil(remaining / daysUntilDeadline) : null;
-      if (base.forecastDays !== null) {
-        base.onTrack = base.forecastDays <= daysUntilDeadline;
-      }
-    }
-  }
-  return base;
-}
-
 function ContactsPaceTooltip({
   projectId, obligation, done, deadline, children,
 }: {
@@ -196,13 +138,13 @@ function ContactsPaceTooltip({
     if (pace || loading || obligation <= 0) return;
     setLoading(true);
     try {
-      const { data } = await supabase
-        .from('project_contacts_history')
-        .select('contacts_done, recorded_at')
-        .eq('project_id', projectId)
-        .order('recorded_at', { ascending: true })
-        .limit(90);
-      if (data) setPace(computePace(data, obligation, done, deadline));
+      const result = await loadContactsPaceData(supabase, {
+        projectId,
+        obligation,
+        done,
+        deadline,
+      });
+      if (result) setPace(result);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   };
@@ -379,6 +321,15 @@ function AssigneeAvatar({
 
 function isCompletedStatus(status: string | null | undefined): boolean {
   return normalizeStatus(status).includes('заверш');
+}
+
+function pluralizeDays(n: number): string {
+  const abs = Math.abs(n) % 100;
+  const last = abs % 10;
+  if (abs > 10 && abs < 20) return 'дн.';
+  if (last === 1) return 'день';
+  if (last >= 2 && last <= 4) return 'дня';
+  return 'дн.';
 }
 
 function getDeadlineStatus(deadline: string | null | undefined): 'overdue' | 'soon' | 'ok' | null {
@@ -684,6 +635,10 @@ export function ProjectList() {
   const [taskDeadlineDefaultAt, setTaskDeadlineDefaultAt] = useState('');
   const [taskDeadlineDefaultTime, setTaskDeadlineDefaultTime] = useState('12:00');
 
+  // Bulk-loaded pace per project (заполняется один раз после fetchProjects).
+  // Питает индикатор риска "не успеваем" между колонками KPI Факт и Контакты.
+  const [paceByProjectId, setPaceByProjectId] = useState<Map<string, ProjectPace>>(new Map());
+
   const [projectNotes, setProjectNotes] = useState<Record<string, ProjectNote[]>>({});
   const [notePopoverId, setNotePopoverId] = useState<string | null>(null);
   const [notePopoverPos, setNotePopoverPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
@@ -704,6 +659,44 @@ export function ProjectList() {
     // Intentionally run once on mount; fetchers are stable in behavior
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Bulk-load pace для всех проектов. Один запрос к project_contacts_history
+  // → индикатор риска у строки получает данные мгновенно (без on-hover).
+  // Re-runs при изменении project IDs или их числовых KPI/contacts полей —
+  // редактирование тех же полей сразу обновляет иконку.
+  const paceInputsKey = projects
+    .map(
+      (p) =>
+        `${p.id}|${p.contacts_obligation ?? ''}|${p.contacts_done ?? ''}|${p.kpi_plan ?? ''}|${p.kpi_fact ?? ''}|${p.deadline ?? ''}`,
+    )
+    .join(';');
+  useEffect(() => {
+    if (projects.length === 0) {
+      setPaceByProjectId(new Map());
+      return;
+    }
+    let cancelled = false;
+    const inputs: ProjectPaceInput[] = projects.map((p) => ({
+      projectId: p.id,
+      contactsObligation: parseInt(p.contacts_obligation ?? '0', 10) || 0,
+      contactsDone: parseInt(p.contacts_done ?? '0', 10) || 0,
+      kpiPlan: parseInt(p.kpi_plan ?? '0', 10) || 0,
+      kpiFact: parseInt(p.kpi_fact ?? '0', 10) || 0,
+      deadline: p.deadline ?? null,
+    }));
+    void loadAllProjectsPace(supabase, inputs)
+      .then((result) => {
+        if (!cancelled) setPaceByProjectId(result);
+      })
+      .catch(() => {
+        // graceful: tooltip всё равно работает on-hover, индикатор просто не покажется
+        if (!cancelled) setPaceByProjectId(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paceInputsKey]);
 
   useEffect(() => {
     const interval = setInterval(() => void fetchSignedAvatars(), 30 * 60 * 1000);
@@ -1518,6 +1511,8 @@ export function ProjectList() {
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Deadline' : 'Дедлайн'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[80px]">{locale === 'en' ? 'KPI Plan' : 'KPI План'}</th>
                   <th className="px-2 py-3 text-center text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[70px]">{locale === 'en' ? 'KPI Fact' : 'KPI Факт'}</th>
+                  {/* Risk indicator (Clock icon when project is behind schedule). Header пуст — иконка self-explanatory. */}
+                  <th className="px-1 py-3 w-6" aria-label={locale === 'en' ? 'Risk' : 'Риск'} />
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[100px]">{locale === 'en' ? 'Contacts' : 'Контакты'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Specialist' : 'Специалист'}</th>
                   <th className="px-2 py-3 text-left text-[10px] font-semibold text-zinc-400 uppercase tracking-wider min-w-[120px]">{locale === 'en' ? 'Lead (PM)' : 'Лид (PM)'}</th>
@@ -1759,6 +1754,36 @@ export function ProjectList() {
                             )}
                           </div>
                           </KpiPaceTooltip>
+                          );
+                        })()}
+                      </td>
+                      <td className="px-1 py-3 align-middle text-center">
+                        {(() => {
+                          const risk = summarizeProjectRisk(
+                            paceByProjectId.get(project.id),
+                            isCompletedStatus(project.status),
+                          );
+                          if (risk.axes.length === 0) return null;
+                          const axisLabel =
+                            risk.axes.length === 2
+                              ? 'KPI и контактам'
+                              : risk.axes[0] === 'kpi'
+                              ? 'KPI'
+                              : 'контактам';
+                          const tail =
+                            risk.daysBehind > 0
+                              ? ` на ${risk.daysBehind} ${pluralizeDays(risk.daysBehind)}`
+                              : '';
+                          const tooltip = `Не успеваем по ${axisLabel}${tail}`;
+                          return (
+                            <span
+                              role="img"
+                              aria-label={tooltip}
+                              title={tooltip}
+                              className="inline-flex items-center justify-center cursor-help"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-red-500" strokeWidth={1.75} aria-hidden="true" />
+                            </span>
                           );
                         })()}
                       </td>

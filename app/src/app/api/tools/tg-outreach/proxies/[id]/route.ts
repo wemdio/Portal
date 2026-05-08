@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
+import { authenticateRequest, jsonError, normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -23,7 +23,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         }
       
         const update: Record<string, unknown> = {};
-        if (body.url !== undefined) update.url = body.url;
+        if (body.url !== undefined) update.url = normalizeProxyUrl(String(body.url));
         if (body.name !== undefined) update.name = body.name;
         if (body.is_active !== undefined) update.is_active = body.is_active;
       

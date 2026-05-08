@@ -134,19 +134,76 @@ export function findColumnIndex(header: string[], ...names: string[]): number {
   return -1;
 }
 
+export interface ProcessInPoolOptions<T, R> {
+  /**
+   * Hard ceiling per task (ms). After this the worker abandons the in-flight
+   * promise and writes a sentinel into the slot — keeps the pool moving when
+   * an item silently hangs (e.g. tarpit proxy that holds the TCP socket open
+   * without responding).
+   *
+   * NB: this does NOT cancel the underlying work — for that, `fn` itself must
+   * accept and honor an AbortSignal. We pass one via `fn(item, i, signal)` so
+   * implementations can wire it into their own fetch/AbortController.
+   *
+   * Defaults to no timeout (legacy behavior) when not set.
+   */
+  taskTimeoutMs?: number;
+  /**
+   * Sentinel value written into `results[i]` when the timeout fires.
+   * Must return an `R` so the result array stays well-typed. Default: returns
+   * `undefined as R` — fine for callers that already mutate side-state inside
+   * `fn` (most enrich/scrape callsites do).
+   */
+  onTimeout?: (item: T, index: number) => R;
+}
+
 export async function processInPool<T, R>(
   items: T[],
   concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
+  fn: (item: T, index: number, signal?: AbortSignal) => Promise<R>,
+  opts?: ProcessInPoolOptions<T, R>,
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
+  const taskTimeoutMs = opts?.taskTimeoutMs ?? 0;
+  const onTimeout = opts?.onTimeout;
   let nextIdx = 0;
+
+  async function runOne(i: number): Promise<R> {
+    if (taskTimeoutMs <= 0) return fn(items[i], i);
+
+    const controller = new AbortController();
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<R>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        controller.abort();
+        const sentinel = onTimeout ? onTimeout(items[i], i) : (undefined as unknown as R);
+        resolve(sentinel);
+      }, taskTimeoutMs);
+    });
+    try {
+      const winner = await Promise.race([
+        fn(items[i], i, controller.signal),
+        timeoutPromise,
+      ]);
+      return winner;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
+  }
+
   async function worker() {
     while (nextIdx < items.length) {
       const i = nextIdx++;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await runOne(i);
+      } catch {
+        // Task threw — keep its slot undefined so the caller's own
+        // try/catch inside `fn` is the source of truth for per-item errors.
+        // We still must catch here, otherwise one bad task kills the pool.
+      }
     }
   }
+
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
   return results;
 }

@@ -63,7 +63,16 @@ interface ConstructorJob {
   current_step_progress: number;
   total_steps: number;
   initial_row_count: number;
-  result_stats?: { total_rows: number; emails_found: number; avg_ta_score: number; columns: number };
+  result_stats?: {
+    total_rows: number;
+    emails_found: number;
+    avg_ta_score: number;
+    columns: number;
+    /** ta_scoring телеметрия — заполняется только когда был шаг ta_scoring. */
+    ta_scoring_pre_filter_rows?: number;
+    ta_scoring_filtered_out?: number;
+    ta_scoring_pre_filter_avg?: number;
+  };
   error_message?: string;
   created_at: string;
   completed_at?: string;
@@ -305,6 +314,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   const [selectedSteps, setSelectedSteps] = useState<StepKey[]>([]);
   const [brief, setBrief] = useState('');
+  const [keepAllScored, setKeepAllScored] = useState(false);
   const [briefInputMode, setBriefInputMode] = useState<'pdf' | 'text' | 'saved'>(
     clientMode ? 'saved' : 'pdf',
   );
@@ -586,8 +596,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     setSubmitting(true);
     setError('');
     try {
-      const stepConfig: Record<string, string> = {};
+      // step_config принимает в БД произвольный jsonb — кладём смешанные типы.
+      const stepConfig: Record<string, unknown> = {};
       if (selectedSteps.includes('ta_scoring') && brief.trim()) stepConfig.brief = brief.trim();
+      if (selectedSteps.includes('ta_scoring') && keepAllScored) stepConfig.keepAllScored = true;
       if (selectedSteps.includes('personalization') && prompt.trim()) stepConfig.prompt = prompt.trim();
       if (Object.keys(columnMapping).length > 0) stepConfig.column_mapping = JSON.stringify(columnMapping);
 
@@ -1182,6 +1194,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white resize-none"
                         />
                       )}
+                      <label className="mt-3 flex items-start gap-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={keepAllScored}
+                          onChange={(e) => setKeepAllScored(e.target.checked)}
+                          className="mt-0.5 w-4 h-4 rounded border-gray-300 text-violet-600 focus:ring-violet-400"
+                        />
+                        <span className="text-xs text-gray-700 leading-snug">
+                          Сохранить все оценённые компании (без фильтра 7+)
+                          <span className="block text-[11px] text-gray-500 mt-0.5">
+                            По умолчанию AI оставляет только баллы 7–10. Включите, чтобы получить файл со всеми компаниями и их оценками — сами решите кого взять.
+                          </span>
+                        </span>
+                      </label>
                     </div>
                   )}
                   {needsPrompt && (
@@ -1374,6 +1400,42 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 </p>
               </div>
             </div>
+
+            {/* TA scoring telemetry — отдельным блоком, чтобы пользователь видел
+                что AI оценил, какие средние, и сколько отфильтровалось */}
+            {typeof activeJob.result_stats?.ta_scoring_pre_filter_rows === 'number' && (
+              <div className="bg-blue-50 rounded-2xl border border-blue-200 p-5">
+                <p className="text-sm font-semibold text-blue-900 mb-2">Оценка ЦА — детали</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+                  <div>
+                    <p className="text-xs text-blue-700">AI оценил</p>
+                    <p className="font-bold text-blue-900">
+                      {activeJob.result_stats.ta_scoring_pre_filter_rows} компаний
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-blue-700">Средний балл (до фильтра)</p>
+                    <p className="font-bold text-blue-900">
+                      {activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-blue-700">Отфильтровано (ниже 7)</p>
+                    <p className="font-bold text-blue-900">
+                      {activeJob.result_stats.ta_scoring_filtered_out ?? 0}
+                    </p>
+                  </div>
+                </div>
+                {activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
+                  <p className="mt-3 text-xs text-blue-800">
+                    Все компании AI оценил ниже 7 — это значит, что либо бриф не подходит к базе,
+                    либо описаний компаний (шаг «Обогатить описаниями») мало для уверенной оценки.
+                    Можно перезапустить с галкой «Сохранить все оценённые», чтобы получить файл со всеми
+                    компаниями и их баллами и решить вручную.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex items-center gap-3 flex-wrap">

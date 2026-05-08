@@ -227,4 +227,142 @@ describe('syncProjectContactsFromInstantly', () => {
     // Никаких UPDATE по contacts_done не должно произойти.
     expect(mainDb.getRows('projects')[0].contacts_done).toBe('50');
   });
+
+  /* ── History snapshot contract (Bug 2: пиши снапшоты и для не-Instantly проектов) ── */
+
+  describe('project_contacts_history daily snapshot', () => {
+    const TODAY = '2026-04-26';
+
+    it('writes a snapshot for an Instantly-linked project using the synced sum', async () => {
+      const mainDb = createMockSupabase({
+        tables: {
+          projects: [
+            { id: 'p1', name: 'Acme', contacts_done: '0', kpi_fact: '5' },
+          ],
+          project_contacts_history: [],
+        },
+      });
+      const instantlyDb = createMockSupabase({
+        tables: {
+          project_instantly_campaigns: [
+            { project_id: 'p1', campaign_id: 'c1' },
+            { project_id: 'p1', campaign_id: 'c2' },
+          ],
+          instantly_campaign_catalog: [
+            { id: 'c1', new_leads_contacted_count: 120 },
+            { id: 'c2', new_leads_contacted_count: 80 },
+          ],
+        },
+      });
+
+      await syncProjectContactsFromInstantly({
+        mainDb: mainDb as never,
+        instantlyDb: instantlyDb as never,
+        now: NOW,
+      });
+
+      const history = mainDb.getRows('project_contacts_history');
+      const p1Snap = history.find((h) => h.project_id === 'p1');
+      expect(p1Snap).toBeDefined();
+      expect(p1Snap?.contacts_done).toBe(200);
+      expect(p1Snap?.kpi_fact).toBe(5);
+      expect(p1Snap?.recorded_at).toBe(TODAY);
+    });
+
+    it('writes a snapshot for projects WITHOUT Instantly links from manual contacts_done/kpi_fact', async () => {
+      // Колди / Тригга кейс: специалист руками заполняет поля 1-2 раза в неделю.
+      // Cron должен пиннить эти значения как ежедневные снапшоты, чтобы tooltip
+      // на странице "Проекты" мог показывать темп.
+      const mainDb = createMockSupabase({
+        tables: {
+          projects: [
+            { id: 'koldi', name: 'Колди', contacts_done: '777', kpi_fact: '42' },
+            { id: 'trigga', name: 'Тригга', contacts_done: '500', kpi_fact: null },
+          ],
+          project_contacts_history: [],
+        },
+      });
+      const instantlyDb = createMockSupabase({
+        tables: { project_instantly_campaigns: [], instantly_campaign_catalog: [] },
+      });
+
+      await syncProjectContactsFromInstantly({
+        mainDb: mainDb as never,
+        instantlyDb: instantlyDb as never,
+        now: NOW,
+      });
+
+      const history = mainDb.getRows('project_contacts_history');
+      const koldi = history.find((h) => h.project_id === 'koldi');
+      const trigga = history.find((h) => h.project_id === 'trigga');
+      expect(koldi).toEqual(
+        expect.objectContaining({
+          project_id: 'koldi',
+          contacts_done: 777,
+          kpi_fact: 42,
+          recorded_at: TODAY,
+        }),
+      );
+      expect(trigga).toEqual(
+        expect.objectContaining({
+          project_id: 'trigga',
+          contacts_done: 500,
+          kpi_fact: null,
+          recorded_at: TODAY,
+        }),
+      );
+    });
+
+    it('skips projects whose contacts_done is empty / non-numeric (nothing to snapshot)', async () => {
+      const mainDb = createMockSupabase({
+        tables: {
+          projects: [
+            { id: 'p1', contacts_done: '', kpi_fact: null }, // brand-new project
+            { id: 'p2', contacts_done: null, kpi_fact: '10' },
+            { id: 'p3', contacts_done: 'foo', kpi_fact: null },
+          ],
+          project_contacts_history: [],
+        },
+      });
+      const instantlyDb = createMockSupabase({
+        tables: { project_instantly_campaigns: [], instantly_campaign_catalog: [] },
+      });
+
+      await syncProjectContactsFromInstantly({
+        mainDb: mainDb as never,
+        instantlyDb: instantlyDb as never,
+        now: NOW,
+      });
+
+      expect(mainDb.getRows('project_contacts_history')).toHaveLength(0);
+    });
+
+    it('upserts on (project_id, recorded_at) so re-running the cron is idempotent', async () => {
+      const mainDb = createMockSupabase({
+        tables: {
+          projects: [{ id: 'p1', contacts_done: '100', kpi_fact: '7' }],
+          // Same-day snapshot already recorded earlier in the day.
+          project_contacts_history: [
+            { project_id: 'p1', contacts_done: 90, kpi_fact: 6, recorded_at: TODAY },
+          ],
+        },
+      });
+      const instantlyDb = createMockSupabase({
+        tables: { project_instantly_campaigns: [], instantly_campaign_catalog: [] },
+      });
+
+      await syncProjectContactsFromInstantly({
+        mainDb: mainDb as never,
+        instantlyDb: instantlyDb as never,
+        now: NOW,
+      });
+
+      const history = mainDb.getRows('project_contacts_history');
+      const p1Snaps = history.filter((h) => h.project_id === 'p1' && h.recorded_at === TODAY);
+      expect(p1Snaps).toHaveLength(1);
+      expect(p1Snaps[0]).toEqual(
+        expect.objectContaining({ contacts_done: 100, kpi_fact: 7 }),
+      );
+    });
+  });
 });

@@ -1080,6 +1080,31 @@ async def run_sync(manual: bool = False) -> dict:
         return result
 
 
+def should_notify(result: dict, manual: bool) -> bool:
+    """
+    Decide whether a finished sync run should ping Telegram.
+
+    Manual triggers and crashes always notify so on-call sees them fast.
+    Otherwise we only notify on real *deltas* — campaigns added/removed,
+    Instantly API errors, or failed client-leads syncs.
+
+    NOTE: `leads_total` is the count of leads pulled this cycle for client
+    sync. It is informational, not a delta — it's > 0 on essentially every
+    run when active clients have campaigns, so including it would turn the
+    bot into a per-cycle spammer once the interval drops below ~12 hours.
+    """
+    if manual:
+        return True
+    if result.get("status") == "error":
+        return True
+    return (
+        result.get("added", 0) > 0
+        or result.get("removed", 0) > 0
+        or result.get("api_errors", 0) > 0
+        or result.get("leads_campaigns_failed", 0) > 0
+    )
+
+
 async def _run_sync_and_report(manual: bool = False) -> None:
     global _last_sync_result
 
@@ -1092,15 +1117,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
         result = await run_sync(manual=manual)
         _last_sync_result = result
 
-        has_changes = (
-            result.get("added", 0) > 0
-            or result.get("removed", 0) > 0
-            or result.get("api_errors", 0) > 0
-            or result.get("leads_campaigns_failed", 0) > 0
-            or result.get("leads_total", 0) > 0
-        )
-
-        if manual or result.get("status") == "error" or has_changes:
+        if should_notify(result, manual):
             await send_telegram(_format_sync_result(result))
         else:
             print(f"[sync] No changes — Telegram notification skipped")

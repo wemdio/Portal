@@ -10,6 +10,7 @@ import {
 } from '@/lib/enrich/extractors/types';
 import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
+import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
 import { detectEnterpriseLogos } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
@@ -194,6 +195,9 @@ export async function processSignalsForUrl(
   }
   if (extractors.includes('cases_count')) {
     out.cases_count = subpageHtml.cases ? extractCasesCount(subpageHtml.cases) : 0;
+  }
+  if (extractors.includes('case_industries')) {
+    out.case_industries = subpageHtml.cases ? extractCaseIndustries(subpageHtml.cases) : [];
   }
   if (extractors.includes('enterprise_logos')) {
     const cust = out.customers ?? (subpageHtml.cases ? extractCustomers(subpageHtml.cases) : []);

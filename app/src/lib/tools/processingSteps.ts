@@ -33,6 +33,18 @@ const SITE_CHECK_TIMEOUT = 12_000;
 
 const EMAIL_CONCURRENCY = 5;
 const ENRICH_CONCURRENCY = 5;
+/**
+ * Hard ceiling per site for enrich. fetchAndExtract internally tries main +
+ * www + http variants + up to N about-page candidates with retries — each
+ * with its own 8s soft timeout. Worst-case the chain can stretch to a
+ * minute+ for a single tarpit/proxy-blocked site, blocking one worker slot.
+ * With concurrency=5, if all five slots latch onto such hosts at once, the
+ * step's `await processInPool(...)` never returns and the whole job hangs.
+ *
+ * 60s is generous enough for honest slow servers but caps the catastrophic
+ * tail. Worker abandons the in-flight promise and moves on.
+ */
+const ENRICH_PER_SITE_TIMEOUT_MS = 60_000;
 const SITE_CHECK_BATCH = 50;
 const TA_BATCH = 10;
 const CLEANUP_BATCH = 100;
@@ -293,13 +305,22 @@ export async function stepEnrich(
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
   let done = 0;
+  let timedOut = 0;
   const checkpointEvery = 250;
-  await processInPool(toProcess, ENRICH_CONCURRENCY, async (item) => {
+  await processInPool(toProcess, ENRICH_CONCURRENCY, async (item, _i, signal) => {
     if (isCancelled && await isCancelled()) return;
     try {
-      const text = await fetchAndExtract(item.url, { timeout: 15_000 });
+      // signal comes from the pool's per-task watchdog. Pass it down so a
+      // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
+      const text = await fetchAndExtract(item.url, { timeout: 15_000, signal });
       if (text) newBody[item.i][targetDescIdx] = text.slice(0, 2000);
-    } catch { /* skip */ }
+    } catch (err) {
+      if (signal?.aborted) {
+        timedOut += 1;
+        // No log per-site to avoid spamming — aggregate count printed below.
+      }
+      // Other errors silently skipped: site is unreachable / blocked.
+    }
     done++;
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
@@ -307,7 +328,15 @@ export async function stepEnrich(
     if (onCheckpoint && (done % checkpointEvery === 0 || done === toProcess.length)) {
       await onCheckpoint([newHeader, ...newBody]);
     }
+  }, {
+    taskTimeoutMs: ENRICH_PER_SITE_TIMEOUT_MS,
   });
+
+  if (timedOut > 0) {
+    console.warn(
+      `[stepEnrich] ${timedOut}/${toProcess.length} sites hit the ${ENRICH_PER_SITE_TIMEOUT_MS}ms hard timeout (probably proxy tarpits or unresponsive servers).`,
+    );
+  }
 
   await onProgress(100);
   return [newHeader, ...newBody];
@@ -335,11 +364,33 @@ const TA_SYSTEM_PROMPT = `Ты — эксперт по B2B лидогенера�
 ФОРМАТ ОТВЕТА: Только JSON массив, без пояснений.
 [{"idx": 0, "score": 7, "reason": "краткое обоснование на русском"}]`;
 
+export interface StepTAScoreOptions {
+  /**
+   * Когда true — НЕ фильтровать по порогу 7+, оставить все оценённые строки
+   * с проставленными колонками «ЦА Балл» / «ЦА Причина». Полезно когда
+   * сотрудник хочет сам решить, кого оставить, или для дебага брифа
+   * (видно, что AI ставит большинству низкие баллы).
+   */
+  keepAllScored?: boolean;
+  /**
+   * Колбэк для телеметрии: pre_filter_rows / filtered_out / avg_score.
+   * Worker сохраняет это в `result_stats`, чтобы UI мог показать «AI оценил
+   * N компаний, средний балл X.X, ниже порога — отфильтровано M». Без этого
+   * пустой результат выглядел как «инструмент сломался».
+   */
+  onStats?: (stats: {
+    pre_filter_rows: number;
+    filtered_out_count: number;
+    pre_filter_avg_score: number;
+  }) => void;
+}
+
 export async function stepTAScore(
   data: string[][],
   brief: string,
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepTAScoreOptions,
 ): Promise<string[][]> {
   const header = data[0];
   const body = data.slice(1);
@@ -386,9 +437,28 @@ export async function stepTAScore(
   }
 
   const TA_MIN_SCORE = 7;
-  const filtered = scored.filter((row) => {
-    const score = parseInt(row[newHeader.length - 2], 10);
-    return !isNaN(score) && score >= TA_MIN_SCORE;
+  const scoreColIdx = newHeader.length - 2;
+
+  // Pre-filter telemetry
+  const preFilterRows = scored.length;
+  let scoreSum = 0;
+  for (const row of scored) {
+    const v = parseInt(row[scoreColIdx], 10);
+    if (!isNaN(v)) scoreSum += v;
+  }
+  const preFilterAvg = preFilterRows > 0 ? scoreSum / preFilterRows : 0;
+
+  const filtered = options?.keepAllScored
+    ? scored
+    : scored.filter((row) => {
+        const score = parseInt(row[scoreColIdx], 10);
+        return !isNaN(score) && score >= TA_MIN_SCORE;
+      });
+
+  options?.onStats?.({
+    pre_filter_rows: preFilterRows,
+    filtered_out_count: preFilterRows - filtered.length,
+    pre_filter_avg_score: preFilterAvg,
   });
 
   await onProgress(100);

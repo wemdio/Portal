@@ -220,3 +220,67 @@ def test_concurrency_default_is_eight():
     for Instantly's rate limit on a 1700-campaign workspace."""
     assert main.ANALYTICS_FALLBACK_CONCURRENCY >= 4
     assert main.ANALYTICS_FALLBACK_CONCURRENCY <= 16
+
+
+# ── should_notify (Telegram throttling) ──────────────────────────────────────
+#
+# Background (May 2026): the previous implementation considered every cycle
+# where `leads_total > 0` as "has changes", which is true on essentially
+# every cycle when active clients have campaigns. With INSTANTLY_SYNC_INTERVAL_SEC
+# at 43200 (12h) that meant ~2 Telegram messages/day — tolerable. Lowering the
+# interval to 3600 (1h) would have made the bot spam ~24 messages/day.
+#
+# `should_notify(result, manual)` is a pure function that decides when the
+# scheduled sync should ping Telegram. Manual triggers and errors always
+# notify; otherwise we only notify on real *deltas* (added/removed campaigns,
+# api errors, failed leads syncs). The total leads count is informational, not
+# a delta, so it must NOT trigger on its own.
+
+def _ok(**overrides: object) -> dict:
+    base = {
+        "status": "ok",
+        "added": 0,
+        "removed": 0,
+        "updated": 0,
+        "api_errors": 0,
+        "leads_campaigns_failed": 0,
+        "leads_total": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_should_notify_quiet_when_nothing_changed():
+    """Regression: scheduled run with leads but no deltas must NOT notify."""
+    assert main.should_notify(_ok(leads_total=1549), manual=False) is False
+    assert main.should_notify(_ok(), manual=False) is False
+
+
+def test_should_notify_on_added_or_removed_campaigns():
+    assert main.should_notify(_ok(added=1), manual=False) is True
+    assert main.should_notify(_ok(removed=1), manual=False) is True
+
+
+def test_should_notify_on_api_errors():
+    assert main.should_notify(_ok(api_errors=3), manual=False) is True
+
+
+def test_should_notify_on_leads_sync_failures():
+    assert main.should_notify(_ok(leads_campaigns_failed=1), manual=False) is True
+
+
+def test_should_notify_on_status_error():
+    """If the whole sync crashed, always notify so on-call sees it fast."""
+    err = {"status": "error", "error": "boom"}
+    assert main.should_notify(err, manual=False) is True
+
+
+def test_should_notify_on_manual_trigger():
+    """`/sync` from Telegram should always echo the result back to the user."""
+    assert main.should_notify(_ok(leads_total=0), manual=True) is True
+
+
+def test_default_sync_interval_is_one_hour():
+    """`.env` on prod should set INSTANTLY_SYNC_INTERVAL_SEC=3600. The code
+    enforces a 1h floor (MIN_SYNC_INTERVAL_SEC); the unset-default also matches."""
+    assert main.MIN_SYNC_INTERVAL_SEC == 3600
