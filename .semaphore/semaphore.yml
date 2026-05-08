@@ -18,6 +18,7 @@ blocks:
         commands:
           - checkout
           - sem-version node 22
+          - npm install -g npm@latest
           - ROOT_DIR="$(pwd)"
           - 'if [ -d "${ROOT_DIR}/app" ]; then APP_PATH="${ROOT_DIR}/app"; else APP_REL_PATH=$(find "${ROOT_DIR}" -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$APP_REL_PATH"; else echo "app folder not found!"; exit 1; fi; fi'
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
