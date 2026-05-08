@@ -16,6 +16,7 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
   switch (key) {
     case 'customers':
     case 'integrations':
+    case 'case_industries':
       return Array.isArray(value) ? value.filter((s) => typeof s === 'string').join(', ') : '';
     case 'enterprise_logos':
     case 'free_trial':
