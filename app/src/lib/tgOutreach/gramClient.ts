@@ -6,8 +6,8 @@ import { readSqliteSession } from '@/lib/telegram/sessionUtils';
 import { HttpConnectSocket } from './httpProxySocket';
 import type { OutreachAccount, OutreachProxy } from './types';
 
-const HEARTBEAT_PATH = '/tmp/tg-outreach-heartbeat';
-function writeHeartbeat() {
+export const HEARTBEAT_PATH = '/tmp/tg-outreach-heartbeat';
+export function writeHeartbeat() {
   try { fs.writeFileSync(HEARTBEAT_PATH, Date.now().toString()); } catch { /* ignore */ }
 }
 

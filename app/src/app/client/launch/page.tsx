@@ -154,6 +154,9 @@ export default function ClientLaunchPage() {
   const [launchError, setLaunchError] = useState('');
   const [result, setResult] = useState<LaunchResult | null>(null);
 
+  // Brief status drives an inline tip in Step 3. Null until first fetch.
+  const [briefFilled, setBriefFilled] = useState<boolean | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ─── Load preset + history ───────────────────────────────────────────────
@@ -197,6 +200,24 @@ export default function ClientLaunchPage() {
     void loadPreset();
     void loadHistory();
   }, [loadPreset, loadHistory]);
+
+  // Fire-and-forget: fetch onboarding status to know whether the brief is
+  // filled. Drives the inline tip shown in the Sequence step. Failures are
+  // silent — the tip just won't show.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await clientApiFetch<{ items: { id: string; done: boolean }[] }>(
+          '/onboarding/status',
+        );
+        if (cancelled) return;
+        const brief = res.items.find((i) => i.id === 'brief');
+        setBriefFilled(brief?.done ?? null);
+      } catch { /* ignore — non-critical */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // ─── File upload ────────────────────────────────────────────────────────
   async function handleFile(file: File) {
@@ -447,15 +468,23 @@ export default function ClientLaunchPage() {
   if (!preset || preset.email_account_ids.length === 0) {
     return (
       <div className="mx-auto max-w-5xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8">Запуск кампаний</h1>
-        <div className="neu-card py-16 sm:py-24 text-center px-6">
+        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8">Создать кампанию</h1>
+        <div className="neu-card py-12 sm:py-16 text-center px-6">
           <Settings className="mx-auto h-10 w-10 mb-4" style={{ color: 'var(--cp-text-l)' }} />
           <p className="text-sm sm:text-base font-semibold mb-2" style={{ color: 'var(--cp-text)' }}>
             Пресет ещё не настроен
           </p>
-          <p className="text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            Обратитесь к вашему менеджеру, чтобы он привязал email-аккаунты и настроил расписание.
+          <p className="text-xs sm:text-sm max-w-md mx-auto" style={{ color: 'var(--cp-text-m)' }}>
+            Прежде чем вы запустите первую кампанию, ваш менеджер должен привязать
+            к аккаунту email-почты для рассылки и общее расписание. Это разовая настройка.
           </p>
+          <a
+            href="mailto:hello@polza.com?subject=Настройка%20пресета%20для%20запуска%20кампаний"
+            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 mt-6 text-sm font-semibold"
+          >
+            <Mail className="h-4 w-4" />
+            Связаться с менеджером
+          </a>
         </div>
       </div>
     );
@@ -636,6 +665,20 @@ export default function ClientLaunchPage() {
         {/* Step 3: Sequence */}
         {fileHeaders.length > 0 && (
           <Section number={3} title="Цепочка писем" subtitle="Используйте переменные ниже, чтобы персонализировать сообщения.">
+            {briefFilled === false && (
+              <div
+                className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-3.5 mb-4 flex items-start gap-3 text-xs sm:text-sm"
+                style={{ color: 'var(--cp-text-m)' }}
+              >
+                <Info className="h-4 w-4 shrink-0 mt-0.5" style={{ color: 'var(--cp-accent)' }} />
+                <div className="flex-1 min-w-0">
+                  <strong style={{ color: 'var(--cp-text)' }}>Совет.</strong>{' '}
+                  Заполните <Link href={'/client/brief' as Route} className="font-semibold" style={{ color: 'var(--cp-accent)' }}>бриф</Link> —
+                  AI-инструменты (Цепочки писем, Оценка ЦА, персонализация) сработают точнее под вашу аудиторию.
+                </div>
+              </div>
+            )}
+
             <VariableReference
               mapping={mapping}
               customVars={customVars}

@@ -1,38 +1,30 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import type { Route } from 'next';
+import { Menu } from 'lucide-react';
 import { Nunito } from 'next/font/google';
 import { supabase } from '@/lib/supabaseClient';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { getPortalPageSectionTitle } from '@/lib/pageTitle';
 import { commonDictionary, dict, normalizeLocale, type Locale } from '@/lib/i18n';
 import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
+import { resolveActiveNavId } from '@/lib/clientNav';
+import { ClientSidebar } from '@/components/client/ClientSidebar';
+import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
 
 const nunito = Nunito({
   subsets: ['latin', 'cyrillic'],
   display: 'swap',
 });
 
-const clientNav = [
-  { name: 'Кампании', nameEn: 'Campaigns', href: '/client' },
-  { name: 'Проекты', nameEn: 'Projects', href: '/client/projects' },
-  { name: 'Лиды', nameEn: 'Leads', href: '/client/leads' },
-  { name: 'Базы', nameEn: 'Databases', href: '/client/bases' },
-  { name: 'Подготовить базу к запуску', nameEn: 'Prepare database', href: '/client/base-constructor' },
-  { name: 'Отчёты', nameEn: 'Reports', href: '/client/reports' },
-  { name: 'Парсеры', nameEn: 'Parsers', href: '/client/parsers' },
-  { name: 'Запуск кампаний', nameEn: 'Launch campaigns', href: '/client/launch' },
-  { name: 'Бриф', nameEn: 'Brief', href: '/client/brief' },
-  { name: 'Собрать базу', nameEn: 'Build database', href: '/client/companies-search' },
-] as const;
-
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const [locale, setLocale] = useState<Locale>('ru');
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,17 +64,32 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     });
   };
 
-  const isActive = (href: string) =>
-    href === '/client'
-      ? pathname === '/client' || pathname.startsWith('/client/campaigns')
-      : pathname.startsWith(href);
+  // Active item resolution: pathname + special-case for /client/parsers?tab=email-sequence
+  // (the AI letter generator lives there as a Старт item, not as Парсеры).
+  const activeId = useMemo(() => {
+    const tab = searchParams?.get('tab');
+    if (pathname === '/client/parsers' && tab === 'email-sequence') {
+      return 'sequence';
+    }
+    return resolveActiveNavId(pathname);
+  }, [pathname, searchParams]);
 
   return (
     <PortalLoadingProvider>
     <GlobalTextTranslator locale={locale} />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
-      <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-5 sm:pb-2 md:px-8">
-        <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 max-w-6xl mx-auto">
+      <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
+        <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 mx-auto max-w-[1400px]">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            className="md:hidden neu-pill p-1.5 shrink-0"
+            aria-label={locale === 'en' ? 'Open menu' : 'Открыть меню'}
+            style={{ color: 'var(--cp-text-m)' }}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
             style={{ color: 'var(--cp-accent)' }}
@@ -90,24 +97,9 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             Portal
           </span>
 
-          <div className="relative flex-1 min-w-0">
-            <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto pb-1">
-              {clientNav.map((item) => {
-                const active = isActive(item.href);
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href as Route}
-                    className={`neu-pill shrink-0 px-2.5 py-1 sm:px-3 sm:py-1.5 text-[11px] sm:text-xs font-semibold whitespace-nowrap ${active ? 'active' : ''}`}
-                    style={!active ? { color: 'var(--cp-text-m)' } : undefined}
-                  >
-                    {locale === 'en' ? item.nameEn : item.name}
-                  </Link>
-                );
-              })}
-            </nav>
-          </div>
-          <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1">
+          <div className="flex-1" />
+
+          <div className="neu-pill inline-flex items-center gap-1 px-1.5 py-1 shrink-0">
             <button
               type="button"
               onClick={() => void persistLocale('ru')}
@@ -139,9 +131,19 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         </div>
       </header>
 
-      <main className="flex-1 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
-        {children}
-      </main>
+      <ClientMobileDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        activeId={activeId}
+        locale={locale}
+      />
+
+      <div className="flex-1 flex">
+        <ClientSidebar activeId={activeId} locale={locale} />
+        <main className="flex-1 min-w-0 px-3 py-4 sm:px-4 sm:py-6 md:px-8 md:py-8">
+          {children}
+        </main>
+      </div>
     </div>
     </PortalLoadingProvider>
   );

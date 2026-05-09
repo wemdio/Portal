@@ -141,6 +141,10 @@ jest.mock('@/lib/liOutreach/apiHelpers', () => {
       user: { id: AUTH_USER_ID },
       supabase: { from: (table: string) => fromMock(table) },
     })),
+    // The /start route reads checkIsAdmin so the admin-bypass branch can skip
+    // the user_id filter on li_campaigns. This file only tests progress
+    // preservation for the owning user, so we hard-code the non-admin path.
+    checkIsAdmin: jest.fn(async () => false),
   };
 });
 
