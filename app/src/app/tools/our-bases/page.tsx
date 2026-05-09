@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { authFetch } from '@/lib/authFetch';
-import { FEDERAL_DISTRICTS, ALL_REGION_CODES, getRegionByCode } from '@/lib/companiesSearch/regions';
+import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
 import { OkvedTreeModal } from '@/components/OkvedTreeModal';
 
 type Mode = 'activity' | 'inn';
