@@ -126,7 +126,8 @@ async function insertInBatches<T extends Record<string, unknown>>(
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
-    const { error } = await admin.from('search_results').insert(batch);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = await admin.from('search_results').insert(batch as any);
     if (error) {
       hadFailures = true;
       firstErrorMessage ??= error.message;

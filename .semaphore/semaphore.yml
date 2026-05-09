@@ -17,12 +17,13 @@ blocks:
       prologue:
         commands:
           - checkout
+          - sem-version node 22
           - ROOT_DIR="$(pwd)"
           - 'if [ -d "${ROOT_DIR}/app" ]; then APP_PATH="${ROOT_DIR}/app"; else APP_REL_PATH=$(find "${ROOT_DIR}" -type d -name "app" -not -path "*/node_modules/*" | head -n1); if [ -n "$APP_REL_PATH" ]; then APP_PATH="$APP_REL_PATH"; else echo "app folder not found!"; exit 1; fi; fi'
           - echo "APP_PATH=$APP_PATH" >> /tmp/env_vars
           - cd $APP_PATH
           - 'cache restore node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json), node-modules'
-          - npm ci --include=optional
+          - npm install
           - cache store node-modules-$SEMAPHORE_GIT_BRANCH-$(checksum package-lock.json) node_modules
       jobs:
         - name: 'Lint, typecheck, build, test, audit'
