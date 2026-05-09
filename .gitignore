@@ -62,3 +62,107 @@ offers_example/
 # python
 **/__pycache__/
 *.py[cod]
+
+# Сторонние сервисы (smtp-proxy, и т.п.) — node_modules восстанавливается через npm install,
+# dist собирается через npm run build, нет смысла хранить их в репозитории.
+services/*/node_modules/
+services/*/dist/
+
+# Большие тестовые наборы данных (не нужны в истории — лежат в S3 / лок-окружении).
+app/public/test60k.csv
+
+# Локальные временные данные / клиентские артефакты — нельзя хранить в публичной git-истории
+# (могут содержать персональные данные, реквизиты, контракты).
+.tmp/
+_fix_tmp/
+temp_bank/
+temp-cases/
+temp-transcripts/
+temp-diarize/
+
+# Локальные SQL-разделения — генерируются скриптами, не нужны в репо.
+app/.sql-chunks/
+app/sql_splits/
+
+# Временные файлы в корне `app/` (генерируются скриптами поэтапной заливки).
+app/temp_*
+
+# Одноразовые fix/update/write-скрипты в корне репо — оставляем у разработчика локально.
+/fix_*.py
+/update_*.py
+/write_config.py
+
+# Конфиги локальных AI-инструментов — у каждого разработчика свои.
+.augment/
+.agents/
+.claude/
+
+# Архивы скачиваний и прочие результаты — не должны попадать в репо.
+New folder/
+*personal_*months*.json
+*hh_results_*.csv
+*personalization-test-results.csv
+
+# Локальные диагностические/debug-скрипты в корне репо (`_check_*`, `_prod_*`,
+# `_extract_*`, `_deploy_*` и т.п.). Это инструменты разработчика для разовых
+# проверок продакшена / отладки, не должны попадать в общую историю.
+/_*.py
+/_*.mjs
+/_*.html
+/_*.json
+/_*.txt
+/_*.cjs
+
+# Тестовые скрипты в `app/scripts/` — одноразовые проверки API (test-inn-*,
+# test-requesty-*) и пакетные загрузки (upload-3-*, upload-transcripts-*).
+app/scripts/test-inn-*.*
+app/scripts/test-requesty-*.*
+app/scripts/upload-3-*.*
+app/scripts/upload-transcripts-*.*
+# Префиксованные underscore-скрипты в `app/scripts/` — debug/одноразовые.
+app/scripts/_*.mjs
+app/scripts/_*.ts
+app/scripts/_*.cjs
+
+# Локальные mcp/sql/payload-артефакты в `app/`.
+app/.invoke-*.json
+app/.mcp-*.json
+app/.mcp_*.json
+app/.split-*.mjs
+app/.dump-*.mjs
+app/.term-out-*.txt
+app/_test_*.mjs
+app/payload_batch_*.json
+
+# Корневые underscore-результаты разовых анализов.
+/_*.csv
+/_*.tsx
+/_*.ts
+
+# Все Python-скрипты в корне репо — это разовые dev-инструменты (check_*, clean_*,
+# diag*, debug_*, fix_*, install_*, get_*, restore_*, setup-* и т.п.).
+# Единственное исключение — `test_instantly_limit.py`, который реально нужен.
+/*.py
+!/test_instantly_limit.py
+
+# Прочие разовые/локальные файлы в корне.
+/body.json
+/landing/
+/projects-emergency.html
+/openclaw_*.txt
+/leads-outreach-agency.csv
+docs/research/
+*.idbi*.jpg
+"idbi*"
+
+# Скрипты в `app/scripts/` для разовых аналитик/диаризации/fleet-проверок.
+app/scripts/diarize-*.mjs
+app/scripts/diarize-*.sql
+app/scripts/fleet-*.mjs
+app/scripts/fleet-*.json
+app/scripts/enrich-*.mjs
+app/scripts/enrich-*.ts
+app/scripts/analyze-*.mjs
+app/scripts/build-instantly-docx*.mjs
+app/scripts/check-traffic.mjs
+app/scripts/collect-inn*.mjs

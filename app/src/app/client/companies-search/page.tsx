@@ -196,6 +196,19 @@ export default function CompaniesSearchPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">
+      <header>
+        <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900">
+          {t('B2B-поиск компаний', 'B2B company search', locale)}
+        </h1>
+        <p className="mt-2 text-sm sm:text-base text-gray-500">
+          {t(
+            'Поиск российских юрлиц по ОКВЭД, регионам, выручке и контактам. Экспорт в CSV/XLSX.',
+            'Russian legal entities by activity, region, revenue, and contacts. CSV/XLSX export.',
+            locale,
+          )}
+        </p>
+      </header>
+
       {/* Step 1 */}
       <div className="bg-white rounded-xl shadow-sm p-6">
         <div className="flex items-center gap-6 mb-6 text-sm">

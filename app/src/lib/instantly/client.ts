@@ -241,7 +241,17 @@ export async function listLeads(body: {
   limit?: number;
   starting_after?: string;
 }) {
-  return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body });
+  // Instantly API v2 expects `list_id` and `campaign` — not `lead_list_id` /
+  // `campaign_id`. Sending the wrong keys makes Instantly silently ignore the
+  // filter and return leads from the entire workspace. We keep the caller-
+  // facing field names for backwards compatibility (portal UI, scripts, worker)
+  // but rename them on the wire.
+  // See: tests/lib/instantly/clientListLeads.test.ts
+  const { lead_list_id, campaign_id, ...rest } = body;
+  const apiBody: Record<string, unknown> = { ...rest };
+  if (lead_list_id !== undefined) apiBody.list_id = lead_list_id;
+  if (campaign_id !== undefined) apiBody.campaign = campaign_id;
+  return request<PaginatedResponse<Lead>>('/leads/list', { method: 'POST', body: apiBody });
 }
 
 export async function listAllLeads(campaignId: string): Promise<Lead[]> {

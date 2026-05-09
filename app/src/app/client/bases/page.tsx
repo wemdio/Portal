@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
+import type { Route } from 'next';
+import { Send } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface Lead {
@@ -122,10 +125,21 @@ export default function ClientBasesPage() {
           <div className="neu-spinner animate-spin" />
         </div>
       ) : filtered.length === 0 && totalLeads === 0 ? (
-        <div className="neu-card py-16 text-center">
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            Контакты ещё не загружены. Данные обновляются автоматически каждый час.
+        <div className="neu-card py-12 sm:py-16 text-center px-6">
+          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
+            Контакты ещё не загружены
           </p>
+          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
+            На этой странице видно базы внутри уже запущенных кампаний.
+            Создайте первую кампанию — её база появится здесь автоматически.
+          </p>
+          <Link
+            href={'/client/launch' as Route}
+            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
+          >
+            <Send className="h-4 w-4" />
+            Создать кампанию
+          </Link>
         </div>
       ) : filtered.length === 0 ? (
         <div className="neu-card py-16 text-center">

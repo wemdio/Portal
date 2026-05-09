@@ -859,6 +859,11 @@ export async function runCampaignLoop(
 
       for (const { client, account } of clients) {
         if (shouldStop()) break;
+        // Bump heartbeat per account so the Docker healthcheck doesn't
+        // falsely flip to unhealthy during long anti-flood pauses between
+        // accounts (outer while-loop heartbeat is written only once per full
+        // pass through ALL accounts, which can take 1-2 hours).
+        try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
 
         const now = new Date();
         if (account.cooldown_until && new Date(account.cooldown_until) > now) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -11,11 +11,17 @@ export async function GET(req: NextRequest) {
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
 
-    const { data, error } = await supabaseAdmin
+    const admin = await checkIsAdmin(auth.user.id);
+
+    let query = supabaseAdmin
       .from('li_campaigns')
       .select('*')
-      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
+    if (!admin) {
+      query = query.eq('user_id', auth.user.id);
+    }
+
+    const { data, error } = await query;
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ campaigns: data ?? [] });
   });
