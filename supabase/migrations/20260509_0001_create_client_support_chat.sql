@@ -235,3 +235,29 @@ alter table public.notifications
       'support_thread'
     )
   );
+
+-- ── 6. Self-hosted Realtime publication ────────────────────────────────────
+-- Required so the Realtime container (deploy/main-db/docker-compose.yml,
+-- service `realtime`) actually emits INSERT events for client_support_messages
+-- to subscribers. On Supabase Cloud this is a Dashboard checkbox; on our
+-- self-hosted stack it has to be done in SQL — same pattern as
+-- 20260206_0008_create_trace_spans.sql and 20260205_0004_create_application_logs.sql.
+--
+-- Only the messages table is published — the client and admin chat UIs do not
+-- subscribe to threads directly (the admin list refetches via REST whenever a
+-- new message lands), so adding threads to the publication would just produce
+-- WAL traffic without consumers.
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'client_support_messages'
+  ) then
+    alter publication supabase_realtime add table public.client_support_messages;
+  end if;
+end
+$$;
