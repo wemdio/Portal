@@ -8,6 +8,7 @@ type Props = {
   selected: Set<string>;
   onChange: (s: Set<string>) => void;
   onClose: () => void;
+  onLoaded?: (totalCount: number) => void;
 };
 
 type Group = { letter: string; items: string[] };
@@ -28,7 +29,7 @@ function groupByLetter(types: string[]): Group[] {
     .map(([letter, items]) => ({ letter, items }));
 }
 
-export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Props) {
+export function ActivityTypesModal({ apiUrl, selected, onChange, onClose, onLoaded }: Props) {
   const [search, setSearch] = useState('');
   const [allTypes, setAllTypes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,8 +44,10 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as { types: string[] };
         if (!cancelled) {
-          setAllTypes(json.types ?? []);
+          const types = json.types ?? [];
+          setAllTypes(types);
           setLoading(false);
+          onLoaded?.(types.length);
         }
       } catch (err) {
         if (!cancelled) {
