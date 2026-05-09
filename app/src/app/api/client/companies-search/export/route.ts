@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { minimalOkvedPrefixes } from '@/lib/companiesSearch/okvedFilter';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
@@ -72,7 +73,12 @@ function applyFilters(
   }
 
   if (body.activityTypes && body.activityTypes.length > 0) {
-    q = q.in('activity_type', body.activityTypes);
+    const prefixes = minimalOkvedPrefixes(body.activityTypes);
+    if (prefixes.length > 0) {
+      q = q.or(
+        prefixes.map((p) => `activity_type.like.${p.replace(/[%,]/g, '')}%`).join(','),
+      );
+    }
   }
   if (body.hasPhone) q = q.not('phones', 'is', null);
   if (body.hasEmail) q = q.not('email', 'is', null);

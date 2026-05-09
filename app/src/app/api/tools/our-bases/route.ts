@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { minimalOkvedPrefixes } from '@/lib/companiesSearch/okvedFilter';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 export const dynamic = 'force-dynamic';
@@ -55,7 +56,13 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.activityTypes && body.activityTypes.length > 0) {
-      q = q.in('activity_type', body.activityTypes);
+      const prefixes = minimalOkvedPrefixes(body.activityTypes);
+      if (prefixes.length > 0) {
+        const orClause = prefixes
+          .map((p) => `activity_type.like.${p.replace(/[%,]/g, '')}%`)
+          .join(',');
+        q = q.or(orClause);
+      }
     }
 
     if (body.hasPhone) q = q.not('phones', 'is', null);
