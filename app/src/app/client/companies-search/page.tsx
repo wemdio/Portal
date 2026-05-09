@@ -235,43 +235,56 @@ export default function CompaniesSearchPage() {
 
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 pb-20">
+    <div className="max-w-5xl mx-auto space-y-6 pb-20">
+      <header>
+        <h1 className="text-2xl sm:text-3xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
+          {t('B2B-поиск компаний', 'B2B company search', locale)}
+        </h1>
+        <p className="mt-2 text-sm sm:text-base" style={{ color: 'var(--cp-text-m)' }}>
+          {t(
+            'Поиск российских юрлиц по ОКВЭД, регионам, выручке и контактам. Экспорт в CSV/XLSX.',
+            'Russian legal entities by activity, region, revenue, and contacts. CSV/XLSX export.',
+            locale,
+          )}
+        </p>
+      </header>
+
       {/* Step 1 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <div className="flex items-center gap-6 mb-6 text-sm">
+      <div className="neu-card p-5 sm:p-6">
+        <div className="flex items-center gap-2 mb-5 flex-wrap">
           <button
             type="button"
             onClick={() => setMode('activity')}
-            className={`flex items-center gap-2 ${mode === 'activity' ? 'font-bold text-gray-900' : 'text-blue-600'}`}
+            className={`neu-pill px-3 py-1.5 text-xs sm:text-sm font-semibold ${mode === 'activity' ? 'active' : ''}`}
+            style={mode !== 'activity' ? { color: 'var(--cp-text-m)' } : undefined}
           >
-            {mode === 'activity' && <span className="text-green-600">✓</span>}
             {t('По видам деятельности', 'By activity type', locale)}
           </button>
           <button
             type="button"
             onClick={() => setMode('inn')}
-            className={`flex items-center gap-2 ${mode === 'inn' ? 'font-bold text-gray-900' : 'text-blue-600'}`}
+            className={`neu-pill px-3 py-1.5 text-xs sm:text-sm font-semibold ${mode === 'inn' ? 'active' : ''}`}
+            style={mode !== 'inn' ? { color: 'var(--cp-text-m)' } : undefined}
           >
-            {mode === 'inn' && <span className="text-green-600">✓</span>}
             {t('По списку ИНН', 'By TIN list', locale)}
           </button>
         </div>
 
-        <h2 className="text-xl font-bold mb-4">
+        <h2 className="text-base sm:text-lg font-bold mb-4" style={{ color: 'var(--cp-text)' }}>
           {t('1. Выберите регионы и виды деятельности', '1. Select regions and activity types', locale)}
         </h2>
 
         {mode === 'activity' ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <button
                 type="button"
                 onClick={() => setRegionsModalOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2.5 rounded inline-flex items-center gap-2"
+                className="neu-btn px-4 py-2.5 text-sm font-semibold inline-flex items-center gap-2"
               >
-                {t('Регионы', 'Regions', locale)} <span>▼</span>
+                {t('Регионы', 'Regions', locale)} <span aria-hidden>▾</span>
               </button>
-              <div className="text-sm text-gray-700 mt-3 font-semibold">
+              <div className="text-xs sm:text-sm mt-3 font-semibold" style={{ color: 'var(--cp-text-m)' }}>
                 {selectedRegionsCount === ALL_REGION_CODES.length
                   ? t('Выбраны все регионы РФ', 'All regions selected', locale)
                   : selectedRegionsCount === 0
@@ -284,11 +297,11 @@ export default function CompaniesSearchPage() {
               <button
                 type="button"
                 onClick={() => setActivitiesModalOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2.5 rounded inline-flex items-center gap-2"
+                className="neu-btn px-4 py-2.5 text-sm font-semibold inline-flex items-center gap-2"
               >
-                {t('Виды деятельности', 'Activity types', locale)} <span>▼</span>
+                {t('Виды деятельности', 'Activity types', locale)} <span aria-hidden>▾</span>
               </button>
-              <div className="text-sm text-gray-500 mt-3">
+              <div className="text-xs sm:text-sm mt-3" style={{ color: 'var(--cp-text-l)' }}>
                 {selectedActivitiesCount === 0
                   ? t('Не выбран ни один вид деятельности (= все)', 'No activity types selected (= all)', locale)
                   : t(`Выбрано: ${selectedActivitiesCount}`, `Selected: ${selectedActivitiesCount}`, locale)}
@@ -297,7 +310,7 @@ export default function CompaniesSearchPage() {
           </div>
         ) : (
           <div>
-            <label className="text-sm text-gray-600 mb-2 block">
+            <label className="text-xs sm:text-sm mb-2 block" style={{ color: 'var(--cp-text-m)' }}>
               {t(
                 'Список ИНН (через запятую, пробел или с новой строки):',
                 'TIN list (comma, space, or newline separated):',
@@ -307,7 +320,7 @@ export default function CompaniesSearchPage() {
             <textarea
               value={innList}
               onChange={(e) => setInnList(e.target.value)}
-              className="w-full border border-gray-300 rounded p-3 font-mono text-sm"
+              className="neu-input w-full p-3 font-mono text-sm"
               rows={6}
               placeholder="7710641442&#10;5017074592"
             />
@@ -316,15 +329,15 @@ export default function CompaniesSearchPage() {
       </div>
 
       {/* Step 2 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="text-xl font-bold mb-6">
+      <div className="neu-card p-5 sm:p-6">
+        <h2 className="text-base sm:text-lg font-bold mb-5" style={{ color: 'var(--cp-text)' }}>
           {t('2. Дополнительные фильтры', '2. Additional filters', locale)}
         </h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-6">
           <div className="space-y-6">
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Контакты', 'Contacts', locale)}
               </div>
               <div className="flex flex-wrap gap-6">
@@ -342,13 +355,13 @@ export default function CompaniesSearchPage() {
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Организационно-правовая форма', 'Legal form', locale)}
               </div>
               <select
                 value={legalForm}
                 onChange={(e) => setLegalForm(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm bg-white"
+                className="neu-input w-full px-3 py-2 text-sm"
               >
                 <option value="">{t('Все организации', 'All organizations', locale)}</option>
                 {LEGAL_FORMS.map((f) => (
@@ -360,36 +373,36 @@ export default function CompaniesSearchPage() {
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Численность сотрудников', 'Number of employees', locale)}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                  <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('От', 'From', locale)}</span>
                   <input
                     type="number"
                     min={0}
                     value={employeesFrom}
                     onChange={(e) => setEmployeesFrom(e.target.value)}
-                    className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                    className="neu-input flex-1 px-3 py-2 text-sm"
                     placeholder="0"
                   />
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                  <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('до', 'to', locale)}</span>
                   <input
                     type="number"
                     min={0}
                     value={employeesTo}
                     onChange={(e) => setEmployeesTo(e.target.value)}
-                    className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                    className="neu-input flex-1 px-3 py-2 text-sm"
                   />
                 </div>
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Дополнительные данные', 'Additional data', locale)}
               </div>
               <div className="flex flex-col gap-2">
@@ -414,49 +427,49 @@ export default function CompaniesSearchPage() {
 
           <div className="space-y-6">
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Выручка, руб.', 'Revenue, RUB', locale)}
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('От', 'From', locale)}</span>
                 <input
                   type="number"
                   min={0}
                   value={revenueFrom}
                   onChange={(e) => setRevenueFrom(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="neu-input flex-1 px-3 py-2 text-sm"
                 />
-                <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('до', 'to', locale)}</span>
                 <input
                   type="number"
                   min={0}
                   value={revenueTo}
                   onChange={(e) => setRevenueTo(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="neu-input flex-1 px-3 py-2 text-sm"
                 />
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">
+              <div className="text-xs sm:text-sm font-semibold mb-2" style={{ color: 'var(--cp-text-m)' }}>
                 {t('Стоимость организации, руб.', 'Company cost, RUB', locale)}
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-500">{t('От', 'From', locale)}</span>
+                <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('От', 'From', locale)}</span>
                 <input
                   type="number"
                   min={0}
                   value={costFrom}
                   onChange={(e) => setCostFrom(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="neu-input flex-1 px-3 py-2 text-sm"
                 />
-                <span className="text-sm text-gray-500">{t('до', 'to', locale)}</span>
+                <span className="text-xs" style={{ color: 'var(--cp-text-l)' }}>{t('до', 'to', locale)}</span>
                 <input
                   type="number"
                   min={0}
                   value={costTo}
                   onChange={(e) => setCostTo(e.target.value)}
-                  className="flex-1 border-b border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+                  className="neu-input flex-1 px-3 py-2 text-sm"
                 />
               </div>
             </div>
@@ -465,8 +478,8 @@ export default function CompaniesSearchPage() {
       </div>
 
       {/* Step 3 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="text-xl font-bold mb-4">
+      <div className="neu-card p-5 sm:p-6">
+        <h2 className="text-base sm:text-lg font-bold mb-4" style={{ color: 'var(--cp-text)' }}>
           {t('3. Данные по ИП', '3. Individual entrepreneurs', locale)}
         </h2>
         <Switch
@@ -482,7 +495,7 @@ export default function CompaniesSearchPage() {
             </span>
           }
         />
-        <p className="text-xs text-gray-500 mt-4 leading-relaxed">
+        <p className="text-xs mt-4 leading-relaxed" style={{ color: 'var(--cp-text-l)' }}>
           {t(
             'Для ИП доступны только базовые поля (название, ИНН, адрес, контакты).',
             'For individual entrepreneurs, only basic fields are available (name, TIN, address, contacts).',
@@ -497,20 +510,22 @@ export default function CompaniesSearchPage() {
           type="button"
           onClick={handleCalculate}
           disabled={calcLoading}
-          className="bg-yellow-400 hover:bg-yellow-500 disabled:opacity-60 text-gray-900 font-semibold px-12 py-4 rounded-md text-base shadow-sm transition-colors"
+          className="neu-btn px-10 py-3.5 text-sm sm:text-base font-bold"
         >
           {calcLoading
             ? t('Считаем...', 'Calculating...', locale)
-            : t('Собрать базу', 'Build database', locale)}
+            : t('Посчитать и собрать базу', 'Calculate and build', locale)}
         </button>
 
-        {calcError && <div className="text-sm text-red-600">{calcError}</div>}
+        {calcError && (
+          <div className="text-sm" style={{ color: 'var(--cp-danger)' }}>{calcError}</div>
+        )}
 
         {calcResult && (
           <div className="text-center">
-            <div className="text-sm text-gray-700 mb-1">
+            <div className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
               {t('Найдено компаний: ', 'Companies found: ', locale)}
-              <span className="font-bold text-lg text-gray-900">
+              <span className="font-bold text-lg" style={{ color: 'var(--cp-text)' }}>
                 {calcResult.count.toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU')}
               </span>
             </div>
@@ -518,8 +533,8 @@ export default function CompaniesSearchPage() {
         )}
 
         {calcResult && calcResult.count > 0 && (
-          <div className="bg-white rounded-xl shadow-sm p-6 w-full max-w-lg">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4 text-center">
+          <div className="neu-card p-5 sm:p-6 w-full max-w-lg">
+            <h3 className="text-sm font-bold mb-4 text-center" style={{ color: 'var(--cp-text)' }}>
               {t('Скачать базу', 'Download database', locale)}
             </h3>
             <div className="grid grid-cols-2 gap-3">
@@ -527,18 +542,18 @@ export default function CompaniesSearchPage() {
                 type="button"
                 onClick={() => handleExport('xlsx')}
                 disabled={exportLoading !== null}
-                className="flex flex-col items-center gap-2 border-2 border-green-500 bg-green-50 hover:bg-green-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+                className="neu-sm flex flex-col items-center gap-2 px-4 py-4 disabled:opacity-60"
               >
-                <svg className="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg className="w-7 h-7" style={{ color: 'var(--cp-accent)' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25h6m-3-3v3" />
                 </svg>
-                <span className="text-sm font-semibold text-green-700">
+                <span className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
                   {exportLoading === 'xlsx'
                     ? t('Формируем...', 'Generating...', locale)
                     : 'Excel (.xlsx)'}
                 </span>
-                <span className="text-xs text-gray-500">
+                <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
                   {t('Для работы в Excel', 'For Excel', locale)}
                 </span>
               </button>
@@ -547,23 +562,23 @@ export default function CompaniesSearchPage() {
                 type="button"
                 onClick={() => handleExport('csv')}
                 disabled={exportLoading !== null}
-                className="flex flex-col items-center gap-2 border-2 border-blue-400 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 rounded-lg px-4 py-4 transition-colors"
+                className="neu-sm flex flex-col items-center gap-2 px-4 py-4 disabled:opacity-60"
               >
-                <svg className="w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg className="w-7 h-7" style={{ color: 'var(--cp-accent)' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                 </svg>
-                <span className="text-sm font-semibold text-blue-700">
+                <span className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
                   {exportLoading === 'csv'
                     ? t('Формируем...', 'Generating...', locale)
                     : 'CSV (.csv)'}
                 </span>
-                <span className="text-xs text-gray-500">
+                <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
                   {t('Универсальный формат', 'Universal format', locale)}
                 </span>
               </button>
             </div>
             {exportError && (
-              <div className="text-sm text-red-600 text-center mt-3">{exportError}</div>
+              <div className="text-sm text-center mt-3" style={{ color: 'var(--cp-danger)' }}>{exportError}</div>
             )}
           </div>
         )}
@@ -645,21 +660,32 @@ function RegionsModal({
   }, [search]);
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="neu-card max-w-2xl w-full max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: 'var(--cp-bg)' }}
+      >
+        <div className="flex items-center justify-between px-5 py-4">
+          <h3 className="text-base sm:text-lg font-bold" style={{ color: 'var(--cp-text)' }}>
             {t('Регионы и города', 'Regions and cities', locale)}
           </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+          <button
+            onClick={onClose}
+            className="neu-pill p-1.5"
+            aria-label={t('Закрыть', 'Close', locale)}
+            style={{ color: 'var(--cp-text-l)' }}
+          >
+            ×
+          </button>
         </div>
-        <div className="px-5 pb-4">
+        <div className="px-5 pb-3">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t('Быстрый поиск', 'Quick search', locale)}
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
+            className="neu-input w-full px-3 py-2 text-sm"
           />
         </div>
         <div className="flex-1 overflow-y-auto px-5 pb-5">
@@ -674,7 +700,8 @@ function RegionsModal({
                   <button
                     type="button"
                     onClick={() => toggleExpand(district.name)}
-                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700"
+                    className="w-6 h-6 flex items-center justify-center"
+                    style={{ color: 'var(--cp-text-l)' }}
                   >
                     {isOpen ? '−' : '+'}
                   </button>
@@ -685,9 +712,10 @@ function RegionsModal({
                       if (el) el.indeterminate = !allSelected && selectedCount > 0;
                     }}
                     onChange={() => toggleDistrict(district.name)}
-                    className="w-4 h-4 accent-green-500"
+                    className="w-4 h-4"
+                    style={{ accentColor: 'var(--cp-accent)' }}
                   />
-                  <span className="text-sm">{district.name}</span>
+                  <span className="text-sm" style={{ color: 'var(--cp-text)' }}>{district.name}</span>
                 </div>
                 {isOpen && (
                   <div className="ml-12 mt-1 space-y-1">
@@ -697,10 +725,11 @@ function RegionsModal({
                           type="checkbox"
                           checked={selected.has(r.code)}
                           onChange={() => toggle(r.code)}
-                          className="w-4 h-4 accent-green-500"
+                          className="w-4 h-4"
+                          style={{ accentColor: 'var(--cp-accent)' }}
                         />
-                        <span className="text-sm font-bold mr-1">{r.code}</span>
-                        <span className="text-sm">{r.name}</span>
+                        <span className="text-sm font-bold mr-1" style={{ color: 'var(--cp-text-m)' }}>{r.code}</span>
+                        <span className="text-sm" style={{ color: 'var(--cp-text)' }}>{r.name}</span>
                       </label>
                     ))}
                   </div>
@@ -709,29 +738,31 @@ function RegionsModal({
             );
           })}
         </div>
-        <div className="flex items-center justify-between p-4" style={{ boxShadow: '0 -1px 0 var(--cp-shadow-l, rgba(0,0,0,0.06))' }}>
-          <span className="text-sm text-gray-600">
-            {t(`Выбрано регионов и городов: ${selected.size}`, `Regions selected: ${selected.size}`, locale)}
+        <div className="flex items-center justify-between p-4 gap-2 flex-wrap">
+          <span className="text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
+            {t(`Выбрано: ${selected.size}`, `Selected: ${selected.size}`, locale)}
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="neu-pill px-3 py-1.5 text-xs font-semibold"
+              style={{ color: 'var(--cp-text-m)' }}
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={() => onChange(new Set(ALL_REGION_CODES))}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="neu-pill px-3 py-1.5 text-xs font-semibold"
+              style={{ color: 'var(--cp-text-m)' }}
             >
               {t('Все', 'All', locale)}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              className="neu-btn px-4 py-1.5 text-xs font-semibold"
             >
               {t('Готово', 'Done', locale)}
             </button>
@@ -776,28 +807,39 @@ function ActivitiesModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between p-5">
-          <h3 className="text-lg font-bold">
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="neu-card max-w-2xl w-full max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: 'var(--cp-bg)' }}
+      >
+        <div className="flex items-center justify-between px-5 py-4">
+          <h3 className="text-base sm:text-lg font-bold" style={{ color: 'var(--cp-text)' }}>
             {t('Виды деятельности', 'Activity types', locale)}
           </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+          <button
+            onClick={onClose}
+            className="neu-pill p-1.5"
+            aria-label={t('Закрыть', 'Close', locale)}
+            style={{ color: 'var(--cp-text-l)' }}
+          >
+            ×
+          </button>
         </div>
-        <div className="px-5 pb-4">
+        <div className="px-5 pb-3">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t('Быстрый поиск', 'Quick search', locale)}
-            className="w-full border-b border-gray-200 px-2 py-2 text-sm focus:outline-none focus:border-blue-400"
+            className="neu-input w-full px-3 py-2 text-sm"
           />
         </div>
         <div className="flex-1 overflow-y-auto px-5 pb-5">
-          {loading && <div className="text-sm text-gray-500">{t('Загрузка...', 'Loading...', locale)}</div>}
-          {error && <div className="text-sm text-red-600">{error}</div>}
+          {loading && <div className="text-sm" style={{ color: 'var(--cp-text-l)' }}>{t('Загрузка...', 'Loading...', locale)}</div>}
+          {error && <div className="text-sm" style={{ color: 'var(--cp-danger)' }}>{error}</div>}
           {!loading && !error && filtered.length === 0 && (
-            <div className="text-sm text-gray-500">
+            <div className="text-sm" style={{ color: 'var(--cp-text-l)' }}>
               {types.length === 0
                 ? t('В базе пока нет данных. Список заполнится после импорта.', 'No data yet. The list will populate after import.', locale)
                 : t('Ничего не найдено', 'Nothing found', locale)}
@@ -811,28 +853,30 @@ function ActivitiesModal({
                   checked={selected.has(tp)}
                   onChange={() => toggle(tp)}
                   className="w-4 h-4"
+                  style={{ accentColor: 'var(--cp-accent)' }}
                 />
-                <span className="text-sm">{tp}</span>
+                <span className="text-sm" style={{ color: 'var(--cp-text)' }}>{tp}</span>
               </label>
             ))}
           </div>
         </div>
-        <div className="flex items-center justify-between p-4" style={{ boxShadow: '0 -1px 0 var(--cp-shadow-l, rgba(0,0,0,0.06))' }}>
-          <span className="text-sm text-gray-600">
+        <div className="flex items-center justify-between p-4 gap-2 flex-wrap">
+          <span className="text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
             {t(`Выбрано: ${selected.size}`, `Selected: ${selected.size}`, locale)}
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               type="button"
               onClick={() => onChange(new Set())}
-              className="px-4 py-2 text-sm bg-gray-100 hover:bg-gray-200 rounded"
+              className="neu-pill px-3 py-1.5 text-xs font-semibold"
+              style={{ color: 'var(--cp-text-m)' }}
             >
               {t('Очистить', 'Clear', locale)}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              className="neu-btn px-4 py-1.5 text-xs font-semibold"
             >
               {t('Готово', 'Done', locale)}
             </button>

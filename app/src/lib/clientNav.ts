@@ -1,0 +1,216 @@
+/**
+ * Client portal navigation IA.
+ *
+ * Designed during Phase 0 of the May 2026 UX redesign. Three pedagogical
+ * groups guide a complete novice through the outreach workflow:
+ *
+ *   🚀 Старт       — what you do once or before each campaign
+ *   📊 Мониторинг  — what you check while a campaign runs
+ *   📁 Архив       — read-only background data populated by the team
+ *
+ * URLs are intentionally preserved from the legacy top-nav layout so client
+ * bookmarks keep working. Labels and grouping change; hrefs do not.
+ *
+ * The Dashboard hub (/client/dashboard) is added in Phase 3 as a separate
+ * top-level item OUTSIDE the groups (it's the welcome surface, not a step).
+ *
+ * The single source of truth for the IA contract — see clientNav.test.ts.
+ */
+
+export type ClientNavGroupId = 'start' | 'monitoring' | 'archive';
+
+export interface ClientNavItem {
+  /** Stable id for tests, telemetry, active-link logic. Never reused. */
+  id: string;
+  label: string;
+  labelEn: string;
+  href: string;
+  /**
+   * If true, the sidebar renders this item with accent styling (Send-icon pill)
+   * to surface it as the workflow's primary call-to-action. Exactly one item
+   * across the IA may carry this flag.
+   */
+  primaryCta?: boolean;
+  /**
+   * Optional tooltip / a11y description shown on hover. Used for items that
+   * are conceptually overloaded (e.g. «Цепочки писем» = AI letter generator,
+   * not the campaign sequence inside Создать кампанию).
+   */
+  description?: string;
+  descriptionEn?: string;
+}
+
+export interface ClientNavGroup {
+  id: ClientNavGroupId;
+  label: string;
+  labelEn: string;
+  items: readonly ClientNavItem[];
+}
+
+/**
+ * Top-level dashboard hub, kept outside any group because it isn't a step in
+ * the workflow — it's the welcome surface that summarises everything.
+ */
+export const CLIENT_NAV_DASHBOARD: ClientNavItem = {
+  id: 'dashboard',
+  label: 'Дашборд',
+  labelEn: 'Dashboard',
+  href: '/client/dashboard',
+};
+
+const startGroup: ClientNavGroup = {
+  id: 'start',
+  label: 'Старт',
+  labelEn: 'Start here',
+  items: [
+    {
+      id: 'brief',
+      label: 'Бриф',
+      labelEn: 'Brief',
+      href: '/client/brief',
+      description: 'Опишите ЦА и продукт — наш AI использует это во всех инструментах',
+      descriptionEn: 'Describe ICP and product — our AI uses this across tools',
+    },
+    {
+      id: 'build',
+      label: 'Базы',
+      labelEn: 'Databases',
+      href: '/client/build',
+      description: 'Соберите контакты из источников и подготовьте к рассылке',
+      descriptionEn: 'Collect contacts from sources and prepare for outreach',
+    },
+    {
+      id: 'sequence',
+      label: 'Цепочки писем',
+      labelEn: 'Email sequences',
+      href: '/client/parsers?tab=email-sequence',
+      description: 'AI-генерация цепочки холодных писем под сегмент',
+      descriptionEn: 'AI-generated cold email chain for the segment',
+    },
+    {
+      id: 'launch',
+      label: 'Создать кампанию',
+      labelEn: 'Create campaign',
+      href: '/client/launch',
+      primaryCta: true,
+      description: 'Загрузить базу, написать цепочку и запустить',
+      descriptionEn: 'Upload, sequence, and launch',
+    },
+  ],
+};
+
+const monitoringGroup: ClientNavGroup = {
+  id: 'monitoring',
+  label: 'Мониторинг',
+  labelEn: 'Monitoring',
+  items: [
+    {
+      id: 'campaigns',
+      label: 'Кампании',
+      labelEn: 'Campaigns',
+      href: '/client',
+      description: 'Запущенные кампании и их метрики',
+      descriptionEn: 'Running campaigns and their metrics',
+    },
+    {
+      id: 'replies',
+      label: 'Ответы и лиды',
+      labelEn: 'Replies & leads',
+      href: '/client/leads',
+      description: 'Ответы получателей и квалифицированные лиды',
+      descriptionEn: 'Recipient replies and qualified leads',
+    },
+    {
+      id: 'reports',
+      label: 'Отчёты',
+      labelEn: 'Reports',
+      href: '/client/reports',
+      description: 'Сводный отчёт по выбранным кампаниям',
+      descriptionEn: 'Aggregated report across selected campaigns',
+    },
+  ],
+};
+
+const archiveGroup: ClientNavGroup = {
+  id: 'archive',
+  label: 'Архив',
+  labelEn: 'Archive',
+  items: [
+    {
+      id: 'bases',
+      label: 'Базы в кампаниях',
+      labelEn: 'Campaign databases',
+      href: '/client/bases',
+      description: 'Контакты внутри запущенных кампаний (read-only)',
+      descriptionEn: 'Contacts inside running campaigns (read-only)',
+    },
+    {
+      id: 'projects',
+      label: 'Проекты',
+      labelEn: 'Projects',
+      href: '/client/projects',
+      description: 'Статусы и задачи проектов от агентства',
+      descriptionEn: 'Project status and tasks from the agency team',
+    },
+  ],
+};
+
+export const CLIENT_NAV_GROUPS: readonly ClientNavGroup[] = [
+  startGroup,
+  monitoringGroup,
+  archiveGroup,
+];
+
+/**
+ * Phase 4 consolidation: the «Базы» hub at /client/build shows three legacy
+ * tools as cards (companies-search, parsers, base-constructor). When a user
+ * is on any of those legacy URLs the sidebar should still highlight «Базы»
+ * because that's the hub they came from.
+ */
+const BUILD_LEGACY_PREFIXES: readonly string[] = [
+  '/client/build',
+  '/client/companies-search',
+  '/client/parsers',
+  '/client/base-constructor',
+];
+
+/**
+ * Active-link helper — handles legacy aliases and the special-case where
+ * `/client` (Кампании) overlaps with `/client/campaigns/[id]` detail pages.
+ *
+ * Returns the id of the nav item that should be highlighted for a given
+ * pathname, or null when the user is on a route that doesn't appear in the
+ * sidebar (e.g. a deeply-nested admin redirect).
+ */
+export function resolveActiveNavId(pathname: string): string | null {
+  if (pathname === '/client/dashboard' || pathname.startsWith('/client/dashboard/')) {
+    return 'dashboard';
+  }
+  // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
+  if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {
+    return 'campaigns';
+  }
+  // «Базы» hub absorbs the legacy URLs (companies-search, parsers, base-constructor).
+  for (const prefix of BUILD_LEGACY_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
+      return 'build';
+    }
+  }
+  // Walk groups in declaration order, picking the longest prefix match.
+  let bestId: string | null = null;
+  let bestLen = 0;
+  for (const g of CLIENT_NAV_GROUPS) {
+    for (const item of g.items) {
+      // Strip query string from item href before matching against pathname.
+      const itemPath = item.href.split('?')[0];
+      if (itemPath === '/client') continue; // already handled above
+      if (pathname === itemPath || pathname.startsWith(`${itemPath}/`)) {
+        if (itemPath.length > bestLen) {
+          bestId = item.id;
+          bestLen = itemPath.length;
+        }
+      }
+    }
+  }
+  return bestId;
+}

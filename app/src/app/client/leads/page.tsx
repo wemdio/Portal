@@ -1,6 +1,9 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
+import type { Route } from 'next';
+import { Send } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LeadComment = {
@@ -332,11 +335,21 @@ export default function ClientLeadsPage() {
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Загрузка...</p>
         </div>
       ) : leads.length === 0 ? (
-        <div className="neu-card py-16 text-center">
-          <p className="text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>Лидов пока нет</p>
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            Когда специалист передаст вам квалифицированного лида, он появится здесь
+        <div className="neu-card py-12 sm:py-16 text-center px-6">
+          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
+            Лидов пока нет
           </p>
+          <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
+            Лиды появляются здесь после того, как получатели ваших кампаний отвечают
+            и менеджер квалифицирует ответ как лид. Запустите кампанию, чтобы получить первые ответы.
+          </p>
+          <Link
+            href={'/client/launch' as Route}
+            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
+          >
+            <Send className="h-4 w-4" />
+            Создать кампанию
+          </Link>
         </div>
       ) : (
         <>

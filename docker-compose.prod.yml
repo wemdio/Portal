@@ -234,11 +234,23 @@ services:
     labels:
       - autoheal=true
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/tg-outreach-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/tg-outreach-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      # Heartbeat is bumped every 30s by an independent setInterval in
+      # worker/tgOutreach.ts (NOT inside the main loop), so this check reflects
+      # node event loop aliveness — not whether the main loop is currently
+      # busy. Threshold 1800s (30 min) is set defensively for the legacy build
+      # still on prod (heartbeat only inside the per-account loop). With ~100+
+      # accounts and ~10% of them tripping the 15s connect timeout, sequential
+      # buildClients() can take 15-25 minutes — and on top of that, when 5/5
+      # campaigns are busy with anti-flood pauses (220-545s each), the main
+      # loop won't return for another 15+ min. 900s was triggering autoheal
+      # rebuilds every 8-10 minutes, putting the worker in a death loop where
+      # it never finished initialization. Drop back to 300s once the build with
+      # the independent heartbeat ticker (commit pending) is deployed.
+      test: ["CMD-SHELL", "test -f /tmp/tg-outreach-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/tg-outreach-heartbeat | cut -c1-10) )) -lt 1800 || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 3
-      start_period: 120s
+      start_period: 600s
     deploy:
       resources:
         limits:

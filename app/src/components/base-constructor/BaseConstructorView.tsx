@@ -862,20 +862,37 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           const isSelected = selectedSteps.includes(step.key);
                           const lockedReason = isSelected ? isRequiredByOther(step.key) : null;
                           const isAlwaysOn = clientMode && ALWAYS_ON_SET.has(step.key);
+                          // Client gate: «Оценка ЦА» (ta_scoring) requires a saved
+                          // brief. We only block in client mode and only after the
+                          // brief check finished (savedBriefAvailable !== null) —
+                          // otherwise we'd briefly disable the step on first paint.
+                          const taBriefMissing = clientMode
+                            && step.key === 'ta_scoring'
+                            && savedBriefAvailable === false
+                            && !isSelected;
                           const Icon = step.icon;
                           const showAsActive = isSelected || isAlwaysOn;
                           const clientHint = clientMode && step.key === 'enrich_descriptions'
                             ? 'Парсинг выдаёт «грязное» описание, но полезно для оценки ЦА'
                             : null;
+                          const disabledForBrief = taBriefMissing;
                           return (
                             <button
                               key={step.key}
                               onClick={() => toggleStep(step.key)}
-                              disabled={isAlwaysOn}
-                              title={isAlwaysOn ? 'Выполняется автоматически' : (lockedReason ?? undefined)}
+                              disabled={isAlwaysOn || disabledForBrief}
+                              title={
+                                isAlwaysOn
+                                  ? 'Выполняется автоматически'
+                                  : disabledForBrief
+                                  ? 'Сначала заполните бриф'
+                                  : (lockedReason ?? undefined)
+                              }
                               className={`group relative flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
                                 isAlwaysOn
                                   ? 'border-emerald-200 bg-emerald-50/50 cursor-default'
+                                  : disabledForBrief
+                                  ? 'border-gray-100 bg-gray-50 cursor-not-allowed opacity-60'
                                   : showAsActive
                                   ? lockedReason ? 'border-gray-900 bg-gray-100 shadow-sm opacity-80' : 'border-gray-900 bg-gray-50 shadow-sm'
                                   : 'border-gray-100 bg-white hover:border-gray-300 hover:shadow-sm'
@@ -914,6 +931,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                                   <p className="text-[11px] text-emerald-700 mt-1 flex items-start gap-1">
                                     <Zap className="w-3 h-3 mt-0.5 flex-shrink-0" />
                                     {clientHint}
+                                  </p>
+                                )}
+                                {disabledForBrief && (
+                                  <p className="text-[11px] text-blue-600 mt-1 flex items-start gap-1">
+                                    <Lock className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                                    Сначала заполните&nbsp;
+                                    <a
+                                      href="/client/brief"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="font-semibold underline hover:text-blue-800"
+                                    >
+                                      бриф
+                                    </a>
+                                    &nbsp;— нужен для AI-оценки релевантности
                                   </p>
                                 )}
                                 {showAsActive && columnWarnings.has(step.key) && (
