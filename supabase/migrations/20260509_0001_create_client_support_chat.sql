@@ -248,9 +248,17 @@ alter table public.notifications
 -- new message lands), so adding threads to the publication would just produce
 -- WAL traffic without consumers.
 
+-- Guard: на некоторых окружениях (локалка без Realtime, fresh DB прежде чем
+-- supabase init поднял Realtime) публикации supabase_realtime просто нет.
+-- Без отдельной проверки `pg_publication` исходный `not exists` по
+-- pg_publication_tables всегда истинен (таблиц в несуществующей публикации
+-- нет), и ALTER падает с 42704 «undefined object». Это и сломало деплой
+-- в build e31ee01d в мае 2026.
 do $$
 begin
-  if not exists (
+  if exists (
+    select 1 from pg_publication where pubname = 'supabase_realtime'
+  ) and not exists (
     select 1
     from pg_publication_tables
     where pubname = 'supabase_realtime'
