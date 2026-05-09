@@ -18,6 +18,7 @@ import { Send } from 'lucide-react';
 import {
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
+  CLIENT_NAV_SUPPORT,
   type ClientNavItem,
 } from '@/lib/clientNav';
 import type { Locale } from '@/lib/i18n';
@@ -113,6 +114,15 @@ export function ClientNavList({ activeId, locale, onItemClick }: ClientNavListPr
           </div>
         </div>
       ))}
+
+      <div className="mt-4 pt-3 border-t" style={{ borderColor: 'var(--cp-divider, rgba(0,0,0,0.06))' }}>
+        <NavItemRow
+          item={CLIENT_NAV_SUPPORT}
+          active={activeId === CLIENT_NAV_SUPPORT.id}
+          locale={locale}
+          onItemClick={onItemClick}
+        />
+      </div>
     </nav>
   );
 }
