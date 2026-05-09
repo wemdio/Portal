@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 
 type Props = {
@@ -10,11 +10,30 @@ type Props = {
   onClose: () => void;
 };
 
+type Group = { letter: string; items: string[] };
+
+function groupByLetter(types: string[]): Group[] {
+  const map = new Map<string, string[]>();
+  for (const t of types) {
+    const letter = t.charAt(0).toUpperCase();
+    let arr = map.get(letter);
+    if (!arr) {
+      arr = [];
+      map.set(letter, arr);
+    }
+    arr.push(t);
+  }
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a.localeCompare(b, 'ru'))
+    .map(([letter, items]) => ({ letter, items }));
+}
+
 export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Props) {
   const [search, setSearch] = useState('');
   const [allTypes, setAllTypes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -37,30 +56,59 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
     return () => { cancelled = true; };
   }, [apiUrl]);
 
-  const filtered = useMemo(() => {
+  const filteredTypes = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return allTypes;
     return allTypes.filter((t) => t.toLowerCase().includes(q));
   }, [search, allTypes]);
 
-  const allFilteredSelected = filtered.length > 0 && filtered.every((t) => selected.has(t));
+  const groups = useMemo(() => groupByLetter(filteredTypes), [filteredTypes]);
 
-  const toggleAll = () => {
-    const next = new Set(selected);
-    if (allFilteredSelected) {
-      for (const t of filtered) next.delete(t);
-    } else {
-      for (const t of filtered) next.add(t);
+  const expandedForDisplay = useMemo(() => {
+    if (search.trim()) {
+      return new Set(groups.map((g) => g.letter));
     }
-    onChange(next);
-  };
+    return expanded;
+  }, [search, groups, expanded]);
 
-  const toggle = (type: string) => {
+  const toggleExpand = useCallback((letter: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(letter)) next.delete(letter);
+      else next.add(letter);
+      return next;
+    });
+  }, []);
+
+  const toggleItem = useCallback((type: string) => {
     const next = new Set(selected);
     if (next.has(type)) next.delete(type);
     else next.add(type);
     onChange(next);
-  };
+  }, [selected, onChange]);
+
+  const toggleGroup = useCallback((group: Group) => {
+    const next = new Set(selected);
+    const allSelected = group.items.every((t) => next.has(t));
+    if (allSelected) {
+      for (const t of group.items) next.delete(t);
+    } else {
+      for (const t of group.items) next.add(t);
+    }
+    onChange(next);
+  }, [selected, onChange]);
+
+  const toggleAll = useCallback(() => {
+    const items = filteredTypes;
+    const next = new Set(selected);
+    const allSelected = items.every((t) => next.has(t));
+    if (allSelected) {
+      for (const t of items) next.delete(t);
+    } else {
+      for (const t of items) next.add(t);
+    }
+    onChange(next);
+  }, [selected, onChange, filteredTypes]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -78,7 +126,7 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
           </button>
         </div>
 
-        <div className="px-8 pb-3">
+        <div className="px-8 pb-4">
           <div className="relative">
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
@@ -93,28 +141,6 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
           </div>
         </div>
 
-        {!loading && !error && filtered.length > 0 && (
-          <div className="px-8 pb-2">
-            <label className="flex items-center gap-2 cursor-pointer py-1 hover:bg-gray-50 rounded px-1 -mx-1">
-              <input
-                type="checkbox"
-                checked={allFilteredSelected}
-                ref={(el) => {
-                  if (el) {
-                    const someSelected = filtered.some((t) => selected.has(t));
-                    el.indeterminate = !allFilteredSelected && someSelected;
-                  }
-                }}
-                onChange={toggleAll}
-                className="w-4 h-4 accent-blue-600 flex-shrink-0"
-              />
-              <span className="text-sm font-medium text-gray-700">
-                {search.trim() ? `Выбрать все найденные (${filtered.length})` : `Выбрать все (${allTypes.length})`}
-              </span>
-            </label>
-          </div>
-        )}
-
         <div className="flex-1 overflow-y-auto px-8 pb-4">
           {loading && (
             <div className="text-sm text-gray-500 py-8 text-center">Загрузка...</div>
@@ -122,23 +148,61 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
           {error && (
             <div className="text-sm text-red-600 py-8 text-center">{error}</div>
           )}
-          {!loading && !error && filtered.length === 0 && (
+          {!loading && !error && groups.length === 0 && (
             <div className="text-sm text-gray-500 py-8 text-center">Ничего не найдено</div>
           )}
-          {filtered.map((type) => (
-            <label
-              key={type}
-              className="flex items-center gap-2 cursor-pointer py-1 hover:bg-gray-50 rounded px-1 -mx-1"
-            >
-              <input
-                type="checkbox"
-                checked={selected.has(type)}
-                onChange={() => toggle(type)}
-                className="w-4 h-4 accent-blue-600 flex-shrink-0"
-              />
-              <span className="text-sm">{type}</span>
-            </label>
-          ))}
+          {groups.map((group) => {
+            const selectedCount = group.items.filter((t) => selected.has(t)).length;
+            const allSelected = selectedCount === group.items.length && group.items.length > 0;
+            const isOpen = expandedForDisplay.has(group.letter);
+
+            return (
+              <div key={group.letter} className="mb-1">
+                <div className="flex items-center gap-2 py-1 hover:bg-gray-50 rounded-lg px-1 -mx-1">
+                  <button
+                    type="button"
+                    onClick={() => toggleExpand(group.letter)}
+                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700 flex-shrink-0"
+                  >
+                    {isOpen ? '−' : '+'}
+                  </button>
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allSelected && selectedCount > 0;
+                    }}
+                    onChange={() => toggleGroup(group)}
+                    className="w-4 h-4 accent-blue-600 flex-shrink-0"
+                  />
+                  <span className="text-sm font-bold text-gray-800">
+                    {group.letter}
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    ({selectedCount}/{group.items.length})
+                  </span>
+                </div>
+                {isOpen && (
+                  <div className="ml-12 mt-0.5 space-y-0.5">
+                    {group.items.map((type) => (
+                      <label
+                        key={type}
+                        className="flex items-center gap-2 cursor-pointer py-0.5 hover:bg-gray-50 rounded px-1 -mx-1"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected.has(type)}
+                          onChange={() => toggleItem(type)}
+                          className="w-4 h-4 accent-blue-600 flex-shrink-0"
+                        />
+                        <span className="text-sm">{type}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         <div className="flex items-center justify-between px-8 py-5 border-t border-gray-100">
@@ -155,7 +219,7 @@ export function ActivityTypesModal({ apiUrl, selected, onChange, onClose }: Prop
             </button>
             <button
               type="button"
-              onClick={() => onChange(new Set(allTypes))}
+              onClick={toggleAll}
               className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-base font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
               Все
