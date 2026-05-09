@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 export const dynamic = 'force-dynamic';
@@ -26,8 +26,6 @@ const COLUMNS = [
   { key: 'egais',           label: 'ЕГАИС' },
 ] as const;
 
-const DB_FIELDS = COLUMNS.map((c) => c.key).join(', ');
-
 const admin = supabaseAdmin!;
 
 async function getUser(req: NextRequest) {
@@ -35,53 +33,6 @@ async function getUser(req: NextRequest) {
   if (!token) return null;
   const { data } = await admin.auth.getUser(token);
   return data.user;
-}
-
-function applyFilters(body: CompaniesSearchFilters, offset: number) {
-  let q = admin
-    .from('companies_directory')
-    .select(DB_FIELDS)
-    .order('id', { ascending: true })
-    .range(offset, offset + CHUNK_SIZE - 1);
-
-  if (body.regionCodes && body.regionCodes.length > 0) {
-    const tokens: string[] = [];
-    for (const code of body.regionCodes) {
-      const r = getRegionByCode(code);
-      if (r) for (const tk of r.matchTokens) tokens.push(tk);
-    }
-    if (tokens.length > 0) {
-      q = q.or(
-        tokens.map((tk) => `address.ilike.%${tk.replace(/[%,]/g, '')}%`).join(','),
-      );
-    }
-  }
-
-  if (body.activityTypes && body.activityTypes.length > 0) {
-    q = q.in('activity_type', body.activityTypes);
-  }
-  if (body.hasPhone) q = q.not('phones', 'is', null);
-  if (body.hasEmail) q = q.not('email', 'is', null);
-  if (body.legalForms && body.legalForms.length > 0) {
-    q = q.or(
-      body.legalForms.map((f) => `name.ilike.${f.replace(/[%,]/g, '')}%`).join(','),
-    );
-  }
-  if (body.hasWebsite) q = q.not('website', 'is', null);
-  if (body.hasEdo) q = q.not('edo_id', 'is', null);
-  if (body.hasEgais) q = q.not('egais', 'is', null);
-  if (body.includeIp === false) q = q.not('name', 'ilike', 'ИП %');
-  if (typeof body.revenueFrom === 'number') q = q.gte('revenue', body.revenueFrom);
-  if (typeof body.revenueTo === 'number') q = q.lte('revenue', body.revenueTo);
-  if (typeof body.costFrom === 'number') q = q.gte('cost', body.costFrom);
-  if (typeof body.costTo === 'number') q = q.lte('cost', body.costTo);
-  if (typeof body.employeesFrom === 'number') q = q.gte('employees_count', body.employeesFrom);
-  if (typeof body.employeesTo === 'number') q = q.lte('employees_count', body.employeesTo);
-  if (body.innList && body.innList.length > 0) {
-    q = q.in('inn', body.innList);
-  }
-
-  return q;
 }
 
 type Row = Record<string, unknown>;
@@ -124,10 +75,8 @@ export async function POST(req: NextRequest) {
   let offset = 0;
 
   for (;;) {
-    const { data, error } = await applyFilters(body, offset);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-    const rows = (data ?? []) as unknown as Row[];
+    const { rows, error } = await searchRows(body, CHUNK_SIZE, offset);
+    if (error) return NextResponse.json({ error }, { status: 500 });
     if (rows.length === 0) break;
 
     allRows.push(...rows);
