@@ -8,7 +8,7 @@ COPY app/patches ./patches
 
 # Install dependencies and force musl lightningcss binary for Alpine.
 # package-lock currently contains only gnu flavor, which breaks Next/Turbopack on musl.
-RUN npm ci --include=optional \
+RUN npm install --include=optional \
   && LIGHTNINGCSS_VERSION=$(node -p "require('./node_modules/lightningcss/package.json').version") \
   && npm install --no-save "lightningcss-linux-x64-musl@${LIGHTNINGCSS_VERSION}"
 

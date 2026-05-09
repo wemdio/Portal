@@ -7,7 +7,7 @@ COPY app/package.json app/package-lock.json ./
 
 # Skip postinstall (playwright install) — we run it manually below
 # Include optional native packages for cross-platform deterministic installs.
-RUN npm ci --include=optional --ignore-scripts
+RUN npm install --include=optional --ignore-scripts
 
 # Apply patches (e.g. GramJS TL schema fix) before building
 COPY app/patches ./patches
