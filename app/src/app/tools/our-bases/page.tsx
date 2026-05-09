@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { authFetch } from '@/lib/authFetch';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
-import { OkvedTreeModal } from '@/components/OkvedTreeModal';
+import { ActivityTypesModal } from '@/components/ActivityTypesModal';
 
 type Mode = 'activity' | 'inn';
 
@@ -481,7 +481,8 @@ export default function OurBasesPage() {
         />
       )}
       {activitiesModalOpen && (
-        <OkvedTreeModal
+        <ActivityTypesModal
+          apiUrl="/api/tools/our-bases/activity-types"
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}

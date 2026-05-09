@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
-import { minimalOkvedPrefixes } from '@/lib/companiesSearch/okvedFilter';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 export const dynamic = 'force-dynamic';
@@ -56,13 +55,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.activityTypes && body.activityTypes.length > 0) {
-      const prefixes = minimalOkvedPrefixes(body.activityTypes);
-      if (prefixes.length > 0) {
-        const orClause = prefixes
-          .map((p) => `activity_type.like.${p.replace(/[%,]/g, '')}%`)
-          .join(',');
-        q = q.or(orClause);
-      }
+      q = q.in('activity_type', body.activityTypes);
     }
 
     if (body.hasPhone) q = q.not('phones', 'is', null);
@@ -99,34 +92,12 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    // DEBUG: total row count without any filters + sample activity_type values
-    const [filtered, total, sample] = await Promise.all([
-      buildQuery('count'),
-      admin
-        .from('companies_directory')
-        .select('id', { count: 'exact', head: true }),
-      admin
-        .from('companies_directory')
-        .select('activity_type')
-        .not('activity_type', 'is', null)
-        .limit(10),
-    ]);
+    const { count, error: countErr } = await buildQuery('count');
+    if (countErr) return NextResponse.json({ error: countErr.message }, { status: 500 });
 
-    if (filtered.error) return NextResponse.json({ error: filtered.error.message }, { status: 500 });
+    const response: { count: number; rows?: Array<Record<string, unknown>> } = { count: count ?? 0 };
 
-    const response: Record<string, unknown> = {
-      count: filtered.count ?? 0,
-      _debug: {
-        totalRowsNoFilter: total.count ?? 0,
-        totalError: total.error?.message ?? null,
-        sampleActivityTypes: (sample.data ?? []).map(
-          (r) => (r as { activity_type: string }).activity_type,
-        ),
-        sampleError: sample.error?.message ?? null,
-      },
-    };
-
-    if (!wantCount && (filtered.count ?? 0) > 0) {
+    if (!wantCount && (count ?? 0) > 0) {
       const { data, error } = await buildQuery('rows').limit(limit);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       response.rows = (data as unknown as Record<string, unknown>[]) ?? [];
