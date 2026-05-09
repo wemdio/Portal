@@ -99,12 +99,34 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    const { count, error: countErr } = await buildQuery('count');
-    if (countErr) return NextResponse.json({ error: countErr.message }, { status: 500 });
+    // DEBUG: total row count without any filters + sample activity_type values
+    const [filtered, total, sample] = await Promise.all([
+      buildQuery('count'),
+      admin
+        .from('companies_directory')
+        .select('id', { count: 'exact', head: true }),
+      admin
+        .from('companies_directory')
+        .select('activity_type')
+        .not('activity_type', 'is', null)
+        .limit(10),
+    ]);
 
-    const response: { count: number; rows?: Array<Record<string, unknown>> } = { count: count ?? 0 };
+    if (filtered.error) return NextResponse.json({ error: filtered.error.message }, { status: 500 });
 
-    if (!wantCount && (count ?? 0) > 0) {
+    const response: Record<string, unknown> = {
+      count: filtered.count ?? 0,
+      _debug: {
+        totalRowsNoFilter: total.count ?? 0,
+        totalError: total.error?.message ?? null,
+        sampleActivityTypes: (sample.data ?? []).map(
+          (r) => (r as { activity_type: string }).activity_type,
+        ),
+        sampleError: sample.error?.message ?? null,
+      },
+    };
+
+    if (!wantCount && (filtered.count ?? 0) > 0) {
       const { data, error } = await buildQuery('rows').limit(limit);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       response.rows = (data as unknown as Record<string, unknown>[]) ?? [];
