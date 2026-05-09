@@ -232,12 +232,12 @@ export default function ClientProjectsPage() {
             Проекты создаёт менеджер агентства. Если вы ожидаете проект, но его нет —
             напишите менеджеру, чтобы он привязал его к вашему профилю.
           </p>
-          <a
-            href="mailto:hello@polza.com?subject=Не%20вижу%20проекта%20в%20клиентском%20портале"
+          <Link
+            href={'/client/support' as Route}
             className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
           >
             Связаться с менеджером
-          </a>
+          </Link>
         </div>
       ) : (
         <>

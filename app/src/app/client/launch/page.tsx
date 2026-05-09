@@ -478,13 +478,13 @@ export default function ClientLaunchPage() {
             Прежде чем вы запустите первую кампанию, ваш менеджер должен привязать
             к аккаунту email-почты для рассылки и общее расписание. Это разовая настройка.
           </p>
-          <a
-            href="mailto:hello@polza.com?subject=Настройка%20пресета%20для%20запуска%20кампаний"
+          <Link
+            href={'/client/support' as Route}
             className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 mt-6 text-sm font-semibold"
           >
             <Mail className="h-4 w-4" />
             Связаться с менеджером
-          </a>
+          </Link>
         </div>
       </div>
     );
