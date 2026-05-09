@@ -43,6 +43,7 @@ export default function CompaniesSearchPage() {
     new Set(ALL_REGION_CODES),
   );
   const [selectedActivities, setSelectedActivities] = useState<Set<string>>(new Set());
+  const [allActivityTypesCount, setAllActivityTypesCount] = useState(0);
   const [innList, setInnList] = useState('');
 
   const [hasPhone, setHasPhone] = useState(false);
@@ -85,7 +86,9 @@ export default function CompaniesSearchPage() {
           ? Array.from(selectedRegions)
           : undefined,
       activityTypes:
-        mode === 'activity' && selectedActivitiesCount > 0
+        mode === 'activity' &&
+        selectedActivitiesCount > 0 &&
+        selectedActivitiesCount < allActivityTypesCount
           ? Array.from(selectedActivities)
           : undefined,
       hasPhone,
@@ -259,8 +262,9 @@ export default function CompaniesSearchPage() {
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold text-gray-900">{t('Виды деятельности', 'Activity types', locale)}</div>
                 <div className="text-xs text-gray-500 mt-0.5">
-                  {selectedActivitiesCount === 0
-                    ? t('Не выбрано (= все виды)', 'Not selected (= all types)', locale)
+                  {selectedActivitiesCount === 0 ||
+                  (allActivityTypesCount > 0 && selectedActivitiesCount >= allActivityTypesCount)
+                    ? t('Все виды деятельности', 'All activity types', locale)
                     : t(`Выбрано: ${selectedActivitiesCount}`, `Selected: ${selectedActivitiesCount}`, locale)}
                 </div>
               </div>
@@ -557,6 +561,7 @@ export default function CompaniesSearchPage() {
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
+          onLoaded={setAllActivityTypesCount}
         />
       )}
     </div>

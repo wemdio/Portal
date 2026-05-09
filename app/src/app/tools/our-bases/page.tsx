@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { authFetch } from '@/lib/authFetch';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
@@ -24,6 +24,7 @@ export default function OurBasesPage() {
     new Set(ALL_REGION_CODES),
   );
   const [selectedActivities, setSelectedActivities] = useState<Set<string>>(new Set());
+  const [allActivityTypesCount, setAllActivityTypesCount] = useState(0);
   const [innList, setInnList] = useState('');
 
   const [hasPhone, setHasPhone] = useState(false);
@@ -66,7 +67,9 @@ export default function OurBasesPage() {
           ? Array.from(selectedRegions)
           : undefined,
       activityTypes:
-        mode === 'activity' && selectedActivitiesCount > 0
+        mode === 'activity' &&
+        selectedActivitiesCount > 0 &&
+        selectedActivitiesCount < allActivityTypesCount
           ? Array.from(selectedActivities)
           : undefined,
       hasPhone,
@@ -225,8 +228,9 @@ export default function OurBasesPage() {
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-gray-900">Виды деятельности</div>
                   <div className="text-xs text-gray-500 mt-0.5">
-                    {selectedActivitiesCount === 0
-                      ? 'Не выбрано (= все виды)'
+                    {selectedActivitiesCount === 0 ||
+                    (allActivityTypesCount > 0 && selectedActivitiesCount >= allActivityTypesCount)
+                      ? 'Все виды деятельности'
                       : `Выбрано: ${selectedActivitiesCount}`}
                   </div>
                 </div>
@@ -486,6 +490,7 @@ export default function OurBasesPage() {
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
+          onLoaded={setAllActivityTypesCount}
         />
       )}
     </div>
