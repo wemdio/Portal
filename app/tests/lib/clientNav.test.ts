@@ -13,13 +13,16 @@
 import {
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_DASHBOARD,
+  CLIENT_NAV_SUPPORT,
   ClientNavGroupId,
+  resolveActiveNavId,
   type ClientNavGroup,
   type ClientNavItem,
 } from '@/lib/clientNav';
 
 const allItems: readonly ClientNavItem[] = [
   CLIENT_NAV_DASHBOARD,
+  CLIENT_NAV_SUPPORT,
   ...CLIENT_NAV_GROUPS.flatMap((g) => g.items),
 ];
 
@@ -80,9 +83,27 @@ describe('client nav IA', () => {
       '/client/parsers?tab=email-sequence',
       '/client/launch',
       '/client/brief',
+      '/client/support',
     ]);
     const actualHrefs = new Set(allItems.map((i) => i.href));
     expect(actualHrefs).toEqual(expectedHrefs);
+  });
+
+  it('exposes a support root item separate from groups (replaces legacy mailto)', () => {
+    expect(CLIENT_NAV_SUPPORT.href).toBe('/client/support');
+    expect(CLIENT_NAV_SUPPORT.id).toBe('support');
+    expect(CLIENT_NAV_SUPPORT.label).toBeTruthy();
+    expect(CLIENT_NAV_SUPPORT.labelEn).toBeTruthy();
+    // The support item must NOT live inside any of the workflow groups —
+    // it's an always-available helpdesk surface, not a step.
+    for (const g of CLIENT_NAV_GROUPS) {
+      expect(g.items.some((i) => i.id === 'support')).toBe(false);
+    }
+  });
+
+  it('resolveActiveNavId picks support for /client/support', () => {
+    expect(resolveActiveNavId('/client/support')).toBe('support');
+    expect(resolveActiveNavId('/client/support/foo')).toBe('support');
   });
 
   it('Старт group orders items pedagogically (brief → collect & clean → write → launch)', () => {

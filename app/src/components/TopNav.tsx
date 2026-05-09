@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { useUser } from '@/lib/UserProvider';
-import { getRoleLabel, isAdmin, canAccessBillingCalendar } from '@/lib/roles';
+import { getRoleLabel, isAdmin, isTechnician, canAccessBillingCalendar } from '@/lib/roles';
 import { commonDictionary, dict } from '@/lib/i18n';
 
 export function TopNav() {
@@ -29,6 +29,7 @@ export function TopNav() {
 
   const visibleItems = navItems.filter((item) => {
     if (item.adminOnly && !isAdmin(userRole)) return false;
+    if (item.technicianOrAdmin && !isTechnician(userRole)) return false;
     if (item.billingCalendarOnly && !canAccessBillingCalendar(userRole)) return false;
     if (item.navTabId && navTabVisibility[item.navTabId] === false) return false;
     if (item.requiresTool && visibleTools !== null && !visibleTools.includes(item.requiresTool)) return false;
