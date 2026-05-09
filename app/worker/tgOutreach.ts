@@ -1,5 +1,6 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
 import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
+import { writeHeartbeat } from '@/lib/tgOutreach/gramClient';
 import { startTrace } from '@/lib/tracer';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
@@ -277,6 +278,16 @@ async function main() {
   await resetStuckJobs();
   await resumeRunningCampaigns();
 
+  // Independent heartbeat ticker. We can't rely on the per-account heartbeat
+  // inside buildClients() — when all 5 campaigns are busy with anti-flood pauses
+  // (220-545s each), the main loop won't return to bump heartbeat for 20+ min,
+  // and the docker healthcheck would (wrongly) flip to unhealthy. As long as
+  // the Node event loop is alive, we tick every 30s here so health reflects
+  // process aliveness, not loop progress.
+  writeHeartbeat();
+  const heartbeatTimer = setInterval(() => writeHeartbeat(), 30_000);
+  if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+
   const resumeTimer = setInterval(() => {
     if (shouldStop()) return;
     resumeRunningCampaigns().catch((err) =>
@@ -292,6 +303,7 @@ async function main() {
     realtimeTables: ['tg_outreach_jobs'],
   });
 
+  clearInterval(heartbeatTimer);
   clearInterval(resumeTimer);
 
   log('info', 'Waiting for running campaigns to finish...');

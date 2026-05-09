@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { OnboardingBanner } from '@/components/client/OnboardingBanner';
 
 // Flat row returned by /api/client/campaigns (data comes from DB, analytics inline)
 interface CampaignRow {
@@ -197,6 +198,7 @@ export default function ClientCampaignsPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
+      <OnboardingBanner />
       <div className="mb-6 sm:mb-8 flex items-end justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-extrabold">Кампании</h1>
@@ -230,8 +232,20 @@ export default function ClientCampaignsPage() {
           </div>
 
           {campaigns.length === 0 ? (
-            <div className="neu-card py-16 text-center">
-              <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Нет назначенных кампаний</p>
+            <div className="neu-card py-12 sm:py-16 text-center px-6">
+              <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
+                Кампаний пока нет
+              </p>
+              <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
+                Запустите первую кампанию: загрузите базу, напишите цепочку — мы покажем
+                здесь её метрики (отправки, открытия, ответы) в реальном времени.
+              </p>
+              <Link
+                href={'/client/launch' as Route}
+                className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold"
+              >
+                Создать кампанию
+              </Link>
             </div>
           ) : (
             <>

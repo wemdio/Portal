@@ -1,0 +1,202 @@
+/**
+ * Backend logic for the /client/dashboard onboarding checklist.
+ *
+ * Pure-ish function: takes a userId + two supabase clients (public schema +
+ * instantly schema) and returns the 5-item progress structure that matches
+ * Phase 0 of the May 2026 UX redesign.
+ *
+ * Keeping this OUTSIDE the route handler so it's testable without involving
+ * Next.js request lifecycle or the cache wrapper. The route file imports this
+ * and wraps the call in `cached()` for a short TTL.
+ *
+ * Performance: 4 small queries to the database in parallel (most return 0-1
+ * rows). On a warm connection this is < 50ms total, well below the 15s cache
+ * TTL we set in the route handler.
+ */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+export type OnboardingStepId =
+  | 'brief'
+  | 'preset'
+  | 'first_base'
+  | 'first_clean'
+  | 'first_launch';
+
+export interface OnboardingStatusItem {
+  id: OnboardingStepId;
+  label: string;
+  done: boolean;
+  /** Where to take the user when they tap this row. null = handled by manager (no client action). */
+  href: string | null;
+  /** Human-readable explanation when done=false and the user can't unblock it themselves. */
+  blocked_reason?: string;
+}
+
+export interface OnboardingStatusResponse {
+  items: OnboardingStatusItem[];
+  /** True iff every item is done. */
+  complete: boolean;
+  /** Id of the first not-done item the user should tackle next, or null when complete. */
+  next_id: OnboardingStepId | null;
+}
+
+export interface OnboardingStatusDeps {
+  /** Supabase client for the `public` schema (auth, base_constructor_jobs, profiles). */
+  supabaseAdmin: SupabaseClient;
+  /** Supabase client for the `instantly` schema (briefs, presets, launches). */
+  supabaseInstantly: SupabaseClient;
+}
+
+const STEP_ORDER: readonly OnboardingStepId[] = [
+  'brief',
+  'preset',
+  'first_base',
+  'first_clean',
+  'first_launch',
+] as const;
+
+const LAUNCH_DONE_STATUSES: readonly string[] = ['active', 'paused', 'completed'];
+
+interface BriefFieldsShape {
+  company_description?: unknown;
+  product_description?: unknown;
+  target_audience?: unknown;
+}
+
+/**
+ * The brief is considered "started enough" when at least one of the three
+ * core fields (company description, product description, target audience)
+ * has any non-whitespace content. This keeps the checklist responsive — a
+ * client who fills any one field on first save is rewarded immediately.
+ */
+function hasMinimalBriefContent(fields: BriefFieldsShape | null | undefined): boolean {
+  if (!fields || typeof fields !== 'object') return false;
+  const fieldsToCheck: (keyof BriefFieldsShape)[] = [
+    'company_description',
+    'product_description',
+    'target_audience',
+  ];
+  for (const key of fieldsToCheck) {
+    const value = fields[key];
+    if (typeof value === 'string' && value.trim().length > 0) return true;
+  }
+  return false;
+}
+
+export async function computeOnboardingStatus(
+  userId: string,
+  deps: OnboardingStatusDeps,
+): Promise<OnboardingStatusResponse> {
+  const { supabaseAdmin, supabaseInstantly } = deps;
+
+  // All four queries run in parallel — none depend on each other's output.
+  const [briefRes, presetRes, jobsRes, launchesRes] = await Promise.all([
+    supabaseInstantly
+      .from('client_briefs')
+      .select('fields')
+      .eq('client_user_id', userId)
+      .maybeSingle(),
+    supabaseInstantly
+      .from('client_campaign_presets')
+      .select('email_account_ids')
+      .eq('client_user_id', userId)
+      .maybeSingle(),
+    supabaseAdmin
+      .from('base_constructor_jobs')
+      .select('status')
+      .eq('user_id', userId),
+    supabaseInstantly
+      .from('client_campaign_launches')
+      .select('status')
+      .eq('client_user_id', userId),
+  ]);
+
+  // ── Brief ────────────────────────────────────────────────────────────
+  const briefFields = (briefRes.data?.fields ?? null) as BriefFieldsShape | null;
+  const briefDone = hasMinimalBriefContent(briefFields);
+
+  // ── Preset ───────────────────────────────────────────────────────────
+  const presetRow = presetRes.data as { email_account_ids?: unknown } | null;
+  const presetEmailIds = Array.isArray(presetRow?.email_account_ids)
+    ? (presetRow!.email_account_ids as unknown[])
+    : [];
+  const presetDone = presetEmailIds.length > 0;
+
+  // ── first_base / first_clean (from base_constructor_jobs) ────────────
+  const jobs = (jobsRes.data ?? []) as { status?: unknown }[];
+  const hasAnyJob = jobs.length > 0;
+  const hasCompletedJob = jobs.some((j) => j.status === 'completed');
+
+  // ── first_base / first_launch (from client_campaign_launches) ────────
+  const launches = (launchesRes.data ?? []) as { status?: unknown }[];
+  const hasAnyLaunch = launches.length > 0;
+  const hasLaunchedCampaign = launches.some(
+    (l) => typeof l.status === 'string' && LAUNCH_DONE_STATUSES.includes(l.status),
+  );
+
+  const firstBaseDone = hasAnyJob || hasAnyLaunch;
+  const firstCleanDone = hasCompletedJob;
+  const firstLaunchDone = hasLaunchedCampaign;
+
+  // ── Build response ───────────────────────────────────────────────────
+  const items: OnboardingStatusItem[] = [
+    {
+      id: 'brief',
+      label: 'Заполнить бриф',
+      done: briefDone,
+      href: '/client/brief',
+    },
+    presetDone
+      ? {
+          id: 'preset',
+          label: 'Менеджер настроил пресет',
+          done: true,
+          href: null,
+        }
+      : {
+          id: 'preset',
+          label: 'Менеджер настроил пресет',
+          done: false,
+          href: null,
+          blocked_reason: presetRow
+            ? 'Пресет создан, но у вас не привязаны email-аккаунты. Обратитесь к менеджеру.'
+            : 'Менеджер ещё не настроил ваш пресет. Обратитесь к менеджеру.',
+        },
+    {
+      id: 'first_base',
+      label: 'Собрать первую базу',
+      done: firstBaseDone,
+      href: '/client/build',
+    },
+    {
+      id: 'first_clean',
+      label: 'Очистить первую базу',
+      done: firstCleanDone,
+      href: '/client/base-constructor',
+    },
+    {
+      id: 'first_launch',
+      label: 'Запустить первую кампанию',
+      done: firstLaunchDone,
+      href: '/client/launch',
+    },
+  ];
+
+  const complete = items.every((i) => i.done);
+  const nextItem = items.find((i) => !i.done) ?? null;
+  const next_id = (nextItem?.id ?? null) as OnboardingStepId | null;
+
+  // Cheap sanity check: items are returned in the canonical step order.
+  // (kept for assertion in tests; cheap at runtime.)
+  if (process.env.NODE_ENV !== 'production') {
+    const ids = items.map((i) => i.id);
+    for (let i = 0; i < STEP_ORDER.length; i++) {
+      if (ids[i] !== STEP_ORDER[i]) {
+        throw new Error(`onboardingStatus: step order broken at index ${i}`);
+      }
+    }
+  }
+
+  return { items, complete, next_id };
+}

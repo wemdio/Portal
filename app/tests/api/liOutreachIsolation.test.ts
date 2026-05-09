@@ -92,6 +92,11 @@ function makeBuilder(table: string) {
 
 const fromMock = jest.fn((table: string) => makeBuilder(table));
 
+// Mutable flag toggled per-test so we can exercise both the regular-user path
+// (default) and the admin-bypass branch added in the "admins manage all LI
+// campaigns" feature. See the second describe block below.
+const adminFlag = { value: false };
+
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { from: (table: string) => fromMock(table) },
 }));
@@ -104,6 +109,7 @@ jest.mock('@/lib/liOutreach/apiHelpers', () => {
       user: { id: AUTH_USER_ID },
       supabase: { from: (table: string) => fromMock(table) },
     })),
+    checkIsAdmin: jest.fn(async () => adminFlag.value),
   };
 });
 
@@ -134,6 +140,7 @@ function ownsUserScope(table: string): boolean {
 beforeEach(() => {
   resetState();
   fromMock.mockClear();
+  adminFlag.value = false;
 });
 
 describe('LI Outreach — user_id isolation on list endpoints', () => {
@@ -328,5 +335,113 @@ describe('LI Outreach — owner check on by-id campaign endpoints', () => {
       params: Promise.resolve({ id: 'c2' }),
     });
     expect((res as Response).status).toBe(404);
+  });
+});
+
+/**
+ * Admin bypass: when checkIsAdmin(authUser) === true the route MUST NOT add
+ * `user_id = auth.user.id` to its li_campaigns query. This is the whole point
+ * of the "admins manage all LI campaigns" feature — without these tests the
+ * isolation suite above passes even if the admin path quietly regresses back
+ * to user-scoped behaviour. We assert two complementary signals:
+ *   1. cross-user reads return the foreign campaign instead of 404
+ *   2. no `eq('user_id', auth.user.id)` filter is recorded against li_campaigns
+ *      for the admin's own user_id (admins read globally, not as themselves)
+ */
+describe('LI Outreach — admin bypass on campaign endpoints', () => {
+  function seedCampaigns() {
+    state.rowsByTable.li_campaigns = [
+      { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', lead_list_id: null },
+      { id: 'c2', user_id: OTHER_USER_ID, name: 'NotMine', status: 'draft', lead_list_id: null },
+    ];
+  }
+
+  function liCampaignsScopedToAuthUser(): boolean {
+    return state.allEqCalls.some(
+      (c) => c.table === 'li_campaigns' && c.column === 'user_id' && c.value === AUTH_USER_ID,
+    );
+  }
+
+  beforeEach(() => {
+    adminFlag.value = true;
+  });
+
+  it('GET /campaigns returns campaigns from every owner without scoping by user_id', async () => {
+    seedCampaigns();
+    const { GET } = await import('@/app/api/tools/li-outreach/campaigns/route');
+    const res = await GET(makeReq('http://x/api/tools/li-outreach/campaigns'));
+    const body = await (res as Response).json();
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
+    const ids = (body.campaigns as Array<{ id: string }>).map((c) => c.id).sort();
+    expect(ids).toEqual(['c1', 'c2']);
+  });
+
+  it('GET /campaigns/[id] returns a foreign campaign for an admin', async () => {
+    seedCampaigns();
+    const { GET } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
+    const res = await GET(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c2'),
+      { params: Promise.resolve({ id: 'c2' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    const body = await (res as Response).json();
+    expect(body.campaign.id).toBe('c2');
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
+  });
+
+  // The mock builder used in this file treats update/upsert/insert as no-ops
+  // (see makeBuilder above) — those flows are covered by dedicated suites
+  // (e.g. liOutreachStartCampaignProgress.test.ts). For the admin-bypass
+  // surface we only need to assert that the *authz gate* passed: the route
+  // returned 200 instead of 404, and never added `user_id = auth.user.id` to
+  // its li_campaigns query. That combination is impossible unless the admin
+  // branch was taken.
+
+  it('PUT /campaigns/[id] reaches the mutation step for a foreign campaign when admin', async () => {
+    seedCampaigns();
+    const { PUT } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
+    const res = await PUT(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c2', {
+        method: 'PUT',
+        body: JSON.stringify({ name: 'Renamed by admin' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+      { params: Promise.resolve({ id: 'c2' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
+  });
+
+  it('DELETE /campaigns/[id] reaches the delete step for a foreign campaign when admin', async () => {
+    seedCampaigns();
+    const { DELETE } = await import('@/app/api/tools/li-outreach/campaigns/[id]/route');
+    const res = await DELETE(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c2', { method: 'DELETE' }),
+      { params: Promise.resolve({ id: 'c2' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
+  });
+
+  it('POST /campaigns/[id]/start passes the owner check on a foreign campaign when admin', async () => {
+    seedCampaigns();
+    const { POST } = await import('@/app/api/tools/li-outreach/campaigns/[id]/start/route');
+    const res = await POST(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c2/start', { method: 'POST' }),
+      { params: Promise.resolve({ id: 'c2' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
+  });
+
+  it('POST /campaigns/[id]/stop passes the owner check on a foreign campaign when admin', async () => {
+    seedCampaigns();
+    const { POST } = await import('@/app/api/tools/li-outreach/campaigns/[id]/stop/route');
+    const res = await POST(
+      makeReq('http://x/api/tools/li-outreach/campaigns/c2/stop', { method: 'POST' }),
+      { params: Promise.resolve({ id: 'c2' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(liCampaignsScopedToAuthUser()).toBe(false);
   });
 });

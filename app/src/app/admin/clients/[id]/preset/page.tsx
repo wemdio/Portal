@@ -15,10 +15,6 @@ import {
   type Account,
   type AccountStatusValue,
 } from '@/lib/instantly/types';
-import {
-  INSTANTLY_TIMEZONE_OPTIONS,
-  normalizeInstantlyTimezone,
-} from '@/lib/clientLaunch/timezones';
 
 interface PresetState {
   email_account_ids: string[];
@@ -47,9 +43,7 @@ const DEFAULT_PRESET: PresetState = {
   schedule_from: '09:00',
   schedule_to: '18:00',
   schedule_days: [1, 2, 3, 4, 5],
-  // Europe/Kirov, not Europe/Moscow — Instantly accepts only IANA ids on its
-  // whitelist; both are MSK / UTC+3.
-  schedule_timezone: 'Europe/Kirov',
+  schedule_timezone: 'Europe/Moscow',
 };
 
 const WEEKDAYS = [
@@ -60,6 +54,22 @@ const WEEKDAYS = [
   { value: 5, label: 'Пт' },
   { value: 6, label: 'Сб' },
   { value: 0, label: 'Вс' },
+] as const;
+
+const TIMEZONES = [
+  'Europe/Moscow',
+  'Europe/Kaliningrad',
+  'Europe/Samara',
+  'Asia/Yekaterinburg',
+  'Asia/Omsk',
+  'Asia/Novosibirsk',
+  'Asia/Krasnoyarsk',
+  'Asia/Irkutsk',
+  'Asia/Yakutsk',
+  'Asia/Vladivostok',
+  'Asia/Magadan',
+  'Asia/Kamchatka',
+  'UTC',
 ] as const;
 
 function getErrorMessage(err: unknown): string {
@@ -136,11 +146,7 @@ export default function ClientPresetPage() {
           schedule_from: p.schedule_from || DEFAULT_PRESET.schedule_from,
           schedule_to: p.schedule_to || DEFAULT_PRESET.schedule_to,
           schedule_days: Array.isArray(p.schedule_days) ? p.schedule_days : DEFAULT_PRESET.schedule_days,
-          // Auto-migrate legacy values (e.g. Europe/Moscow → Europe/Kirov) at
-          // load time so the admin sees the new equivalent in the dropdown.
-          schedule_timezone: normalizeInstantlyTimezone(
-            p.schedule_timezone || DEFAULT_PRESET.schedule_timezone,
-          ),
+          schedule_timezone: p.schedule_timezone || DEFAULT_PRESET.schedule_timezone,
         });
         setHasExistingPreset(true);
       }
@@ -414,8 +420,8 @@ export default function ClientPresetPage() {
                   onChange={(e) => setPreset({ ...preset, schedule_timezone: e.target.value })}
                   className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                 >
-                  {INSTANTLY_TIMEZONE_OPTIONS.map((tz) => (
-                    <option key={tz.value} value={tz.value}>{tz.label}</option>
+                  {TIMEZONES.map((tz) => (
+                    <option key={tz} value={tz}>{tz}</option>
                   ))}
                 </select>
               </div>
