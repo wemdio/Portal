@@ -13,6 +13,7 @@ import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } fro
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
+import { SERVICE_OPTIONS } from '@/lib/projectServices';
 import {
   loadAllProjectsPace,
   loadContactsPaceData,
@@ -219,7 +220,6 @@ function ContactsPaceTooltip({
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
-const SERVICE_OPTIONS = ['Аутрич', 'ТГ аутрич', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Ретаргет'];
 const PROJECT_TYPE_OPTIONS = ['Продажа', 'Продление'];
 const STATUS_OPTIONS = ['В работе', 'Тестирование', 'На паузе', 'Подготовка', 'Завершен', 'Отменен'];
 
