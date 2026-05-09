@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
-import { OkvedTreeModal } from '@/components/OkvedTreeModal';
+import { ActivityTypesModal } from '@/components/ActivityTypesModal';
 
 type Mode = 'activity' | 'inn';
 type L = 'ru' | 'en';
@@ -552,11 +552,11 @@ export default function CompaniesSearchPage() {
         />
       )}
       {activitiesModalOpen && (
-        <OkvedTreeModal
+        <ActivityTypesModal
+          apiUrl="/api/client/companies-search/activity-types"
           selected={selectedActivities}
           onChange={setSelectedActivities}
           onClose={() => setActivitiesModalOpen(false)}
-          locale={locale}
         />
       )}
     </div>
