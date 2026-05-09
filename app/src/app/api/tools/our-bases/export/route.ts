@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { minimalOkvedPrefixes } from '@/lib/companiesSearch/okvedFilter';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 export const dynamic = 'force-dynamic';
@@ -58,7 +59,12 @@ function applyFilters(body: CompaniesSearchFilters, offset: number) {
   }
 
   if (body.activityTypes && body.activityTypes.length > 0) {
-    q = q.in('activity_type', body.activityTypes);
+    const prefixes = minimalOkvedPrefixes(body.activityTypes);
+    if (prefixes.length > 0) {
+      q = q.or(
+        prefixes.map((p) => `activity_type.like.${p.replace(/[%,]/g, '')}%`).join(','),
+      );
+    }
   }
   if (body.hasPhone) q = q.not('phones', 'is', null);
   if (body.hasEmail) q = q.not('email', 'is', null);
