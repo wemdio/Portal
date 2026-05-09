@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
 
   const jobId = getJobIdFromUrl(req);
-  const limit = Math.max(1, Math.min(1000, Number(req.nextUrl.searchParams.get('limit') ?? '200') || 200));
+  const limit = Math.max(1, Math.min(5000, Number(req.nextUrl.searchParams.get('limit') ?? '200') || 200));
   const offset = Math.max(0, Number(req.nextUrl.searchParams.get('offset') ?? '0') || 0);
 
   const { data, error } = await supabase
@@ -33,6 +33,6 @@ export async function GET(req: NextRequest) {
     .range(offset, offset + limit - 1);
 
   if (error) return jsonError(error.message, 500);
-  return NextResponse.json({ results: data ?? [], limit, offset });
+  return NextResponse.json({ results: data ?? [], limit, offset, hasMore: (data?.length ?? 0) === limit });
 }
 

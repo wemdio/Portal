@@ -91,8 +91,19 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
   const loadResults = useCallback(async (jobId: string) => {
     setLoadingResults(true);
     try {
-      const data = await authFetchJson<{ results: YandexMapsOrganizationRow[] }>(`/api/parsers/yandexmaps/${jobId}/results?limit=1000&offset=0`);
-      setResults(data.results ?? []);
+      const PAGE = 5000;
+      let offset = 0;
+      let all: YandexMapsOrganizationRow[] = [];
+      for (;;) {
+        const data = await authFetchJson<{ results: YandexMapsOrganizationRow[]; hasMore: boolean }>(
+          `/api/parsers/yandexmaps/${jobId}/results?limit=${PAGE}&offset=${offset}`,
+        );
+        const page = data.results ?? [];
+        all = all.concat(page);
+        if (!data.hasMore || page.length === 0) break;
+        offset += page.length;
+      }
+      setResults(all);
     } finally {
       setLoadingResults(false);
     }
@@ -261,34 +272,28 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     return `yandex_${day}${month}${year}_${hours}${minutes}.${extension}`;
   };
 
-  const handleExportCsv = useCallback(() => {
-    if (!activeJobId || results.length === 0) return;
-    const header = ['Name', 'Phone', 'Website', 'Email', 'Address', 'City', 'Categories', 'WorkingHours', 'Rating', 'Reviews', 'CardUrl', 'Telegram', 'VK', 'Instagram', 'WhatsApp'];
-    const rows = results.map((r) => [
-      `"${String(r.name ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.phone ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.website ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.email ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.address ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.city ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.categories ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.working_hours ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.rating ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.reviews_count ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.card_url ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.telegram ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.vk ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.instagram ?? '').replace(/"/g, '""')}"`,
-      `"${String(r.whatsapp ?? '').replace(/"/g, '""')}"`,
-    ]);
-    const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = getExportFilename('csv');
-    a.click();
-  }, [activeJobId, results]);
+  const handleExportCsv = useCallback(async () => {
+    if (!activeJobId) return;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) return;
+      const res = await fetch(`/api/parsers/yandexmaps/${activeJobId}/export`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = getExportFilename('csv');
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('CSV export failed', e);
+      setError('Не удалось скачать CSV');
+    }
+  }, [activeJobId]);
 
   const handleExportExcel = useCallback(async () => {
     if (!activeJobId || results.length === 0) return;
@@ -337,7 +342,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         return;
       }
 
-      const MAX_ROWS = 5000;
+      const MAX_ROWS = 50_000;
       const rows: string[][] = [
         [
           'Name',
@@ -732,7 +737,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                     <button
                       type="button"
                       onClick={handleExportCsv}
-                      disabled={results.length === 0}
+                      disabled={!activeJobId}
                       className="inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors"
                     >
                       <Download className="h-3.5 w-3.5" />
@@ -803,7 +808,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                 </div>
                 {results.length > 500 && (
                   <div className="p-2 border-t border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
-                    Показано 500 из {results.length} записей
+                    Показано 500 из {results.length} записей. В экспорт (Excel / CSV) попадут все {results.length}.
                   </div>
                 )}
               </div>

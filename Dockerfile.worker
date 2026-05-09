@@ -1,13 +1,13 @@
 # Stage 1: Dependencies
 # Use Debian-based image — Playwright needs system libs unavailable on Alpine
-FROM node:20-slim AS deps
+FROM node:22-slim AS deps
 WORKDIR /app
 
 COPY app/package.json app/package-lock.json ./
 
 # Skip postinstall (playwright install) — we run it manually below
 # Include optional native packages for cross-platform deterministic installs.
-RUN npm ci --include=optional --ignore-scripts
+RUN npm install --include=optional --ignore-scripts
 
 # Apply patches (e.g. GramJS TL schema fix) before building
 COPY app/patches ./patches
@@ -29,7 +29,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN npx playwright install chromium --with-deps
 
 # Stage 2: Build worker bundles with esbuild
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -43,7 +43,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts worker/enrich.ts worker/yandexmaps.ts worker/runner.ts worker/emailvalidation.ts worker/tgOutreach.ts worker/salesCopilot.ts worker/aiCaller.ts worker/tgParser.ts worker/tgTranscribe.ts worker/instantlyLeads.ts worker/outreach.ts worker/liOutreach.ts \
   --bundle \
   --platform=node \
-  --target=node20 \
+  --target=node22 \
   --outdir=dist/workers \
   --tsconfig=tsconfig.json \
   --conditions=react-server \
@@ -53,7 +53,7 @@ RUN node_modules/.bin/esbuild worker/index.ts worker/hh.ts worker/search.ts work
   --log-level=info
 
 # Stage 3: Runtime
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 WORKDIR /app
 
 RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid 1001 --create-home worker

@@ -16,20 +16,10 @@ export async function GET(req: NextRequest) {
   const user = await getUser(req);
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { data, error } = await admin
-    .from('companies_directory')
-    .select('activity_type')
-    .not('activity_type', 'is', null)
-    .limit(50000);
+  const { data, error } = await admin.rpc('companies_directory_activity_types');
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const set = new Set<string>();
-  for (const row of data ?? []) {
-    const v = (row as { activity_type: string | null }).activity_type;
-    if (v && v.trim()) set.add(v.trim());
-  }
-
-  const types = Array.from(set).sort((a, b) => a.localeCompare(b, 'ru'));
+  const types = (data as { activity_type: string }[] ?? []).map((r) => r.activity_type);
   return NextResponse.json({ types });
 }
