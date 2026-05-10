@@ -396,6 +396,7 @@ export async function deleteInstantlyCatalogCampaignById(id: string): Promise<vo
 async function aiMatchUnmatchedCampaigns(
   projects: { id: string; client: string }[],
   allCampaignIds: Set<string>,
+  denylistSet: Set<string>,
 ): Promise<{ matched: number }> {
   if (!supabaseAdmin || !supabaseMain) return { matched: 0 };
 
@@ -487,11 +488,16 @@ Return [] if no matches found.`;
 
       if (parsed.length === 0) continue;
 
-      // Validate: only allow known project_id and campaign_id values
+      // Validate: only allow known project_id and campaign_id values.
+      // Также режем пары из denylist (специалист удалил их из карточки руками
+      // — AI не должен их возвращать обратно).
       const projectIds = new Set(projects.map((p) => p.id));
       const batchCampaignIds = new Set(batch.map((c) => c.id));
       const valid = parsed.filter(
-        (m) => projectIds.has(m.project_id) && batchCampaignIds.has(m.campaign_id),
+        (m) =>
+          projectIds.has(m.project_id) &&
+          batchCampaignIds.has(m.campaign_id) &&
+          !denylistSet.has(`${m.project_id}::${m.campaign_id}`),
       );
 
       if (valid.length > 0) {
@@ -552,6 +558,19 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       `${r.project_id}::${r.campaign_id}`),
   );
 
+  // Чёрный список ручных удалений — кампании, которые специалист отвязал
+  // от проекта в карточке. Без этого фильтра text-match при каждом прогоне
+  // возвращает их обратно — главная боль продлеваемых проектов, где
+  // кампании прошлого периода не должны подтягиваться к новому.
+  const { data: denylist } = await supabaseAdmin
+    .from('project_instantly_campaigns_denylist')
+    .select('project_id, campaign_id');
+
+  const denylistSet = new Set(
+    (denylist ?? []).map((r: { project_id: string; campaign_id: string }) =>
+      `${r.project_id}::${r.campaign_id}`),
+  );
+
   const matches: { project_id: string; campaign_id: string; match_source: string }[] = [];
 
   for (const project of projects as { id: string; client: string }[]) {
@@ -563,6 +582,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       if (!campaignLower.includes(clientLower)) continue;
       const key = `${project.id}::${campaign.id}`;
       if (manualSet.has(key)) continue;
+      if (denylistSet.has(key)) continue;
       matches.push({
         project_id: project.id,
         campaign_id: campaign.id,
@@ -591,6 +611,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     const aiResult = await aiMatchUnmatchedCampaigns(
       projects as { id: string; client: string }[],
       allCampaignIds,
+      denylistSet,
     );
     aiMatched = aiResult.matched;
     if (aiMatched > 0) {
