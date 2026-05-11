@@ -478,14 +478,38 @@ function getTaskStatusLabel(status: TaskStatus, locale: 'ru' | 'en'): string {
 
 function ItemPopover({ items, title, popoverRef, pos, canEdit, deleteConfirmId, setDeleteConfirmId, onDelete, onClose, newValue, setNewValue, onAdd, placeholder, showStatusDot, onDeadlineChange, onItemClick }: ItemPopoverProps) {
   const { locale } = useUser();
+
+  // Закрытие по ESC — обязательная страховка для случая, когда попап
+  // визуально улетел за экран (рамка задач у проекта с большим списком).
+  // Раньше при openUp=true и высоком списке header с крестиком оказывался
+  // выше верхней границы вьюпорта, и закрыть было нечем.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // Динамический maxHeight: попап никогда не должен выходить за вьюпорт.
+  // 80vh — это было «80% высоты окна», но если openUp=true и pos.top меньше
+  // высоты попапа, header уезжал за верхний край. Считаем реально доступное
+  // место в нужном направлении и ограничиваем им (минимум 200px чтобы хоть
+  // header + поле ввода поместились).
+  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const GAP = 16; // отступ от края экрана
+  const availableSpace = pos.openUp
+    ? Math.max(200, pos.top - GAP)
+    : Math.max(200, viewportH - pos.top - GAP - 4);
+
   return (
     <div
       ref={popoverRef}
       className="fixed z-50 w-[480px] bg-white rounded-xl border border-zinc-200/80 shadow-2xl flex flex-col"
       style={{
-        maxHeight: '80vh',
+        maxHeight: `${availableSpace}px`,
         ...(pos.openUp
-          ? { bottom: `${window.innerHeight - pos.top + 4}px`, left: `${pos.left}px` }
+          ? { bottom: `${viewportH - pos.top + 4}px`, left: `${pos.left}px` }
           : { top: `${pos.top + 4}px`, left: `${pos.left}px` }),
       }}
     >
