@@ -74,6 +74,15 @@ export async function POST(
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  // Если специалист руками добавил кампанию обратно — это явная отмена
+  // прошлого решения «удалить из карточки». Снимаем её с denylist'а, чтобы
+  // авто-матчер не воспринимал её как «всегда исключать».
+  await supabaseInstantly
+    .from('project_instantly_campaigns_denylist')
+    .delete()
+    .eq('project_id', projectId)
+    .eq('campaign_id', body.campaign_id);
+
   return NextResponse.json({ ok: true });
 }
 
@@ -100,6 +109,24 @@ export async function DELETE(
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  // Запоминаем пару, чтобы автопривязка её больше не пихала обратно.
+  // Без этого text-match (campaign.name LIKE %client%) и AI-матчер на
+  // следующей синхронизации каталога вернут запись, что и было самой
+  // болью: «удаляю — а оно возвращается». UPSERT, а не INSERT — на случай
+  // повторного DELETE по той же паре.
+  const { error: denylistErr } = await supabaseInstantly
+    .from('project_instantly_campaigns_denylist')
+    .upsert(
+      { project_id: projectId, campaign_id: campaignId },
+      { onConflict: 'project_id,campaign_id' },
+    );
+  if (denylistErr) {
+    console.error('[campaigns/DELETE] denylist write failed', denylistErr.message);
+    // Не валим запрос: основная работа (DELETE из project_instantly_campaigns)
+    // прошла. Худшее что случится — авто-матчер вернёт запись на следующей
+    // синке, и пользователю придётся удалить ещё раз. Это лучше чем 500.
   }
 
   return NextResponse.json({ ok: true });
