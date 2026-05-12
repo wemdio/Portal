@@ -17,19 +17,49 @@ export async function getOrCreateThread(
   db: SupabaseClient,
   clientUserId: string,
 ): Promise<SupportThreadRow | null> {
-  const { data: thread, error } = await db
+  const { data: existing, error: selectError } = await db
     .from('client_support_threads')
-    .upsert({ client_user_id: clientUserId }, { onConflict: 'client_user_id' })
+    .select('*')
+    .eq('client_user_id', clientUserId)
+    .maybeSingle<SupportThreadRow>();
+
+  if (selectError) {
+    throw new Error(`support_thread_select_failed: ${selectError.message}`);
+  }
+  if (existing) return existing;
+
+  const { data: created, error: insertError } = await db
+    .from('client_support_threads')
+    .insert({ client_user_id: clientUserId })
     .select('*')
     .single<SupportThreadRow>();
 
-  if (error) {
-    throw new Error(`support_thread_upsert_failed: ${error.message}`);
+  if (!insertError && created) return created;
+
+  // Race-safe fallback: two tabs/devices can open support for the same client
+  // at the same time. One insert wins the UNIQUE(client_user_id), the loser
+  // should read the row instead of failing the page.
+  const insertCode = typeof insertError?.code === 'string' ? insertError.code : '';
+  const duplicate =
+    insertCode === '23505' ||
+    (insertError?.message ?? '').toLowerCase().includes('duplicate key');
+  if (duplicate) {
+    const { data: racedThread, error: racedSelectError } = await db
+      .from('client_support_threads')
+      .select('*')
+      .eq('client_user_id', clientUserId)
+      .maybeSingle<SupportThreadRow>();
+
+    if (racedSelectError) {
+      throw new Error(`support_thread_race_select_failed: ${racedSelectError.message}`);
+    }
+    if (racedThread) return racedThread;
   }
-  if (!thread) {
-    throw new Error('support_thread_upsert_returned_no_row');
+
+  if (insertError) {
+    throw new Error(`support_thread_insert_failed: ${insertError.message}`);
   }
-  return thread;
+  throw new Error('support_thread_insert_returned_no_row');
 }
 
 /**
