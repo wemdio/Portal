@@ -81,7 +81,27 @@ create trigger trg_client_support_threads_updated_at
   before update on public.client_support_threads
   for each row execute function public.client_support_threads_touch_updated_at();
 
--- ── 4. RLS ──────────────────────────────────────────────────────────────────
+-- ── 4. GRANTs ──────────────────────────────────────────────────────────────
+-- On self-hosted Supabase the migration runner connects as the `postgres`
+-- role, and default privileges in `public` are configured only for
+-- `supabase_admin`-owned objects. Without these explicit GRANTs the API
+-- (which uses `service_role` via supabaseAdmin) gets
+-- `permission denied for table client_support_threads`. The May-2026
+-- incident "Не удалось загрузить тред" was exactly this.
+-- See also 20260509_0002_client_support_grants.sql (the catch-up fix for
+-- environments where _0001 was already applied before this block existed)
+-- and 20260509_0003_public_default_privileges_for_postgres.sql (the
+-- structural fix that makes future migrations not need this manually).
+
+grant all on public.client_support_threads  to service_role;
+grant all on public.client_support_threads  to postgres;
+grant select, insert, update on public.client_support_threads to authenticated;
+
+grant all on public.client_support_messages to service_role;
+grant all on public.client_support_messages to postgres;
+grant select, insert on public.client_support_messages to authenticated;
+
+-- ── 5. RLS ──────────────────────────────────────────────────────────────────
 
 alter table public.client_support_threads enable row level security;
 alter table public.client_support_messages enable row level security;
@@ -197,7 +217,7 @@ create policy "support_messages_manager_send"
     )
   );
 
--- ── 5. Extend public.notifications to accept the support type ──────────────
+-- ── 6. Extend public.notifications to accept the support type ──────────────
 -- The original CHECK was authored in 20260416_0001_create_notifications.sql
 -- and listed only deadline / lead-* / info types. We replace it (and the
 -- entity_type CHECK) so the support fanout can write into the same table
@@ -236,7 +256,7 @@ alter table public.notifications
     )
   );
 
--- ── 6. Self-hosted Realtime publication ────────────────────────────────────
+-- ── 7. Self-hosted Realtime publication ────────────────────────────────────
 -- Required so the Realtime container (deploy/main-db/docker-compose.yml,
 -- service `realtime`) actually emits INSERT events for client_support_messages
 -- to subscribers. On Supabase Cloud this is a Dashboard checkbox; on our
