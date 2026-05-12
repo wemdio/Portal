@@ -17,7 +17,9 @@ import type {
   ClientBriefPriceTier,
   ClientBriefSocialProofKey,
 } from '@/lib/clientBrief';
+import { mergePatchEmptyOnly } from '@/lib/clientBrief/autofill/mergePatchEmptyOnly';
 import { LeadSourceHypothesesView } from '@/components/projects/LeadSourceHypothesesView';
+import { BriefAutofillPanel, type BriefAutofillResult } from './BriefAutofillPanel';
 
 interface ClientBriefFormProps {
   /** API endpoint that supports GET/PUT for the brief */
@@ -28,6 +30,13 @@ interface ClientBriefFormProps {
    * auto-triggers generation on first save and supports manual re-generation.
    */
   hypothesesEndpoint?: string;
+  /**
+   * Optional API endpoint for AI autofill (POST). When provided, renders the
+   * «Заполнить бриф по сайту» panel above the form. Body: { website }. Server
+   * returns { ok, fieldsPatch, questions }. The panel only updates local form
+   * state — the client still has to press «Сохранить».
+   */
+  autofillEndpoint?: string;
   /** Optional title shown above the form */
   title?: string;
   /** Optional subtitle line */
@@ -292,6 +301,7 @@ function HypothesesSection({
 export function ClientBriefForm({
   endpoint,
   hypothesesEndpoint,
+  autofillEndpoint,
   title,
   subtitle,
   auditPrefix,
@@ -441,6 +451,47 @@ export function ClientBriefForm({
     setFields((prev) => ({ ...prev, [key]: value }));
   };
 
+  const handleAutofillRequest = useCallback(
+    async (website: string): Promise<BriefAutofillResult> => {
+      if (!autofillEndpoint) {
+        return { ok: false, fieldsPatch: {}, questions: [], error: 'Autofill endpoint не настроен' };
+      }
+      try {
+        const data = await apiFetch<{
+          ok?: boolean;
+          fieldsPatch?: Partial<ClientBriefFields>;
+          questions?: string[];
+          error?: string;
+        }>(autofillEndpoint, {
+          method: 'POST',
+          body: JSON.stringify({ website }),
+        });
+        return {
+          ok: data?.ok !== false,
+          fieldsPatch: data?.fieldsPatch ?? {},
+          questions: Array.isArray(data?.questions) ? data!.questions! : [],
+          error: data?.error,
+        };
+      } catch (err) {
+        void logError(`${auditPrefix}.autofill.failed`, err);
+        return {
+          ok: false,
+          fieldsPatch: {},
+          questions: [],
+          error: err instanceof Error ? err.message : 'Не удалось получить черновик',
+        };
+      }
+    },
+    [autofillEndpoint, apiFetch, auditPrefix],
+  );
+
+  const handleApplyAutofillPatch = useCallback((patch: Partial<ClientBriefFields>) => {
+    setFields((prev) => mergePatchEmptyOnly(prev, patch));
+    void logAudit(`${auditPrefix}.autofill.applied`, 'Autofill patch applied', {
+      fields: Object.keys(patch),
+    });
+  }, [auditPrefix]);
+
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -469,6 +520,14 @@ export function ClientBriefForm({
           <span className="flex-1">{error}</span>
           <button onClick={() => setError('')} className="ml-2" aria-label="Закрыть">✕</button>
         </div>
+      )}
+
+      {autofillEndpoint && (
+        <BriefAutofillPanel
+          initialWebsite={fields.company_website}
+          onAutofill={handleAutofillRequest}
+          onApplyPatch={handleApplyAutofillPatch}
+        />
       )}
 
       <section className={SECTION_BASE}>
