@@ -14,7 +14,14 @@ import type {
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
-import { getClientTariffRow, resolveEffectiveLimits, getClientStatus, getBillingPeriodStart, countClientContacts } from '@/lib/tariffs';
+import {
+  countClientContacts,
+  getBillingPeriodStart,
+  getClientTariffRow,
+  getClientStatus,
+  getClientTariffUsage,
+  resolveEffectiveLimits,
+} from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -263,6 +270,7 @@ export async function POST(req: NextRequest) {
         accepted_rows: accepted,
         skipped_rows: skipped < 0 ? 0 : skipped,
       },
+      tariff_usage: await getClientTariffUsage(userId),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Не удалось запустить кампанию';

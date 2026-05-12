@@ -28,4 +28,6 @@ CREATE POLICY "Clients can read own tariff"
   FOR SELECT
   USING (auth.uid() = user_id);
 
+GRANT ALL ON public.client_tariffs TO service_role;
+GRANT ALL ON public.client_tariffs TO postgres;
 GRANT SELECT ON public.client_tariffs TO authenticated;

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { encryptJsonAes256Gcm } from '@/lib/cryptoGcm';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getClientTariffUsage } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,6 +44,31 @@ export async function POST(req: NextRequest) {
     const max_results = Math.max(1, Math.min(5000, Number(body?.max_results ?? 5000) || 5000));
     const headless = body?.headless !== false;
 
+    let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
+    if (supabaseAdmin) {
+      const { data: profile } = await supabaseAdmin
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+
+      if (profile?.role === 'client') {
+        tariffUsage = await getClientTariffUsage(user.id);
+        if (tariffUsage.status === 'setup') {
+          return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
+        }
+        if (tariffUsage.status !== 'active') {
+          return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+        }
+        if (max_results > tariffUsage.usage.max_rows.remaining) {
+          return jsonError(
+            `Осталось ${tariffUsage.usage.max_rows.remaining.toLocaleString('ru-RU')} запросов по вашему тарифу. Уменьшите максимум результатов.`,
+            400,
+          );
+        }
+      }
+    }
+
     const proxy = body?.proxy ?? null;
     const proxy_enabled = Boolean(proxy?.enabled);
     const proxy_protocol = (proxy?.protocol ?? 'http') as string;
@@ -72,7 +99,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (error || !job) throw new Error(error?.message || 'Failed to create job');
-    return NextResponse.json({ job });
+    return NextResponse.json({ job, tariff_usage: tariffUsage });
   } catch (e) {
     console.error('Create yandexmaps job error:', e);
     return jsonError('Internal Server Error', 500);

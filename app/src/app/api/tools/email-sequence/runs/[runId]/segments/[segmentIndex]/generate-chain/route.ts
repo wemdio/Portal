@@ -8,7 +8,14 @@ import { PROMPT_LETTER_EXAMPLES } from '@/lib/emailSequence/promptLetterExamples
 import { startTrace } from '@/lib/tracer';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getClientTariffRow, resolveEffectiveLimits, getClientStatus, getBillingPeriodStart, countChains } from '@/lib/tariffs';
+import {
+  countChains,
+  getBillingPeriodStart,
+  getClientTariffRow,
+  getClientStatus,
+  getClientTariffUsage,
+  resolveEffectiveLimits,
+} from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -213,6 +220,7 @@ export async function POST(
     process.env.EMAIL_SEQUENCE_WRITER_MODEL ??
     'gpt-5.2';
 
+  let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
   if (supabaseAdmin) {
     const { data: profile } = await supabaseAdmin
       .from('profiles')
@@ -231,9 +239,11 @@ export async function POST(
       const limits = resolveEffectiveLimits(tariffRow);
       const periodStart = getBillingPeriodStart(tariffRow);
       const usedThisPeriod = await countChains(user.id, periodStart);
+      tariffUsage = await getClientTariffUsage(user.id);
       if (usedThisPeriod >= limits.max_chains_per_month) {
         return jsonError(
-          `Лимит генераций цепочек: ${limits.max_chains_per_month} / мес. Использовано: ${usedThisPeriod}.`,
+          `Лимит генераций цепочек: ${limits.max_chains_per_month} / мес. ` +
+          `Использовано: ${usedThisPeriod}. Осталось: ${Math.max(0, limits.max_chains_per_month - usedThisPeriod)}.`,
           429,
         );
       }
@@ -383,7 +393,10 @@ export async function POST(
       logMeta,
     );
 
-    return NextResponse.json({ letters: letters.map((l) => l.content) });
+    return NextResponse.json({
+      letters: letters.map((l) => l.content),
+      tariff_usage: tariffUsage ? await getClientTariffUsage(user.id) : null,
+    });
   } catch (err) {
     if (err instanceof RunCancelledError) {
       await trace?.end({ cancelled: true }, 'Остановлено пользователем');

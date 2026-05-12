@@ -3,6 +3,8 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import type { HHSearchConfig } from '@/lib/parsers/hhParser';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getClientTariffUsage } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -80,6 +82,40 @@ export async function POST(req: NextRequest) {
     return jsonError('Invalid config payload', 400, { request_id: requestId });
   }
 
+  let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
+  if (supabaseAdmin) {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+
+    if (profile?.role === 'client') {
+      tariffUsage = await getClientTariffUsage(user.id);
+      if (tariffUsage.status === 'setup') {
+        return jsonError(
+          'Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.',
+          403,
+          { request_id: requestId, tariff_usage: tariffUsage },
+        );
+      }
+      if (tariffUsage.status !== 'active') {
+        return jsonError(
+          'Подписка не активна. Оплатите тариф для продолжения работы.',
+          403,
+          { request_id: requestId, tariff_usage: tariffUsage },
+        );
+      }
+      if (tariffUsage.usage.max_rows.remaining <= 0) {
+        return jsonError(
+          'Лимит запросов по тарифу исчерпан.',
+          429,
+          { request_id: requestId, tariff_usage: tariffUsage },
+        );
+      }
+    }
+  }
+
   const { data, error } = await supabase
     .from('parser_jobs')
     .insert({
@@ -109,6 +145,6 @@ export async function POST(req: NextRequest) {
     { jobId: data?.id, parserType: PARSER_TYPE, searchText: config.text, config },
     logMeta,
   );
-  return NextResponse.json({ job: data });
+  return NextResponse.json({ job: data, tariff_usage: tariffUsage });
 }
 

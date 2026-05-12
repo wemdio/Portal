@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { HHParserView } from '@/components/parsers/HHParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
@@ -8,8 +9,16 @@ import { EmailSequenceV2View } from '@/components/email-sequence-v2/EmailSequenc
 
 type Tab = 'hh' | 'search' | 'yandexmaps' | 'email-sequence';
 
+function parseTab(value: string | null | undefined): Tab {
+  if (value === 'hh' || value === 'search' || value === 'yandexmaps' || value === 'email-sequence') {
+    return value;
+  }
+  return 'hh';
+}
+
 export default function ClientParsersPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('hh');
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState<Tab>(() => parseTab(searchParams?.get('tab')));
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -72,7 +81,7 @@ export default function ClientParsersPage() {
       {activeTab === 'hh' && <HHParserView clientMode />}
       {activeTab === 'search' && <SearchParserView clientMode />}
       {activeTab === 'yandexmaps' && <YandexMapsParserView clientMode />}
-      {activeTab === 'email-sequence' && <EmailSequenceV2View />}
+      {activeTab === 'email-sequence' && <EmailSequenceV2View clientMode />}
     </div>
   );
 }

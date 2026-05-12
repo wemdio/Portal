@@ -12,6 +12,7 @@ import { Download, RefreshCw, FileSpreadsheet, Database } from 'lucide-react';
 
 import { saveAs } from 'file-saver';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 function formatDate(dateStr: string) {
   try {
@@ -169,7 +170,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
       }
     } catch (e) {
       console.error(e);
-      setError('Не удалось создать запуск');
+      setError(e instanceof Error ? e.message : 'Не удалось создать запуск');
     } finally {
       setBusy(false);
     }
@@ -444,6 +445,16 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
           <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
         </div>
       </div>
+
+      {clientMode && activeJob ? (
+        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <ClientTariffUsageInline
+            metric="max_rows"
+            spent={Math.max(totalOrgs, totalLinks, results.length)}
+            refreshKey={`${activeJob.id}:${activeJob.status}:${totalOrgs}:${totalLinks}`}
+          />
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Sidebar: History */}

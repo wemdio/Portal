@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
 import type { EmailSequenceV2LetterRow, EmailSequenceV2RunRow } from '@/types';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 const VALUES_MODEL_OPTIONS = [
   { value: 'gpt-5.2', label: 'gpt-5.2 (качество)' },
@@ -256,7 +257,7 @@ function LetterCard({
   );
 }
 
-export function EmailSequenceV2View() {
+export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boolean } = {}) {
   const [runs, setRuns] = useState<EmailSequenceV2RunRow[]>([]);
   const [run, setRun] = useState<EmailSequenceV2RunRow | null>(null);
   const [letters, setLetters] = useState<EmailSequenceV2LetterRow[]>([]);
@@ -622,6 +623,17 @@ export function EmailSequenceV2View() {
         <span className="text-gray-300">→</span>
         <StageBadge index={3} label="Генерация цепочки" active={stage1Done && stage2Done && !stage3Done} done={stage3Done} />
       </div>
+
+      {clientMode ? (
+        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <ClientTariffUsageInline
+            metric="max_chains_per_month"
+            spent={stage3Done ? 1 : undefined}
+            unit="цепочек"
+            refreshKey={`${run?.id ?? 'new'}:${run?.status ?? 'none'}:${letters.length}`}
+          />
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
