@@ -5,6 +5,8 @@ export type NavItem = {
   href: string;
   adminOnly?: boolean;
   billingCalendarOnly?: boolean;
+  /** Visible only to admins and technicians (uses lib/roles.ts isTechnician). */
+  technicianOrAdmin?: boolean;
   /** If set, this item is hidden when the user has it disabled in user_tool_visibility */
   navTabId?: string;
   requiresTool?: string;
@@ -31,5 +33,12 @@ export const navItems: NavItem[] = [
   { id: 'tariffs', name: 'Тарифы', nameEn: 'Tariffs', href: '/tariffs' },
   { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
   { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
+  {
+    id: 'support',
+    name: 'Чаты клиентов',
+    nameEn: 'Client support',
+    href: '/support',
+    technicianOrAdmin: true,
+  },
   { id: 'profile', name: 'Профиль', nameEn: 'Profile', href: '/profile' },
 ];

@@ -58,6 +58,21 @@ export const CLIENT_NAV_DASHBOARD: ClientNavItem = {
   href: '/client/dashboard',
 };
 
+/**
+ * Always-available "talk to us" surface, rendered separately at the bottom
+ * of the sidebar (below the workflow groups). It replaces the legacy
+ * mailto:hello@polza.com fallback that lived inside the empty states of
+ * /client/projects and /client/launch — the chat now lives in-portal.
+ */
+export const CLIENT_NAV_SUPPORT: ClientNavItem = {
+  id: 'support',
+  label: 'Поддержка',
+  labelEn: 'Support',
+  href: '/client/support',
+  description: 'Чат с менеджером — отвечаем в рабочее время',
+  descriptionEn: 'Chat with your manager — we reply during business hours',
+};
+
 const startGroup: ClientNavGroup = {
   id: 'start',
   label: 'Старт',
@@ -189,6 +204,9 @@ export function resolveActiveNavId(pathname: string): string | null {
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {
     return 'campaigns';
+  }
+  if (pathname === CLIENT_NAV_SUPPORT.href || pathname.startsWith(`${CLIENT_NAV_SUPPORT.href}/`)) {
+    return CLIENT_NAV_SUPPORT.id;
   }
   // «Базы» hub absorbs the legacy URLs (companies-search, parsers, base-constructor).
   for (const prefix of BUILD_LEGACY_PREFIXES) {
