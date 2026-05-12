@@ -2,6 +2,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { getClientTariffUsage } from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 
@@ -78,6 +80,28 @@ export async function POST(req: NextRequest) {
       search_depth,
     };
 
+    let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
+    if (supabaseAdmin) {
+      const { data: profile } = await supabaseAdmin
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+
+      if (profile?.role === 'client') {
+        tariffUsage = await getClientTariffUsage(user.id);
+        if (tariffUsage.status === 'setup') {
+          return jsonError('Ваш личный кабинет настраивается. Пожалуйста, подождите — мы скоро всё подготовим.', 403);
+        }
+        if (tariffUsage.status !== 'active') {
+          return jsonError('Подписка не активна. Оплатите тариф для продолжения работы.', 403);
+        }
+        if (tariffUsage.usage.max_rows.remaining <= 0) {
+          return jsonError('Лимит запросов по тарифу исчерпан.', 429);
+        }
+      }
+    }
+
     const { data: job, error } = await supabase
       .from('search_parser_jobs')
       .insert({
@@ -93,7 +117,7 @@ export async function POST(req: NextRequest) {
       throw new Error(error?.message || 'Failed to create job');
     }
 
-    return NextResponse.json({ job });
+    return NextResponse.json({ job, tariff_usage: tariffUsage });
   } catch (err) {
     console.error('Create search job error:', err);
     return jsonError('Internal Server Error', 500);

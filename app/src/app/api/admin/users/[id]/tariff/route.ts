@@ -191,8 +191,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     : 'standard';
 
   const isCustom = tariffType === 'custom';
-  const row = {
-    user_id: targetUserId,
+  const payload = {
     tariff_type: tariffType,
     max_contacts: isCustom ? clampInt(body.max_contacts) : null,
     max_rows: isCustom ? clampInt(body.max_rows) : null,
@@ -202,9 +201,15 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabaseAdmin
+  const { data: existing } = await supabaseAdmin
     .from('client_tariffs')
-    .upsert(row, { onConflict: 'user_id' });
+    .select('id')
+    .eq('user_id', targetUserId)
+    .maybeSingle();
+
+  const { error } = existing
+    ? await supabaseAdmin.from('client_tariffs').update(payload).eq('user_id', targetUserId)
+    : await supabaseAdmin.from('client_tariffs').insert({ user_id: targetUserId, ...payload });
 
   if (error) {
     await logError('admin.tariff.put.failed', error, { targetUserId });

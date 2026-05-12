@@ -143,6 +143,14 @@ const monitoringGroup: ClientNavGroup = {
       description: 'Сводный отчёт по выбранным кампаниям',
       descriptionEn: 'Aggregated report across selected campaigns',
     },
+    {
+      id: 'tariff',
+      label: 'Тариф',
+      labelEn: 'Plan',
+      href: '/client/tariff',
+      description: 'Текущий тариф и остатки по лимитам',
+      descriptionEn: 'Current plan and remaining limits',
+    },
   ],
 };
 

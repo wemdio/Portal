@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
 
-// Максимум строк за один запрос к Supabase (пагинация).
 const CHUNK_SIZE = 5000;
 
 const COLUMNS = [
@@ -27,8 +25,6 @@ const COLUMNS = [
   { key: 'egais',           label: 'ЕГАИС' },
 ] as const;
 
-const DB_FIELDS = COLUMNS.map((c) => c.key).join(', ');
-
 interface ExportFilters {
   regionCodes?: string[];
   activityTypes?: string[];
@@ -47,56 +43,6 @@ interface ExportFilters {
   includeIp?: boolean;
   innList?: string[];
 }
-
-function applyFilters(
-  body: ExportFilters,
-  offset: number,
-) {
-  let q = supabaseAdmin!
-    .from('companies_directory')
-    .select(DB_FIELDS)
-    .order('id', { ascending: true })
-    .range(offset, offset + CHUNK_SIZE - 1);
-
-  if (body.regionCodes && body.regionCodes.length > 0) {
-    const tokens: string[] = [];
-    for (const code of body.regionCodes) {
-      const r = getRegionByCode(code);
-      if (r) for (const tk of r.matchTokens) tokens.push(tk);
-    }
-    if (tokens.length > 0) {
-      q = q.or(
-        tokens.map((tk) => `address.ilike.%${tk.replace(/[%,]/g, '')}%`).join(','),
-      );
-    }
-  }
-
-  if (body.activityTypes && body.activityTypes.length > 0) {
-    q = q.in('activity_type', body.activityTypes);
-  }
-  if (body.hasPhone) q = q.not('phones', 'is', null);
-  if (body.hasEmail) q = q.not('email', 'is', null);
-  if (body.legalForms && body.legalForms.length > 0) {
-    q = q.or(
-      body.legalForms.map((f) => `name.ilike.${f.replace(/[%,]/g, '')}%`).join(','),
-    );
-  }
-  if (body.hasWebsite) q = q.not('website', 'is', null);
-  if (body.hasEdo) q = q.not('edo_id', 'is', null);
-  if (body.hasEgais) q = q.not('egais', 'is', null);
-  if (body.includeIp === false) q = q.not('name', 'ilike', 'ИП %');
-  if (typeof body.revenueFrom === 'number') q = q.gte('revenue', body.revenueFrom);
-  if (typeof body.revenueTo === 'number') q = q.lte('revenue', body.revenueTo);
-  if (typeof body.costFrom === 'number') q = q.gte('cost', body.costFrom);
-  if (typeof body.costTo === 'number') q = q.lte('cost', body.costTo);
-  if (typeof body.employeesFrom === 'number') q = q.gte('employees_count', body.employeesFrom);
-  if (typeof body.employeesTo === 'number') q = q.lte('employees_count', body.employeesTo);
-  if (body.innList && body.innList.length > 0) q = q.in('inn', body.innList);
-
-  return q;
-}
-
-// ── helpers ────────────────────────────────────────────────────────────
 
 type Row = Record<string, unknown>;
 
@@ -118,12 +64,9 @@ function escapeCSV(value: unknown): string {
   return s;
 }
 
-// ── main handler ──────────────────────────────────────────────────────
-
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
-  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const url = new URL(req.url);
   const format = (url.searchParams.get('format') ?? 'xlsx') as 'csv' | 'xlsx';
@@ -135,15 +78,12 @@ export async function POST(req: NextRequest) {
     return jsonError('Invalid JSON', 400);
   }
 
-  // Собираем все строки чанками.
   const allRows: Row[] = [];
   let offset = 0;
 
   for (;;) {
-    const { data, error } = await applyFilters(body, offset);
-    if (error) return jsonError(error.message, 500);
-
-    const rows = (data ?? []) as unknown as Row[];
+    const { rows, error } = await searchRows(body, CHUNK_SIZE, offset);
+    if (error) return jsonError(error, 500);
     if (rows.length === 0) break;
 
     allRows.push(...rows);
@@ -173,11 +113,9 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // xlsx
   const sheetRows = allRows.map(toSheetRow);
   const ws = XLSX.utils.json_to_sheet(sheetRows);
 
-  // Auto-width columns.
   ws['!cols'] = COLUMNS.map((col) => ({
     wch: Math.min(
       sheetRows.reduce(
