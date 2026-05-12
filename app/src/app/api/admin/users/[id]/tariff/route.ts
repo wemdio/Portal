@@ -97,16 +97,28 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const paidUntil = new Date(setupUntil);
     paidUntil.setMonth(paidUntil.getMonth() + 1);
 
-    const { error } = await supabaseAdmin
+    const subscriptionFields = {
+      is_active: true,
+      paid_at: now.toISOString(),
+      setup_until: setupUntil.toISOString(),
+      paid_until: paidUntil.toISOString(),
+      updated_at: now.toISOString(),
+    };
+
+    const { data: existingRow } = await supabaseAdmin
       .from('client_tariffs')
-      .update({
-        is_active: true,
-        paid_at: now.toISOString(),
-        setup_until: setupUntil.toISOString(),
-        paid_until: paidUntil.toISOString(),
-        updated_at: now.toISOString(),
-      })
-      .eq('user_id', targetUserId);
+      .select('id')
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+
+    const { error } = existingRow
+      ? await supabaseAdmin
+          .from('client_tariffs')
+          .update(subscriptionFields)
+          .eq('user_id', targetUserId)
+      : await supabaseAdmin
+          .from('client_tariffs')
+          .insert({ user_id: targetUserId, tariff_type: 'standard', ...subscriptionFields });
 
     if (error) {
       await logError('admin.tariff.activate.failed', error, { targetUserId });
@@ -133,9 +145,20 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const paidUntil = new Date(now);
     paidUntil.setMonth(paidUntil.getMonth() + 1);
 
+    const { data: existingForFinish } = await supabaseAdmin
+      .from('client_tariffs')
+      .select('id, is_active')
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+
+    if (!existingForFinish) {
+      return jsonError('Subscription not found — activate first', 404);
+    }
+
     const { error } = await supabaseAdmin
       .from('client_tariffs')
       .update({
+        is_active: true,
         setup_until: now.toISOString(),
         paid_until: paidUntil.toISOString(),
         updated_at: now.toISOString(),
@@ -163,6 +186,16 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
 
   if (body.action === 'deactivate') {
+    const { data: existingForDeactivate } = await supabaseAdmin
+      .from('client_tariffs')
+      .select('id')
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+
+    if (!existingForDeactivate) {
+      return jsonError('Subscription not found', 404);
+    }
+
     const { error } = await supabaseAdmin
       .from('client_tariffs')
       .update({

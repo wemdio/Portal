@@ -113,6 +113,7 @@ export interface TgForwardOrigin {
 export interface TgMessage {
   message_id: number;
   message_thread_id?: number;
+  date?: number;
   chat: { id: number };
   from?: TgUser;
   forward_origin?: TgForwardOrigin;
@@ -323,6 +324,8 @@ export async function processVideoMessage(
       filename: videoInfo.filename,
       file_size_bytes: videoInfo.fileSize ?? null,
       duration_seconds: videoInfo.duration ?? null,
+      tg_message_date: msg.date != null ? new Date(msg.date * 1000).toISOString() : null,
+      caption: msg.caption ?? null,
       text: '',
       length: 0,
       status: 'error',
@@ -391,6 +394,8 @@ export async function processVideoMessage(
     filename: videoInfo.filename,
     file_size_bytes: fileSizeBytes,
     duration_seconds: videoInfo.duration ?? null,
+    tg_message_date: msg.date != null ? new Date(msg.date * 1000).toISOString() : null,
+    caption: msg.caption ?? null,
     text,
     length: text.length,
     status: 'completed',
@@ -467,6 +472,8 @@ export async function saveErrorRecord(
     filename: videoInfo.filename,
     file_size_bytes: videoInfo.fileSize ?? null,
     duration_seconds: videoInfo.duration ?? null,
+    tg_message_date: msg.date != null ? new Date(msg.date * 1000).toISOString() : null,
+    caption: msg.caption ?? null,
     text: '',
     length: 0,
     status: 'error',
