@@ -4,7 +4,8 @@ import { useCallback, useMemo, useState } from 'react';
 import { Switch } from '@/components/Switch';
 import { authFetch } from '@/lib/authFetch';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
-import { ActivityTypesModal } from '@/components/ActivityTypesModal';
+import { OkvedTreeModal } from '@/components/OkvedTreeModal';
+import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 
 type Mode = 'activity' | 'inn';
 
@@ -19,12 +20,11 @@ export default function OurBasesPage() {
   const [mode, setMode] = useState<Mode>('activity');
 
   const [regionsModalOpen, setRegionsModalOpen] = useState(false);
-  const [activitiesModalOpen, setActivitiesModalOpen] = useState(false);
+  const [okvedModalOpen, setOkvedModalOpen] = useState(false);
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(
     new Set(ALL_REGION_CODES),
   );
-  const [selectedActivities, setSelectedActivities] = useState<Set<string>>(new Set());
-  const [allActivityTypesCount, setAllActivityTypesCount] = useState(0);
+  const [selectedOkveds, setSelectedOkveds] = useState<Set<string>>(new Set());
   const [innList, setInnList] = useState('');
 
   const [hasPhone, setHasPhone] = useState(false);
@@ -50,7 +50,10 @@ export default function OurBasesPage() {
   const [exportError, setExportError] = useState<string | null>(null);
 
   const selectedRegionsCount = selectedRegions.size;
-  const selectedActivitiesCount = selectedActivities.size;
+  const selectedOkvedTopCount = useMemo(
+    () => reduceToTopCodes(selectedOkveds).length,
+    [selectedOkveds],
+  );
 
   const buildFilters = () => {
     const parsedInnList =
@@ -66,11 +69,9 @@ export default function OurBasesPage() {
         mode === 'activity' && selectedRegionsCount !== ALL_REGION_CODES.length
           ? Array.from(selectedRegions)
           : undefined,
-      activityTypes:
-        mode === 'activity' &&
-        selectedActivitiesCount > 0 &&
-        selectedActivitiesCount < allActivityTypesCount
-          ? Array.from(selectedActivities)
+      okvedCodes:
+        mode === 'activity' && selectedOkveds.size > 0
+          ? Array.from(selectedOkveds)
           : undefined,
       hasPhone,
       hasEmail,
@@ -217,7 +218,7 @@ export default function OurBasesPage() {
 
               <button
                 type="button"
-                onClick={() => setActivitiesModalOpen(true)}
+                onClick={() => setOkvedModalOpen(true)}
                 className="group flex items-center gap-3 w-full border border-gray-200 rounded-xl px-5 py-4 bg-gray-50/50 hover:border-blue-400 hover:bg-white hover:shadow-sm transition-all text-left"
               >
                 <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0 group-hover:bg-amber-100 transition-colors">
@@ -226,12 +227,11 @@ export default function OurBasesPage() {
                   </svg>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-gray-900">Виды деятельности</div>
+                  <div className="text-sm font-semibold text-gray-900">Виды деятельности (ОКВЭД)</div>
                   <div className="text-xs text-gray-500 mt-0.5">
-                    {selectedActivitiesCount === 0 ||
-                    (allActivityTypesCount > 0 && selectedActivitiesCount >= allActivityTypesCount)
+                    {selectedOkveds.size === 0
                       ? 'Все виды деятельности'
-                      : `Выбрано: ${selectedActivitiesCount}`}
+                      : `Выбрано: ${selectedOkveds.size}${selectedOkvedTopCount !== selectedOkveds.size ? ` (${selectedOkvedTopCount} групп)` : ''}`}
                   </div>
                 </div>
                 <svg className="w-5 h-5 text-gray-400 group-hover:text-blue-500 flex-shrink-0 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -484,13 +484,11 @@ export default function OurBasesPage() {
           onClose={() => setRegionsModalOpen(false)}
         />
       )}
-      {activitiesModalOpen && (
-        <ActivityTypesModal
-          apiUrl="/api/tools/our-bases/activity-types"
-          selected={selectedActivities}
-          onChange={setSelectedActivities}
-          onClose={() => setActivitiesModalOpen(false)}
-          onLoaded={setAllActivityTypesCount}
+      {okvedModalOpen && (
+        <OkvedTreeModal
+          selected={selectedOkveds}
+          onChange={setSelectedOkveds}
+          onClose={() => setOkvedModalOpen(false)}
         />
       )}
     </div>

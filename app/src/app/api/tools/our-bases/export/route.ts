@@ -18,6 +18,8 @@ const COLUMNS = [
   { key: 'phones',          label: 'Телефоны' },
   { key: 'email',           label: 'Email' },
   { key: 'website',         label: 'Сайт' },
+  { key: 'okved_code',      label: 'Код ОКВЭД' },
+  { key: 'okved_name',      label: 'ОКВЭД (название)' },
   { key: 'activity_type',   label: 'Вид деятельности' },
   { key: 'employees_count', label: 'Сотрудники' },
   { key: 'revenue',         label: 'Выручка' },
