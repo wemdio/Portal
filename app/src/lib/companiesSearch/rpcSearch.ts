@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 function filtersToRpcParams(body: CompaniesSearchFilters) {
@@ -11,6 +12,16 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
       if (r) for (const t of r.matchTokens) tokens.push(t);
     }
     if (tokens.length > 0) regionTokens = tokens;
+  }
+
+  // Из дерева ОКВЭД пользователь выбирает узлы — сужаем до «топовых», чтобы
+  // один префикс заменял всех потомков. Например, выбраны 24, 24.10, 24.10.2 →
+  // на сервер уходит только ['24']: SQL фильтрует через LIKE '24.%', что
+  // покрывает все вложенные коды.
+  let okvedPrefixes: string[] | null = null;
+  if (body.okvedCodes && body.okvedCodes.length > 0) {
+    okvedPrefixes = reduceToTopCodes(new Set(body.okvedCodes));
+    if (okvedPrefixes.length === 0) okvedPrefixes = null;
   }
 
   return {
@@ -30,6 +41,7 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
     p_employees_from: typeof body.employeesFrom === 'number' ? body.employeesFrom : null,
     p_employees_to: typeof body.employeesTo === 'number' ? body.employeesTo : null,
     p_inn_list: body.innList?.length ? body.innList : null,
+    p_okved_prefixes: okvedPrefixes,
   };
 }
 
