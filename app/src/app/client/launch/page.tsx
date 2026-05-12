@@ -17,6 +17,7 @@ import {
   type ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { INSTANTLY_TIMEZONE_OPTIONS, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 interface PresetSummary {
   id: string;
@@ -501,6 +502,14 @@ export default function ClientLaunchPage() {
           <p className="text-sm mb-6" style={{ color: 'var(--cp-text-m)' }}>
             Загружено {result.accepted_rows.toLocaleString('ru-RU')} лидов
             {result.skipped_rows > 0 && ` · пропущено ${result.skipped_rows.toLocaleString('ru-RU')}`}
+            <span className="block mt-1">
+              <ClientTariffUsageInline
+                metric="max_contacts"
+                spent={result.accepted_rows}
+                unit="контактов"
+                refreshKey={result.id}
+              />
+            </span>
           </p>
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             {result.instantly_campaign_id && (

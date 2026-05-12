@@ -27,6 +27,7 @@ function getClientPortalSectionTitle(pathname: string, locale: Locale): string {
   if (pathname.startsWith('/client/leads')) return locale === 'en' ? 'Leads' : 'Лиды';
   if (pathname.startsWith('/client/bases')) return locale === 'en' ? 'Databases' : 'Базы';
   if (pathname.startsWith('/client/reports')) return locale === 'en' ? 'Reports' : 'Отчёты';
+  if (pathname.startsWith('/client/tariff')) return locale === 'en' ? 'Plan' : 'Тариф';
   return SITE_LABEL;
 }
 

@@ -9,6 +9,7 @@ import { HHParserForm } from '@/components/parsers/HHParserForm';
 import { JobsList } from '@/components/parsers/JobsList';
 import { VacancyResults } from '@/components/parsers/VacancyResults';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 type JobsResponse = { jobs: ParserJob[] };
 type CreateJobResponse = { job: ParserJob };
@@ -743,6 +744,16 @@ export function HHParserView({ clientMode }: HHParserViewProps = {}) {
       ) : null}
 
       <HHParserForm onStart={start} busy={busy} />
+
+      {clientMode && activeJob ? (
+        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <ClientTariffUsageInline
+            metric="max_rows"
+            spent={Math.max(resultsCount, activeJob.total_parsed ?? 0, activeJob.total_found ?? 0)}
+            refreshKey={`${activeJob.id}:${activeJob.status}:${resultsCount}`}
+          />
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         <JobsList

@@ -4,7 +4,14 @@ import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
-import { getClientTariffRow, resolveEffectiveLimits, getClientStatus } from '@/lib/tariffs';
+import {
+  countClientRows,
+  getBillingPeriodStart,
+  getClientTariffRow,
+  getClientStatus,
+  getClientTariffUsage,
+  resolveEffectiveLimits,
+} from '@/lib/tariffs';
 
 const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
@@ -49,6 +56,7 @@ export async function POST(req: NextRequest) {
 
       const role = await getUserRole(user.id);
       let tariffMaxRows: number | undefined;
+      let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
       if (role === 'client') {
         const tariffRow = await getClientTariffRow(user.id);
         const clientStatus = getClientStatus(tariffRow);
@@ -64,7 +72,20 @@ export async function POST(req: NextRequest) {
             { status: 403 },
           );
         }
-        tariffMaxRows = resolveEffectiveLimits(tariffRow).max_rows;
+        const limits = resolveEffectiveLimits(tariffRow);
+        const usedRows = await countClientRows(user.id, getBillingPeriodStart(tariffRow));
+        const remainingRows = Math.max(0, limits.max_rows - usedRows);
+        if (data.length - 1 > remainingRows) {
+          return NextResponse.json(
+            {
+              error:
+                `Осталось ${remainingRows.toLocaleString('ru-RU')} запросов по вашему тарифу. ` +
+                `В файле ${(data.length - 1).toLocaleString('ru-RU')} строк.`,
+            },
+            { status: 400 },
+          );
+        }
+        tariffMaxRows = remainingRows;
       }
       const guard = applyClientGuard({
         role,
@@ -111,7 +132,11 @@ export async function POST(req: NextRequest) {
         console.error('[base-constructor] Worker error:', err),
       );
 
-      return NextResponse.json({ job });
+      if (role === 'client') {
+        tariffUsage = await getClientTariffUsage(user.id);
+      }
+
+      return NextResponse.json({ job, tariff_usage: tariffUsage });
     },
   );
 }

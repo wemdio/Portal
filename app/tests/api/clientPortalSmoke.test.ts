@@ -273,11 +273,13 @@ jest.mock('@/lib/projectBriefHypotheses/generateHypotheses', () => ({
 const mockGetClientTariffRow = jest.fn<Promise<Record<string, unknown> | null>, [string]>();
 const mockResolveEffectiveLimits = jest.fn<Record<string, number>, [unknown]>();
 const mockGetClientStatus = jest.fn<string, [unknown]>();
+const mockGetClientTariffUsage = jest.fn<Promise<Record<string, unknown>>, [string]>();
 
 jest.mock('@/lib/tariffs', () => ({
   getClientTariffRow: (userId: string) => mockGetClientTariffRow(userId),
   resolveEffectiveLimits: (row: unknown) => mockResolveEffectiveLimits(row),
   getClientStatus: (row: unknown) => mockGetClientStatus(row),
+  getClientTariffUsage: (userId: string) => mockGetClientTariffUsage(userId),
 }));
 
 // ── Companies-search regions ─────────────────────────────────────────────────
@@ -339,6 +341,28 @@ beforeEach(() => {
     base_constructor_rows_per_run: 10000,
   });
   mockGetClientStatus.mockReset().mockReturnValue('active');
+  mockGetClientTariffUsage.mockReset().mockResolvedValue({
+    tariff_type: 'standard',
+    status: 'active',
+    paid_at: null,
+    paid_until: null,
+    setup_until: null,
+    period_start: '2026-05-01T00:00:00.000Z',
+    limits: {
+      max_contacts: 10000,
+      max_rows: 20000,
+      max_chains_per_month: 3,
+      max_domains: 4,
+      max_emails: 16,
+    },
+    usage: {
+      max_contacts: { limit: 10000, used: 0, remaining: 10000 },
+      max_rows: { limit: 20000, used: 0, remaining: 20000 },
+      max_chains_per_month: { limit: 3, used: 0, remaining: 3 },
+      max_domains: { limit: 4, used: 0, remaining: 4 },
+      max_emails: { limit: 16, used: 0, remaining: 16 },
+    },
+  });
 
   process.env.OPENROUTER_BRIEF_API_KEY = 'test-key';
 });
