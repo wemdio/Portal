@@ -8,6 +8,12 @@ export const dynamic = 'force-dynamic';
 export interface CompaniesSearchFilters {
   regionCodes?: string[];
   activityTypes?: string[];
+  /**
+   * Выбранные узлы дерева ОКВЭД-2 (любого уровня — раздел/класс/подкласс/группа/...).
+   * На бэке схлопывается до минимального набора префиксов и матчится через
+   * `okved_code LIKE 'X%'` в companies_directory.
+   */
+  okvedCodes?: string[];
   hasPhone?: boolean;
   hasEmail?: boolean;
   legalForms?: string[];
