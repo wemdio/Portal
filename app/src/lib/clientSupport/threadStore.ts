@@ -17,22 +17,19 @@ export async function getOrCreateThread(
   db: SupabaseClient,
   clientUserId: string,
 ): Promise<SupportThreadRow | null> {
-  const { data: existing } = await db
+  const { data: thread, error } = await db
     .from('client_support_threads')
-    .select('*')
-    .eq('client_user_id', clientUserId)
-    .maybeSingle<SupportThreadRow>();
-
-  if (existing) return existing;
-
-  const { data: created, error } = await db
-    .from('client_support_threads')
-    .insert({ client_user_id: clientUserId })
+    .upsert({ client_user_id: clientUserId }, { onConflict: 'client_user_id' })
     .select('*')
     .single<SupportThreadRow>();
 
-  if (error || !created) return null;
-  return created;
+  if (error) {
+    throw new Error(`support_thread_upsert_failed: ${error.message}`);
+  }
+  if (!thread) {
+    throw new Error('support_thread_upsert_returned_no_row');
+  }
+  return thread;
 }
 
 /**
