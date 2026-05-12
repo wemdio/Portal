@@ -766,7 +766,14 @@ export async function runCampaignLoop(
   db: SupabaseClient,
   shouldStop: () => boolean,
   traceContext?: TraceContext,
+  onProgress?: () => void,
 ) {
+  // Called from every loop hot-spot so the worker-level watchdog can detect
+  // a stuck campaign (e.g. gramJS recvLoop blocked, infinite proxy reconnect)
+  // and force-exit the process. Without this, the heartbeat setInterval keeps
+  // the container "healthy" while the campaign is actually frozen (May 10
+  // incident: stuck 35 hours after a single "Пауза 211 сек" log line).
+  const tick = () => { try { onProgress?.(); } catch { /* */ } };
   const logToDb = async (level: 'info' | 'warning' | 'error', msg: string) => {
     console.log(`[tg-outreach][${campaignId.slice(0, 8)}][${level}] ${msg}`);
     await writeLog(db, campaignId, level, msg, traceContext);
@@ -839,6 +846,7 @@ export async function runCampaignLoop(
 
   try {
     while (!shouldStop()) {
+      tick();
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
@@ -859,6 +867,7 @@ export async function runCampaignLoop(
 
       for (const { client, account } of clients) {
         if (shouldStop()) break;
+        tick();
         // Bump heartbeat per account so the Docker healthcheck doesn't
         // falsely flip to unhealthy during long anti-flood pauses between
         // accounts (outer while-loop heartbeat is written only once per full
@@ -976,6 +985,7 @@ export async function runCampaignLoop(
         const accountDelay = randomRange(tg.account_loop_delay_range) * 1000;
         log('info', `Пауза ${Math.round(accountDelay / 1000)} сек перед следующим аккаунтом`);
         await interruptibleSleep(accountDelay, shouldStop);
+        tick();
       }
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {

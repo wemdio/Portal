@@ -13,6 +13,18 @@ const shouldStop = setupGracefulShutdown(log);
 
 const runningCampaigns = new Map<string, { stop: () => void; promise: Promise<void> }>();
 
+// Per-campaign last-progress timestamps. Each campaign loop calls onProgress()
+// in its hot spots (top of while iteration, before each account, after each
+// account pause). If a campaign stops reporting progress for longer than the
+// watchdog threshold, we force-exit the process so docker/autoheal can restart
+// us. This catches "container healthy but main loop frozen" scenarios — the
+// May 10 incident: worker hung 35 hours after a single "Пауза 211 сек" log
+// line, autoheal didn't react because the independent heartbeat setInterval
+// kept the container green.
+const campaignLastProgressAt = new Map<string, number>();
+const WATCHDOG_THRESHOLD_MS = Number(process.env.TG_OUTREACH_WATCHDOG_MS) || 15 * 60_000;
+const WATCHDOG_CHECK_INTERVAL_MS = 60_000;
+
 async function resetStuckJobs() {
   const { data } = await db
     .from('tg_outreach_jobs')
@@ -95,7 +107,10 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
 
   const traceContext = trace ? { requestId } : undefined;
 
-  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested, traceContext)
+  campaignLastProgressAt.set(campaignId, Date.now());
+  const onProgress = () => { campaignLastProgressAt.set(campaignId, Date.now()); };
+
+  const promise = runCampaignLoop(campaignId, db, () => shouldStop() || stopRequested, traceContext, onProgress)
     .then(() => {
       log('info', `Campaign ${campaignId} loop finished`);
       void trace?.end({ status: 'stopped' });
@@ -109,6 +124,7 @@ async function handleStartJob(job: { id: string; campaign_id: string }) {
     })
     .finally(() => {
       runningCampaigns.delete(campaignId);
+      campaignLastProgressAt.delete(campaignId);
       db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
         if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
       }, () => {});
@@ -278,15 +294,35 @@ async function main() {
   await resetStuckJobs();
   await resumeRunningCampaigns();
 
-  // Independent heartbeat ticker. We can't rely on the per-account heartbeat
-  // inside buildClients() — when all 5 campaigns are busy with anti-flood pauses
-  // (220-545s each), the main loop won't return to bump heartbeat for 20+ min,
-  // and the docker healthcheck would (wrongly) flip to unhealthy. As long as
-  // the Node event loop is alive, we tick every 30s here so health reflects
-  // process aliveness, not loop progress.
+  // Independent heartbeat ticker keeps the docker healthcheck green as long
+  // as the Node event loop is alive. False unhealthy flips during long
+  // anti-flood pauses are gone, but on its own this does NOT detect a stuck
+  // campaign loop (the May 10 incident proved that). The watchdog below
+  // covers that gap.
   writeHeartbeat();
   const heartbeatTimer = setInterval(() => writeHeartbeat(), 30_000);
   if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+
+  // Watchdog: if any running campaign hasn't reported progress for longer
+  // than WATCHDOG_THRESHOLD_MS, the loop is almost certainly frozen
+  // (gramJS recvLoop stuck, infinite proxy reconnect, etc). Force-exit so
+  // docker restarts us and auto-resume rebuilds clients with fresh sockets.
+  const watchdogTimer = setInterval(() => {
+    if (shouldStop()) return;
+    const now = Date.now();
+    for (const [campaignId, lastAt] of campaignLastProgressAt) {
+      const stallMs = now - lastAt;
+      if (stallMs > WATCHDOG_THRESHOLD_MS) {
+        log(
+          'error',
+          `Watchdog: campaign ${campaignId} no progress for ${Math.round(stallMs / 60_000)} min ` +
+            `(threshold ${Math.round(WATCHDOG_THRESHOLD_MS / 60_000)} min). Exiting for restart.`,
+        );
+        process.exit(1);
+      }
+    }
+  }, WATCHDOG_CHECK_INTERVAL_MS);
+  if (typeof watchdogTimer.unref === 'function') watchdogTimer.unref();
 
   const resumeTimer = setInterval(() => {
     if (shouldStop()) return;
@@ -304,6 +340,7 @@ async function main() {
   });
 
   clearInterval(heartbeatTimer);
+  clearInterval(watchdogTimer);
   clearInterval(resumeTimer);
 
   log('info', 'Waiting for running campaigns to finish...');
