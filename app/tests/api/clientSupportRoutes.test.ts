@@ -210,6 +210,37 @@ function makeBuilder(table: string) {
       };
       return insertSelf;
     },
+    upsert: (payload: MockRow | MockRow[], options?: { onConflict?: string }) => {
+      dbState.insertCalls.push({ table: state.table, payload });
+      const arr = Array.isArray(payload) ? payload : [payload];
+      const list = tableRows(state.table);
+      const upserted: MockRow[] = [];
+      for (const item of arr) {
+        const conflictColumn = options?.onConflict;
+        const existing =
+          conflictColumn && item[conflictColumn] !== undefined
+            ? list.find((r) => r[conflictColumn] === item[conflictColumn])
+            : undefined;
+        if (existing) {
+          Object.assign(existing, item);
+          upserted.push(existing);
+          continue;
+        }
+        const row: MockRow = {
+          id: `${state.table}-row-${list.length + upserted.length + 1}`,
+          created_at: new Date().toISOString(),
+          ...item,
+        };
+        upserted.push(row);
+        list.push(row);
+      }
+      const upsertSelf = {
+        ...builder,
+        select: () => upsertSelf,
+        single: async () => ({ data: upserted[0] ?? null, error: null }),
+      };
+      return upsertSelf;
+    },
     update: (payload: MockRow) => {
       const updateSelf = {
         ...builder,
