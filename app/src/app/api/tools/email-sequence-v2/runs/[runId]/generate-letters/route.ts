@@ -8,7 +8,14 @@ import { parseLettersFromModelOutput } from '@/lib/emailSequenceV2/letterParser'
 import type { EmailSequenceV2RunRow } from '@/types';
 import { logError, logInfo } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { getClientTariffRow, resolveEffectiveLimits, getClientStatus, getBillingPeriodStart, countChains } from '@/lib/tariffs';
+import {
+  countChains,
+  getBillingPeriodStart,
+  getClientTariffRow,
+  getClientStatus,
+  getClientTariffUsage,
+  resolveEffectiveLimits,
+} from '@/lib/tariffs';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -62,6 +69,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
 
   const model = (body.model && body.model.trim()) || typedRun.writer_model || 'gpt-5.2';
 
+  let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
   if (supabaseAdmin) {
     const { data: profile } = await supabaseAdmin
       .from('profiles')
@@ -80,9 +88,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       const limits = resolveEffectiveLimits(tariffRow);
       const periodStart = getBillingPeriodStart(tariffRow);
       const usedThisPeriod = await countChains(user.id, periodStart);
+      tariffUsage = await getClientTariffUsage(user.id);
       if (usedThisPeriod >= limits.max_chains_per_month) {
         return jsonError(
-          `Лимит генераций цепочек: ${limits.max_chains_per_month} / мес. Использовано: ${usedThisPeriod}.`,
+          `Лимит генераций цепочек: ${limits.max_chains_per_month} / мес. ` +
+          `Использовано: ${usedThisPeriod}. Осталось: ${Math.max(0, limits.max_chains_per_month - usedThisPeriod)}.`,
           429,
         );
       }
@@ -164,7 +174,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       .eq('run_id', runId)
       .order('letter_index', { ascending: true });
 
-    return NextResponse.json({ run: updated, letters: lettersRows ?? [] });
+    return NextResponse.json({
+      run: updated,
+      letters: lettersRows ?? [],
+      tariff_usage: tariffUsage ? await getClientTariffUsage(user.id) : null,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     await supabase

@@ -82,6 +82,34 @@ export type SubscriptionStatus = {
   setup_until: string | null;
 };
 
+export type LimitUsage = {
+  limit: number;
+  used: number;
+  remaining: number;
+};
+
+export type ClientTariffUsage = Record<keyof TariffLimits, LimitUsage>;
+
+export type ClientTariffUsageSummary = SubscriptionStatus & {
+  period_start: string;
+  usage: ClientTariffUsage;
+};
+
+function nonNegativeInt(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function usageBucket(limit: number, used: number): LimitUsage {
+  const safeLimit = nonNegativeInt(limit);
+  const safeUsed = nonNegativeInt(used);
+  return {
+    limit: safeLimit,
+    used: safeUsed,
+    remaining: Math.max(0, safeLimit - safeUsed),
+  };
+}
+
 export function resolveEffectiveLimits(row: ClientTariffRow | null): TariffLimits {
   if (!row) return TARIFF_DEFAULTS.standard;
 
@@ -146,6 +174,113 @@ export async function countClientContacts(userId: string, periodStart: string): 
     .in('status', ['active', 'uploading', 'completed']);
   if (!data) return 0;
   return data.reduce((sum, r) => sum + (Number(r.accepted_rows) || 0), 0);
+}
+
+export async function countClientRows(userId: string, periodStart: string): Promise<number> {
+  if (!supabaseAdmin) return 0;
+
+  const [baseJobs, hhJobs, searchJobs, yandexJobs] = await Promise.all([
+    supabaseAdmin
+      .from('base_constructor_jobs')
+      .select('initial_row_count')
+      .eq('user_id', userId)
+      .gte('created_at', periodStart)
+      .in('status', ['pending', 'processing', 'completed']),
+    supabaseAdmin
+      .from('parser_jobs')
+      .select('total_parsed,total_found')
+      .eq('user_id', userId)
+      .eq('parser_type', 'hh_vacancies')
+      .gte('created_at', periodStart)
+      .in('status', ['pending', 'running', 'completed']),
+    supabaseAdmin
+      .from('search_parser_jobs')
+      .select('total_results')
+      .eq('user_id', userId)
+      .gte('created_at', periodStart)
+      .in('status', ['pending', 'running', 'completed']),
+    supabaseAdmin
+      .from('yandex_maps_jobs')
+      .select('total_links,total_organizations')
+      .eq('user_id', userId)
+      .gte('created_at', periodStart)
+      .in('status', ['pending', 'running', 'completed']),
+  ]);
+
+  const baseRows = (baseJobs.data ?? []).reduce(
+    (sum, row) => sum + nonNegativeInt((row as { initial_row_count?: unknown }).initial_row_count),
+    0,
+  );
+  const hhRows = (hhJobs.data ?? []).reduce((sum, row) => {
+    const item = row as { total_parsed?: unknown; total_found?: unknown };
+    return sum + Math.max(nonNegativeInt(item.total_parsed), nonNegativeInt(item.total_found));
+  }, 0);
+  const searchRows = (searchJobs.data ?? []).reduce(
+    (sum, row) => sum + nonNegativeInt((row as { total_results?: unknown }).total_results),
+    0,
+  );
+  const yandexRows = (yandexJobs.data ?? []).reduce((sum, row) => {
+    const item = row as { total_links?: unknown; total_organizations?: unknown };
+    return sum + Math.max(nonNegativeInt(item.total_organizations), nonNegativeInt(item.total_links));
+  }, 0);
+
+  return baseRows + hhRows + searchRows + yandexRows;
+}
+
+export async function countClientEmailAccountsAndDomains(
+  userId: string,
+): Promise<{ emails: number; domains: number }> {
+  const { supabaseInstantly } = await import('@/lib/supabaseInstantly');
+  if (!supabaseInstantly) return { emails: 0, domains: 0 };
+
+  const { data } = await supabaseInstantly
+    .from('client_campaign_presets')
+    .select('email_account_ids')
+    .eq('client_user_id', userId)
+    .maybeSingle();
+
+  const ids = Array.isArray((data as { email_account_ids?: unknown } | null)?.email_account_ids)
+    ? ((data as { email_account_ids?: unknown[] }).email_account_ids ?? [])
+      .map((v) => String(v ?? '').trim())
+      .filter(Boolean)
+    : [];
+  const domains = new Set<string>();
+  for (const email of ids) {
+    const at = email.lastIndexOf('@');
+    if (at >= 0 && at < email.length - 1) domains.add(email.slice(at + 1).toLowerCase());
+  }
+
+  return { emails: ids.length, domains: domains.size };
+}
+
+export async function getClientTariffUsage(userId: string): Promise<ClientTariffUsageSummary> {
+  const row = await getClientTariffRow(userId);
+  const limits = resolveEffectiveLimits(row);
+  const periodStart = getBillingPeriodStart(row);
+
+  const [contacts, rows, chains, presetUsage] = await Promise.all([
+    countClientContacts(userId, periodStart),
+    countClientRows(userId, periodStart),
+    countChains(userId, periodStart),
+    countClientEmailAccountsAndDomains(userId),
+  ]);
+
+  return {
+    status: getClientStatus(row),
+    tariff_type: row?.tariff_type ?? 'standard',
+    limits,
+    paid_at: row?.paid_at ?? null,
+    paid_until: row?.paid_until ?? null,
+    setup_until: row?.setup_until ?? null,
+    period_start: periodStart,
+    usage: {
+      max_contacts: usageBucket(limits.max_contacts, contacts),
+      max_rows: usageBucket(limits.max_rows, rows),
+      max_chains_per_month: usageBucket(limits.max_chains_per_month, chains),
+      max_domains: usageBucket(limits.max_domains, presetUsage.domains),
+      max_emails: usageBucket(limits.max_emails, presetUsage.emails),
+    },
+  };
 }
 
 export async function countChains(userId: string, periodStart: string): Promise<number> {

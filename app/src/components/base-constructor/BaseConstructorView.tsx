@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, type DragEvent } from 'react'
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import {
   ALWAYS_ON_STEPS_FOR_CLIENT,
   CLIENT_ROW_LIMIT,
@@ -769,6 +770,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                           <p className="text-sm font-medium text-gray-900">{fileName}</p>
                           <p className="text-xs text-gray-500">
                             {fileData.length - 1} строк, {fileData[0]?.length || 0} колонок
+                            {clientMode ? (
+                              <>
+                                {' '}
+                                (<ClientTariffUsageInline metric="max_rows" remainingOnly refreshKey={fileData.length} />)
+                              </>
+                            ) : null}
                           </p>
                         </div>
                       </div>
@@ -1408,7 +1415,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 <p className="mt-2 text-2xl font-bold text-gray-900">
                   {activeJob.result_stats?.total_rows ?? 0}
                 </p>
-                <p className="text-xs text-gray-400 mt-0.5">из {activeJob.initial_row_count}</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  из {activeJob.initial_row_count}
+                  {clientMode ? (
+                    <>
+                      {' '}
+                      (<ClientTariffUsageInline
+                        metric="max_rows"
+                        spent={activeJob.initial_row_count}
+                        remainingOnly
+                        refreshKey={`${activeJob.id}:${activeJob.completed_at ?? activeJob.status}`}
+                      />)
+                    </>
+                  ) : null}
+                </p>
               </div>
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Email найдено</p>

@@ -9,6 +9,7 @@ import { SearchParserForm } from './SearchParserForm';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { RefreshCw, Download, ExternalLink, FileSpreadsheet, Loader2, CirclePause, Trash2, Database, Copy, ChevronDown, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
+import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 type Lead = {
   id: string;
@@ -523,7 +524,7 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
       setActiveJobId(data.job.id);
     } catch (err) {
       console.error(err);
-      setError('Не удалось запустить парсинг');
+      setError(err instanceof Error ? err.message : 'Не удалось запустить парсинг');
     } finally {
       setBusy(false);
     }
@@ -712,6 +713,16 @@ export function SearchParserView({ clientMode }: SearchParserViewProps = {}) {
       ) : null}
 
       <SearchParserForm onStart={(payload) => void handleStart(payload)} busy={busy} />
+
+      {clientMode && activeJob ? (
+        <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <ClientTariffUsageInline
+            metric="max_rows"
+            spent={displayCompanyCount}
+            refreshKey={`${activeJob.id}:${activeJob.status}:${displayCompanyCount}`}
+          />
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
         {/* Jobs List */}

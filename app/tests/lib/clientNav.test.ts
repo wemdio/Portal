@@ -79,6 +79,7 @@ describe('client nav IA', () => {
       '/client/leads',
       '/client/bases',
       '/client/reports',
+      '/client/tariff',
       '/client/build',
       '/client/parsers?tab=email-sequence',
       '/client/launch',
@@ -134,6 +135,7 @@ describe('client nav IA', () => {
       'campaigns',
       'replies',
       'reports',
+      'tariff',
     ]);
   });
 
