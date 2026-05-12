@@ -8,6 +8,7 @@ export default function ClientBriefPage() {
       <ClientBriefForm
         endpoint="/api/client/brief"
         hypothesesEndpoint="/api/client/brief/hypotheses"
+        autofillEndpoint="/api/client/brief/autofill"
         title="Бриф"
         subtitle="Заполните бриф один раз — мы используем его для AI-инструментов (Оценка ЦА, генерация гипотез и др.)."
         auditPrefix="client.brief"
