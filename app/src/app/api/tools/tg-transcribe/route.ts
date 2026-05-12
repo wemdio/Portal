@@ -48,10 +48,12 @@ export async function GET(req: NextRequest) {
 
         // List: lightweight — no full text, no count
         const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '200', 10) || 200, 1), 500);
+        const sortParam = url.searchParams.get('sort');
+        const sortColumn = sortParam === 'message_date' ? 'tg_message_date' : 'created_at';
         const { data, error } = await admin
           .from('tg_video_transcripts')
-          .select('id, created_at, tg_chat_id, tg_message_id, tg_sender_id, sender_name, filename, file_size_bytes, duration_seconds, text, length, status, error_text')
-          .order('created_at', { ascending: false })
+          .select('id, created_at, tg_message_date, tg_chat_id, tg_message_id, tg_sender_id, sender_name, caption, filename, file_size_bytes, duration_seconds, text, length, status, error_text')
+          .order(sortColumn, { ascending: false, nullsFirst: false })
           .limit(limit);
 
         if (error) return jsonError(error.message, 500);
