@@ -4,8 +4,9 @@ import { qualifyReply, getBodyText, fetchBriefByCampaign } from './leadQualifier
 import * as instantly from './client';
 import type { Email } from './types';
 
-const EMAILS_PER_CAMPAIGN = 50;
+const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
+const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
@@ -23,42 +24,102 @@ function workerLog(
   else console[level](line);
 }
 
-/**
- * Returns the distinct set of campaign IDs to poll.
- * Sources (merged, deduplicated):
- * 1. project_instantly_campaigns — auto/manual links from projects
- * 2. user_instantly_campaign_preferences — manual specialist picks (fallback)
- */
-async function getSubscribedCampaignIds(): Promise<string[]> {
-  if (!supabaseAdmin) return [];
-  const ids = new Set<string>();
-
-  // Primary: campaigns linked to projects
-  const { data: projectCampaigns } = await supabaseAdmin
-    .from('project_instantly_campaigns')
-    .select('campaign_id');
-  if (projectCampaigns) {
-    for (const r of projectCampaigns) {
-      ids.add((r as { campaign_id: string }).campaign_id);
-    }
-  }
-
-  // Fallback: manual specialist preferences
-  const { data: prefs } = await supabaseAdmin
-    .from('user_instantly_campaign_preferences')
-    .select('campaign_id');
-  if (prefs) {
-    for (const r of prefs) {
-      ids.add((r as { campaign_id: string }).campaign_id);
-    }
-  }
-
-  return [...ids];
+function envNumber(name: string, fallback: number): number {
+  const raw = Number(process.env[name] ?? String(fallback));
+  return Number.isFinite(raw) ? raw : fallback;
 }
 
 /**
- * Main polling function: fetches recent reply emails from the Instantly API
- * **only for campaigns that specialists have subscribed to**, deduplicates
+ * Returns campaign IDs that are linked to a real Portal client project.
+ *
+ * `user_instantly_campaign_preferences` only controls a specialist's lead-feed
+ * view. It must not expand the AI polling surface by itself, because the worker
+ * should not qualify replies for campaigns that are not tied to a Portal client.
+ */
+async function getPortalLinkedCampaignIds(): Promise<string[]> {
+  if (!supabaseAdmin) return [];
+  const { data: links } = await supabaseAdmin
+    .from('project_instantly_campaigns')
+    .select('project_id, campaign_id');
+
+  const rows = (links ?? []) as { project_id?: string | null; campaign_id?: string | null }[];
+  if (rows.length === 0) return [];
+
+  // If main DB is unavailable, we cannot verify that the project still exists
+  // and belongs to a Portal client. Safer to skip than to classify orphaned
+  // workspace campaigns.
+  if (!supabaseMain) {
+    workerLog('warn', 'supabaseMain not configured — cannot verify Portal project links');
+    return [];
+  }
+
+  const projectIds = [...new Set(rows.map((r) => r.project_id).filter(Boolean) as string[])];
+  const validProjectIds = new Set<string>();
+  for (let i = 0; i < projectIds.length; i += PROJECT_BATCH_SIZE) {
+    const batch = projectIds.slice(i, i + PROJECT_BATCH_SIZE);
+    const { data: projects, error } = await supabaseMain
+      .from('projects')
+      .select('id, client')
+      .in('id', batch);
+
+    if (error) {
+      workerLog('warn', 'Failed to verify Portal project links', error.message);
+      continue;
+    }
+
+    for (const project of projects ?? []) {
+      const client = typeof project.client === 'string' ? project.client.trim() : '';
+      if (client) validProjectIds.add(project.id as string);
+    }
+  }
+
+  const campaignIds = new Set<string>();
+  for (const row of rows) {
+    if (row.project_id && row.campaign_id && validProjectIds.has(row.project_id)) {
+      campaignIds.add(row.campaign_id);
+    }
+  }
+
+  return [...campaignIds];
+}
+
+async function fetchRecentLinkedReplies(
+  campaignIds: Set<string>,
+): Promise<(Email & { _campaignName?: string })[]> {
+  const maxPages = Math.max(
+    1,
+    Math.min(20, envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5)),
+  );
+  const replyEmails: (Email & { _campaignName?: string })[] = [];
+  let startingAfter: string | undefined;
+
+  for (let page = 0; page < maxPages; page++) {
+    const res = await instantly.listEmails({
+      ue_type: 2,
+      limit: REPLY_EMAILS_PAGE_SIZE,
+      starting_after: startingAfter,
+    });
+    const allEmails = res.items ?? [];
+    const linkedReplies = allEmails.filter((e) => {
+      const campaignId = e.campaign_id;
+      return (e.ue_type ?? 2) === 2 && !!campaignId && campaignIds.has(campaignId);
+    });
+    workerLog(
+      'info',
+      `Reply page ${page + 1}: ${allEmails.length} replies fetched, ${linkedReplies.length} linked to Portal projects`,
+    );
+    replyEmails.push(...(linkedReplies as (Email & { _campaignName?: string })[]));
+
+    startingAfter = res.next_starting_after || undefined;
+    if (!startingAfter || allEmails.length === 0) break;
+  }
+
+  return replyEmails;
+}
+
+/**
+ * Main polling function: fetches recent reply emails from the Instantly API,
+ * keeps only replies for campaigns linked to Portal client projects, deduplicates
  * against already-processed records, and qualifies new ones via AI.
  * Returns the number of new replies qualified.
  */
@@ -75,39 +136,18 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
 
-  // 1. Only poll campaigns that at least one specialist selected
-  const campaignIds = await getSubscribedCampaignIds();
-  workerLog('info', `Subscribed campaigns: ${campaignIds.length} (${campaignIds.join(', ')})`);
+  // 1. Only qualify campaigns that are tied to a Portal client project.
+  const campaignIds = await getPortalLinkedCampaignIds();
+  workerLog('info', `Portal-linked campaigns: ${campaignIds.length}`);
   if (campaignIds.length === 0) return 0;
 
-  // 2. Fetch recent reply emails for subscribed campaigns
-  const replyEmails: (Email & { _campaignName?: string })[] = [];
-  const interCampaignDelay = Math.max(
-    1000,
-    Number(process.env.INSTANTLY_LEADS_INTER_CAMPAIGN_DELAY_MS ?? '3500'),
-  );
-
-  for (let i = 0; i < campaignIds.length; i++) {
-    const campaignId = campaignIds[i];
-    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
-    try {
-      const res = await instantly.listEmails({
-        campaign_id: campaignId,
-        limit: EMAILS_PER_CAMPAIGN,
-      });
-      const allEmails = res.items ?? [];
-      const replies = allEmails.filter((e) => (e.ue_type ?? 1) === 2);
-      workerLog('info', `Campaign ${campaignId}: ${allEmails.length} emails fetched, ${replies.length} replies (ue_type=2)`);
-      for (const r of replies) {
-        replyEmails.push(r as Email & { _campaignName?: string });
-      }
-    } catch (err) {
-      workerLog('error', `Failed to fetch emails for campaign ${campaignId}`, err);
-    }
-  }
+  // 2. Fetch recent replies globally, then filter locally by Portal-linked campaign.
+  // This avoids one Instantly API call per historical auto-linked campaign.
+  const campaignIdSet = new Set(campaignIds);
+  const replyEmails = await fetchRecentLinkedReplies(campaignIdSet);
 
   if (replyEmails.length === 0) {
-    workerLog('info', 'No reply emails found across subscribed campaigns');
+    workerLog('info', 'No linked reply emails found');
     return 0;
   }
 
@@ -149,13 +189,17 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
   if (newReplies.length === 0) return 0;
 
-  workerLog('info', `Found ${newReplies.length} new reply(s) across ${campaignIds.length} subscribed campaign(s)`);
+  workerLog('info', `Found ${newReplies.length} new linked reply(s) across ${campaignIds.length} Portal-linked campaign(s)`);
 
   // 4. Qualify each new reply (capped per tick to stay within rate limits)
+  const interReplyDelay = Math.max(
+    1000,
+    envNumber('INSTANTLY_LEADS_INTER_REPLY_DELAY_MS', 3500),
+  );
   let processed = 0;
   for (let i = 0; i < Math.min(newReplies.length, MAX_QUALIFY_PER_TICK); i++) {
     const reply = newReplies[i];
-    if (i > 0) await new Promise((r) => setTimeout(r, interCampaignDelay));
+    if (i > 0) await new Promise((r) => setTimeout(r, interReplyDelay));
     try {
       await qualifyOneReply(db, reply, apiKey);
       processed++;
