@@ -215,7 +215,10 @@ function buildSystemPrompt(briefText?: string | null): string {
 }
 
 interface AIResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{
+    finish_reason?: string;
+    message?: { content?: string };
+  }>;
 }
 
 export interface ClassifyOptions {
@@ -226,6 +229,12 @@ export interface ClassifyOptions {
 }
 
 const DEFAULT_MODEL = 'policy/gemini-flash';
+const DEFAULT_MAX_TOKENS = 2000;
+
+function envNumber(name: string, fallback: number): number {
+  const raw = Number(process.env[name] ?? String(fallback));
+  return Number.isFinite(raw) ? raw : fallback;
+}
 
 /**
  * Fetch brief text for a campaign.
@@ -395,6 +404,10 @@ export async function classifyWithAI(
   const { apiKey, model = DEFAULT_MODEL, maxRetries = 2, briefText } = options;
   const userMessage = buildUserMessage(ctx);
   const systemPrompt = buildSystemPrompt(briefText);
+  const maxTokens = Math.max(
+    1000,
+    envNumber('INSTANTLY_LEAD_QUAL_MAX_TOKENS', DEFAULT_MAX_TOKENS),
+  );
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let response: Response;
@@ -414,7 +427,7 @@ export async function classifyWithAI(
             { role: 'user', content: userMessage },
           ],
           temperature: 0.1,
-          max_tokens: 600,
+          max_tokens: maxTokens,
           response_format: { type: 'json_object' },
         }),
       });
@@ -430,7 +443,13 @@ export async function classifyWithAI(
 
     if (response.ok) {
       const data = (await response.json()) as AIResponse;
-      const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content?.trim() ?? '';
+      if (choice?.finish_reason === 'length' && attempt < maxRetries) {
+        console.warn('[LeadQualifier] AI response hit max_tokens, retrying...');
+        await sleep(1500 * Math.pow(2, attempt));
+        continue;
+      }
       if (!content && attempt < maxRetries) {
         console.warn('[LeadQualifier] Empty AI response, retrying...');
         await sleep(1500 * Math.pow(2, attempt));

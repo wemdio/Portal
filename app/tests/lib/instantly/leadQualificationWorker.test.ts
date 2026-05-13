@@ -1,0 +1,157 @@
+/** @jest-environment node */
+
+import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import type { Email } from '@/lib/instantly/types';
+
+let mockInstantlyDb: MockSupabaseClient | null;
+let mockMainDb: MockSupabaseClient | null;
+
+const listEmails = jest.fn();
+const getLeadsByEmail = jest.fn();
+const qualifyReply = jest.fn();
+const fetchBriefByCampaign = jest.fn();
+
+jest.mock('@/lib/supabaseInstantly', () => ({
+  get supabaseInstantly() {
+    return mockInstantlyDb;
+  },
+}));
+
+jest.mock('@/lib/supabaseAdmin', () => ({
+  get supabaseAdmin() {
+    return mockMainDb;
+  },
+}));
+
+jest.mock('@/lib/instantly/client', () => ({
+  __esModule: true,
+  listEmails: (...args: unknown[]) => listEmails(...args),
+  getLeadsByEmail: (...args: unknown[]) => getLeadsByEmail(...args),
+}));
+
+jest.mock('@/lib/instantly/leadQualifier', () => ({
+  __esModule: true,
+  qualifyReply: (...args: unknown[]) => qualifyReply(...args),
+  fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
+  getBodyText: (body: Email['body']) => {
+    if (!body) return '';
+    if (typeof body === 'string') return body;
+    return body.text ?? body.html ?? '';
+  },
+}));
+
+function replyEmail(overrides: Partial<Email>): Email {
+  return {
+    id: 'email-1',
+    campaign_id: 'linked-campaign',
+    from_address_email: 'lead@example.com',
+    thread_id: 'thread-1',
+    subject: 'Re: proposal',
+    ue_type: 2,
+    body: { text: 'Interested' },
+    timestamp_email: '2026-05-13T12:00:00Z',
+    ...overrides,
+  } as Email;
+}
+
+describe('pollAndQualifyReplies', () => {
+  const oldLeadKey = process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+  const oldBriefKey = process.env.OPENROUTER_BRIEF_API_KEY;
+  const oldPages = process.env.INSTANTLY_LEADS_EMAIL_PAGES;
+
+  beforeEach(() => {
+    jest.resetModules();
+    listEmails.mockReset();
+    getLeadsByEmail.mockReset().mockResolvedValue([]);
+    fetchBriefByCampaign.mockReset().mockResolvedValue(null);
+    qualifyReply.mockReset().mockResolvedValue({
+      isLead: false,
+      proposalSeen: true,
+      interestSignals: [],
+      reason: 'Не лид',
+      confidence: 0.8,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({ id: 'linked-email' }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+
+    process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = 'test-ai-key';
+    delete process.env.OPENROUTER_BRIEF_API_KEY;
+    process.env.INSTANTLY_LEADS_EMAIL_PAGES = '1';
+
+    mockInstantlyDb = createMockSupabase({
+      tables: {
+        project_instantly_campaigns: [
+          { project_id: 'project-1', campaign_id: 'linked-campaign', match_source: 'auto' },
+          { project_id: 'missing-project', campaign_id: 'orphan-campaign', match_source: 'auto' },
+        ],
+        user_instantly_campaign_preferences: [
+          { user_id: 'user-1', campaign_id: 'prefs-only-campaign' },
+        ],
+        instantly_lead_qualifications: [],
+      },
+    });
+    mockMainDb = createMockSupabase({
+      tables: {
+        projects: [
+          { id: 'project-1', client: 'Acme', specialist_user_id: 'specialist-1' },
+        ],
+        notifications: [],
+        deadline_notification_log: [],
+      },
+    });
+  });
+
+  afterAll(() => {
+    if (oldLeadKey === undefined) delete process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY;
+    else process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY = oldLeadKey;
+    if (oldBriefKey === undefined) delete process.env.OPENROUTER_BRIEF_API_KEY;
+    else process.env.OPENROUTER_BRIEF_API_KEY = oldBriefKey;
+    if (oldPages === undefined) delete process.env.INSTANTLY_LEADS_EMAIL_PAGES;
+    else process.env.INSTANTLY_LEADS_EMAIL_PAGES = oldPages;
+  });
+
+  it('polls recent replies globally and qualifies only campaigns linked to a Portal client project', async () => {
+    const replies = [
+      replyEmail({ id: 'linked-email', campaign_id: 'linked-campaign' }),
+      replyEmail({ id: 'prefs-only-email', campaign_id: 'prefs-only-campaign' }),
+      replyEmail({ id: 'orphan-email', campaign_id: 'orphan-campaign' }),
+    ];
+    listEmails.mockImplementation(async (params: { campaign_id?: string }) => {
+      if (params.campaign_id) {
+        return {
+          items: replies.filter((email) => email.campaign_id === params.campaign_id),
+          next_starting_after: null,
+        };
+      }
+      return { items: replies, next_starting_after: null };
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(listEmails).toHaveBeenCalledTimes(1);
+    expect(listEmails).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ue_type: 2,
+        limit: expect.any(Number),
+      }),
+    );
+    expect(listEmails.mock.calls[0][0]).not.toHaveProperty('campaign_id');
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(qualifyReply.mock.calls[0][0]).toBe('linked-campaign');
+    expect(mockInstantlyDb!.upserts).toHaveLength(1);
+    expect(mockInstantlyDb!.upserts[0].rows[0]).toEqual(
+      expect.objectContaining({
+        campaign_id: 'linked-campaign',
+        instantly_email_id: 'linked-email',
+      }),
+    );
+  });
+});
