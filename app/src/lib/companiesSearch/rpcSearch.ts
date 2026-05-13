@@ -1,7 +1,23 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
-import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import { reduceToTopCodes, OKVED2_TREE } from '@/lib/companiesSearch/okved2';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
+
+/**
+ * Буквенные секции ОКВЭД ("A", "B", …) заменяем их прямыми числовыми
+ * дочерними кодами ("01", "02", "03" для "A"), потому что в БД и в
+ * okved_reference коды хранятся в числовом формате. SQL-фильтр
+ * `LIKE '01.%'` покрывает вложенные, а `LIKE 'A.%'` — нет.
+ */
+function expandSectionLetters(codes: string[]): string[] {
+  return codes.flatMap((code) => {
+    if (/^[A-Z]$/i.test(code)) {
+      const section = OKVED2_TREE.find((n) => n.code === code);
+      return section?.children?.map((c) => c.code) ?? [code];
+    }
+    return [code];
+  });
+}
 
 function filtersToRpcParams(body: CompaniesSearchFilters) {
   let regionTokens: string[] | null = null;
@@ -18,9 +34,10 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
   // один префикс заменял всех потомков. Например, выбраны 24, 24.10, 24.10.2 →
   // на сервер уходит только ['24']: SQL фильтрует через LIKE '24.%', что
   // покрывает все вложенные коды.
+  // Буквенные секции (A, B, C…) раскрываем в числовые коды первого уровня.
   let okvedPrefixes: string[] | null = null;
   if (body.okvedCodes && body.okvedCodes.length > 0) {
-    okvedPrefixes = reduceToTopCodes(new Set(body.okvedCodes));
+    okvedPrefixes = expandSectionLetters(reduceToTopCodes(new Set(body.okvedCodes)));
     if (okvedPrefixes.length === 0) okvedPrefixes = null;
   }
 

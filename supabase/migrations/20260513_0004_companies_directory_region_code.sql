@@ -64,7 +64,22 @@ drop table _region_tokens;
 create index if not exists companies_directory_region_code_idx
   on public.companies_directory (region_code);
 
--- ── Count (переписан на region_code) ─────────────────────────────────
+-- Составной индекс для быстрого count/fetch с фильтрами region_code + okved_code.
+-- Index Only Scan: 75ms вместо 29s Seq Scan.
+create index if not exists companies_directory_region_okved_idx
+  on public.companies_directory (region_code, okved_code);
+
+-- ── Drop old overloads (without p_region_codes) before creating new ones ──
+drop function if exists public.companies_directory_count_rpc(
+  text[], text[], boolean, boolean, text[], boolean, boolean, boolean,
+  boolean, numeric, numeric, numeric, numeric, int, int, text[], text[]
+);
+drop function if exists public.companies_directory_fetch_rpc(
+  text[], text[], boolean, boolean, text[], boolean, boolean, boolean,
+  boolean, numeric, numeric, numeric, numeric, int, int, text[], text[], int, int
+);
+
+-- ── Count (переписан на region_code + быстрый ОКВЭД через expansion) ─
 create or replace function public.companies_directory_count_rpc(
   p_region_tokens   text[]  default null,
   p_activity_types  text[]  default null,
@@ -86,21 +101,29 @@ create or replace function public.companies_directory_count_rpc(
   p_region_codes    text[]  default null
 )
 returns bigint
-language sql stable
+language plpgsql stable
 set statement_timeout = '180s'
 as $$
-  select count(*)
+declare
+  _okved_codes text[];
+  _result bigint;
+begin
+  -- Раскрываем ОКВЭД-префиксы в конкретные коды через справочник.
+  -- Это превращает медленный LIKE-join (29 сек) в быстрый = ANY() (100 мс).
+  if p_okved_prefixes is not null then
+    select array_agg(distinct ok.code) into _okved_codes
+    from okved_reference ok, unnest(p_okved_prefixes) px
+    where ok.code = px or ok.code like px || '.%';
+  end if;
+
+  select count(*) into _result
   from public.companies_directory c
   where
     (p_region_codes is null or c.region_code = any(p_region_codes))
     and (p_region_tokens is null or p_region_codes is not null
          or exists (select 1 from unnest(p_region_tokens) t where c.address ilike '%' || t || '%'))
     and (p_activity_types is null or c.activity_type = any(p_activity_types))
-    and (p_okved_prefixes is null or exists (
-      select 1 from unnest(p_okved_prefixes) px
-      where c.okved_code is not null
-        and (c.okved_code = px or c.okved_code like px || '.%')
-    ))
+    and (_okved_codes is null or c.okved_code = any(_okved_codes))
     and (not p_has_phone  or c.phones is not null)
     and (not p_has_email  or c.email  is not null)
     and (p_legal_forms is null or exists (
@@ -117,9 +140,12 @@ as $$
     and (p_employees_from is null or c.employees_count >= p_employees_from)
     and (p_employees_to   is null or c.employees_count <= p_employees_to)
     and (p_inn_list is null or c.inn = any(p_inn_list));
+
+  return _result;
+end;
 $$;
 
--- ── Fetch rows (переписан на region_code) ────────────────────────────
+-- ── Fetch rows (переписан на region_code + быстрый ОКВЭД) ───────────
 create or replace function public.companies_directory_fetch_rpc(
   p_region_tokens   text[]  default null,
   p_activity_types  text[]  default null,
@@ -146,7 +172,16 @@ returns jsonb
 language plpgsql stable
 set statement_timeout = '180s'
 as $$
+declare
+  _okved_codes text[];
 begin
+  -- Раскрываем ОКВЭД-префиксы в конкретные коды через справочник
+  if p_okved_prefixes is not null then
+    select array_agg(distinct ok.code) into _okved_codes
+    from okved_reference ok, unnest(p_okved_prefixes) px
+    where ok.code = px or ok.code like px || '.%';
+  end if;
+
   return coalesce((
     select jsonb_agg(row_to_json(sub))
     from (
@@ -162,11 +197,7 @@ begin
         and (p_region_tokens is null or p_region_codes is not null
              or exists (select 1 from unnest(p_region_tokens) t where c.address ilike '%' || t || '%'))
         and (p_activity_types is null or c.activity_type = any(p_activity_types))
-        and (p_okved_prefixes is null or exists (
-          select 1 from unnest(p_okved_prefixes) px
-          where c.okved_code is not null
-            and (c.okved_code = px or c.okved_code like px || '.%')
-        ))
+        and (_okved_codes is null or c.okved_code = any(_okved_codes))
         and (not p_has_phone  or c.phones is not null)
         and (not p_has_email  or c.email  is not null)
         and (p_legal_forms is null or exists (
