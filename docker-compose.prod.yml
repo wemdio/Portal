@@ -614,6 +614,39 @@ services:
     networks:
       - portal-network
 
+  changelog-bot:
+    image: ${DOCKER_USERNAME}/portal-changelog-bot:prod
+    container_name: portal-changelog-bot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8095/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - .env
+    environment:
+      - CHANGELOG_BOT_TOKEN=${CHANGELOG_BOT_TOKEN}
+      - CHANGELOG_CHAT_ID=${CHANGELOG_CHAT_ID}
+      - CHANGELOG_THREAD_ID=${CHANGELOG_THREAD_ID}
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPO=${GITHUB_REPO:-wemdio/Portal}
+      - REQUESTY_CHANGELOG_API_KEY=${REQUESTY_CHANGELOG_API_KEY}
+      - CHANGELOG_OPENROUTER_MODEL=${CHANGELOG_OPENROUTER_MODEL:-anthropic/claude-sonnet-4-5}
+      - CHANGELOG_WEBHOOK_PORT=${CHANGELOG_WEBHOOK_PORT:-8095}
+    ports:
+      - "8095:8095"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     container_name: portal-telegram-bot-api
