@@ -84,7 +84,12 @@ export function computePace(
     ),
   );
   const delta = last.value - first.value;
-  const avgPerDay = Math.round(delta / daysDiff);
+  // Раньше тут было Math.round(delta / daysDiff) — для KPI/лидов это режет
+  // до 0 любой темп < 0.5/день (типично для b2b: 3 лида за 14 дней = 0.21,
+  // round → 0, прогноз null, UI «темп 0, нет данных»). По состоянию мая 2026
+  // это касалось 22% всех проектов с KPI-историей. Считаем дробным,
+  // форматирование на стороне UI.
+  const avgPerDay = delta / daysDiff;
   base.avgPerDay = avgPerDay;
   base.periodDays = daysDiff;
 

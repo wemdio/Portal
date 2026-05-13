@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Loader2, Sparkles, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { ClientBriefFields } from '@/lib/clientBrief';
 
 export interface BriefAutofillResult {
@@ -58,9 +58,8 @@ export function BriefAutofillPanel({
   }
 
   return (
-    <section className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+    <section className="rounded-xl border border-blue-200 bg-blue-50/60 p-4">
       <header className="flex items-center gap-2 text-sm font-semibold text-indigo-900">
-        <Sparkles className="h-4 w-4" />
         Заполнить бриф по сайту (AI)
       </header>
       <p className="mt-1 text-xs text-indigo-900/80">
@@ -81,13 +80,13 @@ export function BriefAutofillPanel({
           type="button"
           onClick={handleClick}
           disabled={disabled}
-          className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors ${
+          className={`neu-btn inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors ${
             disabled
-              ? 'bg-indigo-300 cursor-not-allowed'
-              : 'bg-indigo-600 hover:bg-indigo-700'
+              ? 'bg-blue-300 cursor-not-allowed'
+              : 'bg-blue-600 hover:bg-blue-700'
           }`}
         >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          {loading && <Loader2 className="h-4 w-4 animate-spin" />}
           Заполнить по сайту
         </button>
       </div>
