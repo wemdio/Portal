@@ -1,6 +1,12 @@
 -- Добавляем колонку region_code для моментальной фильтрации по регионам.
 -- Вместо ILIKE '%token%' по address (full scan) — exact match по region_code (btree index).
-set statement_timeout = '600s';
+--
+-- Backfill идёт token-by-token (длинные первыми) вместо одного cross-join UPDATE,
+-- чтобы каждый отдельный UPDATE мог использовать GIN trgm-индекс из миграции 0003
+-- и не создавал гигантский промежуточный результат. Строки, уже получившие
+-- region_code, пропускаются (WHERE region_code IS NULL), что ускоряет каждую
+-- последующую итерацию.
+set statement_timeout = '1800s';
 
 alter table public.companies_directory
   add column if not exists region_code text;
@@ -34,16 +40,24 @@ insert into _region_tokens (token, code) values
   ('Забайкальск','75'),('Еврейск','79'),('Чукотск','87'),
   ('Донецк','93'),('Луганск','94'),('Запорожск','90'),('Херсонск','95');
 
--- Backfill: первый совпавший токен (длинные токены проверяются первыми для точности)
-update public.companies_directory c
-set region_code = sub.code
-from (
-  select distinct on (c2.id) c2.id, rt.code
-  from public.companies_directory c2
-  join _region_tokens rt on c2.address ilike '%' || rt.token || '%'
-  order by c2.id, length(rt.token) desc
-) sub
-where c.id = sub.id and c.region_code is null;
+-- Backfill: token-by-token, длинные токены первыми для точности
+do $$
+declare
+  r record;
+  cnt int;
+begin
+  for r in select token, code from _region_tokens order by length(token) desc loop
+    update public.companies_directory
+    set    region_code = r.code
+    where  region_code is null
+      and  address ilike '%' || r.token || '%';
+    get diagnostics cnt = row_count;
+    if cnt > 0 then
+      raise notice 'region_code backfill: "%" → %: % rows', r.token, r.code, cnt;
+    end if;
+  end loop;
+end;
+$$;
 
 drop table _region_tokens;
 
