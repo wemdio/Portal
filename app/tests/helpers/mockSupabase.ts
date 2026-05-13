@@ -203,6 +203,12 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
   const inserts: InsertCall[] = [];
   const upserts: UpsertCall[] = [];
   const updates: UpdateCall[] = [];
+  let generatedIdSeq = 1;
+
+  function withGeneratedId(table: string, row: Row): Row {
+    if (Object.prototype.hasOwnProperty.call(row, 'id')) return row;
+    return { ...row, id: `mock-${table}-${generatedIdSeq++}` };
+  }
 
   function makeBuilder(table: string): Builder {
     const filters: Filter[] = [];
@@ -225,28 +231,36 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
     function flushMutation(): { data: Row[]; error: null; count: number } {
       if (mode === 'insert') {
-        tables[table] = (tables[table] ?? []).concat(pendingInsert);
-        inserts.push({ table, rows: pendingInsert });
-        return { data: pendingInsert, error: null, count: pendingInsert.length };
+        const insertedRows = pendingInsert.map((row) => withGeneratedId(table, row));
+        tables[table] = (tables[table] ?? []).concat(insertedRows);
+        inserts.push({ table, rows: insertedRows });
+        return { data: insertedRows, error: null, count: insertedRows.length };
       }
       if (mode === 'upsert' && pendingUpsert) {
         const keyCols = (pendingUpsert.onConflict ?? '').split(',').map((s) => s.trim()).filter(Boolean);
         const existing = tables[table] ?? [];
         const result: Row[] = existing.slice();
+        const returnedRows: Row[] = [];
         for (const r of pendingUpsert.rows) {
           let replaced = false;
           for (let i = 0; i < result.length; i++) {
             if (keyCols.length && keyCols.every((k) => result[i][k] === r[k])) {
-              result[i] = { ...result[i], ...r };
+              const nextRow = { ...result[i], ...r };
+              result[i] = nextRow;
+              returnedRows.push(nextRow);
               replaced = true;
               break;
             }
           }
-          if (!replaced) result.push(r);
+          if (!replaced) {
+            const nextRow = withGeneratedId(table, r);
+            result.push(nextRow);
+            returnedRows.push(nextRow);
+          }
         }
         tables[table] = result;
         upserts.push({ table, rows: pendingUpsert.rows, onConflict: pendingUpsert.onConflict });
-        return { data: pendingUpsert.rows, error: null, count: pendingUpsert.rows.length };
+        return { data: returnedRows, error: null, count: returnedRows.length };
       }
       if (mode === 'update' && pendingUpdate) {
         const matching = rowsForRead();

@@ -10,6 +10,7 @@ const listEmails = jest.fn();
 const getLeadsByEmail = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
+const sendLeadTelegramAlert = jest.fn();
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -40,6 +41,11 @@ jest.mock('@/lib/instantly/leadQualifier', () => ({
   },
 }));
 
+jest.mock('@/lib/instantly/leadTelegramAlerts', () => ({
+  __esModule: true,
+  sendLeadTelegramAlert: (...args: unknown[]) => sendLeadTelegramAlert(...args),
+}), { virtual: true });
+
 function replyEmail(overrides: Partial<Email>): Email {
   return {
     id: 'email-1',
@@ -63,6 +69,7 @@ describe('pollAndQualifyReplies', () => {
     jest.resetModules();
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
+    sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
     qualifyReply.mockReset().mockResolvedValue({
       isLead: false,
@@ -100,6 +107,16 @@ describe('pollAndQualifyReplies', () => {
       tables: {
         projects: [
           { id: 'project-1', client: 'Acme', specialist_user_id: 'specialist-1' },
+        ],
+        profiles: [
+          { id: 'specialist-1', full_name: 'Sergey Petrov', email: 'sergey@example.com' },
+        ],
+        telegram_links: [
+          {
+            user_id: 'specialist-1',
+            telegram_id: '123456',
+            telegram_username: 'sergey_portal',
+          },
         ],
         notifications: [],
         deadline_notification_log: [],
@@ -153,5 +170,55 @@ describe('pollAndQualifyReplies', () => {
         instantly_email_id: 'linked-email',
       }),
     );
+  });
+
+  it('sends a Telegram alert for a newly qualified lead assigned to a linked specialist', async () => {
+    qualifyReply.mockResolvedValueOnce({
+      isLead: true,
+      proposalSeen: true,
+      interestSignals: ['asked_for_call'],
+      reason: 'Просит созвон',
+      confidence: 0.92,
+      needsReview: false,
+      objectionHandleable: false,
+      objectionDraft: null,
+      threadContext: {
+        replyEmail: replyEmail({
+          id: 'lead-email',
+          body: { text: 'Давайте созвонимся' },
+          subject: 'Re: proposal',
+        }),
+        threadEmails: [],
+        lastOutbound: null,
+      },
+    });
+    listEmails.mockResolvedValue({
+      items: [replyEmail({ id: 'lead-email', campaign_id: 'linked-campaign' })],
+      next_starting_after: null,
+    });
+
+    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+    const processed = await pollAndQualifyReplies();
+
+    expect(processed).toBe(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
+      campaignId: 'linked-campaign',
+      leadEmail: 'lead@example.com',
+      leadName: null,
+      companyName: null,
+      campaignName: null,
+      replySubject: 'Re: proposal',
+      replyPreview: 'Давайте созвонимся',
+      aiReason: 'Просит созвон',
+      specialistMentions: [
+        {
+          userId: 'specialist-1',
+          fullName: 'Sergey Petrov',
+          telegramId: '123456',
+          telegramUsername: 'sergey_portal',
+        },
+      ],
+    }));
   });
 });
