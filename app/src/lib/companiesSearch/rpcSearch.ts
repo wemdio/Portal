@@ -4,8 +4,10 @@ import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 
 function filtersToRpcParams(body: CompaniesSearchFilters) {
+  let regionCodes: string[] | null = null;
   let regionTokens: string[] | null = null;
   if (body.regionCodes && body.regionCodes.length > 0) {
+    regionCodes = body.regionCodes;
     const tokens: string[] = [];
     for (const code of body.regionCodes) {
       const r = getRegionByCode(code);
@@ -25,6 +27,7 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
   }
 
   return {
+    p_region_codes: regionCodes,
     p_region_tokens: regionTokens,
     p_activity_types: body.activityTypes?.length ? body.activityTypes : null,
     p_has_phone: body.hasPhone ?? false,
