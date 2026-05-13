@@ -15,14 +15,14 @@ export const TARIFF_DEFAULTS: Record<'standard' | 'pro', TariffLimits> = {
   standard: {
     max_contacts: 10_000,
     max_rows: 20_000,
-    max_chains_per_month: 3,
+    max_chains_per_month: 10,
     max_domains: 4,
     max_emails: 16,
   },
   pro: {
     max_contacts: 20_000,
     max_rows: 40_000,
-    max_chains_per_month: 6,
+    max_chains_per_month: 20,
     max_domains: 8,
     max_emails: 32,
   },
