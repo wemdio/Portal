@@ -45,7 +45,7 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
   };
 }
 
-const SEARCH_TIMEOUT_MS = 25_000;
+const SEARCH_TIMEOUT_MS = 180_000;
 
 export async function searchCount(
   body: CompaniesSearchFilters,
