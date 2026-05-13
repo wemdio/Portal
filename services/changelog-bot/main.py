@@ -409,6 +409,29 @@ async def handle_health(_request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "service": "changelog-bot"})
 
 
+# ── Catchup on startup ────────────────────────────────────────────────────────
+
+async def _run_catchup() -> None:
+    """При старте проверяем: если сегодня будний день, уже после 9:00 МСК
+    и саммари за текущее окно ещё не отправлялось — запускаем дайджест."""
+    now_msk = datetime.now(MSK)
+    weekday = now_msk.weekday()
+    if weekday >= 5:
+        return
+
+    nine_am = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now_msk < nine_am:
+        return
+
+    since_utc, until_utc = _compute_window(now_msk)
+    if await already_sent(since_utc, until_utc):
+        print("[changelog] Catchup: digest already sent for this window — skipping.", flush=True)
+        return
+
+    print("[changelog] Catchup: missed digest detected — running now.", flush=True)
+    await run_digest()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -429,6 +452,8 @@ async def main() -> None:
     if RUN_NOW:
         print("[changelog] CHANGELOG_RUN_NOW=1 — running digest immediately", flush=True)
         await run_digest()
+    else:
+        await _run_catchup()
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
