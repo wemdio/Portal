@@ -118,6 +118,7 @@ export default function ProfilePage() {
   const [tgLinked, setTgLinked] = useState<boolean | null>(null);
   const [tgLoading, setTgLoading] = useState(false);
   const [tgDeeplink, setTgDeeplink] = useState<string | null>(null);
+  const [tgUsername, setTgUsername] = useState<string | null>(null);
 
   const [campaignPrefs, setCampaignPrefs] = useState<string[]>([]);
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
@@ -246,8 +247,9 @@ export default function ProfilePage() {
           headers: { Authorization: `Bearer ${t}` },
         });
         if (!res.ok || !mounted) return;
-        const body = (await res.json()) as { linked?: boolean };
+        const body = (await res.json()) as { linked?: boolean; telegram_username?: string | null };
         setTgLinked(!!body.linked);
+        setTgUsername(body.telegram_username ?? null);
       } catch { /* ignore */ }
     })();
     return () => { mounted = false; };
@@ -347,6 +349,7 @@ export default function ProfilePage() {
       if (!res.ok) throw new Error('Не удалось отвязать');
       setTgLinked(false);
       setTgDeeplink(null);
+      setTgUsername(null);
       setMessage(locale === 'en' ? 'Telegram unlinked' : 'Telegram отвязан');
     } catch (err) {
       setError(getErrorMessage(err));
@@ -638,9 +641,16 @@ export default function ProfilePage() {
           <div className="p-5">
             {tgLinked ? (
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                  <span className="text-sm text-gray-700">{tr(locale, 'Telegram привязан', 'Telegram linked')}</span>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                    <span className="text-sm text-gray-700">{tr(locale, 'Telegram привязан', 'Telegram linked')}</span>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {tgUsername
+                      ? tr(locale, `Для уведомлений будет использоваться @${tgUsername}`, `Lead alerts will mention @${tgUsername}`)
+                      : tr(locale, 'Username не сохранён: бот будет упоминать вас по Telegram ID', 'Username is not saved: the bot will mention you by Telegram ID')}
+                  </p>
                 </div>
                 <button
                   type="button"

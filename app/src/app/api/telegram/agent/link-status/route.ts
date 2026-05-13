@@ -17,13 +17,16 @@ export async function GET(req: NextRequest) {
 
   const { data } = await supabaseAdmin
     .from('telegram_links')
-    .select('telegram_id')
+    .select('telegram_id, telegram_username, telegram_first_name, telegram_last_name')
     .eq('user_id', user.id)
     .maybeSingle();
 
   return NextResponse.json({
     linked: !!data,
     telegram_id: data?.telegram_id ?? null,
+    telegram_username: data?.telegram_username ?? null,
+    telegram_first_name: data?.telegram_first_name ?? null,
+    telegram_last_name: data?.telegram_last_name ?? null,
   });
 }
 

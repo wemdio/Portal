@@ -1,6 +1,7 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { qualifyReply, getBodyText, fetchBriefByCampaign } from './leadQualifier';
+import { sendLeadTelegramAlert, type LeadTelegramSpecialistMention } from './leadTelegramAlerts';
 import * as instantly from './client';
 import type { Email } from './types';
 
@@ -310,6 +311,9 @@ async function qualifyOneReply(
       leadName ?? null,
       companyName ?? null,
       campaignName,
+      reply.subject ?? null,
+      replyText || null,
+      result.reason ?? null,
     );
   }
 }
@@ -328,6 +332,9 @@ async function notifySpecialistsAboutLead(
   leadName: string | null,
   companyName: string | null,
   campaignName: string | null,
+  replySubject: string | null,
+  replyPreview: string | null,
+  aiReason: string | null,
 ): Promise<void> {
   if (!supabaseMain) return;
 
@@ -374,10 +381,11 @@ async function notifySpecialistsAboutLead(
       return;
     }
 
+    const userIdList = [...userIds];
     const contactLabel = leadName ?? leadEmail;
     const campaignLabel = campaignName ? ` (${campaignName})` : '';
 
-    const rows = [...userIds].map((uid) => ({
+    const rows = userIdList.map((uid) => ({
       user_id: uid,
       type: 'lead_new',
       title: 'Новый квалифицированный лид',
@@ -406,8 +414,91 @@ async function notifySpecialistsAboutLead(
         { onConflict: 'entity_type,entity_id,level' },
       );
 
+    await sendTelegramLeadAlertForSpecialists({
+      userIds: userIdList,
+      qualificationId,
+      campaignId,
+      leadEmail,
+      leadName,
+      companyName,
+      campaignName,
+      replySubject,
+      replyPreview,
+      aiReason,
+    });
+
     workerLog('info', `Created lead notifications for ${userIds.size} specialist(s)`);
   } catch (err) {
     workerLog('error', 'Error creating lead notifications', err);
+  }
+}
+
+async function sendTelegramLeadAlertForSpecialists(data: {
+  userIds: string[];
+  qualificationId: string;
+  campaignId: string;
+  leadEmail: string;
+  leadName: string | null;
+  companyName: string | null;
+  campaignName: string | null;
+  replySubject: string | null;
+  replyPreview: string | null;
+  aiReason: string | null;
+}): Promise<void> {
+  if (!supabaseMain) return;
+
+  try {
+    const { data: profiles } = await supabaseMain
+      .from('profiles')
+      .select('id, full_name, email')
+      .in('id', data.userIds);
+
+    const { data: links } = await supabaseMain
+      .from('telegram_links')
+      .select('user_id, telegram_id, telegram_username')
+      .in('user_id', data.userIds);
+
+    const profilesById = new Map(
+      (profiles ?? []).map((profile) => [
+        profile.id as string,
+        profile as { id: string; full_name?: string | null; email?: string | null },
+      ]),
+    );
+    const linksByUserId = new Map(
+      (links ?? []).map((link) => [
+        link.user_id as string,
+        link as { user_id: string; telegram_id?: string | number | null; telegram_username?: string | null },
+      ]),
+    );
+
+    const specialistMentions: LeadTelegramSpecialistMention[] = data.userIds.map((userId) => {
+      const profile = profilesById.get(userId);
+      const link = linksByUserId.get(userId);
+      return {
+        userId,
+        fullName: profile?.full_name ?? profile?.email ?? null,
+        telegramId: link?.telegram_id ?? null,
+        telegramUsername: link?.telegram_username ?? null,
+      };
+    });
+
+    const result = await sendLeadTelegramAlert({
+      qualificationId: data.qualificationId,
+      campaignId: data.campaignId,
+      leadEmail: data.leadEmail,
+      leadName: data.leadName,
+      companyName: data.companyName,
+      campaignName: data.campaignName,
+      specialistMentions,
+      replySubject: data.replySubject,
+      replyPreview: data.replyPreview,
+      aiReason: data.aiReason,
+    });
+
+    if (!result.sent) {
+      workerLog('warn', `Telegram lead alert skipped or failed for qualification ${data.qualificationId}`);
+    }
+  } catch (err) {
+    workerLog('error', 'Error sending Telegram lead alert', err);
   }
 }

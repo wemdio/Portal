@@ -323,7 +323,7 @@ export async function handleCallbackQuery(callbackQuery: {
 
 export async function handleAgentMessage(msg: {
   chat: { id: number };
-  from?: { id: number };
+  from?: { id: number; username?: string; first_name?: string; last_name?: string };
   text?: string;
   voice?: { file_id: string; duration: number };
 }): Promise<void> {
@@ -352,7 +352,11 @@ export async function handleAgentMessage(msg: {
 
   const linkPrefix = '/start lnk';
   if (text.startsWith(linkPrefix)) {
-    await handleLinkCommand(chatId, telegramId, text.slice(linkPrefix.length));
+    await handleLinkCommand(chatId, telegramId, text.slice(linkPrefix.length), {
+      username: msg.from?.username ?? null,
+      firstName: msg.from?.first_name ?? null,
+      lastName: msg.from?.last_name ?? null,
+    });
     return;
   }
 
