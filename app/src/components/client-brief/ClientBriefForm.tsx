@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, AlertCircle, Loader2, Save, Sparkles } from 'lucide-react';
+import { Check, AlertCircle, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { logAudit, logError } from '@/lib/loggerClient';
 import {
@@ -149,9 +149,9 @@ function PriceTierSelector({
               key={tier}
               type="button"
               onClick={() => onChange(active ? null : tier)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+              className={`price-tier-btn px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
                 active
-                  ? 'bg-blue-600 text-white border-blue-600'
+                  ? 'active bg-blue-600 text-white border-blue-600'
                   : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
               }`}
             >
@@ -239,7 +239,6 @@ function HypothesesSection({
   return (
     <section className={SECTION_BASE}>
       <header className={`${HEADER_BASE} flex items-center gap-2`}>
-        <Sparkles className="h-4 w-4 text-indigo-600" />
         Гипотезы по сбору базы (AI)
       </header>
       <div className="p-6 space-y-4">
@@ -288,7 +287,7 @@ function HypothesesSection({
               disabled={generating}
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-300 bg-white px-4 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              {generating && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {hasResult ? 'Сгенерировать заново' : 'Сгенерировать ещё раз'}
             </button>
           </div>
@@ -763,9 +762,9 @@ export function ClientBriefForm({
           type="button"
           onClick={() => void handleSave()}
           disabled={saving}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-6 text-sm font-semibold text-white shadow-sm shadow-blue-600/25 transition-all hover:-translate-y-0.5 hover:shadow-md hover:shadow-blue-600/35 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50"
+          className="neu-btn inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 text-sm font-semibold text-white shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
           {saving ? 'Сохранение...' : 'Сохранить бриф'}
         </button>
       </div>

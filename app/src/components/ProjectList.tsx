@@ -14,6 +14,25 @@ import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
 import { Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
+
+/**
+ * Формат темпа для tooltip'ов «Анализ KPI» и «Анализ контактов».
+ * Раньше показывали Math.round(avgPerDay) — для медленных проектов
+ * (типичный b2b: 3 лида за 14 дней = 0.21/день) выходило 0, и юзер видел
+ * «темп 0, нет прогноза», хотя на самом деле проект движется.
+ *
+ * Правила:
+ *   - ≥10 → целое («15/день»)
+ *   - ≥1  → 1 знак после запятой («2.4/день»)
+ *   - >0  → 2 знака («0.21/день»)
+ *   - =0  → «0»
+ */
+function formatPaceValue(v: number): string {
+  if (v >= 10) return Math.round(v).toString();
+  if (v >= 1) return v.toFixed(1);
+  if (v > 0) return v.toFixed(2);
+  return '0';
+}
 import {
   loadAllProjectsPace,
   loadContactsPaceData,
@@ -80,7 +99,7 @@ function KpiPaceTooltip({
               <div className="font-semibold text-zinc-900 text-[13px]">Анализ KPI</div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">Темп</span>
-                <span className="font-medium tabular-nums">~{pace.avgPerDay}/день</span>
+                <span className="font-medium tabular-nums">~{formatPaceValue(pace.avgPerDay)}/день</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">Осталось</span>
@@ -176,7 +195,7 @@ function ContactsPaceTooltip({
               <div className="font-semibold text-zinc-900 text-[13px]">Анализ темпа</div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">Темп</span>
-                <span className="font-medium tabular-nums">~{pace.avgPerDay}/день</span>
+                <span className="font-medium tabular-nums">~{formatPaceValue(pace.avgPerDay)}/день</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">Осталось</span>
