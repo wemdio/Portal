@@ -396,13 +396,25 @@ async def run_digest() -> None:
         return
 
     escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    raw_lines = escaped.splitlines()
     lines = []
-    for line in escaped.splitlines():
+    prev_is_header = False
+    for line in raw_lines:
         stripped = line.strip()
-        if stripped.endswith(":") and not stripped.startswith("-"):
+        is_header = stripped.endswith(":") and not stripped.startswith("-")
+        is_empty = stripped == ""
+
+        if is_empty and prev_is_header:
+            prev_is_header = False
+            continue
+
+        if is_header:
             lines.append(f"<b>{stripped}</b>")
+            prev_is_header = True
         else:
             lines.append(line)
+            prev_is_header = False
+
     text = "\n".join(lines)
     print(f"[changelog] Sending message ({len(text)} chars)...", flush=True)
     ok = await send_message(text)
