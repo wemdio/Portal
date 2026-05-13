@@ -45,14 +45,34 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
   };
 }
 
+const SEARCH_TIMEOUT_MS = 180_000;
+const TIMEOUT_ERROR = 'Поиск занял слишком много времени — база данных перегружена. Попробуйте повторить через несколько секунд.';
+
+type RpcResult<T> = { data: T; error: null } | { data: null; error: { message: string } };
+
+function raceTimeout<T>(p: Promise<RpcResult<T>>): Promise<RpcResult<T>> {
+  return Promise.race([
+    p,
+    new Promise<RpcResult<T>>((_, reject) =>
+      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), SEARCH_TIMEOUT_MS),
+    ),
+  ]);
+}
+
 export async function searchCount(
   body: CompaniesSearchFilters,
 ): Promise<{ count: number; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_count_rpc', params);
-  if (error) return { count: 0, error: error.message };
-  return { count: Number(data) ?? 0 };
+  try {
+    const result = await raceTimeout<number>(
+      Promise.resolve(admin.rpc('companies_directory_count_rpc', params)).then((r) => r as RpcResult<number>),
+    );
+    if (result.error) return { count: 0, error: result.error.message };
+    return { count: Number(result.data) ?? 0 };
+  } catch (e) {
+    return { count: 0, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export async function searchRows(
@@ -62,11 +82,15 @@ export async function searchRows(
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_fetch_rpc', {
-    ...params,
-    p_limit: limit,
-    p_offset: offset,
-  });
-  if (error) return { rows: [], error: error.message };
-  return { rows: (data as unknown as Record<string, unknown>[]) ?? [] };
+  try {
+    const result = await raceTimeout<Record<string, unknown>[]>(
+      Promise.resolve(
+        admin.rpc('companies_directory_fetch_rpc', { ...params, p_limit: limit, p_offset: offset }),
+      ).then((r) => r as RpcResult<Record<string, unknown>[]>),
+    );
+    if (result.error) return { rows: [], error: result.error.message };
+    return { rows: result.data ?? [] };
+  } catch (e) {
+    return { rows: [], error: e instanceof Error ? e.message : String(e) };
+  }
 }
