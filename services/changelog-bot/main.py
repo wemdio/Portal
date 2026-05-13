@@ -124,7 +124,7 @@ async def save_digest(since: datetime, until: datetime, summary: str) -> None:
 
 def _compute_window(now_msk: datetime) -> tuple[datetime, datetime]:
     """Return (since, until) in UTC for the reporting window."""
-    boundary = now_msk.replace(hour=8, minute=30, second=0, microsecond=0)
+    boundary = now_msk.replace(hour=9, minute=0, second=0, microsecond=0)
     weekday = now_msk.weekday()  # 0=Mon … 6=Sun
 
     if weekday == 0:  # Monday → since Friday 08:30 MSK
@@ -440,12 +440,12 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_digest,
-        CronTrigger(day_of_week="mon-fri", hour=5, minute=30, timezone="UTC"),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone="UTC"),
         id="daily_digest",
         max_instances=1,
     )
     scheduler.start()
-    print(f"[changelog] Scheduled: Mon–Fri at 08:30 MSK (05:30 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
+    print(f"[changelog] Scheduled: Mon–Fri at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
 
     while True:
         await asyncio.sleep(3600)
