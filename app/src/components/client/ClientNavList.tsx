@@ -14,7 +14,6 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Send } from 'lucide-react';
 import {
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
@@ -49,25 +48,8 @@ function NavItemRow({
   locale: Locale;
   onItemClick?: () => void;
 }) {
-  const isPrimary = item.primaryCta === true;
   const label = pickLabel(item, locale);
   const description = pickDescription(item, locale);
-
-  if (isPrimary) {
-    // CTA: filled pill with accent background + Send icon.
-    return (
-      <Link
-        href={item.href as Route}
-        onClick={onItemClick}
-        title={description}
-        className="neu-btn flex items-center gap-2 px-3.5 py-2.5 text-sm font-bold w-full justify-start"
-        aria-current={active ? 'page' : undefined}
-      >
-        <Send className="h-4 w-4 shrink-0" />
-        <span className="truncate">{label}</span>
-      </Link>
-    );
-  }
 
   return (
     <Link

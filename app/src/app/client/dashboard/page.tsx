@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { Route } from 'next';
 import {
-  Send, FileText, ListChecks, Sparkles, Mail, ArrowRight, Loader2,
+  Send, Mail, ArrowRight, Loader2,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingChecklist } from '@/components/client/OnboardingChecklist';
@@ -26,7 +26,6 @@ interface QuickAction {
   href: string;
   label: string;
   description: string;
-  icon: React.ComponentType<{ className?: string }>;
   primary?: boolean;
 }
 
@@ -35,25 +34,21 @@ const QUICK_ACTIONS: readonly QuickAction[] = [
     href: '/client/brief',
     label: 'Заполнить бриф',
     description: 'AI-инструменты используют его для лучших результатов',
-    icon: FileText,
   },
   {
     href: '/client/build',
     label: 'Подготовить базу',
     description: 'Собрать контакты из источников и очистить под рассылку',
-    icon: ListChecks,
   },
   {
     href: '/client/parsers?tab=email-sequence',
     label: 'Цепочки писем',
     description: 'AI-генерация холодных писем под сегмент',
-    icon: Sparkles,
   },
   {
     href: '/client/launch',
     label: 'Создать кампанию',
     description: 'Загрузить базу, написать цепочку и запустить',
-    icon: Send,
     primary: true,
   },
 ];
@@ -114,7 +109,6 @@ export default function ClientDashboardPage() {
           </h2>
           <div className="space-y-2.5">
             {QUICK_ACTIONS.map((action) => {
-              const Icon = action.icon;
               return (
                 <Link
                   key={action.href}
@@ -123,17 +117,6 @@ export default function ClientDashboardPage() {
                     action.primary ? 'neu-card' : 'neu-sm'
                   }`}
                 >
-                  <span
-                    className="inline-flex items-center justify-center h-9 w-9 rounded-xl shrink-0"
-                    style={{
-                      background: action.primary
-                        ? 'var(--cp-accent)'
-                        : 'rgba(74,111,165,0.10)',
-                      color: action.primary ? '#fff' : 'var(--cp-accent)',
-                    }}
-                  >
-                    <Icon className="h-4 w-4" />
-                  </span>
                   <div className="flex-1 min-w-0">
                     <p
                       className="text-sm font-bold"
