@@ -312,7 +312,7 @@ async def _send_single(text: str) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if THREAD_ID:
+    if THREAD_ID and int(THREAD_ID) != 1:
         payload["message_thread_id"] = int(THREAD_ID)
     print(f"[changelog] TG payload: chat_id={CHAT_ID} thread_id={THREAD_ID or 'none'} text_len={len(text)}", flush=True)
     try:
