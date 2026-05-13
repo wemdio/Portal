@@ -45,14 +45,28 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
   };
 }
 
+const SEARCH_TIMEOUT_MS = 25_000;
+
 export async function searchCount(
   body: CompaniesSearchFilters,
 ): Promise<{ count: number; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_count_rpc', params);
-  if (error) return { count: 0, error: error.message };
-  return { count: Number(data) ?? 0 };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    const { data, error } = await admin.rpc('companies_directory_count_rpc', params, { signal: ac.signal as AbortSignal });
+    if (error) return { count: 0, error: error.message };
+    return { count: Number(data) ?? 0 };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('abort') || msg.includes('Abort') || msg.includes('timeout')) {
+      return { count: 0, error: 'Запрос занял слишком много времени. Попробуйте уменьшить количество регионов или видов деятельности.' };
+    }
+    return { count: 0, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function searchRows(
@@ -62,11 +76,23 @@ export async function searchRows(
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_fetch_rpc', {
-    ...params,
-    p_limit: limit,
-    p_offset: offset,
-  });
-  if (error) return { rows: [], error: error.message };
-  return { rows: (data as unknown as Record<string, unknown>[]) ?? [] };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    const { data, error } = await admin.rpc('companies_directory_fetch_rpc', {
+      ...params,
+      p_limit: limit,
+      p_offset: offset,
+    }, { signal: ac.signal as AbortSignal });
+    if (error) return { rows: [], error: error.message };
+    return { rows: (data as unknown as Record<string, unknown>[]) ?? [] };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('abort') || msg.includes('Abort') || msg.includes('timeout')) {
+      return { rows: [], error: 'Запрос занял слишком много времени. Попробуйте уменьшить количество регионов или видов деятельности.' };
+    }
+    return { rows: [], error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
 }
