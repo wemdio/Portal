@@ -46,7 +46,7 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
 }
 
 const SEARCH_TIMEOUT_MS = 180_000;
-const TIMEOUT_ERROR = 'Поиск занял слишком много времени — база данных перегружена. Попробуйте повторить через несколько секунд.';
+const TIMEOUT_ERROR = 'Поиск занял слишком много времени. Попробуйте повторить через несколько секунд/минут.';
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
