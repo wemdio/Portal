@@ -1461,6 +1461,18 @@ body:has(.client-portal) {
   box-shadow: 3px 3px 8px var(--cp-shadow-d), -3px -3px 8px var(--cp-shadow-l);
 }
 
+/* Price tier buttons and similar toggle buttons in admin components */
+.client-portal button.price-tier-btn {
+  box-shadow: 2px 2px 5px var(--cp-shadow-d), -2px -2px 5px var(--cp-shadow-l);
+  border-color: transparent !important;
+}
+.client-portal button.price-tier-btn.active {
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+  border-color: transparent !important;
+  color: var(--cp-accent) !important;
+  background-color: var(--cp-bg) !important;
+}
+
 /* Inputs / selects / textareas in admin components: make them inset cream */
 .client-portal input[type="text"],
 .client-portal input[type="email"],
@@ -1474,6 +1486,8 @@ body:has(.client-portal) {
 .client-portal textarea {
   background-color: var(--cp-bg);
   color: var(--cp-text);
+  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l) !important;
+  border-color: transparent !important;
 }
 .client-portal input[type="text"]::placeholder,
 .client-portal input[type="email"]::placeholder,

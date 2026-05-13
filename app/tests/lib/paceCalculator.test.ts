@@ -22,6 +22,7 @@ import {
   PACE_HISTORY_WINDOW_DAYS,
   summarizeProjectRisk,
   type PaceData,
+  type PaceHistoryPoint,
   type PaceQueryBuilder,
   type PaceQueryClient,
   type ProjectPace,
@@ -96,6 +97,21 @@ describe('computePace', () => {
     expect(r.avgPerDay).toBe(1);
     expect(r.onTrack).toBe(false);
     expect(r.requiredPace).toBeGreaterThan(r.avgPerDay);
+  });
+
+  it('keeps sub-1 pace as fractional instead of rounding to 0', () => {
+    // Регрессия: 3 лида за 14 дней = 0.214/день. Раньше Math.round даёт 0,
+    // forecastDays=null, UI «темп 0, нет прогноза». 22% всех KPI-проектов
+    // в мае 2026 страдали именно от этого.
+    const hist: PaceHistoryPoint[] = [
+      { value: 5, recorded_at: '2026-04-01' },
+      { value: 8, recorded_at: '2026-04-15' },
+    ];
+    const r = computePace(hist, 50, 8, null, NOW);
+    expect(r.avgPerDay).toBeGreaterThan(0);
+    expect(r.avgPerDay).toBeLessThan(1);
+    expect(r.forecastDays).not.toBeNull();
+    expect(r.forecastDays).toBeGreaterThan(0);
   });
 });
 
@@ -254,7 +270,8 @@ describe('loadKpiPaceData', () => {
 
     expect(pace!.dataPoints).toBe(2);
     expect(pace!.periodDays).toBe(29);
-    expect(pace!.avgPerDay).toBe(1); // round((30-10)/29)
+    // (30-10)/29 ≈ 0.6896. Раньше Math.round давал 1; теперь — точное float.
+    expect(pace!.avgPerDay).toBeCloseTo(20 / 29, 4);
   });
 });
 
@@ -322,9 +339,11 @@ describe('loadAllProjectsPace', () => {
 
     const p1 = result.get('p1');
     expect(p1?.contacts?.dataPoints).toBe(2);
-    expect(p1?.contacts?.avgPerDay).toBe(1); // round((50-10)/29)
+    // (50-10)/29 ≈ 1.379 — теперь float, не округление до 1.
+    expect(p1?.contacts?.avgPerDay).toBeCloseTo(40 / 29, 4);
     expect(p1?.kpi?.dataPoints).toBe(2);
-    expect(p1?.kpi?.avgPerDay).toBe(1); // round((25-5)/29)
+    // (25-5)/29 ≈ 0.6896 — раньше округлялось до 1, теперь float.
+    expect(p1?.kpi?.avgPerDay).toBeCloseTo(20 / 29, 4);
 
     const p2 = result.get('p2');
     expect(p2?.contacts?.dataPoints).toBe(2);
