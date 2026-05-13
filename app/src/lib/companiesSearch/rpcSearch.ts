@@ -46,26 +46,26 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
 }
 
 const SEARCH_TIMEOUT_MS = 180_000;
+const TIMEOUT_ERROR = 'Запрос занял слишком много времени. Попробуйте уменьшить количество регионов или видов деятельности.';
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(TIMEOUT_ERROR)), ms)),
+  ]);
+}
 
 export async function searchCount(
   body: CompaniesSearchFilters,
 ): Promise<{ count: number; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), SEARCH_TIMEOUT_MS);
   try {
-    const { data, error } = await admin.rpc('companies_directory_count_rpc', params, { signal: ac.signal as AbortSignal });
+    const { data, error } = await withTimeout(admin.rpc('companies_directory_count_rpc', params), SEARCH_TIMEOUT_MS);
     if (error) return { count: 0, error: error.message };
     return { count: Number(data) ?? 0 };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('abort') || msg.includes('Abort') || msg.includes('timeout')) {
-      return { count: 0, error: 'Запрос занял слишком много времени. Попробуйте уменьшить количество регионов или видов деятельности.' };
-    }
-    return { count: 0, error: msg };
-  } finally {
-    clearTimeout(timer);
+    return { count: 0, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -76,23 +76,14 @@ export async function searchRows(
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), SEARCH_TIMEOUT_MS);
   try {
-    const { data, error } = await admin.rpc('companies_directory_fetch_rpc', {
-      ...params,
-      p_limit: limit,
-      p_offset: offset,
-    }, { signal: ac.signal as AbortSignal });
+    const { data, error } = await withTimeout(
+      admin.rpc('companies_directory_fetch_rpc', { ...params, p_limit: limit, p_offset: offset }),
+      SEARCH_TIMEOUT_MS,
+    );
     if (error) return { rows: [], error: error.message };
     return { rows: (data as unknown as Record<string, unknown>[]) ?? [] };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('abort') || msg.includes('Abort') || msg.includes('timeout')) {
-      return { rows: [], error: 'Запрос занял слишком много времени. Попробуйте уменьшить количество регионов или видов деятельности.' };
-    }
-    return { rows: [], error: msg };
-  } finally {
-    clearTimeout(timer);
+    return { rows: [], error: e instanceof Error ? e.message : String(e) };
   }
 }
