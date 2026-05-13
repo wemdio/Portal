@@ -24,8 +24,8 @@ type TariffData = {
   max_emails: number | null;
 };
 const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
-  standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 3, max_domains: 4, max_emails: 16 },
-  pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 6, max_domains: 8, max_emails: 32 },
+  standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
+  pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
 };
 const TARIFF_LABELS: Record<TariffType, string> = { standard: 'Стандарт', pro: 'Про', custom: 'Custom' };
 const LIMIT_LABELS: { key: keyof Omit<TariffData, 'tariff_type'>; label: string }[] = [

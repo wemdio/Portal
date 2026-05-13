@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const DB_FETCH_TIMEOUT_MS = Number(process.env.SUPABASE_FETCH_TIMEOUT_MS ?? '30000');
+const DB_FETCH_TIMEOUT_MS = Number(process.env.SUPABASE_FETCH_TIMEOUT_MS ?? '120000');
 const DB_RETRY_MAX_ATTEMPTS = Math.max(1, Number(process.env.SUPABASE_RETRY_MAX_ATTEMPTS ?? '3'));
 const DB_RETRY_BASE_DELAY_MS = Math.max(50, Number(process.env.SUPABASE_RETRY_BASE_DELAY_MS ?? '500'));
 

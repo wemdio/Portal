@@ -1,6 +1,23 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getRegionByCode } from '@/lib/companiesSearch/regions';
+import { reduceToTopCodes, OKVED2_TREE } from '@/lib/companiesSearch/okved2';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
+
+/**
+ * Буквенные секции ОКВЭД ("A", "B", …) заменяем их прямыми числовыми
+ * дочерними кодами ("01", "02", "03" для "A"), потому что в БД и в
+ * okved_reference коды хранятся в числовом формате. SQL-фильтр
+ * `LIKE '01.%'` покрывает вложенные, а `LIKE 'A.%'` — нет.
+ */
+function expandSectionLetters(codes: string[]): string[] {
+  return codes.flatMap((code) => {
+    if (/^[A-Z]$/i.test(code)) {
+      const section = OKVED2_TREE.find((n) => n.code === code);
+      return section?.children?.map((c) => c.code) ?? [code];
+    }
+    return [code];
+  });
+}
 
 function filtersToRpcParams(body: CompaniesSearchFilters) {
   let regionTokens: string[] | null = null;
@@ -13,7 +30,19 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
     if (tokens.length > 0) regionTokens = tokens;
   }
 
+  // Из дерева ОКВЭД пользователь выбирает узлы — сужаем до «топовых», чтобы
+  // один префикс заменял всех потомков. Например, выбраны 24, 24.10, 24.10.2 →
+  // на сервер уходит только ['24']: SQL фильтрует через LIKE '24.%', что
+  // покрывает все вложенные коды.
+  // Буквенные секции (A, B, C…) раскрываем в числовые коды первого уровня.
+  let okvedPrefixes: string[] | null = null;
+  if (body.okvedCodes && body.okvedCodes.length > 0) {
+    okvedPrefixes = expandSectionLetters(reduceToTopCodes(new Set(body.okvedCodes)));
+    if (okvedPrefixes.length === 0) okvedPrefixes = null;
+  }
+
   return {
+    p_region_codes: body.regionCodes?.length ? body.regionCodes : null,
     p_region_tokens: regionTokens,
     p_activity_types: body.activityTypes?.length ? body.activityTypes : null,
     p_has_phone: body.hasPhone ?? false,
@@ -30,7 +59,22 @@ function filtersToRpcParams(body: CompaniesSearchFilters) {
     p_employees_from: typeof body.employeesFrom === 'number' ? body.employeesFrom : null,
     p_employees_to: typeof body.employeesTo === 'number' ? body.employeesTo : null,
     p_inn_list: body.innList?.length ? body.innList : null,
+    p_okved_prefixes: okvedPrefixes,
   };
+}
+
+const SEARCH_TIMEOUT_MS = 180_000;
+const TIMEOUT_ERROR = 'Поиск занял слишком много времени — база данных перегружена. Попробуйте повторить через несколько секунд.';
+
+type RpcResult<T> = { data: T; error: null } | { data: null; error: { message: string } };
+
+function raceTimeout<T>(p: Promise<RpcResult<T>>): Promise<RpcResult<T>> {
+  return Promise.race([
+    p,
+    new Promise<RpcResult<T>>((_, reject) =>
+      setTimeout(() => reject(new Error(TIMEOUT_ERROR)), SEARCH_TIMEOUT_MS),
+    ),
+  ]);
 }
 
 export async function searchCount(
@@ -38,9 +82,15 @@ export async function searchCount(
 ): Promise<{ count: number; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_count_rpc', params);
-  if (error) return { count: 0, error: error.message };
-  return { count: Number(data) ?? 0 };
+  try {
+    const result = await raceTimeout<number>(
+      Promise.resolve(admin.rpc('companies_directory_count_rpc', params)).then((r) => r as RpcResult<number>),
+    );
+    if (result.error) return { count: 0, error: result.error.message };
+    return { count: Number(result.data) ?? 0 };
+  } catch (e) {
+    return { count: 0, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export async function searchRows(
@@ -50,11 +100,15 @@ export async function searchRows(
 ): Promise<{ rows: Record<string, unknown>[]; error?: string }> {
   const admin = supabaseAdmin!;
   const params = filtersToRpcParams(body);
-  const { data, error } = await admin.rpc('companies_directory_fetch_rpc', {
-    ...params,
-    p_limit: limit,
-    p_offset: offset,
-  });
-  if (error) return { rows: [], error: error.message };
-  return { rows: (data as unknown as Record<string, unknown>[]) ?? [] };
+  try {
+    const result = await raceTimeout<Record<string, unknown>[]>(
+      Promise.resolve(
+        admin.rpc('companies_directory_fetch_rpc', { ...params, p_limit: limit, p_offset: offset }),
+      ).then((r) => r as RpcResult<Record<string, unknown>[]>),
+    );
+    if (result.error) return { rows: [], error: result.error.message };
+    return { rows: result.data ?? [] };
+  } catch (e) {
+    return { rows: [], error: e instanceof Error ? e.message : String(e) };
+  }
 }

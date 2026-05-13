@@ -19,15 +19,19 @@ import {
   Trash2,
   Square,
   X,
+  ArrowUpDown,
+  MessageSquare,
 } from 'lucide-react';
 
 interface TranscriptItem {
   id: string;
   created_at: string;
+  tg_message_date: string | null;
   tg_chat_id: number;
   tg_message_id: number;
   tg_sender_id: number;
   sender_name: string;
+  caption: string | null;
   filename: string;
   file_size_bytes: number | null;
   duration_seconds: number | null;
@@ -327,6 +331,8 @@ function StopConfirmDialog({
 export default function TgTranscribePage() {
   const [allItems, setAllItems] = useState<TranscriptItem[]>([]);
   const [activeSender, setActiveSender] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<'created_at' | 'message_date'>('created_at');
+  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -602,10 +608,11 @@ export default function TgTranscribePage() {
 
   const PAGE_SIZE = 50;
 
-  const fetchAllItems = useCallback(async () => {
+  const fetchAllItems = useCallback(async (sort: 'created_at' | 'message_date' = 'created_at') => {
     setLoading(true);
     try {
-      const res = await authFetch('/api/tools/tg-transcribe?limit=200&offset=0');
+      const params = new URLSearchParams({ limit: '200', sort });
+      const res = await authFetch(`/api/tools/tg-transcribe?${params}`);
       if (!res.ok) { setAllItems([]); return; }
       const json = (await res.json()) as { items: TranscriptItem[] };
       setAllItems(json.items ?? []);
@@ -625,10 +632,18 @@ export default function TgTranscribePage() {
     return Array.from(names).sort((a, b) => a.localeCompare(b, 'ru'));
   }, [allItems]);
 
-  const filteredItems = React.useMemo(
-    () => activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems,
-    [allItems, activeSender],
-  );
+  const filteredItems = React.useMemo(() => {
+    let result = activeSender ? allItems.filter((i) => i.sender_name === activeSender) : allItems;
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      result = result.filter((i) =>
+        (i.caption ?? '').toLowerCase().includes(q) ||
+        i.sender_name.toLowerCase().includes(q) ||
+        i.filename.toLowerCase().includes(q),
+      );
+    }
+    return result;
+  }, [allItems, activeSender, searchQuery]);
 
   const total = filteredItems.length;
   const items = React.useMemo(
@@ -637,9 +652,9 @@ export default function TgTranscribePage() {
   );
 
   useEffect(() => {
-    void fetchAllItems();
+    void fetchAllItems(sortOrder);
     void fetchChats();
-  }, [fetchAllItems, fetchChats]);
+  }, [fetchAllItems, fetchChats, sortOrder]);
 
   // Refresh transcript list when a video completes or job finishes
   const prevJobRef = useRef<string | null>(null);
@@ -649,17 +664,30 @@ export default function TgTranscribePage() {
       prevJobRef.current = activeJob.id;
       if (activeJob.completed > prevCompletedRef.current) {
         prevCompletedRef.current = activeJob.completed;
-        void fetchAllItems();
+        void fetchAllItems(sortOrder);
       }
     } else if (prevJobRef.current && scanResult) {
       prevCompletedRef.current = 0;
-      void fetchAllItems();
+      void fetchAllItems(sortOrder);
       prevJobRef.current = null;
     }
-  }, [activeJob, scanResult, fetchAllItems]);
+  }, [activeJob, scanResult, fetchAllItems, sortOrder]);
 
   const handleSenderChange = (sender: string | null) => {
     setActiveSender(sender);
+    setPage(0);
+    setExpandedId(null);
+  };
+
+  const handleSortChange = (sort: 'created_at' | 'message_date') => {
+    if (sort === sortOrder) return;
+    setSortOrder(sort);
+    setPage(0);
+    setExpandedId(null);
+  };
+
+  const handleSearchChange = (q: string) => {
+    setSearchQuery(q);
     setPage(0);
     setExpandedId(null);
   };
@@ -1028,39 +1056,95 @@ export default function TgTranscribePage() {
           </div>
         </details>
 
-        {/* Sender filter tabs */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
-            <Users className="h-3.5 w-3.5" />
-            Автор:
-          </div>
-          <button
-            type="button"
-            onClick={() => handleSenderChange(null)}
-            className={[
-              'rounded-full px-3 py-1 text-xs font-medium transition border',
-              activeSender === null
-                ? 'bg-indigo-600 text-white border-indigo-600'
-                : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
-            ].join(' ')}
-          >
-            Все
-          </button>
-          {senders.map((s) => (
+        {/* Search */}
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            placeholder="Поиск по подписи, автору или файлу…"
+            className="w-full rounded-xl border border-gray-200 bg-white py-2 pl-9 pr-9 text-sm text-gray-800 placeholder-gray-400 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
+          />
+          {searchQuery && (
             <button
-              key={s}
               type="button"
-              onClick={() => handleSenderChange(s)}
+              onClick={() => handleSearchChange('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Filters row */}
+        <div className="flex items-start gap-4 flex-wrap">
+          {/* Sender filter tabs */}
+          <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-1">
+              <Users className="h-3.5 w-3.5" />
+              Автор:
+            </div>
+            <button
+              type="button"
+              onClick={() => handleSenderChange(null)}
               className={[
                 'rounded-full px-3 py-1 text-xs font-medium transition border',
-                activeSender === s
+                activeSender === null
                   ? 'bg-indigo-600 text-white border-indigo-600'
                   : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
               ].join(' ')}
             >
-              {s}
+              Все
             </button>
-          ))}
+            {senders.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => handleSenderChange(s)}
+                className={[
+                  'rounded-full px-3 py-1 text-xs font-medium transition border',
+                  activeSender === s
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+                ].join(' ')}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+
+          {/* Sort toggle */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-1 text-xs text-gray-500 mr-0.5">
+              <ArrowUpDown className="h-3.5 w-3.5" />
+              Сортировка:
+            </div>
+            <button
+              type="button"
+              onClick={() => handleSortChange('created_at')}
+              className={[
+                'rounded-full px-3 py-1 text-xs font-medium transition border',
+                sortOrder === 'created_at'
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+              ].join(' ')}
+            >
+              Обработано
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSortChange('message_date')}
+              className={[
+                'rounded-full px-3 py-1 text-xs font-medium transition border',
+                sortOrder === 'message_date'
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50',
+              ].join(' ')}
+            >
+              Дата сообщения
+            </button>
+          </div>
         </div>
 
         {/* Stats bar */}
@@ -1089,9 +1173,11 @@ export default function TgTranscribePage() {
           <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
             <Video className="mx-auto h-10 w-10 text-gray-300 mb-3" />
             <p className="text-sm text-gray-500">
-              {activeSender
-                ? `Нет транскрибаций от ${activeSender}.`
-                : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
+              {searchQuery.trim()
+                ? `Ничего не найдено по запросу «${searchQuery.trim()}».`
+                : activeSender
+                  ? `Нет транскрибаций от ${activeSender}.`
+                  : 'Пока нет транскрибаций. Добавьте бота в ТГ-группу и отправьте видео.'}
             </p>
           </div>
         )}
@@ -1143,6 +1229,12 @@ export default function TgTranscribePage() {
                           </span>
                         )}
                       </div>
+                      {item.caption && (
+                        <p className="mt-0.5 text-xs text-indigo-700 font-medium truncate flex items-center gap-1">
+                          <MessageSquare className="h-3 w-3 shrink-0 text-indigo-400" />
+                          {item.caption}
+                        </p>
+                      )}
                       <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-400">
                         <span className="inline-flex items-center gap-1">
                           <Clock className="h-3 w-3" />
@@ -1176,6 +1268,12 @@ export default function TgTranscribePage() {
 
                   {isExpanded && (
                     <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                      {item.caption && (
+                        <div className="flex items-start gap-2 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                          <MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                          <p className="break-words">{item.caption}</p>
+                        </div>
+                      )}
                       {isError && item.error_text && (
                         <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />

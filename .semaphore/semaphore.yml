@@ -60,3 +60,4 @@ blocks:
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-transcribe-worker:prod --platform linux/amd64 -f services/transcribe-worker/Dockerfile services/transcribe-worker'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-instantly-sync-bot:prod --platform linux/amd64 -f services/instantly-sync-bot/Dockerfile services/instantly-sync-bot'
             - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-backup:prod --platform linux/amd64 -f services/backup/Dockerfile services/backup'
+            - 'docker buildx build --push --tag ${DOCKER_USERNAME}/portal-changelog-bot:prod --platform linux/amd64 -f services/changelog-bot/Dockerfile services/changelog-bot'

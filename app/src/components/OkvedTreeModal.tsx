@@ -66,6 +66,67 @@ function filterTree(nodes: OkvedNode[], query: string): OkvedNode[] {
     });
 }
 
+/** Буквенный раздел (A-U) — нечекабельный заголовок-разделитель */
+function SectionHeader({
+  node,
+  selected,
+  onToggle,
+  expanded,
+  onToggleExpand,
+}: {
+  node: OkvedNode;
+  selected: Set<string>;
+  onToggle: (node: OkvedNode) => void;
+  expanded: Set<string>;
+  onToggleExpand: (code: string) => void;
+}) {
+  const isExpanded = expanded.has(node.code);
+  const selectionState = getSelectionState(node, selected);
+
+  return (
+    <div>
+      <div className="flex items-center gap-1 pt-3 pb-0.5">
+        <button
+          type="button"
+          onClick={() => onToggleExpand(node.code)}
+          className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-600 flex-shrink-0 text-xs"
+        >
+          {isExpanded ? '−' : '+'}
+        </button>
+        {/* Checkbox на разделе выделяет всех потомков */}
+        <label className="flex items-center gap-2 cursor-pointer min-w-0 flex-1">
+          <input
+            type="checkbox"
+            checked={selectionState === 'all'}
+            ref={(el) => { if (el) el.indeterminate = selectionState === 'partial'; }}
+            onChange={() => onToggle(node)}
+            className="w-4 h-4 accent-blue-600 flex-shrink-0"
+          />
+          <span className="text-xs font-bold text-gray-400 uppercase tracking-wide select-none">
+            {node.code}
+          </span>
+          <span className="text-xs font-semibold text-gray-500 truncate">{node.name}</span>
+        </label>
+      </div>
+      {isExpanded && node.children && (
+        <div>
+          {node.children.map((child) => (
+            <TreeNode
+              key={child.code}
+              node={child}
+              selected={selected}
+              onToggle={onToggle}
+              expanded={expanded}
+              onToggleExpand={onToggleExpand}
+              depth={0}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TreeNode({
   node,
   selected,
@@ -85,19 +146,17 @@ function TreeNode({
   const isExpanded = expanded.has(node.code);
   const selectionState = getSelectionState(node, selected);
 
-  const isSection = /^[A-U]$/.test(node.code);
-
   return (
     <div>
       <div
         className="flex items-center gap-1 py-0.5 hover:bg-gray-50 rounded"
-        style={{ paddingLeft: `${depth * 24}px` }}
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
       >
         {hasChildren ? (
           <button
             type="button"
             onClick={() => onToggleExpand(node.code)}
-            className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700 flex-shrink-0"
+            className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-700 flex-shrink-0 text-xs"
           >
             {isExpanded ? '−' : '+'}
           </button>
@@ -114,7 +173,7 @@ function TreeNode({
             onChange={() => onToggle(node)}
             className="w-4 h-4 accent-blue-600 flex-shrink-0"
           />
-          <span className={`text-sm ${isSection ? 'font-bold' : ''}`}>
+          <span className="text-sm">
             <span className="font-semibold text-gray-500 mr-1.5">{node.code}</span>
             {node.name}
           </span>
@@ -235,14 +294,13 @@ export function OkvedTreeModal({ selected, onChange, onClose, locale = 'ru' }: P
             </div>
           )}
           {filteredTree.map((section) => (
-            <TreeNode
+            <SectionHeader
               key={section.code}
               node={section}
               selected={selected}
               onToggle={toggleNode}
               expanded={search.trim() ? expandedForSearch : expanded}
               onToggleExpand={toggleExpand}
-              depth={0}
             />
           ))}
         </div>
