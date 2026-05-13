@@ -179,7 +179,7 @@ export async function countClientContacts(userId: string, periodStart: string): 
 export async function countClientRows(userId: string, periodStart: string): Promise<number> {
   if (!supabaseAdmin) return 0;
 
-  const [baseJobs, hhJobs, searchJobs, yandexJobs] = await Promise.all([
+  const [baseJobs, hhJobs, searchJobs, yandexJobs, companiesExports] = await Promise.all([
     supabaseAdmin
       .from('base_constructor_jobs')
       .select('initial_row_count')
@@ -205,6 +205,11 @@ export async function countClientRows(userId: string, periodStart: string): Prom
       .eq('user_id', userId)
       .gte('created_at', periodStart)
       .in('status', ['pending', 'running', 'completed']),
+    supabaseAdmin
+      .from('client_companies_search_exports')
+      .select('row_count')
+      .eq('user_id', userId)
+      .gte('created_at', periodStart),
   ]);
 
   const baseRows = (baseJobs.data ?? []).reduce(
@@ -223,8 +228,12 @@ export async function countClientRows(userId: string, periodStart: string): Prom
     const item = row as { total_links?: unknown; total_organizations?: unknown };
     return sum + Math.max(nonNegativeInt(item.total_organizations), nonNegativeInt(item.total_links));
   }, 0);
+  const companiesRows = (companiesExports.data ?? []).reduce(
+    (sum, row) => sum + nonNegativeInt((row as { row_count?: unknown }).row_count),
+    0,
+  );
 
-  return baseRows + hhRows + searchRows + yandexRows;
+  return baseRows + hhRows + searchRows + yandexRows + companiesRows;
 }
 
 export async function countClientEmailAccountsAndDomains(

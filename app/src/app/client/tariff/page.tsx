@@ -26,8 +26,6 @@ const LIMITS: Array<{ key: LimitKey; label: string; hint: string; unit: string }
   { key: 'max_contacts', label: 'Контакты Instantly', hint: 'Лиды, загруженные в кампании', unit: 'контактов' },
   { key: 'max_rows', label: 'Запросы на сбор и базы', hint: 'HH, Яндекс.Карты, поисковая выдача, конструктор баз', unit: 'запросов' },
   { key: 'max_chains_per_month', label: 'Цепочки писем', hint: 'AI-генерации цепочек за период', unit: 'цепочек' },
-  { key: 'max_domains', label: 'Домены', hint: 'Домены в подключённых почтах', unit: 'доменов' },
-  { key: 'max_emails', label: 'Почты', hint: 'Подключённые email-аккаунты', unit: 'почт' },
 ];
 
 const TARIFF_LABELS: Record<TariffResponse['tariff_type'], string> = {
