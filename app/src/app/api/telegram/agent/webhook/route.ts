@@ -32,7 +32,13 @@ export async function POST(req: NextRequest) {
   }
 
   const msg = update.message as
-    | { message_id: number; chat: { id: number }; from?: { id: number }; text?: string; voice?: { file_id: string; duration: number } }
+    | {
+      message_id: number;
+      chat: { id: number };
+      from?: { id: number; username?: string; first_name?: string; last_name?: string };
+      text?: string;
+      voice?: { file_id: string; duration: number };
+    }
     | undefined;
 
   if (msg?.from?.id && (msg.text || msg.voice)) {
