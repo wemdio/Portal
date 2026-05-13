@@ -395,7 +395,15 @@ async def run_digest() -> None:
         print("[changelog] AI returned empty summary — nothing to send.", flush=True)
         return
 
-    text = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    lines = []
+    for line in escaped.splitlines():
+        stripped = line.strip()
+        if stripped.endswith(":") and not stripped.startswith("-"):
+            lines.append(f"<b>{stripped}</b>")
+        else:
+            lines.append(line)
+    text = "\n".join(lines)
     print(f"[changelog] Sending message ({len(text)} chars)...", flush=True)
     ok = await send_message(text)
     print(f"[changelog] Message sent: {ok}", flush=True)
