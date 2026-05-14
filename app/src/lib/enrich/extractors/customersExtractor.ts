@@ -38,7 +38,7 @@ function nameFromSrc(src: string): string | null {
   if (!src) return null;
   const match = src.match(/([^/]+)\.\w{3,4}(?:\?.*)?$/);
   if (!match) return null;
-  let name = match[1]
+  const name = match[1]
     .replace(/[-_]+/g, ' ')
     .replace(/\d{2,}/g, '')
     .replace(/\s+/g, ' ')
@@ -85,8 +85,10 @@ const CAP = 30;
 
 type $Type = cheerio.CheerioAPI;
 type AddFn = (s: string) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CheerioSelection = cheerio.Cheerio<any>;
 
-function extractFromImages($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, add: AddFn): void {
+function extractFromImages($: $Type, container: CheerioSelection, add: AddFn): void {
   container.find('img').each((_, img) => {
     const alt = ($(img).attr('alt') ?? '').trim();
     if (alt) {
@@ -99,7 +101,7 @@ function extractFromImages($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>
   });
 }
 
-function extractFromText($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, add: AddFn): void {
+function extractFromText($: $Type, container: CheerioSelection, add: AddFn): void {
   container.find('span, li, a, h3, h4, h5, strong, b, [class*="name"]').each((_, el) => {
     const t = $(el).text().trim();
     if (t && t.length >= 2 && t.length <= 60 && !SECTION_HEADING_RE.test(t)) {
@@ -108,7 +110,7 @@ function extractFromText($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, 
   });
 }
 
-function findSectionFromHeading($: $Type, heading: cheerio.Cheerio<cheerio.AnyNode>): cheerio.Cheerio<cheerio.AnyNode> {
+function findSectionFromHeading($: $Type, heading: CheerioSelection): CheerioSelection {
   let section = heading.parent();
   // Traverse up: heading is often inside a wrapper, the actual content is in sibling/parent container
   for (let i = 0; i < 3; i++) {
