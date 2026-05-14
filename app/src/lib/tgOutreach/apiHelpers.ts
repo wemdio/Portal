@@ -17,14 +17,36 @@ export function jsonError(message: string, status: number) {
  * were still rewriting fresh user input back to `socks5://`, which silently
  * broke every newly-created campaign with `connect timeout (15s)`.
  *
- * New rule:
- *   - leave explicit `http://` / `https://` / `socks4://` / `socks5://` alone
- *   - bare `host:port` defaults to `http://` (the working transport)
+ * Поддерживаемые форматы (в порядке проверки):
+ *   1. `<scheme>://...`     — http/https/socks4/socks5 → как есть.
+ *   2. `host:port:user:pass` — типичный экспорт от Infatica/Proxy6/AstroProxy.
+ *      Раньше попадал в `http://host:port:user:pass`, который new URL() не
+ *      парсит — INSERT в БД проходил, но gramClient.parseProxyUrl()
+ *      возвращал undefined, кампания подключалась без прокси и сразу банилась.
+ *      Теперь конвертим в `http://user:pass@host:port` — валидный URL.
+ *   3. `user:pass@host:port` → `http://user:pass@host:port`.
+ *   4. `host:port`           → `http://host:port`.
  */
 export function normalizeProxyUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return trimmed;
   if (trimmed.includes('://')) return trimmed;
+
+  // host:port:user:pass — четыре сегмента через двоеточие, без `@`.
+  // Допускаем что в pass могут встречаться `:` — поэтому split на максимум 4
+  // не подойдёт, но split с лимитом 4 даёт нам ['host', 'port', 'user', 'rest'],
+  // где rest может содержать `:` (для редких паролей с двоеточием).
+  if (!trimmed.includes('@')) {
+    const parts = trimmed.split(':');
+    if (parts.length >= 4) {
+      const [host, port, user, ...passParts] = parts;
+      const pass = passParts.join(':');
+      if (host && /^\d+$/.test(port) && user && pass) {
+        return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+      }
+    }
+  }
+
   return `http://${trimmed}`;
 }
 
