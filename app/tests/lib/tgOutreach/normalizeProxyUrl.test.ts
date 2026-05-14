@@ -1,9 +1,17 @@
 /**
+ * @jest-environment node
+ *
  * Контракты normalizeProxyUrl. Главный кейс — поддержка популярного формата
  * host:port:user:pass, который экспортируют Proxy6/Infatica/AstroProxy.
  * Без этого фикса URL «http://1.2.3.4:8080:user:pass» хранился в БД успешно,
  * но gramClient.parseProxyUrl() не мог его распарсить и подключался без
  * прокси — кампании сразу банились.
+ *
+ * Pragma `@jest-environment node` обязательна: apiHelpers.ts импортирует
+ * `NextResponse` из `next/server`, который тянет глобал `Request`. В дефолтном
+ * jsdom-окружении (см. jest.config.js) глобал не определён, и тест падает
+ * на этапе module resolution с `ReferenceError: Request is not defined`
+ * ещё до запуска первого it().
  */
 import { normalizeProxyUrl } from '@/lib/tgOutreach/apiHelpers';
 
