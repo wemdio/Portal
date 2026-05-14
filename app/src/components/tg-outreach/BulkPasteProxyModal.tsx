@@ -6,7 +6,7 @@ import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 
 interface Props {
   onClose: () => void;
-  onCreated: () => void;
+  onCreated?: () => void | Promise<void>;
 }
 
 const PLACEHOLDER = `http://login:password@host:port
@@ -36,7 +36,7 @@ export function BulkPasteProxyModal({ onClose, onCreated }: Props) {
         json: { text },
       }) as { count: number; failed: string[] };
       setResult(res);
-      if (res.count > 0) onCreated();
+      if (res.count > 0) await onCreated?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
     } finally {
