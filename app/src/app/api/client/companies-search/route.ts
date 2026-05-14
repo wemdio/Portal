@@ -42,6 +42,7 @@ export interface CompaniesSearchFilters {
 interface SearchResponse {
   count: number;
   rows?: Array<Record<string, unknown>>;
+  remaining?: number;
 }
 
 const MAX_LIMIT = 200;
@@ -60,27 +61,24 @@ export async function POST(req: NextRequest) {
   const wantCount = body.countOnly === true;
   const limit = Math.min(Math.max(Number(body.limit) || 25, 1), MAX_LIMIT);
 
-  // Проверка лимита только при реальном экспорте (не countOnly)
-  if (!wantCount) {
-    const tariffRow = await getClientTariffRow(result.auth.userId);
-    const limits = resolveEffectiveLimits(tariffRow);
-    const periodStart = getBillingPeriodStart(tariffRow);
-    const usedRows = await countClientRows(result.auth.userId, periodStart);
-    const remaining = Math.max(0, limits.max_rows - usedRows);
+  const tariffRow = await getClientTariffRow(result.auth.userId);
+  const limits = resolveEffectiveLimits(tariffRow);
+  const periodStart = getBillingPeriodStart(tariffRow);
+  const usedRows = await countClientRows(result.auth.userId, periodStart);
+  const remaining = Math.max(0, limits.max_rows - usedRows);
 
-    if (remaining <= 0) {
-      return jsonError(
-        `Лимит запросов по тарифу исчерпан. Доступно 0 из ${limits.max_rows.toLocaleString('ru-RU')} запросов.`,
-        429,
-      );
-    }
+  if (!wantCount && remaining <= 0) {
+    return jsonError(
+      `Лимит запросов по тарифу исчерпан. Доступно 0 из ${limits.max_rows.toLocaleString('ru-RU')} запросов.`,
+      429,
+    );
   }
 
   try {
     const { count, error: countErr } = await searchCount(body);
     if (countErr) return jsonError(countErr, 500);
 
-    const response: SearchResponse = { count };
+    const response: SearchResponse = { count, remaining };
 
     if (!wantCount && count > 0) {
       const { rows, error } = await searchRows(body, limit);
