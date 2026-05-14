@@ -27,9 +27,16 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       return typeof value === 'number' && value > 0 ? String(value) : '';
     case 'founded_year':
       return typeof value === 'number' ? String(value) : '';
-    case 'pricing_model':
-      if (typeof value === 'string' && value !== 'unknown') return value;
-      return '';
+    case 'pricing_model': {
+      if (typeof value !== 'string' || value === 'unknown') return '';
+      const modelLabels: Record<string, string> = {
+        'self-serve': 'Самообслуживание',
+        'sales-led': 'Через продажи',
+        'enterprise': 'Энтерпрайз',
+        'freemium': 'Фримиум',
+      };
+      return modelLabels[value] ?? value;
+    }
     case 'blog_last_post':
     case 'stack':
     case 'profile':
