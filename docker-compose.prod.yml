@@ -412,6 +412,49 @@ services:
     networks:
       - portal-network
 
+  # Конструктор баз. Выносит «pipeline для CSV/Excel баз» из HTTP-процесса
+  # portal'a в отдельный долгоживущий контейнер. Polling каждые 5 сек,
+  # параллельно обрабатывает до BASE_CONSTRUCTOR_CONCURRENCY задач.
+  # Stale (без heartbeat 15+ мин) processing-задачи автоматически
+  # резумятся с того шага, где остановились.
+  worker-baseconstructor:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-baseconstructor
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
+      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - OPENROUTER_CLEANUP_API_KEY=${OPENROUTER_CLEANUP_API_KEY}
+      - PROXY_URLS=${PROXY_URLS}
+      - SMTP_PROXY_URL=${SMTP_PROXY_URL}
+      - SMTP_PROXY_URLS=${SMTP_PROXY_URLS}
+      - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=baseconstructor
+      # Сколько job'ов параллельно. 1 job в памяти ≈ 0.5–1.5GB JS heap
+      # из-за большой `data` (string[][]). Memory limit ниже = floor *
+      # CONCURRENCY + запас. 3 = разумный default для среднего железа.
+      - BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY:-3}
+      - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
+    # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
+    # SIGTERM придёт при docker compose down, но шаг доработает до конца —
+    # просто след. шаг не запустится, и worker корректно выйдет.
+    # Резумнётся при следующем старте контейнера.
+    stop_grace_period: 5m
+    deploy:
+      resources:
+        limits:
+          # 3 concurrency × ~1.5GB peak + 1GB на overhead Node/V8.
+          memory: 6144M
+          cpus: '2'
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-instantly-leads:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-instantly-leads

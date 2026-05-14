@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
@@ -128,9 +127,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: error?.message || 'Failed to create job' }, { status: 500 });
       }
 
-      runBaseConstructorJob(job.id).catch((err) =>
-        console.error('[base-constructor] Worker error:', err),
-      );
+      // NB: больше не запускаем worker через fire-and-forget Promise в HTTP-
+      // процессе. Job создаётся со status='pending' (DB default). Отдельный
+      // контейнер `worker-baseconstructor` (см. docker-compose.prod.yml,
+      // WORKER_KIND=baseconstructor) поллит pending каждые 5 сек, атомарно
+      // claim'ит и запускает runBaseConstructorJob. Это устранило класс
+      // багов «processing навсегда после рестарта portal'a».
+      //
+      // На локалке для dev запустите воркер: WORKER_KIND=baseconstructor
+      // npm --prefix app run worker (см. README).
 
       if (role === 'client') {
         tariffUsage = await getClientTariffUsage(user.id);

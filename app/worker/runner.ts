@@ -52,6 +52,9 @@ switch (kind) {
   case 'lioutreach':
     run('./liOutreach');
     break;
+  case 'baseconstructor':
+    run('./baseConstructor');
+    break;
   case 'all':
   default:
     run('./index');

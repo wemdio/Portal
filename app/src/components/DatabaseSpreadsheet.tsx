@@ -1349,6 +1349,12 @@ export function DatabaseSpreadsheet() {
     totalRows: number;
     currentRow: number;
     found: number;
+    // Multi-year support (миграция 20260514_0002 → composite PK (inn,year)).
+    // availableYears подгружается из GET /api/enrich/fns-revenue при открытии
+    // модала. selectedYears — что юзер отметил чекбоксами в селекторе.
+    // Если 2+ года — добавляется колонка «Динамика %».
+    availableYears: number[];
+    selectedYears: number[];
   }>({
     isOpen: false,
     sourceCol: 0,
@@ -1357,6 +1363,8 @@ export function DatabaseSpreadsheet() {
     totalRows: 0,
     currentRow: 0,
     found: 0,
+    availableYears: [],
+    selectedYears: [],
   });
   const fnsAbortRef = useRef<AbortController | null>(null);
 
@@ -7664,8 +7672,39 @@ export function DatabaseSpreadsheet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openFnsModal = () => {
-    setFnsEnrichment({ isOpen: true, sourceCol: 0, isProcessing: false, progress: 0, totalRows: 0, currentRow: 0, found: 0 });
+  const openFnsModal = async () => {
+    setFnsEnrichment({
+      isOpen: true,
+      sourceCol: 0,
+      isProcessing: false,
+      progress: 0,
+      totalRows: 0,
+      currentRow: 0,
+      found: 0,
+      availableYears: [],
+      selectedYears: [],
+    });
+    // Подгружаем список доступных годов из БД. Эндпоинт GET кеширует
+    // ничего, но запрос лёгкий (DISTINCT report_year через индекс) —
+    // миллисекунды на 2M строк.
+    try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      if (!token) return;
+      const res = await fetch('/api/enrich/fns-revenue', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const json = (await res.json()) as { years: number[] };
+      const years = json.years ?? [];
+      setFnsEnrichment((prev) => ({
+        ...prev,
+        availableYears: years,
+        // По умолчанию выбираем последний (свежий) год — старое поведение
+        // tool'a сохраняется для тех кто не трогал селектор.
+        selectedYears: years.length > 0 ? [years[0]] : [],
+      }));
+    } catch { /* модал не падает если /years не отвечает */ }
   };
   const closeFnsModal = () => {
     if (fnsAbortRef.current) { fnsAbortRef.current.abort(); fnsAbortRef.current = null; }
@@ -7683,9 +7722,33 @@ export function DatabaseSpreadsheet() {
     const innColHeader = headerRow[sourceCol]?.toLowerCase().trim() ?? '';
     if (!innColHeader) return;
 
-    const incomeLabel = 'Доход (ФНС)';
-    const expenseLabel = 'Расход (ФНС)';
-    const fields = [incomeLabel, expenseLabel];
+    // Multi-year: колонки именуются с годом — «Доход (ФНС 2024)»,
+    // «Доход (ФНС 2025)», и т.д. Если годов нет (старый кэш / БД пустая) —
+    // fallback на безгодовое «Доход (ФНС)» чтобы не сломать ничего.
+    const selectedYears =
+      fnsEnrichment.selectedYears.length > 0
+        ? [...fnsEnrichment.selectedYears].sort((a, b) => a - b)
+        : [];
+    const sortedYears = selectedYears;
+    const isMultiYear = sortedYears.length > 1;
+
+    const fields: string[] = [];
+    if (sortedYears.length === 0) {
+      // Старый формат — без года в названии колонки.
+      fields.push('Доход (ФНС)', 'Расход (ФНС)');
+    } else {
+      for (const y of sortedYears) {
+        fields.push(`Доход (ФНС ${y})`);
+        fields.push(`Расход (ФНС ${y})`);
+      }
+      // Колонка «Динамика» появляется только при 2+ годах. Считается
+      // как % изменения дохода от старшего года к новейшему
+      // (last/first - 1) × 100.
+      if (isMultiYear) {
+        fields.push('Динамика дохода %');
+        fields.push('Динамика расхода %');
+      }
+    }
 
     const existingHeaders = headerRow.map((h) => String(h ?? '').trim());
     const colMap: Record<string, number> = {};
@@ -7745,12 +7808,15 @@ export function DatabaseSpreadsheet() {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`,
           },
-          body: JSON.stringify({ inns }),
+          body: JSON.stringify({ inns, years: sortedYears.length > 0 ? sortedYears : undefined }),
           signal: abortCtrl.signal,
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = (await res.json()) as { results: Record<string, { income: number; expense: number }> };
+        // Новый формат: results[inn][year] = { org_name, income, expense }.
+        const json = (await res.json()) as {
+          results: Record<string, Record<number, { org_name: string; income: number; expense: number }>>;
+        };
         const results = json.results;
 
         setTabs((prev) => prev.map((tab) => {
@@ -7758,14 +7824,61 @@ export function DatabaseSpreadsheet() {
           const nextData = tab.data.map((row) => [...row]);
           for (const ri of batchIndices) {
             const inn = String(nextData[ri]?.[sourceCol] ?? '').trim();
-            const match = results[inn];
-            if (match) {
-              const incCol = colMap[incomeLabel];
-              const expCol = colMap[expenseLabel];
-              if (incCol !== undefined) nextData[ri][incCol] = match.income > 0 ? String(match.income) : '0';
-              if (expCol !== undefined) nextData[ri][expCol] = match.expense > 0 ? String(match.expense) : '0';
-              foundCount++;
+            const perYear = results[inn];
+            if (!perYear) continue;
+
+            // Записываем ячейки. Если по году нет данных — оставляем пустую
+            // строку (не "0", чтобы юзер видел разницу между «реально 0»
+            // и «ФНС не выгрузил данные за этот год»).
+            if (sortedYears.length === 0) {
+              // Legacy-режим: одна пара колонок без года. Берём первый
+              // попавшийся год.
+              const someYear = Object.keys(perYear).map(Number)[0];
+              const data = someYear !== undefined ? perYear[someYear] : null;
+              if (data) {
+                const incCol = colMap['Доход (ФНС)'];
+                const expCol = colMap['Расход (ФНС)'];
+                if (incCol !== undefined) nextData[ri][incCol] = data.income > 0 ? String(data.income) : '0';
+                if (expCol !== undefined) nextData[ri][expCol] = data.expense > 0 ? String(data.expense) : '0';
+                foundCount++;
+              }
+              continue;
             }
+
+            let rowFound = false;
+            for (const y of sortedYears) {
+              const data = perYear[y];
+              if (!data) continue;
+              rowFound = true;
+              const incCol = colMap[`Доход (ФНС ${y})`];
+              const expCol = colMap[`Расход (ФНС ${y})`];
+              if (incCol !== undefined) nextData[ri][incCol] = data.income > 0 ? String(data.income) : '0';
+              if (expCol !== undefined) nextData[ri][expCol] = data.expense > 0 ? String(data.expense) : '0';
+            }
+
+            // Динамика — только при 2+ годах и наличии значений в первом
+            // и последнем выбранных годах. Иначе ячейка остаётся пустой
+            // (мы не можем считать рост от «нет данных»).
+            if (isMultiYear && rowFound) {
+              const firstY = sortedYears[0];
+              const lastY = sortedYears[sortedYears.length - 1];
+              const firstData = perYear[firstY];
+              const lastData = perYear[lastY];
+              const dynIncCol = colMap['Динамика дохода %'];
+              const dynExpCol = colMap['Динамика расхода %'];
+              if (firstData && lastData) {
+                if (dynIncCol !== undefined && firstData.income > 0) {
+                  const pct = ((lastData.income - firstData.income) / firstData.income) * 100;
+                  nextData[ri][dynIncCol] = `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+                }
+                if (dynExpCol !== undefined && firstData.expense > 0) {
+                  const pct = ((lastData.expense - firstData.expense) / firstData.expense) * 100;
+                  nextData[ri][dynExpCol] = `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+                }
+              }
+            }
+
+            if (rowFound) foundCount++;
           }
           return { ...tab, data: nextData };
         }));
@@ -12127,7 +12240,7 @@ export function DatabaseSpreadsheet() {
           <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
             <div className="border-b border-gray-100 px-6 py-4">
               <h3 className="text-base font-semibold text-gray-900">Доходы и расходы (ФНС)</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Данные из открытой бухгалтерской отчётности ФНС за 2024 год</p>
+              <p className="text-xs text-gray-500 mt-0.5">Данные из открытой бухгалтерской отчётности ФНС</p>
             </div>
 
             <div className="px-6 py-5 space-y-4">
@@ -12145,9 +12258,64 @@ export function DatabaseSpreadsheet() {
                 </select>
               </div>
 
+              {/* Year selector — multi-select чекбоксами. Если в БД только
+                  один год, селектор всё равно показывается (для прозрачности
+                  откуда данные). Если выбрано 2+ — после прогона появится
+                  колонка «Динамика %». */}
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1.5">
+                  За какие года
+                </label>
+                {fnsEnrichment.availableYears.length === 0 ? (
+                  <div className="text-xs text-gray-400 px-3 py-2 bg-gray-50 rounded-lg border border-gray-200">
+                    Загружаем доступные года…
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {fnsEnrichment.availableYears.map((year) => {
+                      const checked = fnsEnrichment.selectedYears.includes(year);
+                      return (
+                        <label
+                          key={year}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-pointer select-none transition ${
+                            checked
+                              ? 'bg-blue-50 border-blue-300 text-blue-900'
+                              : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                          } ${fnsEnrichment.isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={fnsEnrichment.isProcessing}
+                            onChange={(e) => {
+                              const isChecked = e.target.checked;
+                              setFnsEnrichment((prev) => {
+                                const next = new Set(prev.selectedYears);
+                                if (isChecked) next.add(year);
+                                else next.delete(year);
+                                return { ...prev, selectedYears: [...next].sort((a, b) => a - b) };
+                              });
+                            }}
+                            className="h-3.5 w-3.5"
+                          />
+                          {year}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3">
                 <p className="text-xs text-emerald-700 leading-relaxed">
-                  Будут добавлены колонки «Доход (ФНС)» и «Расход (ФНС)». Данные из ~2 млн организаций. Без лимитов, мгновенно.
+                  {fnsEnrichment.selectedYears.length <= 1 ? (
+                    <>Будут добавлены колонки «Доход (ФНС {fnsEnrichment.selectedYears[0] ?? '…'})» и «Расход (ФНС)». Данные из ~2 млн организаций.</>
+                  ) : (
+                    <>
+                      Будут добавлены колонки по каждому выбранному году («Доход (ФНС {fnsEnrichment.selectedYears[0]})», «Доход (ФНС {fnsEnrichment.selectedYears[fnsEnrichment.selectedYears.length - 1]})» и т.д.) плюс
+                      <strong> «Динамика дохода %»</strong> и <strong>«Динамика расхода %»</strong> — изменение между первым и последним выбранным годом.
+                    </>
+                  )}
                 </p>
               </div>
 

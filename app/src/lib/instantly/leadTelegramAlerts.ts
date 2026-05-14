@@ -31,12 +31,34 @@ function getToken(): string {
     || '';
 }
 
+/**
+ * Куда слать алерт. Раньше fallback'а на CHANGELOG не было: если поставили
+ * LEAD_ALERTS_TELEGRAM_BOT_TOKEN, но забыли _CHAT_ID — silent skip без логов.
+ * На проде до 2026-05-14 это привело к тому, что лидовая система вообще не
+ * писала никуда (был задан только CHANGELOG_BOT_TOKEN, без LEAD_ALERTS).
+ *
+ * Теперь: если LEAD_ALERTS_TELEGRAM_CHAT_ID задан — используем его. Иначе —
+ * fallback на CHANGELOG_CHAT_ID (тот же канал что и dev-сводки). Это
+ * симметрично с поведением для токена и не оставляет систему беззвучной.
+ */
 function getChatId(): string {
-  return process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID || '';
+  return process.env.LEAD_ALERTS_TELEGRAM_CHAT_ID
+    || process.env.CHANGELOG_CHAT_ID
+    || '';
 }
 
+/**
+ * Опциональный thread в группе. Если задан LEAD_ALERTS_TELEGRAM_THREAD_ID —
+ * шлём именно туда, иначе fallback на CHANGELOG_THREAD_ID (тот же thread
+ * что и changelog), чтобы лиды не валились в общий поток группы и были
+ * легко находимы.
+ */
 function getThreadId(): number | null {
-  const raw = Number(process.env.LEAD_ALERTS_TELEGRAM_THREAD_ID ?? '');
+  const raw = Number(
+    process.env.LEAD_ALERTS_TELEGRAM_THREAD_ID
+    ?? process.env.CHANGELOG_THREAD_ID
+    ?? '',
+  );
   return Number.isFinite(raw) && raw > 0 ? raw : null;
 }
 
@@ -105,7 +127,15 @@ export async function sendLeadTelegramAlert(
 ): Promise<{ sent: boolean; messageId: number | null }> {
   const token = getToken();
   const chatId = getChatId();
-  if (!token || !chatId) return { sent: false, messageId: null };
+  if (!token || !chatId) {
+    // Silent fail в прошлом приводил к «лиды есть, чат пустой» без объяснений.
+    // Логируем чтобы причина была видна в docker logs portal-worker-instantly-leads.
+    console.warn(
+      `[lead-telegram-alert] skipped (token=${token ? 'set' : 'missing'}, chat=${chatId ? 'set' : 'missing'}). ` +
+        `Set LEAD_ALERTS_TELEGRAM_BOT_TOKEN/CHAT_ID (or rely on CHANGELOG_* fallback).`,
+    );
+    return { sent: false, messageId: null };
+  }
 
   const body: Record<string, unknown> = {
     chat_id: chatId,
