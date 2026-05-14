@@ -92,8 +92,10 @@ describe('POST /api/client/brief/autofill — happy path', () => {
         company_website: 'acme.com',
         company_description: 'We make widgets.',
         product_description: '',
-        // disallowed field — should be silently dropped by the mapper
-        deal_cycle: 'should not leak',
+        // disallowed field — should be silently dropped by the mapper.
+        // persona_name остаётся вне whitelist'а (deal_cycle с 9290c7a
+        // уже валидный, и использовать его здесь — обманчиво).
+        persona_name: 'should not leak',
         questions: ['Какой средний чек?'],
         sources: { company_website: 'из <title>' },
       }),
@@ -113,7 +115,7 @@ describe('POST /api/client/brief/autofill — happy path', () => {
     expect(body.fieldsPatch.company_website).toBe('acme.com');
     expect(body.fieldsPatch.company_description).toBe('We make widgets.');
     expect(body.fieldsPatch.product_description).toBeUndefined();
-    expect(body.fieldsPatch.deal_cycle).toBeUndefined();
+    expect(body.fieldsPatch.persona_name).toBeUndefined();
     expect(body.questions).toEqual(['Какой средний чек?']);
     expect(body.sources.company_website).toBe('из <title>');
   });

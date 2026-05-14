@@ -3,11 +3,12 @@
 
 import { useState } from 'react';
 import { HHParserView } from '@/components/parsers/HHParserView';
+import { HHArchiveParserView } from '@/components/parsers/HHArchiveParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
 import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParserView';
 
-type Tab = 'hh' | 'search' | 'yandexmaps' | 'crypto';
+type Tab = 'hh' | 'hh-archive' | 'search' | 'yandexmaps' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -31,6 +32,17 @@ export default function ParsersPage() {
             `}
           >
             HH.ru Парсер
+          </button>
+          <button
+            onClick={() => setActiveTab('hh-archive')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'hh-archive'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            HH.ru Архив
           </button>
           <button
             onClick={() => setActiveTab('search')}
@@ -70,11 +82,13 @@ export default function ParsersPage() {
 
       {activeTab === 'hh'
         ? <HHParserView />
-        : activeTab === 'search'
-          ? <SearchParserView />
-          : activeTab === 'yandexmaps'
-            ? <YandexMapsParserView />
-            : <CryptoPaymentParserView />}
+        : activeTab === 'hh-archive'
+          ? <HHArchiveParserView />
+          : activeTab === 'search'
+            ? <SearchParserView />
+            : activeTab === 'yandexmaps'
+              ? <YandexMapsParserView />
+              : <CryptoPaymentParserView />}
     </div>
   );
 }
