@@ -27,11 +27,15 @@ import {
   type HHRawResponse,
 } from './parser';
 
-const DEFAULT_USER_AGENT =
-  process.env.HH_ARCHIVE_USER_AGENT ??
-  'PolzaAgency-Portal/1.0 (hello@polzaagency.ru)';
+// User-Agent: можно переопределить через HH_ARCHIVE_USER_AGENT, иначе
+// используем общий default из hhParser.ts (через buildHhRequestHeaders в
+// fetchHHJson). Передаём undefined → подхватится дефолт.
+const DEFAULT_USER_AGENT = process.env.HH_ARCHIVE_USER_AGENT;
 
-const OAUTH_TOKEN = process.env.HH_OAUTH_TOKEN || undefined;
+// OAuth-токен берётся в fetchHHJson через buildHhRequestHeaders из
+// HH_ACCESS_TOKEN (тот же, что использует стандартный парсер). Старое имя
+// HH_OAUTH_TOKEN поддерживаем как override только для тестов.
+const OAUTH_TOKEN_OVERRIDE = process.env.HH_OAUTH_TOKEN || undefined;
 
 /** Базовая задержка между запросами. Можно поднять через env если ловим 429. */
 const REQUEST_DELAY_MS = Number(process.env.HH_ARCHIVE_REQUEST_DELAY_MS ?? '1500');
@@ -96,8 +100,8 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
     dateTo: job.date_to,
     archived: job.archived,
     chunkStrategy: job.chunk_strategy,
-    userAgent: DEFAULT_USER_AGENT,
-    oauthToken: OAUTH_TOKEN,
+    userAgent: DEFAULT_USER_AGENT ?? '',
+    oauthToken: OAUTH_TOKEN_OVERRIDE,
     requestDelayMs: REQUEST_DELAY_MS,
   };
 

@@ -17,6 +17,8 @@
  *      пула до 1 RPS на токен. На сам лимит 2000 не влияет.
  */
 
+import { buildHhRequestHeaders } from '@/lib/parsers/hhParser';
+
 export const HH_API_BASE = 'https://api.hh.ru/vacancies';
 export const HH_API_PAGE_SIZE = 100;
 export const HH_API_MAX_PAGE = 19; // 19 × 100 = 1900; page=20 даёт {found:..., items:[]}
@@ -135,10 +137,11 @@ export async function fetchHHJson(
   config: Pick<HHParseConfig, 'userAgent' | 'oauthToken'>,
   signal?: AbortSignal,
 ): Promise<HHRawResponse> {
-  const headers: Record<string, string> = {
-    'User-Agent': config.userAgent,
-    Accept: 'application/json',
-  };
+  // Используем тот же auth-стек что и стандартный HH-парсер: env-переменная
+  // HH_ACCESS_TOKEN (установлена на проде), default UA. Это даёт OAuth
+  // авторизацию, без которой /vacancies возвращает 403 с 2026-04-15.
+  const headers = buildHhRequestHeaders(config.userAgent);
+  // Если caller передал явный oauthToken (тест/override), он перебивает env.
   if (config.oauthToken) {
     headers.Authorization = `Bearer ${config.oauthToken}`;
   }

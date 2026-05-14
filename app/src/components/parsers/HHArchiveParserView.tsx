@@ -321,35 +321,87 @@ export function HHArchiveParserView() {
           </button>
         </div>
 
-        {preview && (
-          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm space-y-2">
-            <div className="font-semibold text-blue-900">
-              Найдётся около {preview.total_estimated.toLocaleString()} вакансий
-            </div>
-            <div className="text-xs text-blue-700">{preview.note}</div>
-            {preview.total_estimated > maxResults && (
-              <div className="text-xs text-red-700 font-medium">
-                ⚠ Это больше вашего лимита {maxResults.toLocaleString()}. Сократите период
-                либо повысьте лимит (cap 200 000).
+        {preview && (() => {
+          const errored = preview.per_query.filter((p) => p.error);
+          const allErrored = errored.length === preview.per_query.length && preview.per_query.length > 0;
+          const sample403 = errored.find((p) => p.error?.includes('403'));
+          if (allErrored) {
+            return (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm space-y-2">
+                <div className="font-semibold text-red-800">
+                  ❌ HH API недоступен — все запросы упали
+                </div>
+                <div className="text-xs text-red-700">
+                  {sample403 ? (
+                    <>
+                      HH вернул <strong>403 Forbidden</strong>. Обычно причина — анонимный доступ
+                      без OAuth-токена либо неправильный User-Agent. Попросите админа выставить
+                      env-переменные <code className="font-mono">HH_OAUTH_TOKEN</code> и
+                      {' '}<code className="font-mono">HH_ARCHIVE_USER_AGENT</code> на сервере.
+                    </>
+                  ) : (
+                    <>
+                      Ошибка от HH: <code className="font-mono">{errored[0]?.error}</code>.
+                      Возможно, временный сбой — попробуйте ещё раз через минуту.
+                    </>
+                  )}
+                </div>
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-red-700">Все ошибки</summary>
+                  <table className="mt-2 w-full text-left">
+                    <tbody>
+                      {preview.per_query.map((p) => (
+                        <tr key={p.query}>
+                          <td className="py-0.5 pr-2">{p.query}</td>
+                          <td className="py-0.5 text-red-600 font-mono text-[11px]">{p.error}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
               </div>
-            )}
-            <details className="text-xs">
-              <summary className="cursor-pointer text-blue-600">Разбивка по запросам</summary>
-              <table className="mt-2 w-full text-left">
-                <tbody>
-                  {preview.per_query.map((p) => (
-                    <tr key={p.query}>
-                      <td className="py-0.5">{p.query}</td>
-                      <td className="py-0.5 text-right tabular-nums">
-                        {p.error ? <span className="text-red-600">err</span> : p.found.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </details>
-          </div>
-        )}
+            );
+          }
+          return (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm space-y-2">
+              <div className="font-semibold text-blue-900">
+                Найдётся около {preview.total_estimated.toLocaleString()} вакансий
+              </div>
+              <div className="text-xs text-blue-700">{preview.note}</div>
+              {errored.length > 0 && (
+                <div className="text-xs text-amber-800 font-medium">
+                  ⚠ Часть запросов упала ({errored.length} из {preview.per_query.length}):
+                  оценка занижена. См. разбивку ниже.
+                </div>
+              )}
+              {preview.total_estimated > maxResults && (
+                <div className="text-xs text-red-700 font-medium">
+                  ⚠ Это больше вашего лимита {maxResults.toLocaleString()}. Сократите период
+                  либо повысьте лимит (cap 200 000).
+                </div>
+              )}
+              <details className="text-xs">
+                <summary className="cursor-pointer text-blue-600">Разбивка по запросам</summary>
+                <table className="mt-2 w-full text-left">
+                  <tbody>
+                    {preview.per_query.map((p) => (
+                      <tr key={p.query}>
+                        <td className="py-0.5">{p.query}</td>
+                        <td className="py-0.5 text-right tabular-nums">
+                          {p.error ? (
+                            <span className="text-red-600 font-mono">{p.error}</span>
+                          ) : (
+                            p.found.toLocaleString()
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            </div>
+          );
+        })()}
 
         {error && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
