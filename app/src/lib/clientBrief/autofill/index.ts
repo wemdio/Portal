@@ -14,6 +14,23 @@ import { buildAutofillPrompt } from './prompt';
 export const DEFAULT_AUTOFILL_MODEL =
   process.env.CLIENT_BRIEF_AUTOFILL_MODEL ?? 'policy/gemini-flash';
 
+/**
+ * Бросается, когда AI вернул незавершённый JSON (обычно — упёрся в max_tokens
+ * на стороне модели, finish_reason="length"). `callOpenRouterChat` возвращает
+ * только `content` и проглатывает `finish_reason`, поэтому truncation для
+ * нас невидим напрямую. Детектим эвристикой: ответ начался с "{" но не
+ * закрылся "}". Без этой проверки `mapAutofillToBriefPatch.tryParseJson`
+ * молча отдаст null → пустой patch → клиент видит «AI ничего не нашёл»
+ * (выглядит как баг, а не как «надо повторить»).
+ */
+export class AutofillTruncatedError extends Error {
+  readonly code = 'AUTOFILL_TRUNCATED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutofillTruncatedError';
+  }
+}
+
 export interface GenerateBriefAutofillOptions {
   apiKey: string;
   website: string;
@@ -61,6 +78,21 @@ export async function generateBriefAutofill(
     signal,
     title: 'Portal - Client Brief Autofill',
   });
+
+  // Эвристика truncation: если ответ начался как JSON-объект, но не
+  // закрылся — модель почти наверняка упёрлась в max_tokens на своей стороне
+  // (8K у Gemini Flash, 6K у нас) и вернула finish_reason="length", который
+  // openrouter-клиент проглатывает. Лучше упасть с осмысленной ошибкой,
+  // чем тихо отдать пустой patch.
+  const trimmedContent = aiContent.trim();
+  if (trimmedContent.startsWith('{') && !trimmedContent.endsWith('}')) {
+    const tail = trimmedContent.slice(-40).replace(/\s+/g, ' ');
+    throw new AutofillTruncatedError(
+      `AI вернул обрезанный JSON (${trimmedContent.length} симв., хвост: "…${tail}"). ` +
+        'Скорее всего, ответ упёрся в лимит токенов. Попробуйте ещё раз — ' +
+        'если повторится, сообщите в поддержку.',
+    );
+  }
 
   const mapped = mapAutofillToBriefPatch(aiContent);
   return { ...mapped, resolvedUrl: url };

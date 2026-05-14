@@ -5,6 +5,7 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import {
   generateBriefAutofill,
   WebsiteFetchError,
+  AutofillTruncatedError,
 } from '@/lib/clientBrief/autofill';
 import { normalizeWebsiteUrl } from '@/lib/clientBrief/autofill/fetchWebsiteHtml';
 
@@ -68,6 +69,17 @@ export async function POST(req: NextRequest) {
     if (err instanceof WebsiteFetchError) {
       await logError('client.brief.autofill.fetch_failed', err, { userId, website: rawWebsite });
       return jsonError(err.message, 502);
+    }
+    if (err instanceof AutofillTruncatedError) {
+      // Отдельный audit event — чтобы в логах было видно "AI обрезался" vs
+      // "AI совсем не ответил". Если truncation-кейсы участятся, поднимем
+      // maxTokens или сократим whitelist. Без отдельного события эту
+      // ветку статистики не увидеть.
+      await logError('client.brief.autofill.truncated', err, { userId, website: rawWebsite });
+      return NextResponse.json(
+        { error: err.message, code: err.code },
+        { status: 502 },
+      );
     }
     await logError('client.brief.autofill.ai_failed', err, { userId, website: rawWebsite });
     const message =
