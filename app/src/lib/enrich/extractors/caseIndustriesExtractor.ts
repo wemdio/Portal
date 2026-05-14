@@ -237,8 +237,8 @@ const INDUSTRY_DICT: IndustryRule[] = [
   },
 ];
 
-const MIN_MENTIONS = 2;
 const MAX_INDUSTRIES = 5;
+const SHORT_TEXT_THRESHOLD = 500;
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -262,11 +262,14 @@ export function extractCaseIndustries(html: string): string[] {
   const text = $('body').text().toLowerCase();
   if (!text || text.length < 50) return [];
 
+  const wordCount = text.split(/\s+/).length;
+  const minMentions = wordCount < SHORT_TEXT_THRESHOLD ? 1 : 2;
+
   const counts: { name: string; count: number }[] = [];
   for (const rule of INDUSTRY_DICT) {
     let total = 0;
     for (const kw of rule.keywords) total += countAllOccurrences(text, kw);
-    if (total >= MIN_MENTIONS) counts.push({ name: rule.name, count: total });
+    if (total >= minMentions) counts.push({ name: rule.name, count: total });
   }
 
   counts.sort((a, b) => b.count - a.count);

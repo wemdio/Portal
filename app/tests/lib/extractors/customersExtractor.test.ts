@@ -60,8 +60,8 @@ describe('extractCustomers', () => {
     expect(result).toEqual(['Сбербанк']);
   });
 
-  it('filters out alts longer than 60 characters (likely captions, not company names)', () => {
-    const longAlt = 'Эта компания очень крупный клиент работающий с нами с 2010 года и так далее';
+  it('filters out alts longer than 80 characters (likely captions, not company names)', () => {
+    const longAlt = 'Эта компания очень крупный клиент работающий с нами с 2010 года и так далее — отзывы оставляют только положительные';
     const html = `
       <section class="clients">
         <img alt="${longAlt}" src="/long.png" />

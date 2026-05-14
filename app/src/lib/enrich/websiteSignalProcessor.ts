@@ -1,7 +1,7 @@
 import { fetchHtmlWithRetry, fetchHtmlWithPlaywright } from '@/lib/enrich/websiteParser';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import { detectSignals, determineProfile, formatStack } from '@/lib/enrich/signalDetector';
-import { discoverSubpaths } from '@/lib/enrich/subpathDiscovery';
+import { discoverSubpaths, FALLBACK_PATHS } from '@/lib/enrich/subpathDiscovery';
 import {
   ExtractorKey,
   ExtractedData,
@@ -11,7 +11,7 @@ import {
 import { extractCustomers } from '@/lib/enrich/extractors/customersExtractor';
 import { extractCasesCount } from '@/lib/enrich/extractors/casesCountExtractor';
 import { extractCaseIndustries } from '@/lib/enrich/extractors/caseIndustriesExtractor';
-import { detectEnterpriseLogos } from '@/lib/enrich/extractors/enterpriseLogosDetector';
+import { detectEnterpriseLogos, detectEnterpriseInHtml } from '@/lib/enrich/extractors/enterpriseLogosDetector';
 import { extractPricingModel } from '@/lib/enrich/extractors/pricingModelExtractor';
 import { extractPricingDetails } from '@/lib/enrich/extractors/pricingDetailExtractor';
 import { extractHiring } from '@/lib/enrich/extractors/hiringExtractor';
@@ -19,6 +19,7 @@ import { extractIntegrations } from '@/lib/enrich/extractors/integrationsExtract
 import { extractFoundedYear } from '@/lib/enrich/extractors/foundedYearExtractor';
 import { extractTeamSize } from '@/lib/enrich/extractors/teamSizeExtractor';
 import { extractBlogLastPost } from '@/lib/enrich/extractors/blogActivityExtractor';
+import { llmExtractFields } from '@/lib/enrich/extractors/llmExtractor';
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 const PLAYWRIGHT_TIMEOUT_MS = 18_000;
@@ -179,6 +180,36 @@ export async function processSignalsForUrl(
 
   if (requestedSubpages.size > 0) {
     const discovered = discoverSubpaths(main.html, normalized, Array.from(requestedSubpages));
+
+    // For subpages not found via link discovery, try well-known paths with HEAD probe.
+    const missing = Array.from(requestedSubpages).filter((k) => !discovered[k]);
+    if (missing.length > 0) {
+      let baseOrigin: string;
+      try { baseOrigin = new URL(normalized).origin; } catch { baseOrigin = ''; }
+      if (baseOrigin) {
+        await Promise.all(
+          missing.map(async (kind) => {
+            const paths = FALLBACK_PATHS[kind] ?? [];
+            for (const p of paths) {
+              if (signal?.aborted) return;
+              try {
+                const probeUrl = `${baseOrigin}${p}`;
+                const res = await fetch(probeUrl, {
+                  method: 'HEAD',
+                  redirect: 'follow',
+                  signal: signal ?? AbortSignal.timeout(4000),
+                });
+                if (res.ok) {
+                  discovered[kind] = probeUrl;
+                  return;
+                }
+              } catch { /* probe failed, try next */ }
+            }
+          }),
+        );
+      }
+    }
+
     await Promise.all(
       Array.from(requestedSubpages).map(async (kind) => {
         const url = discovered[kind];
@@ -189,67 +220,118 @@ export async function processSignalsForUrl(
     );
   }
 
-  // Cases-related extractors (share /cases HTML)
+  // Cases-related extractors (share /cases HTML, fallback to main)
+  const casesHtml = subpageHtml.cases ?? null;
   if (extractors.includes('customers')) {
-    out.customers = subpageHtml.cases ? extractCustomers(subpageHtml.cases) : [];
+    out.customers = extractCustomers(casesHtml ?? '');
+    if (out.customers.length === 0) out.customers = extractCustomers(main.html);
   }
   if (extractors.includes('cases_count')) {
-    out.cases_count = subpageHtml.cases ? extractCasesCount(subpageHtml.cases) : 0;
+    out.cases_count = extractCasesCount(casesHtml ?? '');
+    if (out.cases_count === 0 && !casesHtml) out.cases_count = extractCasesCount(main.html);
   }
   if (extractors.includes('case_industries')) {
-    out.case_industries = subpageHtml.cases ? extractCaseIndustries(subpageHtml.cases) : [];
+    out.case_industries = extractCaseIndustries(casesHtml ?? '');
+    if (out.case_industries.length === 0) out.case_industries = extractCaseIndustries(main.html);
   }
   if (extractors.includes('enterprise_logos')) {
-    const cust = out.customers ?? (subpageHtml.cases ? extractCustomers(subpageHtml.cases) : []);
-    out.enterprise_logos = detectEnterpriseLogos(cust);
+    const cust = out.customers ?? extractCustomers(casesHtml ?? '');
+    out.enterprise_logos = detectEnterpriseLogos(cust)
+      || detectEnterpriseInHtml(casesHtml ?? '')
+      || detectEnterpriseInHtml(main.html);
   }
 
-  // Pricing-related extractors (share /pricing HTML)
+  // Pricing-related extractors (share /pricing HTML, fallback to main)
+  const pricingHtml = subpageHtml.pricing ?? null;
   if (extractors.includes('pricing_model')) {
-    out.pricing_model = subpageHtml.pricing ? extractPricingModel(subpageHtml.pricing) : 'unknown';
+    out.pricing_model = extractPricingModel(pricingHtml ?? '');
+    if (out.pricing_model === 'unknown' && !pricingHtml) {
+      out.pricing_model = extractPricingModel(main.html);
+    }
   }
   if (extractors.includes('pricing_min') || extractors.includes('free_trial')) {
-    if (subpageHtml.pricing) {
-      const details = extractPricingDetails(subpageHtml.pricing);
-      if (extractors.includes('pricing_min')) out.pricing_min = details.pricing_min;
-      if (extractors.includes('free_trial')) out.free_trial = details.free_trial;
-    } else {
-      if (extractors.includes('free_trial')) out.free_trial = false;
+    const details = extractPricingDetails(pricingHtml ?? '');
+    if (extractors.includes('pricing_min')) out.pricing_min = details.pricing_min;
+    if (extractors.includes('free_trial')) out.free_trial = details.free_trial;
+    // Fallback to main page if subpage had nothing
+    if (!pricingHtml) {
+      const mainDetails = extractPricingDetails(main.html);
+      if (extractors.includes('pricing_min') && !out.pricing_min) out.pricing_min = mainDetails.pricing_min;
+      if (extractors.includes('free_trial') && !out.free_trial) out.free_trial = mainDetails.free_trial;
     }
   }
 
-  // Careers-related extractors (share /careers HTML)
+  // Careers-related extractors (share /careers HTML, fallback to main)
+  const careersHtml = subpageHtml.careers ?? null;
   if (extractors.includes('vacancies_count') || extractors.includes('hiring_roles')) {
-    if (subpageHtml.careers) {
-      const hiring = extractHiring(subpageHtml.careers);
+    const hiring = extractHiring(careersHtml ?? '');
+    if (hiring.vacancies_count === 0 && !careersHtml) {
+      const mainHiring = extractHiring(main.html);
+      if (extractors.includes('vacancies_count')) out.vacancies_count = mainHiring.vacancies_count;
+      if (extractors.includes('hiring_roles')) {
+        out.hiring_roles = {
+          marketing: mainHiring.has_marketing,
+          engineering: mainHiring.has_engineering,
+          sales: mainHiring.has_sales,
+          design: mainHiring.has_design,
+          product: mainHiring.has_product,
+        };
+      }
+    } else {
       if (extractors.includes('vacancies_count')) out.vacancies_count = hiring.vacancies_count;
       if (extractors.includes('hiring_roles')) {
         out.hiring_roles = {
           marketing: hiring.has_marketing,
           engineering: hiring.has_engineering,
           sales: hiring.has_sales,
+          design: hiring.has_design,
+          product: hiring.has_product,
         };
-      }
-    } else {
-      if (extractors.includes('vacancies_count')) out.vacancies_count = 0;
-      if (extractors.includes('hiring_roles')) {
-        out.hiring_roles = { marketing: false, engineering: false, sales: false };
       }
     }
   }
 
-  // Single-extractor subpages
+  // Single-extractor subpages (with main page fallback)
   if (extractors.includes('integrations')) {
-    out.integrations = subpageHtml.integrations ? extractIntegrations(subpageHtml.integrations) : [];
+    out.integrations = extractIntegrations(subpageHtml.integrations ?? '');
+    if (out.integrations.length === 0) out.integrations = extractIntegrations(main.html);
   }
   if (extractors.includes('founded_year')) {
     out.founded_year = subpageHtml.about ? extractFoundedYear(subpageHtml.about) : undefined;
+    if (!out.founded_year) out.founded_year = extractFoundedYear(main.html);
   }
   if (extractors.includes('team_size')) {
     out.team_size = subpageHtml.about ? extractTeamSize(subpageHtml.about) : 0;
+    if (!out.team_size) out.team_size = extractTeamSize(main.html);
   }
   if (extractors.includes('blog_last_post')) {
     out.blog_last_post = subpageHtml.blog ? extractBlogLastPost(subpageHtml.blog) : undefined;
+  }
+
+  // LLM fallback: for fields that heuristics failed on, ask Sonnet 4.5 via Requesty.
+  type LlmField = 'pricing_model' | 'customers' | 'founded_year' | 'team_size' | 'free_trial' | 'case_industries' | 'hiring_roles';
+  const llmNeeded = new Set<LlmField>();
+  if (extractors.includes('pricing_model') && (out.pricing_model === 'unknown' || !out.pricing_model)) llmNeeded.add('pricing_model');
+  if (extractors.includes('customers') && (!out.customers || out.customers.length === 0)) llmNeeded.add('customers');
+  if (extractors.includes('founded_year') && !out.founded_year) llmNeeded.add('founded_year');
+  if (extractors.includes('team_size') && !out.team_size) llmNeeded.add('team_size');
+  if (extractors.includes('free_trial') && out.free_trial !== true) llmNeeded.add('free_trial');
+  if (extractors.includes('case_industries') && (!out.case_industries || out.case_industries.length === 0)) llmNeeded.add('case_industries');
+  if (extractors.includes('hiring_roles') && out.hiring_roles && !out.hiring_roles.marketing && !out.hiring_roles.engineering && !out.hiring_roles.sales && !out.hiring_roles.design && !out.hiring_roles.product) llmNeeded.add('hiring_roles');
+
+  if (llmNeeded.size > 0 && !signal?.aborted) {
+    try {
+      const llmResult = await llmExtractFields(main.html, subpageHtml, llmNeeded);
+      if (llmResult.pricing_model && llmNeeded.has('pricing_model')) out.pricing_model = llmResult.pricing_model;
+      if (llmResult.customers && llmResult.customers.length > 0 && llmNeeded.has('customers')) out.customers = llmResult.customers;
+      if (llmResult.founded_year && llmNeeded.has('founded_year')) out.founded_year = llmResult.founded_year;
+      if (llmResult.team_size && llmNeeded.has('team_size')) out.team_size = llmResult.team_size;
+      if (llmResult.free_trial === true && llmNeeded.has('free_trial')) out.free_trial = true;
+      if (llmResult.case_industries && llmResult.case_industries.length > 0 && llmNeeded.has('case_industries')) out.case_industries = llmResult.case_industries;
+      if (llmResult.hiring_roles && llmNeeded.has('hiring_roles')) out.hiring_roles = llmResult.hiring_roles;
+    } catch {
+      // LLM fallback is best-effort — never break the pipeline.
+    }
   }
 
   return out;
