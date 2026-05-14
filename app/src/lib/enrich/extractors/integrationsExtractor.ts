@@ -65,8 +65,10 @@ const MAX_INTEGRATIONS = 20;
 
 type $Type = cheerio.CheerioAPI;
 type AddFn = (s: string) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CheerioSelection = cheerio.Cheerio<any>;
 
-function extractFromImages($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, add: AddFn): void {
+function extractFromImages($: $Type, container: CheerioSelection, add: AddFn): void {
   container.find('img').each((_, img) => {
     const alt = ($(img).attr('alt') ?? '').trim();
     if (alt) {
@@ -79,7 +81,7 @@ function extractFromImages($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>
   });
 }
 
-function extractFromText($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, add: AddFn): void {
+function extractFromText($: $Type, container: CheerioSelection, add: AddFn): void {
   container.find('li, a, h3, h4, h5, span, strong, b, [class*="name"]').each((_, el) => {
     const t = $(el).text().trim();
     if (t && t.length >= 2 && t.length <= 40 && !SECTION_HEADING_RE.test(t)) {
@@ -88,7 +90,7 @@ function extractFromText($: $Type, container: cheerio.Cheerio<cheerio.AnyNode>, 
   });
 }
 
-function findSectionFromHeading($: $Type, heading: cheerio.Cheerio<cheerio.AnyNode>): cheerio.Cheerio<cheerio.AnyNode> {
+function findSectionFromHeading($: $Type, heading: CheerioSelection): CheerioSelection {
   let section = heading.parent();
   for (let i = 0; i < 3; i++) {
     if (section.find('img').length >= 3 || section.find('li, [class*="item"]').length >= 3) break;
