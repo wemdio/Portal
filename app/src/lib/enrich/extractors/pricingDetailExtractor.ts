@@ -1,6 +1,6 @@
 import { Currency, PriceValue } from './types';
 
-const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial/i;
+const FREE_TRIAL_RE = /free trial|free forever|бесплатно навсегда|14[-\s]?days?\s+(?:free\s+)?trial|пробный период|попроб[а-яё]+\s+бесплатно|start (?:your )?free trial|тестовый доступ|демо[-\s]?доступ|бесплатная версия|free plan|try (?:it )?free|бесплатный тариф|бесплатный план|0\s*[₽$€]\s*\/\s*мес/i;
 
 const PRICE_AFTER_RE = /(\d[\d\s]{0,8}\d|\d)\s*([₽$€]|руб(?:лей|ля|\.)?|usd|eur)/gi;
 const PRICE_BEFORE_RE = /([$€]|usd|eur)\s*(\d[\d\s]{0,8}\d|\d)/gi;
@@ -16,10 +16,10 @@ function detectCurrency(token: string): Currency {
 }
 
 function parsePriceValue(raw: string): number | null {
-  const clean = raw.replace(/\s/g, '');
-  const value = parseInt(clean, 10);
+  const clean = raw.replace(/\s/g, '').replace(/,(\d{2})$/, '.$1');
+  const value = parseFloat(clean);
   if (isNaN(value) || value <= 0 || value > MAX_PRICE) return null;
-  return value;
+  return Math.round(value);
 }
 
 export function extractPricingDetails(html: string): { pricing_min?: PriceValue; free_trial: boolean } {

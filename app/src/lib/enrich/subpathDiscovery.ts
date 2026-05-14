@@ -20,34 +20,71 @@ interface KindMatcher {
 
 const MATCHERS: Record<SubpageKind, KindMatcher> = {
   pricing: {
-    pathPatterns: [/\/pricing\b/, /\/тариф/, /\/цены/, /\/цена/, /\/prices?\b/, /\/plans?\b/],
-    textPatterns: [/\bpricing\b/, /цены/, /цена/, /тариф/, /стоимость/, /\bplans\b/],
+    pathPatterns: [
+      /\/pricing\b/, /\/тариф/, /\/цены/, /\/цена/, /\/prices?\b/, /\/plans?\b/,
+      /\/стоимость/, /\/cost\b/, /\/rates?\b/, /\/calculator\b/, /\/калькулятор/,
+      /\/services?\b/, /\/услуги/,
+    ],
+    textPatterns: [
+      /\bpricing\b/, /цены/, /цена/, /тариф/, /стоимость/, /\bplans?\b/,
+      /прайс/, /расценки/, /калькулятор/, /сколько стоит/,
+    ],
   },
   careers: {
-    pathPatterns: [/\/careers?\b/, /\/jobs?\b/, /\/вакан/, /\/работа/, /\/join[-_]?us\b/],
-    textPatterns: [/\bcareers?\b/, /вакан/, /\bjobs?\b/, /работа у нас/, /\bjoin our team\b/, /вакансии/],
+    pathPatterns: [
+      /\/careers?\b/, /\/jobs?\b/, /\/вакан/, /\/работа/, /\/join[-_]?us\b/,
+      /\/vacancy/, /\/openings?\b/, /\/hiring\b/, /\/work[-_]?with[-_]?us/,
+      /\/team\b/, /\/команда/,
+    ],
+    textPatterns: [
+      /\bcareers?\b/, /вакан/, /\bjobs?\b/, /работа у нас/, /\bjoin our team\b/,
+      /вакансии/, /мы нанимаем/, /we.?re hiring/, /открытые позиции/, /open positions/,
+    ],
   },
   cases: {
     pathPatterns: [
       /\/cases?\b/, /\/case[-_]studies?\b/, /\/portfolio\b/, /\/customers?\b/,
       /\/clients?\b/, /\/кейсы?/, /\/клиент/, /\/истории/,
+      /\/projects?\b/, /\/проект/, /\/works?\b/, /\/работы/,
+      /\/success[-_]?stories?\b/, /\/results?\b/, /\/отзыв/,
     ],
     textPatterns: [
-      /\bcases\b/, /\bcase studies\b/, /\bcustomers\b/, /\bclients\b/, /\bportfolio\b/,
-      /кейсы/, /клиенты/, /истории успеха/, /наши клиенты/,
+      /\bcases?\b/, /\bcase studies\b/, /\bcustomers\b/, /\bclients\b/, /\bportfolio\b/,
+      /кейсы/, /клиенты/, /истории успеха/, /наши клиенты/, /наши работы/,
+      /проекты/, /портфолио/, /\bour work\b/, /результаты/, /нам доверяют/,
     ],
   },
   integrations: {
-    pathPatterns: [/\/integrations?\b/, /\/интеграц/, /\/partners?\b/, /\/партн/],
-    textPatterns: [/\bintegrations?\b/, /интеграции/, /\bpartners\b/, /партнёры/, /партнеры/],
+    pathPatterns: [
+      /\/integrations?\b/, /\/интеграц/, /\/partners?\b/, /\/партн/,
+      /\/apps?\b/, /\/marketplace\b/, /\/connectors?\b/, /\/ecosystem\b/,
+      /\/api\b/, /\/подключен/,
+    ],
+    textPatterns: [
+      /\bintegrations?\b/, /интеграции/, /\bpartners?\b/, /партнёры/, /партнеры/,
+      /подключения/, /экосистема/, /совместимость/, /\bapps?\b/, /\bconnectors?\b/,
+    ],
   },
   about: {
-    pathPatterns: [/\/about\b/, /\/о[-_]?нас/, /\/о[-_]?компании/, /\/company\b/, /\/team\b/, /\/команда/],
-    textPatterns: [/\babout\b/, /о нас/, /о компании/, /\bcompany\b/, /команда/, /\bteam\b/],
+    pathPatterns: [
+      /\/about\b/, /\/о[-_]?нас/, /\/о[-_]?компании/, /\/company\b/, /\/team\b/, /\/команда/,
+      /\/who[-_]?we[-_]?are/, /\/our[-_]?story/, /\/история/,
+    ],
+    textPatterns: [
+      /\babout\b/, /о нас/, /о компании/, /\bcompany\b/, /команда/, /\bteam\b/,
+      /кто мы/, /наша история/, /\bour story\b/,
+    ],
   },
   blog: {
-    pathPatterns: [/\/blog\b/, /\/news\b/, /\/новости/, /\/press\b/, /\/медиа/],
-    textPatterns: [/\bblog\b/, /новости/, /\bnews\b/, /пресс/],
+    pathPatterns: [
+      /\/blog\b/, /\/news\b/, /\/новости/, /\/press\b/, /\/медиа/,
+      /\/articles?\b/, /\/статьи/, /\/journal\b/, /\/insights?\b/,
+      /\/posts?\b/, /\/публикации/,
+    ],
+    textPatterns: [
+      /\bblog\b/, /новости/, /\bnews\b/, /пресс/, /статьи/, /\barticles?\b/,
+      /\binsights?\b/, /публикации/, /\bjournal\b/,
+    ],
   },
 };
 
@@ -114,3 +151,16 @@ export function discoverSubpaths(
 
   return result;
 }
+
+/**
+ * Well-known paths to try via direct HEAD request when link discovery fails.
+ * Ordered by likelihood — first match wins.
+ */
+export const FALLBACK_PATHS: Record<SubpageKind, string[]> = {
+  pricing: ['/pricing', '/prices', '/tariffs', '/plans'],
+  careers: ['/careers', '/jobs', '/vacancies'],
+  cases: ['/cases', '/portfolio', '/clients', '/projects', '/works'],
+  integrations: ['/integrations', '/partners', '/apps'],
+  about: ['/about', '/company', '/about-us'],
+  blog: ['/blog', '/news', '/articles'],
+};
