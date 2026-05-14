@@ -617,29 +617,62 @@ Return {"matches": []} if no confident matches.`;
     }
   }
 
-  if (matchesToInsert.length > 0) {
+  // Дедуп по campaign_id: одна кампания не может принадлежать двум проектам.
+  // Кейс STAPE/Stape (15 мая 2026): у клиента в портале два проекта — один
+  // для TG-аутрича, другой для email-аутрича. AI обрабатывает их независимо,
+  // и одна и та же кампания получает confidence 0.95 для обоих. Без дедупа
+  // мы вставили бы 2 строки в `project_instantly_campaigns` (UNIQUE на
+  // (project_id, campaign_id) такие дубли разрешает), что некорректно
+  // логически — worker дважды считал бы лиды этой кампании.
+  // Стратегия: оставить project с максимальным confidence; при равенстве —
+  // алфавитный порядок client name (детерминированно). Специалист всегда
+  // может вручную добавить вторую привязку через UI.
+  const bestPerCampaign = new Map<string, (typeof matchesToInsert)[number]>();
+  const clientByProjectId = new Map(projects.map((p) => [p.id, p.client] as const));
+  for (const m of matchesToInsert) {
+    const prev = bestPerCampaign.get(m.campaign_id);
+    if (!prev) {
+      bestPerCampaign.set(m.campaign_id, m);
+      continue;
+    }
+    if (m.match_confidence > prev.match_confidence) {
+      bestPerCampaign.set(m.campaign_id, m);
+    } else if (m.match_confidence === prev.match_confidence) {
+      const a = clientByProjectId.get(m.project_id) ?? '';
+      const b = clientByProjectId.get(prev.project_id) ?? '';
+      if (a.localeCompare(b) < 0) bestPerCampaign.set(m.campaign_id, m);
+    }
+  }
+  const dedupedMatches = [...bestPerCampaign.values()];
+  if (dedupedMatches.length < matchesToInsert.length) {
+    console.log(
+      `[ai-match] dedup by campaign_id: ${matchesToInsert.length} → ${dedupedMatches.length}`,
+    );
+  }
+
+  if (dedupedMatches.length > 0) {
     const { error } = await supabaseAdmin
       .from('project_instantly_campaigns')
-      .upsert(matchesToInsert, {
+      .upsert(dedupedMatches, {
         onConflict: 'project_id,campaign_id',
         ignoreDuplicates: true,
       });
     if (error) {
       console.error('[ai-match] upsert error:', error.message);
     } else {
-      totalMatched = matchesToInsert.length;
+      totalMatched = dedupedMatches.length;
       // Чтобы постфактум можно было ревьюить — пишем краткий лог в stdout.
       // Например: «[ai-match] auto-ai: Profit-Gateway ← campaign-uuid 0.95
       // "Profit gateaway = transliteration of Profit Gateway"»
-      const previewN = Math.min(10, matchesToInsert.length);
-      for (const m of matchesToInsert.slice(0, previewN)) {
+      const previewN = Math.min(10, dedupedMatches.length);
+      for (const m of dedupedMatches.slice(0, previewN)) {
         const project = projects.find((p) => p.id === m.project_id);
         console.log(
           `[ai-match] ${(project?.client ?? '?').slice(0, 30)} ← ${m.campaign_id.slice(0, 8)}… conf=${m.match_confidence.toFixed(2)} "${m.match_reason.slice(0, 80)}"`,
         );
       }
-      if (matchesToInsert.length > previewN) {
-        console.log(`[ai-match] ... +${matchesToInsert.length - previewN} more matches`);
+      if (dedupedMatches.length > previewN) {
+        console.log(`[ai-match] ... +${dedupedMatches.length - previewN} more matches`);
       }
     }
   }
