@@ -388,86 +388,191 @@ export async function deleteInstantlyCatalogCampaignById(id: string): Promise<vo
 }
 
 /**
- * AI-powered matching for campaigns that text-based matching missed.
- * Only processes campaigns not yet linked to any project.
- * Uses a cheap model to match campaign names to project clients
- * (handles transliteration, abbreviations, different languages).
+ * Грубая транслитерация кириллица → латиница для pre-filter кандидатов.
+ * Покрывает 90% реальных случаев в данных (Asti↔Асти, Binant↔Бинант,
+ * Cheesmall↔Чизмол, AMAfamily↔АМА и т.п.). Не идеально, но достаточно
+ * чтобы попасть в short-list к AI на per-client запросе.
+ */
+const CYR_TO_LAT: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh',
+  з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o',
+  п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts',
+  ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+};
+
+function transliterate(s: string): string {
+  let out = '';
+  for (const ch of s.toLowerCase()) out += CYR_TO_LAT[ch] ?? ch;
+  return out;
+}
+
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/[\s\-_.!'"()«»❗‼️⭕️|/+]/g, '');
+}
+
+function tokenizeClient(s: string): Set<string> {
+  return new Set(
+    transliterate(s)
+      .split(/[\s\-_.!"'()«»|/+,:;]+/)
+      .map((t) => t.replace(/[^a-z0-9]/g, ''))
+      .filter((t) => t.length >= 3),
+  );
+}
+
+/**
+ * AI-powered matching, переписанный с нуля после массового мисматча
+ * 14 мая 2026 (104 ложных привязки, типа ProfitAds ← UNIRATE/Wasserjet/...).
+ *
+ * Ключевые отличия от старой версии:
+ *   1. Per-client запрос (не batch all-vs-all). Модель видит ОДИН целевой
+ *      client и оценивает каждую кампанию против него. Это убирает
+ *      «default bucket»-эффект, когда модель пристраивала кампании
+ *      «куда-нибудь».
+ *   2. Confidence score (0..1) в ответе. Принимаем только >= 0.85.
+ *   3. Pre-filter кандидатов: для одного клиента отдаём AI только те
+ *      кампании, где есть НАМЁК на связь — substring/transliteration/
+ *      token overlap. Это и быстрее, и снижает шум.
+ *   4. Логирование решений в БД (match_confidence + match_reason).
+ *   5. match_source различается: 'auto-text' (substring), 'auto-ai' (AI).
+ *      Старые 'auto' остаются — backfill не делаем, новые пишем явно.
  */
 async function aiMatchUnmatchedCampaigns(
   projects: { id: string; client: string }[],
   allCampaignIds: Set<string>,
   denylistSet: Set<string>,
-): Promise<{ matched: number }> {
-  if (!supabaseAdmin || !supabaseMain) return { matched: 0 };
+): Promise<{ matched: number; aiCalls: number }> {
+  if (!supabaseAdmin || !supabaseMain) return { matched: 0, aiCalls: 0 };
 
   const apiKey =
     process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
     process.env.OPENROUTER_BRIEF_API_KEY ??
     '';
-  if (!apiKey) return { matched: 0 };
+  if (!apiKey) return { matched: 0, aiCalls: 0 };
 
-  // Find campaigns not linked to any project yet
+  const CONFIDENCE_THRESHOLD = Number(
+    process.env.INSTANTLY_AI_MATCH_THRESHOLD ?? '0.85',
+  );
+  const MAX_CANDIDATES_PER_CLIENT = 60; // топ-N кандидатов в одном AI запросе
+
+  // 1. Найти кампании, ещё не привязанные ни к какому проекту.
   const { data: alreadyLinked } = await supabaseAdmin
     .from('project_instantly_campaigns')
     .select('campaign_id');
-
   const linkedIds = new Set(
     (alreadyLinked ?? []).map((r: { campaign_id: string }) => r.campaign_id),
   );
 
-  const { data: unmatchedRows } = await supabaseAdmin
+  const { data: catalogRows } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select('id, name')
     .not('name', 'is', null);
+  const unmatched = (catalogRows as { id: string; name: string }[] | null ?? [])
+    .filter(
+      (c) =>
+        c.name &&
+        c.name.trim().length > 3 &&
+        !linkedIds.has(c.id) &&
+        allCampaignIds.has(c.id),
+    );
 
-  if (!unmatchedRows?.length) return { matched: 0 };
+  if (unmatched.length === 0) return { matched: 0, aiCalls: 0 };
 
-  const unmatched = (unmatchedRows as { id: string; name: string }[])
-    .filter((c) => !linkedIds.has(c.id) && allCampaignIds.has(c.id) && c.name.trim().length > 3);
+  // Pre-вычисленные «лёгкие» формы для скоринга кандидатов.
+  const campaignNormalized = unmatched.map((c) => ({
+    id: c.id,
+    name: c.name,
+    norm: normalizeForMatch(c.name),
+    normTranslit: normalizeForMatch(transliterate(c.name)),
+    tokens: new Set(
+      transliterate(c.name)
+        .split(/[\s\-_.!"'()«»|/+,:;]+/)
+        .map((t) => t.replace(/[^a-z0-9]/g, ''))
+        .filter((t) => t.length >= 3),
+    ),
+  }));
 
-  if (unmatched.length === 0) return { matched: 0 };
-
-  // Process in batches to stay within token limits
-  const BATCH_SIZE = 200;
-  const projectList = projects.map((p) => `${p.id}|${p.client}`).join('\n');
   let totalMatched = 0;
+  let aiCalls = 0;
+  const matchesToInsert: {
+    project_id: string;
+    campaign_id: string;
+    match_source: string;
+    match_confidence: number;
+    match_reason: string;
+  }[] = [];
 
-  for (let i = 0; i < unmatched.length; i += BATCH_SIZE) {
-    const batch = unmatched.slice(i, i + BATCH_SIZE);
-    const campaignList = batch.map((c) => `${c.id}|${c.name}`).join('\n');
+  for (const project of projects) {
+    const client = project.client?.trim();
+    if (!client || client.length < 2) continue;
 
-    const prompt = `Match campaigns to projects by client name. Campaigns may use transliteration, abbreviations, or different languages than the project client name.
+    const clientLower = client.toLowerCase();
+    const clientNorm = normalizeForMatch(client);
+    const clientTokens = tokenizeClient(client);
 
-PROJECTS (id|client):
-${projectList}
+    // 2. Pre-filter: оставить только кампании, где есть хоть какой-то намёк.
+    //    Без этого фильтра отдавать AI 1800 кандидатов на каждого из 96
+    //    клиентов — много токенов и много шума.
+    const candidates = campaignNormalized
+      .filter((c) => {
+        if (c.name.toLowerCase().includes(clientLower)) return true;
+        if (clientNorm.length >= 3 && c.norm.includes(clientNorm)) return true;
+        if (clientNorm.length >= 3 && c.normTranslit.includes(clientNorm)) return true;
+        // Token overlap: хотя бы один токен клиента (>=3 симв) есть в campaign tokens
+        for (const t of clientTokens) {
+          if (c.tokens.has(t)) return true;
+        }
+        return false;
+      })
+      .slice(0, MAX_CANDIDATES_PER_CLIENT);
+
+    if (candidates.length === 0) continue;
+
+    // 3. AI-вызов на конкретного клиента.
+    const candidateList = candidates.map((c) => `${c.id}|${c.name}`).join('\n');
+    const prompt = `You are a strict matcher. Decide which of the listed CAMPAIGNS belong to this CLIENT.
+
+CLIENT: ${client}
 
 CAMPAIGNS (id|name):
-${campaignList}
+${candidateList}
 
-Return ONLY a JSON array of matches: [{"project_id":"...","campaign_id":"..."}]
-Only include confident matches. If a campaign clearly belongs to a project client, include it. If unsure, skip it.
-Return [] if no matches found.`;
+Rules:
+- A campaign belongs to this client ONLY if the client's name (or its transliteration / close spelling variant / clear abbreviation) appears explicitly in the campaign name.
+- Do NOT match by industry, theme, or generic keyword similarity.
+- Do NOT use "default bucket" reasoning. If unsure, skip the campaign.
+- Same campaign can only belong to one client; if it could plausibly belong to several different clients (e.g. a generic name), confidence should be low.
+
+Return a JSON object: {"matches": [{"campaign_id": "...", "confidence": 0.0-1.0, "reason": "short explanation"}]}
+
+Confidence semantics:
+- 1.00: campaign name explicitly contains the exact client name.
+- 0.95: minor variation — case, punctuation, typo, obvious transliteration (e.g. "Profit gateaway" for "Profit-Gateway", "Asti Group" for "Асти Групп").
+- 0.85: clear unambiguous abbreviation (e.g. only if no other client could plausibly claim it).
+- < 0.85: ambiguous — DO NOT include.
+
+Return {"matches": []} if no confident matches.`;
 
     try {
+      aiCalls++;
       const response = await fetch('https://router.requesty.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
           'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Campaign Project Matcher',
+          'X-Title': 'Portal - Campaign Project Matcher (per-client)',
         },
         body: JSON.stringify({
           model: 'google/gemini-2.0-flash-001',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0,
-          max_tokens: 4000,
+          max_tokens: 1500,
           response_format: { type: 'json_object' },
         }),
       });
 
       if (!response.ok) {
-        console.error(`[ai-match] API ${response.status}`);
+        console.error(`[ai-match] API ${response.status} for client "${client}"`);
         continue;
       }
 
@@ -475,54 +580,104 @@ Return [] if no matches found.`;
         choices?: { message?: { content?: string } }[];
       };
       const content = json.choices?.[0]?.message?.content ?? '';
-      let parsed: { project_id: string; campaign_id: string }[] = [];
+      type AIMatch = { campaign_id: string; confidence: number; reason?: string };
+      let parsed: AIMatch[] = [];
       try {
-        const raw = JSON.parse(content);
-        parsed = Array.isArray(raw) ? raw : (raw.matches ?? raw.results ?? []);
+        const raw = JSON.parse(content) as { matches?: AIMatch[] } | AIMatch[];
+        parsed = Array.isArray(raw) ? raw : (raw.matches ?? []);
       } catch {
-        const arrMatch = content.match(/\[[\s\S]*\]/);
-        if (arrMatch) {
-          try { parsed = JSON.parse(arrMatch[0]); } catch { /* skip */ }
+        const objMatch = content.match(/\{[\s\S]*\}/);
+        if (objMatch) {
+          try {
+            const raw = JSON.parse(objMatch[0]) as { matches?: AIMatch[] };
+            parsed = raw.matches ?? [];
+          } catch {
+            /* skip — модель вернула мусор, не валим всю операцию */
+          }
         }
       }
 
-      if (parsed.length === 0) continue;
-
-      // Validate: only allow known project_id and campaign_id values.
-      // Также режем пары из denylist (специалист удалил их из карточки руками
-      // — AI не должен их возвращать обратно).
-      const projectIds = new Set(projects.map((p) => p.id));
-      const batchCampaignIds = new Set(batch.map((c) => c.id));
-      const valid = parsed.filter(
-        (m) =>
-          projectIds.has(m.project_id) &&
-          batchCampaignIds.has(m.campaign_id) &&
-          !denylistSet.has(`${m.project_id}::${m.campaign_id}`),
-      );
-
-      if (valid.length > 0) {
-        const rows = valid.map((m) => ({
-          project_id: m.project_id,
+      const candidateIds = new Set(candidates.map((c) => c.id));
+      for (const m of parsed) {
+        if (typeof m.confidence !== 'number') continue;
+        if (m.confidence < CONFIDENCE_THRESHOLD) continue;
+        if (!candidateIds.has(m.campaign_id)) continue;
+        const key = `${project.id}::${m.campaign_id}`;
+        if (denylistSet.has(key)) continue;
+        matchesToInsert.push({
+          project_id: project.id,
           campaign_id: m.campaign_id,
-          match_source: 'auto',
-        }));
-
-        const { error } = await supabaseAdmin
-          .from('project_instantly_campaigns')
-          .upsert(rows, { onConflict: 'project_id,campaign_id', ignoreDuplicates: true });
-
-        if (!error) {
-          totalMatched += valid.length;
-        } else {
-          console.error('[ai-match] upsert error:', error.message);
-        }
+          match_source: 'auto-ai',
+          match_confidence: m.confidence,
+          match_reason: (m.reason ?? '').slice(0, 200),
+        });
       }
     } catch (err) {
-      console.error('[ai-match] error:', err);
+      console.error(`[ai-match] error for client "${client}":`, err);
     }
   }
 
-  return { matched: totalMatched };
+  // Дедуп по campaign_id: одна кампания не может принадлежать двум проектам.
+  // Кейс STAPE/Stape (15 мая 2026): у клиента в портале два проекта — один
+  // для TG-аутрича, другой для email-аутрича. AI обрабатывает их независимо,
+  // и одна и та же кампания получает confidence 0.95 для обоих. Без дедупа
+  // мы вставили бы 2 строки в `project_instantly_campaigns` (UNIQUE на
+  // (project_id, campaign_id) такие дубли разрешает), что некорректно
+  // логически — worker дважды считал бы лиды этой кампании.
+  // Стратегия: оставить project с максимальным confidence; при равенстве —
+  // алфавитный порядок client name (детерминированно). Специалист всегда
+  // может вручную добавить вторую привязку через UI.
+  const bestPerCampaign = new Map<string, (typeof matchesToInsert)[number]>();
+  const clientByProjectId = new Map(projects.map((p) => [p.id, p.client] as const));
+  for (const m of matchesToInsert) {
+    const prev = bestPerCampaign.get(m.campaign_id);
+    if (!prev) {
+      bestPerCampaign.set(m.campaign_id, m);
+      continue;
+    }
+    if (m.match_confidence > prev.match_confidence) {
+      bestPerCampaign.set(m.campaign_id, m);
+    } else if (m.match_confidence === prev.match_confidence) {
+      const a = clientByProjectId.get(m.project_id) ?? '';
+      const b = clientByProjectId.get(prev.project_id) ?? '';
+      if (a.localeCompare(b) < 0) bestPerCampaign.set(m.campaign_id, m);
+    }
+  }
+  const dedupedMatches = [...bestPerCampaign.values()];
+  if (dedupedMatches.length < matchesToInsert.length) {
+    console.log(
+      `[ai-match] dedup by campaign_id: ${matchesToInsert.length} → ${dedupedMatches.length}`,
+    );
+  }
+
+  if (dedupedMatches.length > 0) {
+    const { error } = await supabaseAdmin
+      .from('project_instantly_campaigns')
+      .upsert(dedupedMatches, {
+        onConflict: 'project_id,campaign_id',
+        ignoreDuplicates: true,
+      });
+    if (error) {
+      console.error('[ai-match] upsert error:', error.message);
+    } else {
+      totalMatched = dedupedMatches.length;
+      // Чтобы постфактум можно было ревьюить — пишем краткий лог в stdout.
+      // Например: «[ai-match] auto-ai: Profit-Gateway ← campaign-uuid 0.95
+      // "Profit gateaway = transliteration of Profit Gateway"»
+      const previewN = Math.min(10, dedupedMatches.length);
+      for (const m of dedupedMatches.slice(0, previewN)) {
+        const project = projects.find((p) => p.id === m.project_id);
+        console.log(
+          `[ai-match] ${(project?.client ?? '?').slice(0, 30)} ← ${m.campaign_id.slice(0, 8)}… conf=${m.match_confidence.toFixed(2)} "${m.match_reason.slice(0, 80)}"`,
+        );
+      }
+      if (dedupedMatches.length > previewN) {
+        console.log(`[ai-match] ... +${dedupedMatches.length - previewN} more matches`);
+      }
+    }
+  }
+
+  return { matched: totalMatched, aiCalls };
 }
 
 /**
@@ -566,7 +721,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     .from('project_instantly_campaigns_denylist')
     .select('project_id, campaign_id');
 
-  const denylistSet = new Set(
+  const denylistSet = new Set<string>(
     (denylist ?? []).map((r: { project_id: string; campaign_id: string }) =>
       `${r.project_id}::${r.campaign_id}`),
   );
@@ -586,7 +741,7 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       matches.push({
         project_id: project.id,
         campaign_id: campaign.id,
-        match_source: 'auto',
+        match_source: 'auto-text',
       });
     }
   }
@@ -604,9 +759,11 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     }
   }
 
-  // AI-powered matching for campaigns that text matching missed
+  // AI-powered matching for campaigns that text matching missed.
+  // См. aiMatchUnmatchedCampaigns — per-client с confidence threshold 0.85.
   const allCampaignIds = new Set((campaigns as { id: string }[]).map((c) => c.id));
   let aiMatched = 0;
+  let aiCalls = 0;
   try {
     const aiResult = await aiMatchUnmatchedCampaigns(
       projects as { id: string; client: string }[],
@@ -614,12 +771,14 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       denylistSet,
     );
     aiMatched = aiResult.matched;
-    if (aiMatched > 0) {
-      console.log(`[instantly-catalog] AI matched ${aiMatched} additional campaign-project links`);
-    }
+    aiCalls = aiResult.aiCalls;
   } catch (err) {
     console.error('[instantly-catalog] AI match error (non-fatal)', err);
   }
+
+  console.log(
+    `[instantly-catalog] match summary: text=${textMatched} ai=${aiMatched} (in ${aiCalls} AI calls)`,
+  );
 
   return { matched: textMatched + aiMatched };
 }
