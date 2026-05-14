@@ -16,12 +16,14 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { HH_API_BASE, parseAreas } from '@/lib/parsers/hhArchive/parser';
+import { buildHhRequestHeaders } from '@/lib/parsers/hhParser';
 
 export const dynamic = 'force-dynamic';
 
-const USER_AGENT =
-  process.env.HH_ARCHIVE_USER_AGENT ?? 'PolzaAgency-Portal/1.0 (hello@polzaagency.ru)';
-const OAUTH_TOKEN = process.env.HH_OAUTH_TOKEN || undefined;
+// Используем тот же User-Agent/Authorization-стек, что и стандартный HH-парсер,
+// то есть env HH_ACCESS_TOKEN (а не HH_OAUTH_TOKEN). HH с 2026-04-15 требует
+// OAuth для /vacancies — без токена будет 403.
+const USER_AGENT = process.env.HH_ARCHIVE_USER_AGENT;
 
 function err(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -61,11 +63,7 @@ export async function POST(req: NextRequest) {
   const dateTo = typeof body.date_to === 'string' ? body.date_to : '';
   const archived = body.archived !== false; // default true
 
-  const headers: Record<string, string> = {
-    'User-Agent': USER_AGENT,
-    Accept: 'application/json',
-  };
-  if (OAUTH_TOKEN) headers.Authorization = `Bearer ${OAUTH_TOKEN}`;
+  const headers = buildHhRequestHeaders(USER_AGENT);
 
   // По одному мини-запросу на каждый search_query. Все параллельно, чтобы
   // не ждать 30 секунд если у юзера 20 запросов. HH рейт-лимит на 20
