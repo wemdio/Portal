@@ -11,7 +11,7 @@ import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { buildAssigneeOptions, buildRenameMap, ensureCurrentAssigneeOption } from '@/lib/projectAssignees';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { Clock } from 'lucide-react';
+import { AlertTriangle, Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
 
@@ -639,6 +639,11 @@ export function ProjectList() {
   const [viewMode] = useState<ViewMode>('table');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [leadFilter, setLeadFilter] = useState<string>('all');
+  // Фильтр «только проблемные»: проекты, где summarizeProjectRisk вернул
+  // непустой axes — отстают по контактам или по KPI. Проекты без плана
+  // (contacts_obligation=0 и kpi_plan=0) сюда не попадают — у них нет
+  // обязательств, считать их «проблемными» некорректно.
+  const [showOnlyProblems, setShowOnlyProblems] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [canCreate, setCanCreate] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
@@ -1285,6 +1290,17 @@ export function ProjectList() {
     new Set(projects.map((p) => p.manager?.trim()).filter(Boolean)),
   ).sort((a, b) => a!.localeCompare(b!, 'ru-RU')) as string[];
 
+  // Хелпер: проект считается «проблемным» если он отстаёт по любой
+  // активной оси. У проектов без плана (no contacts_obligation и no kpi_plan)
+  // axes пустой — они «не проблемные», их сюда не включаем.
+  const isProblemProject = (project: typeof projects[number]): boolean => {
+    const risk = summarizeProjectRisk(
+      paceByProjectId.get(project.id),
+      isCompletedStatus(project.status),
+    );
+    return risk.axes.length > 0;
+  };
+
   const filteredProjects = projects.filter((project) => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch = !normalizedSearch
@@ -1307,12 +1323,14 @@ export function ProjectList() {
     const matchesLead = leadFilter === 'all'
       || (project.manager?.trim() ?? '') === leadFilter;
 
+    const matchesProblem = !showOnlyProblems || isProblemProject(project);
+
     if (statusFilter === 'all') {
-      return matchesSearch && matchesLead && !isCompletedStatus(project.status);
+      return matchesSearch && matchesLead && matchesProblem && !isCompletedStatus(project.status);
     }
 
     const status = normalizeStatus(project.status);
-    return matchesSearch && matchesLead && status.includes(statusFilter);
+    return matchesSearch && matchesLead && matchesProblem && status.includes(statusFilter);
   });
 
   const leadScopedProjects = leadFilter === 'all'
@@ -1327,6 +1345,13 @@ export function ProjectList() {
     'на паузе': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('пауз')).length,
     'завершен': leadScopedProjects.filter(p => p.status?.toLowerCase().includes('заверш')).length,
   };
+
+  // Счётчик «проблемных» среди активных (некомплитнутых) проектов в области
+  // текущего leadFilter — чтобы значок «Проблемные (N)» совпадал с тем,
+  // что увидит пользователь после клика по тоглу.
+  const problemCount = leadScopedProjects.filter(
+    (p) => !isCompletedStatus(p.status) && isProblemProject(p),
+  ).length;
 
   const sortedProjects = filteredProjects;
 
@@ -1395,6 +1420,45 @@ export function ProjectList() {
               </svg>
             )}
           </div>
+        )}
+
+        {/* Тоггл «Проблемные»: проекты с реальным отставанием по контактам/KPI.
+            Когда нечего показать (никто не в риске) — кнопка приглушается, но не
+            прячется: визуальная подсказка «сегодня всё ок». */}
+        {viewMode !== 'kanban' && (
+          <button
+            type="button"
+            onClick={() => setShowOnlyProblems((v) => !v)}
+            disabled={problemCount === 0 && !showOnlyProblems}
+            title={
+              problemCount === 0
+                ? 'Сейчас отстающих проектов нет'
+                : showOnlyProblems
+                ? 'Показать все'
+                : `Показать только отстающие (${problemCount})`
+            }
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-medium whitespace-nowrap shadow-sm transition-all ${
+              showOnlyProblems
+                ? 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
+                : problemCount === 0
+                ? 'border-zinc-200/80 bg-white text-zinc-300 cursor-not-allowed'
+                : 'border-zinc-200/80 bg-white text-zinc-700 hover:shadow-md'
+            }`}
+          >
+            <AlertTriangle className={`w-3.5 h-3.5 ${showOnlyProblems || problemCount > 0 ? 'text-red-500' : 'text-zinc-300'}`} />
+            {locale === 'en' ? 'Issues' : 'Проблемные'}
+            <span
+              className={`px-1.5 py-px rounded-full text-[10px] ${
+                showOnlyProblems
+                  ? 'bg-white text-red-700 shadow-sm'
+                  : problemCount === 0
+                  ? 'bg-zinc-100 text-zinc-300'
+                  : 'bg-red-100 text-red-700'
+              }`}
+            >
+              {problemCount}
+            </span>
+          </button>
         )}
 
         {/* Status Filter Tabs */}
