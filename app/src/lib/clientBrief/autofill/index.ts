@@ -53,7 +53,10 @@ export async function generateBriefAutofill(
       { role: 'user', content: user },
     ],
     temperature: 0.1,
-    maxTokens: 3500,
+    // Расширенный whitelist (19 полей вместо 11) + source-snippets для каждого
+    // заполненного поля → ответ может занимать 4-5K токенов. Старый лимит 3500
+    // приводил к усечённому JSON и failed parse.
+    maxTokens: 6000,
     responseFormat: { type: 'json_object' },
     signal,
     title: 'Portal - Client Brief Autofill',
