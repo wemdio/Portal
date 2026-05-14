@@ -38,7 +38,7 @@ function nameFromSrc(src: string): string | null {
   if (!src) return null;
   const match = src.match(/([^/]+)\.\w{3,4}(?:\?.*)?$/);
   if (!match) return null;
-  let name = match[1]
+  const name = match[1]
     .replace(/[-_]+/g, ' ')
     .replace(/\d{2,}/g, '')
     .replace(/\s+/g, ' ')
