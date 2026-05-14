@@ -719,7 +719,7 @@ export default function TgTranscribePage() {
 
   return (
     <div className="flex gap-6 text-left max-w-full">
-      <div className="min-w-0 flex-1 max-w-7xl space-y-6">
+      <div className="min-w-0 flex-1 space-y-6">
         {/* Header */}
         <header className="space-y-2">
           <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
