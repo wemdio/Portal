@@ -15,7 +15,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
-import { HH_API_BASE } from '@/lib/parsers/hhArchive/parser';
+import { HH_API_BASE, parseAreas } from '@/lib/parsers/hhArchive/parser';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,7 +77,9 @@ export async function POST(req: NextRequest) {
       params.set('text', q);
       params.set('per_page', '1');
       params.set('page', '0');
-      params.set('area', area);
+      const areas = parseAreas(area);
+      if (areas.length === 0) params.append('area', '113');
+      else for (const a of areas) params.append('area', a);
       if (archived) params.set('archived', 'true');
       if (dateFrom) params.set('date_from', dateFrom);
       if (dateTo) params.set('date_to', dateTo);

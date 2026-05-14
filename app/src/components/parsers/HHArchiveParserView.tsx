@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
+import { RegionPicker } from './RegionPicker';
+import { findRegionById } from '@/lib/parsers/hhArchive/regions';
 
 /**
  * HH Archive Parser UI — отдельная вкладка для архивных (закрытых) вакансий
@@ -55,7 +57,8 @@ const CHUNK_HELP: Record<ArchiveJob['chunk_strategy'], string> = {
 
 export function HHArchiveParserView() {
   const [queriesRaw, setQueriesRaw] = useState(DEFAULT_QUERIES);
-  const [area, setArea] = useState('113');
+  // areas — массив выбранных area id. Пусто = вся РФ (113, дефолт на сервере).
+  const [areas, setAreas] = useState<string[]>(['113']);
   const [dateFrom, setDateFrom] = useState(() => `${new Date().getFullYear() - 1}-01-01`);
   const [dateTo, setDateTo] = useState(() => `${new Date().getFullYear() - 1}-12-31`);
   const [chunkStrategy, setChunkStrategy] = useState<ArchiveJob['chunk_strategy']>('monthly');
@@ -114,7 +117,7 @@ export function HHArchiveParserView() {
         method: 'POST',
         body: JSON.stringify({
           search_queries: queries,
-          area,
+          area: areas.join(','),
           date_from: dateFrom,
           date_to: dateTo,
           archived: true,
@@ -141,7 +144,7 @@ export function HHArchiveParserView() {
         method: 'POST',
         body: JSON.stringify({
           search_queries: queries,
-          area,
+          area: areas.join(','),
           date_from: dateFrom,
           date_to: dateTo,
           archived: true,
@@ -266,15 +269,11 @@ export function HHArchiveParserView() {
 
         <div className="grid grid-cols-3 gap-4">
           <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1">Регион</label>
-            <input
-              type="text"
-              value={area}
-              onChange={(e) => setArea(e.target.value)}
-              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono"
-              placeholder="113"
+            <label className="block text-sm font-semibold text-gray-700 mb-1">Регионы</label>
+            <RegionPicker
+              value={areas}
+              onChange={(ids) => { setAreas(ids); setPreview(null); }}
             />
-            <p className="text-xs text-gray-500 mt-1">113=РФ, 1=Москва, 2=СПб</p>
           </div>
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-1">Разбивка периода</label>
@@ -396,7 +395,7 @@ export function HHArchiveParserView() {
                     <span className="text-gray-700 truncate">{j.search_queries.slice(0, 3).join(', ')}{j.search_queries.length > 3 ? '…' : ''}</span>
                   </div>
                   <div className="text-xs text-gray-500 mt-0.5">
-                    {j.date_from} → {j.date_to} · регион {j.area} · {j.saved_total.toLocaleString()} строк
+                    {j.date_from} → {j.date_to} · {formatAreas(j.area)} · {j.saved_total.toLocaleString()} строк
                   </div>
                 </div>
                 <div className="flex gap-2 shrink-0">
@@ -432,6 +431,16 @@ export function HHArchiveParserView() {
       )}
     </div>
   );
+}
+
+/** Превращает CSV area ("1,2,3") в человекочитаемое «регионы: Москва, СПб, Екатеринбург». */
+function formatAreas(csv: string): string {
+  const ids = csv.split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0) return 'регион 113';
+  const names = ids.map((id) => findRegionById(id)?.name ?? `area=${id}`);
+  if (names.length === 1) return `регион ${names[0]}`;
+  if (names.length <= 3) return `регионы: ${names.join(', ')}`;
+  return `${names.length} регионов: ${names.slice(0, 2).join(', ')}…`;
 }
 
 function StatusBadge({ status }: { status: ArchiveJob['status'] }) {

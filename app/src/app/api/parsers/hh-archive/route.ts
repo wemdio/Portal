@@ -53,7 +53,17 @@ export async function POST(req: NextRequest) {
   if (queries.length === 0) return err('search_queries обязательны', 400);
   if (queries.length > 30) return err('Слишком много запросов (макс 30)', 400);
 
-  const area = typeof body.area === 'string' && body.area ? body.area : '113';
+  // area может быть CSV для мульти-региона ("1,2,3"). Нормализуем:
+  // убираем пробелы, дедуплицируем, отсекаем пустое; default = '113' (РФ).
+  const rawArea = typeof body.area === 'string' && body.area ? body.area : '113';
+  const areaTokens = Array.from(
+    new Set(rawArea.split(',').map((s) => s.trim()).filter(Boolean)),
+  );
+  if (areaTokens.length === 0) areaTokens.push('113');
+  if (areaTokens.length > 30) {
+    return err('Слишком много регионов (макс 30)', 400);
+  }
+  const area = areaTokens.join(',');
   const dateFrom = typeof body.date_from === 'string' ? body.date_from : '';
   const dateTo = typeof body.date_to === 'string' ? body.date_to : '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {

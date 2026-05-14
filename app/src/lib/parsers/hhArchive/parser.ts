@@ -94,7 +94,21 @@ function toIsoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Формирует URL запроса к api.hh.ru/vacancies. */
+/**
+ * Парсит area-поле в массив. Поддерживает CSV ("1,2,3") и single ("113").
+ * Пустые токены отсекаются, чтобы не плодить пустые `area=` параметры.
+ */
+export function parseAreas(area: string): string[] {
+  return area
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Формирует URL запроса к api.hh.ru/vacancies.
+ * Если area CSV — добавит несколько `area=` параметров (HH OR-объединит их).
+ */
 export function buildSearchUrl(
   config: HHParseConfig,
   query: string,
@@ -106,7 +120,9 @@ export function buildSearchUrl(
   params.set('text', query);
   params.set('per_page', String(HH_API_PAGE_SIZE));
   params.set('page', String(page));
-  params.set('area', config.area);
+  const areas = parseAreas(config.area);
+  if (areas.length === 0) params.append('area', '113');
+  else for (const a of areas) params.append('area', a);
   if (config.archived) params.set('archived', 'true');
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
