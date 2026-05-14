@@ -1181,8 +1181,8 @@ body:has(.client-portal) {
   --cp-accent: #4A6FA5;
   --cp-accent-h: #3D5A87;
   --cp-text: #3A3530;
-  --cp-text-m: #8A8078;
-  --cp-text-l: #B0A89E;
+  --cp-text-m: #6A6058;
+  --cp-text-l: #9A9088;
   --cp-danger: #B85450;
   background: var(--cp-bg);
   color: var(--cp-text);
@@ -1473,7 +1473,7 @@ body:has(.client-portal) {
   background-color: var(--cp-bg) !important;
 }
 
-/* Inputs / selects / textareas in admin components: make them inset cream */
+/* Inputs / selects / textareas in admin components: make them clean and readable */
 .client-portal input[type="text"],
 .client-portal input[type="email"],
 .client-portal input[type="password"],
@@ -1484,16 +1484,24 @@ body:has(.client-portal) {
 .client-portal input[type="url"],
 .client-portal select,
 .client-portal textarea {
-  background-color: var(--cp-bg);
+  background-color: #FFFFFF !important;
   color: var(--cp-text);
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l) !important;
-  border-color: transparent !important;
+  box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.04) !important;
+  border: 1px solid rgba(180, 173, 164, 0.3) !important;
+  border-radius: 10px !important;
 }
 .client-portal input[type="text"]::placeholder,
 .client-portal input[type="email"]::placeholder,
 .client-portal input[type="search"]::placeholder,
 .client-portal textarea::placeholder {
   color: var(--cp-text-l);
+}
+.client-portal input[type="text"]:focus,
+.client-portal input[type="email"]:focus,
+.client-portal textarea:focus {
+  border-color: var(--cp-accent) !important;
+  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.15) !important;
+  outline: none;
 }
 
 /* Hover surfaces (e.g. hover:bg-gray-50/100 in admin lists) */

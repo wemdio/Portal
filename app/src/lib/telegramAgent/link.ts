@@ -3,7 +3,31 @@ import { verifyLinkToken } from './linkToken';
 import { sendMessage } from './telegram';
 import { logAudit, logError } from '@/lib/loggerServer';
 
-export async function handleLinkCommand(chatId: number, telegramId: number, token: string): Promise<void> {
+export interface TelegramLinkProfile {
+  username?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+}
+
+function normalizeTelegramUsername(username: string | null | undefined): string | null {
+  const value = username?.trim().replace(/^@+/, '');
+  return value ? value.toLowerCase() : null;
+}
+
+function buildTelegramProfilePatch(profile?: TelegramLinkProfile) {
+  return {
+    telegram_username: normalizeTelegramUsername(profile?.username),
+    telegram_first_name: profile?.firstName?.trim() || null,
+    telegram_last_name: profile?.lastName?.trim() || null,
+  };
+}
+
+export async function handleLinkCommand(
+  chatId: number,
+  telegramId: number,
+  token: string,
+  profile?: TelegramLinkProfile,
+): Promise<void> {
   try {
     const botToken = process.env.TG_AGENT_BOT_TOKEN;
     if (!botToken || !supabaseAdmin) {
@@ -31,6 +55,16 @@ export async function handleLinkCommand(chatId: number, telegramId: number, toke
 
     if (existing) {
       if (existing.user_id === result.userId) {
+        const { error: updateError } = await supabaseAdmin
+          .from('telegram_links')
+          .update({
+            ...buildTelegramProfilePatch(profile),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('telegram_id', String(telegramId));
+        if (updateError) {
+          await logError('telegram-agent.link.update-profile-failed', updateError);
+        }
         await sendMessage(chatId, '✅ Ваш аккаунт уже привязан к порталу.');
       } else {
         await sendMessage(chatId, '⚠️ Этот Telegram-аккаунт уже привязан к другому пользователю портала.');
@@ -51,7 +85,11 @@ export async function handleLinkCommand(chatId: number, telegramId: number, toke
 
     const { error: insertError } = await supabaseAdmin
       .from('telegram_links')
-      .insert({ user_id: result.userId, telegram_id: String(telegramId) });
+      .insert({
+        user_id: result.userId,
+        telegram_id: String(telegramId),
+        ...buildTelegramProfilePatch(profile),
+      });
 
     if (insertError) {
       await logError('telegram-agent.link.insert-failed', insertError);
