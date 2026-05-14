@@ -24,6 +24,7 @@ import {
   sleep,
   type ChunkStrategy,
   type HHParseConfig,
+  type HHRawResponse,
 } from './parser';
 
 const DEFAULT_USER_AGENT =
@@ -217,7 +218,7 @@ async function persistVacancies(
   db: SupabaseClient,
   jobId: string,
   query: string,
-  response: { items?: unknown[] },
+  response: HHRawResponse,
   seen: Set<string>,
 ): Promise<void> {
   const vacs = extractVacancies(response);
