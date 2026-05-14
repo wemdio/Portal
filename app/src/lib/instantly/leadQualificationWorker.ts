@@ -273,33 +273,55 @@ async function qualifyOneReply(
   else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
 
-  const { data: inserted } = await db.from('instantly_lead_qualifications').upsert({
-    campaign_id: campaignId,
-    campaign_name: campaignName,
-    lead_email: leadEmail,
-    lead_name: leadName,
-    company_name: companyName,
-    thread_id: reply.thread_id,
-    reply_subject: reply.subject ?? null,
-    reply_preview: replyText.slice(0, 300) || null,
-    reply_body: replyText || null,
-    last_outbound_preview: lastOutText?.slice(0, 300) ?? null,
-    last_outbound_ue_type: result.threadContext?.lastOutbound?.ue_type ?? null,
-    status,
-    proposal_seen: result.proposalSeen,
-    interest_signals: result.interestSignals,
-    ai_reason: result.reason,
-    ai_confidence: result.confidence,
-    instantly_email_id: reply.id,
-    instantly_lead_id: null,
-    reply_timestamp: reply.timestamp_email ?? null,
-    objection_handleable: result.objectionHandleable,
-    objection_draft: result.objectionDraft,
-  }, { onConflict: 'instantly_email_id', ignoreDuplicates: true }).select('id').single();
+  // ВАЖНО: ловим error от upsert. Без этого тихий 42P10 («there is no unique
+  // or exclusion constraint matching the ON CONFLICT specification») съедал
+  // все классификации с ~6 мая 2026 — таблица оставалась пустой, AI крутился
+  // вхолостую. Миграция 20260514_0001 заменила partial UNIQUE на full UNIQUE;
+  // если ON CONFLICT снова сломается — теперь сразу будет видно в логах.
+  const { data: inserted, error: upsertErr } = await db
+    .from('instantly_lead_qualifications')
+    .upsert(
+      {
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        lead_email: leadEmail,
+        lead_name: leadName,
+        company_name: companyName,
+        thread_id: reply.thread_id,
+        reply_subject: reply.subject ?? null,
+        reply_preview: replyText.slice(0, 300) || null,
+        reply_body: replyText || null,
+        last_outbound_preview: lastOutText?.slice(0, 300) ?? null,
+        last_outbound_ue_type: result.threadContext?.lastOutbound?.ue_type ?? null,
+        status,
+        proposal_seen: result.proposalSeen,
+        interest_signals: result.interestSignals,
+        ai_reason: result.reason,
+        ai_confidence: result.confidence,
+        instantly_email_id: reply.id,
+        instantly_lead_id: null,
+        reply_timestamp: reply.timestamp_email ?? null,
+        objection_handleable: result.objectionHandleable,
+        objection_draft: result.objectionDraft,
+      },
+      { onConflict: 'instantly_email_id', ignoreDuplicates: true },
+    )
+    .select('id')
+    .maybeSingle();
+
+  if (upsertErr) {
+    workerLog(
+      'error',
+      `Upsert failed for ${leadEmail} (campaign ${campaignId}, email_id=${reply.id ?? 'null'}): ${upsertErr.message ?? String(upsertErr)} [code=${upsertErr.code ?? 'n/a'}]`,
+    );
+    // Не молча проглатываем — кидаем дальше, чтобы внешний catch в pollAndQualifyReplies
+    // записал status='error' и проблема была видна и в БД, и в Telegram-алертах.
+    throw new Error(`Upsert failed: ${upsertErr.message ?? 'unknown'}`);
+  }
 
   workerLog(
     'info',
-    `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})`,
+    `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
   );
 
   if (status === 'lead' && inserted?.id && supabaseMain) {
