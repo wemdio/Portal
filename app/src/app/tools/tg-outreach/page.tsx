@@ -969,6 +969,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [name, setName] = useState('');
   const [bulkText, setBulkText] = useState('');
   const [saving, setSaving] = useState(false);
+  /** Previously errors were ignored — authFetch does not throw on 4xx/5xx, so users saw "nothing happened". */
+  const [proxyError, setProxyError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -985,28 +987,48 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const addProxy = async () => {
     if (!url.trim()) return;
     setSaving(true);
-    await authFetch(`${API_BASE}/proxies`, {
-      method: 'POST',
-      body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
-    });
-    setSaving(false);
-    setUrl(''); setName(''); setShowAdd(false);
-    void load();
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Ошибка сервера (${res.status})`);
+        return;
+      }
+      setUrl(''); setName(''); setShowAdd(false);
+      void load();
+    } finally {
+      setSaving(false);
+    }
   };
 
   const addBulk = async () => {
     const lines = bulkText.split('\n').map(l => l.trim()).filter(Boolean);
     if (!lines.length) return;
     setSaving(true);
-    for (const line of lines) {
-      await authFetch(`${API_BASE}/proxies`, {
-        method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId, url: line, name: '' }),
-      });
+    setProxyError(null);
+    try {
+      for (let i = 0; i < lines.length; i++) {
+        const res = await authFetch(`${API_BASE}/proxies`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, url: lines[i], name: '' }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(
+            `Строка ${i + 1}: ${errBody?.error ?? `ошибка ${res.status}`}. Остальные строки не загружены.`,
+          );
+          return;
+        }
+      }
+      setBulkText(''); setShowBulk(false);
+      void load();
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    setBulkText(''); setShowBulk(false);
-    void load();
   };
 
   const toggleActive = async (id: string, current: boolean) => {
@@ -1030,23 +1052,29 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           Прокси кампании <span className="text-gray-400 font-normal">({proxies.length})</span>
         </span>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); }}
+          <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
             Массовое добавление
           </button>
-          <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); }}
+          <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); setProxyError(null); }}
             className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
             <Plus className="h-3.5 w-3.5" /> Добавить
           </button>
         </div>
       </div>
 
+      {proxyError && (showAdd || showBulk) && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {proxyError}
+        </div>
+      )}
+
       {showAdd && (
         <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <label className="space-y-1">
               <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
-              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="socks5://user:pass@host:port"
+              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://user:pass@host:port"
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
             <label className="space-y-1">
@@ -1070,7 +1098,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
           <p className="text-xs text-gray-500">Введите по одному URL прокси на строку:</p>
           <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-            placeholder={'socks5://user:pass@host:port\nhttp://user:pass@host:port'}
+            placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
             className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
           <div className="flex gap-2">
             <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}

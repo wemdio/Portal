@@ -39,7 +39,7 @@ function parseProxyString(raw: string): {
 interface Props {
   allTags: TgOutreachTag[];
   onClose: () => void;
-  onCreated: () => void;
+  onCreated?: () => void | Promise<void>;
 }
 
 export function AddProxyModal({ allTags, onClose, onCreated }: Props) {
@@ -82,7 +82,7 @@ export function AddProxyModal({ allTags, onClose, onCreated }: Props) {
         method: 'POST',
         json: { ip: ip.trim(), port: Number(port), login, password, type, notes, tag_ids: selectedTags },
       });
-      onCreated();
+      await onCreated?.();
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка');
