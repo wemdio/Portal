@@ -362,7 +362,7 @@ describe('applySignalsToTabData — extra columns from extractors', () => {
       ],
     });
 
-    expect(tabData[1][5]).toBe('self-serve');
+    expect(tabData[1][5]).toBe('Самообслуживание');
     expect(tabData[1][6]).toBe('990 RUB');
   });
 
