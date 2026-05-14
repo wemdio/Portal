@@ -21,6 +21,19 @@
 
 DROP INDEX IF EXISTS public.idx_instantly_lead_qualifications_email_id;
 
-ALTER TABLE public.instantly_lead_qualifications
-  ADD CONSTRAINT instantly_lead_qualifications_email_id_key
-  UNIQUE (instantly_email_id);
+-- Идемпотентный ADD CONSTRAINT: ensureDatabase прокатывает каждую миграцию
+-- при каждом деплое, и эта была сначала применена руками на проде,
+-- потом попала в репо — без guard вторая попытка ловит 42P07
+-- (relation already exists) и срывает весь деплой.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'instantly_lead_qualifications_email_id_key'
+      AND conrelid = 'public.instantly_lead_qualifications'::regclass
+  ) THEN
+    ALTER TABLE public.instantly_lead_qualifications
+      ADD CONSTRAINT instantly_lead_qualifications_email_id_key
+      UNIQUE (instantly_email_id);
+  END IF;
+END$$;
