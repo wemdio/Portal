@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
+import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 
 const admin = supabaseAdmin!;
 
@@ -91,20 +92,41 @@ async function autoCompleteIfStuck(jobId: string): Promise<void> {
     return;
   }
 
-  // Случай 2: промежуточный шаг, > 15 минут — помечаем failed.
+  // Случай 2: зависло на промежуточном шаге > 15 минут — РЕСУМИМ.
+  //
+  // Раньше тут было status='failed'. Теперь — пытаемся продолжить с того
+  // места где умерло. `data` персистится между шагами + onCheckpoint
+  // внутри enrich, так что прогресс не теряется. Worker сам поймёт что
+  // это resume (status уже 'processing', current_step >0) и пропустит
+  // выполненные шаги.
+  //
+  // CAS-блокировка через cutoff на started_at: только первый GET после
+  // 15 минут реально клеймит задачу. Если два юзера одновременно открыли
+  // карточку — второй увидит свежий started_at и не запустит второй
+  // worker (иначе они бы конкурентно писали в data).
   if (!isLastStep && elapsedMs >= INTERMEDIATE_STUCK_AFTER_MS) {
-    await admin
+    const cutoffIso = new Date(Date.now() - INTERMEDIATE_STUCK_AFTER_MS).toISOString();
+    const { data: claimed } = await admin
       .from('base_constructor_jobs')
-      .update({
-        status: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message:
-          `Задача зависла между шагами (${row.current_step}/${row.total_steps}, ` +
-          `${Math.round(elapsedMs / 60_000)} мин без прогресса). ` +
-          'Скорее всего был рестарт сервера. Запустите заново.',
-      })
+      .update({ started_at: new Date().toISOString() })
       .eq('id', jobId)
-      .eq('status', 'processing');
+      .eq('status', 'processing')
+      .lt('started_at', cutoffIso)
+      .select('id');
+
+    if (!claimed?.length) {
+      // Уже клеймнули в другом запросе — пусть тот и резумит.
+      return;
+    }
+
+    console.log(`[base-constructor][${jobId}] auto-resume after ${Math.round(elapsedMs / 60_000)}min stuck on step ${row.current_step}/${row.total_steps}`);
+
+    // Fire-and-forget — та же архитектура что и при первичном POST.
+    // Если этот промис снова умрёт от рестарта — следующий GET через
+    // ещё 15 минут попробует резумнуть снова.
+    runBaseConstructorJob(jobId).catch((err) =>
+      console.error(`[base-constructor][${jobId}] auto-resume failed:`, err),
+    );
     return;
   }
 }
