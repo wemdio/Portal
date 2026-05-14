@@ -278,33 +278,25 @@ export class UnipileClient {
 
   /**
    * Patch an account's proxy settings in Unipile.
-   * proxyStr format: "ip:port:user:pass" (HTTP proxy).
-   * Pass null/empty to remove proxy (revert to Unipile default pool).
+   *
+   * Принимаемые форматы (раньше — только два, теперь — все четыре):
+   *   1. `http://user:pass@host:port` / `https://...` — placeholder в Settings UI
+   *      обещал этот формат, но карточка аккаунта раньше его не принимала.
+   *      Юзеры копировали URL → split(':') давал 5 частей → throw → 502.
+   *   2. `user:pass@host:port`        — без схемы, для удобства.
+   *   3. `host:port:user:pass`        — placeholder в карточке аккаунта.
+   *      Поддерживает пароль с `:` (5+ сегментов — хвост склеивается).
+   *   4. `host:port`                  — без аутентификации.
+   *
+   * `null` / пустая строка — снять прокси, вернуть аккаунт в пул Unipile.
    */
   async patchAccountProxy(
     unipileAccountId: string,
     proxyStr: string | null,
   ): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = {};
-    if (proxyStr) {
-      const parts = proxyStr.split(':');
-      if (parts.length === 4) {
-        body.proxy = {
-          host: parts[0],
-          port: Number(parts[1]),
-          username: parts[2],
-          password: parts[3],
-          protocol: 'http',
-        };
-      } else if (parts.length === 2) {
-        body.proxy = {
-          host: parts[0],
-          port: Number(parts[1]),
-          protocol: 'http',
-        };
-      } else {
-        throw new Error(`Invalid proxy format: expected ip:port or ip:port:user:pass, got "${proxyStr}"`);
-      }
+    if (proxyStr && proxyStr.trim()) {
+      body.proxy = parseProxyForUnipile(proxyStr.trim());
     } else {
       body.proxy = null;
     }
@@ -313,6 +305,86 @@ export class UnipileClient {
       addAccountId: false,
     });
   }
+}
+
+/**
+ * Парсит произвольный формат строки прокси в payload Unipile API.
+ * Вынесен из метода чтобы покрыть юнит-тестом без MSW-моков Unipile.
+ */
+export function parseProxyForUnipile(raw: string): {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  protocol: 'http';
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) throw new Error('Empty proxy string');
+
+  // 1. URL-формат: http(s)://[user:pass@]host:port
+  if (trimmed.includes('://')) {
+    let u: URL;
+    try { u = new URL(trimmed); } catch {
+      throw new Error(`Invalid proxy URL: "${trimmed}"`);
+    }
+    const port = Number(u.port);
+    if (!u.hostname || !port) {
+      throw new Error(`Proxy URL missing host or port: "${trimmed}"`);
+    }
+    return {
+      host: u.hostname,
+      port,
+      username: u.username ? decodeURIComponent(u.username) : undefined,
+      password: u.password ? decodeURIComponent(u.password) : undefined,
+      // Unipile принимает только HTTP-туннель — даже если юзер написал https://,
+      // CONNECT-handshake идёт по той же логике. Не пробрасываем https как
+      // отдельный протокол, чтобы Unipile не ругался на неподдерживаемое.
+      protocol: 'http',
+    };
+  }
+
+  // 2. user:pass@host:port (без схемы)
+  if (trimmed.includes('@')) {
+    const atIdx = trimmed.lastIndexOf('@');
+    const auth = trimmed.slice(0, atIdx);
+    const hostPort = trimmed.slice(atIdx + 1);
+    const [host, portStr] = hostPort.split(':');
+    const port = Number(portStr);
+    const colonIdx = auth.indexOf(':');
+    const username = colonIdx >= 0 ? auth.slice(0, colonIdx) : auth;
+    const password = colonIdx >= 0 ? auth.slice(colonIdx + 1) : '';
+    if (!host || !port) {
+      throw new Error(`Proxy missing host or port in "${trimmed}"`);
+    }
+    return { host, port, username, password, protocol: 'http' };
+  }
+
+  // 3. host:port:user:pass — главный «провайдерский» экспорт (Proxy6/Infatica).
+  //    Пароль может содержать `:`, поэтому split с лимитом 4 и хвост в pass.
+  const parts = trimmed.split(':');
+  if (parts.length >= 4) {
+    const [host, portStr, username, ...passParts] = parts;
+    const port = Number(portStr);
+    const password = passParts.join(':');
+    if (!host || !port || !username) {
+      throw new Error(`Proxy 4-segment parse failed for "${trimmed}"`);
+    }
+    return { host, port, username, password, protocol: 'http' };
+  }
+
+  // 4. host:port — анонимный
+  if (parts.length === 2) {
+    const port = Number(parts[1]);
+    if (!parts[0] || !port) {
+      throw new Error(`Proxy host:port parse failed for "${trimmed}"`);
+    }
+    return { host: parts[0], port, protocol: 'http' };
+  }
+
+  throw new Error(
+    `Invalid proxy format. Поддерживаются: http://user:pass@host:port, ` +
+      `user:pass@host:port, host:port:user:pass, host:port. Получено: "${trimmed}"`,
+  );
 }
 
 // ---- Static helpers ---------------------------------------------------
