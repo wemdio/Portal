@@ -23,10 +23,13 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       return value === true ? 'Да' : '';
     case 'cases_count':
     case 'vacancies_count':
-    case 'founded_year':
     case 'team_size':
+      return typeof value === 'number' && value > 0 ? String(value) : '';
+    case 'founded_year':
       return typeof value === 'number' ? String(value) : '';
     case 'pricing_model':
+      if (typeof value === 'string' && value !== 'unknown') return value;
+      return '';
     case 'blog_last_post':
     case 'stack':
     case 'profile':
@@ -39,11 +42,13 @@ export function formatExtraValue(key: ExtractorKey, value: unknown): string {
       return '';
     case 'hiring_roles':
       if (typeof value === 'object' && value !== null) {
-        const r = value as { marketing?: boolean; engineering?: boolean; sales?: boolean };
+        const r = value as { marketing?: boolean; engineering?: boolean; sales?: boolean; design?: boolean; product?: boolean };
         const parts: string[] = [];
         if (r.engineering) parts.push('инженеры');
         if (r.marketing) parts.push('маркетинг');
         if (r.sales) parts.push('продажи');
+        if (r.design) parts.push('дизайн');
+        if (r.product) parts.push('продукт');
         return parts.join(', ');
       }
       return '';

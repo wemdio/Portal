@@ -230,6 +230,8 @@ export interface HiringRoles {
   marketing: boolean;
   engineering: boolean;
   sales: boolean;
+  design: boolean;
+  product: boolean;
 }
 
 /** Full shape of the JSON we store in `website_enrichment_queue.result_text`. */

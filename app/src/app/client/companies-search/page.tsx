@@ -62,7 +62,7 @@ export default function CompaniesSearchPage() {
   const [includeIp, setIncludeIp] = useState(false);
 
   const [calcLoading, setCalcLoading] = useState(false);
-  const [calcResult, setCalcResult] = useState<{ count: number } | null>(null);
+  const [calcResult, setCalcResult] = useState<{ count: number; remaining: number } | null>(null);
   const [calcError, setCalcError] = useState<string | null>(null);
 
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
@@ -140,8 +140,8 @@ export default function CompaniesSearchPage() {
         return;
       }
 
-      const data = (await res.json()) as { count: number };
-      setCalcResult({ count: data.count });
+      const data = (await res.json()) as { count: number; remaining: number };
+      setCalcResult({ count: data.count, remaining: data.remaining });
     } catch (err) {
       setCalcError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
     } finally {
@@ -508,6 +508,15 @@ export default function CompaniesSearchPage() {
               <span className="font-bold text-lg text-gray-900">
                 {calcResult.count.toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU')}
               </span>
+              {calcResult.count > 0 && (
+                <span className="text-xs text-gray-500 ml-2">
+                  ({t(
+                    `после скачивания ваш остаток по тарифу: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('ru-RU')}`,
+                    `remaining after download: ${Math.max(0, calcResult.remaining - calcResult.count).toLocaleString('en-US')}`,
+                    locale,
+                  )})
+                </span>
+              )}
             </div>
           </div>
         )}
