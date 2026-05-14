@@ -342,6 +342,61 @@ ${quotedHint}
 Определи категорию ответа, учитывая ВСЁ содержание письма, включая цитированный текст.`;
 }
 
+/**
+ * Чинит самую частую причину «Bad control character in string literal in JSON»
+ * — AI вкладывает в строку реальный \n / \r / \t / null-byte вместо их
+ * escape-форм (`\\n`, `\\r`, `\\t`). Стандартный JSON.parse такие символы
+ * внутри значения "..." считает невалидными и падает.
+ *
+ * Стейт-машина: проходим посимвольно, отслеживаем «мы внутри строки или нет»,
+ * экранируем control characters только внутри строк. Структурные пробелы и
+ * переводы строк между ключами/значениями не трогаем.
+ *
+ * Также удаляем редко-встречающиеся управляющие байты (DEL, U+007F и т.п.),
+ * которые в любом случае ломают и parse, и валидацию.
+ */
+function sanitizeAIJsonString(raw: string): string {
+  // Убираем «совсем плохие» control bytes (кроме \t \n \r — их обработает ниже).
+  // Через RegExp+строку с \u-escape — control chars в /.../ литерале
+  // TypeScript парсит как «Unterminated regular expression literal».
+  const stripCtrl = new RegExp(
+    '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]',
+    'g',
+  );
+  const stripped = raw.replace(stripCtrl, '');
+
+  let inString = false;
+  let escapeNext = false;
+  let out = '';
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (escapeNext) {
+      out += ch;
+      escapeNext = false;
+      continue;
+    }
+    if (inString && ch === '\\') {
+      out += ch;
+      escapeNext = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\n') out += '\\n';
+      else if (ch === '\r') out += '\\r';
+      else if (ch === '\t') out += '\\t';
+      else out += ch;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 function parseAIResult(content: string): QualificationResult {
   const trimmed = content.trim();
   let parsed: Record<string, unknown>;
@@ -357,7 +412,7 @@ function parseAIResult(content: string): QualificationResult {
     } catch {
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        console.error('[LeadQualifier] Cannot parse AI response:', trimmed.slice(0, 500));
+        console.error('[LeadQualifier] Cannot find JSON object in AI response:', trimmed.slice(0, 500));
         return {
           isLead: false,
           proposalSeen: false,
@@ -369,7 +424,35 @@ function parseAIResult(content: string): QualificationResult {
           objectionDraft: null,
         };
       }
-      parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      try {
+        parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      } catch {
+        // Финальная попытка: санитизация управляющих символов внутри строк.
+        // Случай hello@igroup.dev (14 мая 2026): AI вернул JSON с
+        // неэкранированным \n внутри "reason" — JSON.parse падал с
+        // «Bad control character at position 571». Раньше лид терялся.
+        try {
+          parsed = JSON.parse(sanitizeAIJsonString(jsonMatch[0])) as Record<string, unknown>;
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error(
+            '[LeadQualifier] All parse attempts failed:',
+            errMsg,
+            '\nRaw AI response (first 800 chars):\n',
+            trimmed.slice(0, 800),
+          );
+          return {
+            isLead: false,
+            proposalSeen: false,
+            interestSignals: [],
+            reason: `AI вернул JSON с управляющими символами: ${errMsg.slice(0, 150)}`,
+            confidence: 0,
+            needsReview: true,
+            objectionHandleable: false,
+            objectionDraft: null,
+          };
+        }
+      }
     }
   }
 
@@ -396,6 +479,12 @@ function parseAIResult(content: string): QualificationResult {
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Внутренние функции для unit-тестов парсера. Не использовать в продакшен-коде. */
+export const _private = {
+  sanitizeAIJsonString,
+  parseAIResult,
+};
 
 export async function classifyWithAI(
   ctx: ThreadContext,
