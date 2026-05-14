@@ -40,11 +40,16 @@ describe('normalizeProxyUrl', () => {
     );
   });
 
-  it('URL-encodes user/pass with special chars in the 4-segment form', () => {
-    // Пароль с @ и # — встречается в провайдерах. Без encodeURIComponent
-    // получился бы невалидный URL.
-    expect(normalizeProxyUrl('1.2.3.4:8080:u@ser:p#ass')).toBe(
-      'http://u%40ser:p%23ass@1.2.3.4:8080',
+  it('URL-encodes user/pass with non-@ special chars in the 4-segment form', () => {
+    // Пароль с # и пробельными символами — встречается в провайдерах.
+    // Без encodeURIComponent получился бы невалидный URL.
+    //
+    // NB: символ `@` в user/pass в 4-сегментной форме намеренно не поддерживаем
+    // — иначе невозможно отличить `host:port:u@ser:pass` от формы
+    // `user@host:port:pass`. Guard в normalizeProxyUrl: если в строке
+    // встречается `@`, она парсится как `user:pass@host:port` (другая ветка).
+    expect(normalizeProxyUrl('1.2.3.4:8080:user:p#ass')).toBe(
+      'http://user:p%23ass@1.2.3.4:8080',
     );
   });
 
