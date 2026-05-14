@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
+import {
+  getClientTariffRow,
+  resolveEffectiveLimits,
+  getBillingPeriodStart,
+  countClientRows,
+} from '@/lib/tariffs';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
@@ -81,6 +88,19 @@ export async function POST(req: NextRequest) {
     return jsonError('Invalid JSON', 400);
   }
 
+  const tariffRow = await getClientTariffRow(result.auth.userId);
+  const limits = resolveEffectiveLimits(tariffRow);
+  const periodStart = getBillingPeriodStart(tariffRow);
+  const usedRows = await countClientRows(result.auth.userId, periodStart);
+  const remaining = Math.max(0, limits.max_rows - usedRows);
+
+  if (remaining <= 0) {
+    return jsonError(
+      `Лимит запросов по тарифу исчерпан. Доступно 0 из ${limits.max_rows.toLocaleString('ru-RU')} запросов.`,
+      429,
+    );
+  }
+
   const allRows: Row[] = [];
   let offset = 0;
 
@@ -96,6 +116,12 @@ export async function POST(req: NextRequest) {
 
   if (allRows.length === 0) {
     return jsonError('Нет данных по заданным фильтрам', 404);
+  }
+
+  if (supabaseAdmin) {
+    await supabaseAdmin
+      .from('client_companies_search_exports')
+      .insert({ user_id: result.auth.userId, row_count: allRows.length });
   }
 
   const dateSuffix = new Date().toISOString().slice(0, 10);

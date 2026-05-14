@@ -65,6 +65,33 @@ describe('extractHiring', () => {
     expect(result.has_sales).toBe(true);
   });
 
+  it('detects design roles by EN/RU keywords', () => {
+    const html = `
+      <main>
+        <a class="vacancy">UX/UI Designer</a>
+        <a class="vacancy">Графический дизайнер</a>
+      </main>
+    `;
+
+    const result = extractHiring(html);
+
+    expect(result.has_design).toBe(true);
+    expect(result.has_product).toBe(false);
+  });
+
+  it('detects product roles by EN/RU keywords', () => {
+    const html = `
+      <main>
+        <a class="vacancy">Product Manager</a>
+        <a class="vacancy">Продакт-менеджер</a>
+      </main>
+    `;
+
+    const result = extractHiring(html);
+
+    expect(result.has_product).toBe(true);
+  });
+
   it('returns zero count and all-false flags when page does not look like /careers', () => {
     const html = `
       <article>
@@ -79,23 +106,29 @@ describe('extractHiring', () => {
     expect(result.has_marketing).toBe(false);
     expect(result.has_engineering).toBe(false);
     expect(result.has_sales).toBe(false);
+    expect(result.has_design).toBe(false);
+    expect(result.has_product).toBe(false);
   });
 
-  it('combines all three role flags when multiple departments hire', () => {
+  it('combines all role flags when multiple departments hire', () => {
     const html = `
       <main>
         <div class="job">Marketing Lead</div>
         <div class="job">Senior Engineer</div>
         <div class="job">Sales Manager</div>
+        <div class="job">Product Manager</div>
+        <div class="job">UX Designer</div>
         <div class="job">Customer Support</div>
       </main>
     `;
 
     const result = extractHiring(html);
 
-    expect(result.vacancies_count).toBe(4);
+    expect(result.vacancies_count).toBe(6);
     expect(result.has_marketing).toBe(true);
     expect(result.has_engineering).toBe(true);
     expect(result.has_sales).toBe(true);
+    expect(result.has_design).toBe(true);
+    expect(result.has_product).toBe(true);
   });
 });

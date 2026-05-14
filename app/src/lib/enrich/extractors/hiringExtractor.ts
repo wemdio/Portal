@@ -1,13 +1,12 @@
 import * as cheerio from 'cheerio';
 
 const VACANCY_SELECTOR = [
-  '[class~="vacancy"]',
-  '[class~="vacancies"]',
-  '[class~="job"]',
-  '[class~="job-card"]',
-  '[class~="position"]',
-  '[class~="career"]',
-  '[class~="opening"]',
+  '[class*="vacancy"]', '[class*="vacancies"]',
+  '[class*="job-card"]', '[class*="job-item"]', '[class*="job-listing"]', '[class*="job_item"]',
+  '[class*="job "]', '[class="job"]',
+  '[class*="position"]',
+  '[class*="career-item"]', '[class*="career-card"]',
+  '[class*="opening-item"]', '[class*="opening-card"]', '[class*="opening"]',
 ].join(', ');
 
 const MARKETING_PATTERNS: RegExp[] = [
@@ -30,18 +29,36 @@ const SALES_PATTERNS: RegExp[] = [
   /\bменеджер по продажам\b/i, /\bпродаж/i, /\bаккаунт[-\s]?менеджер\b/i,
 ];
 
+const DESIGN_PATTERNS: RegExp[] = [
+  /\bdesigner\b/i, /\bux\b/i, /\bui\b/i, /\bux\/ui\b/i, /\bui\/ux\b/i,
+  /\bgraphic designer\b/i, /\bproduct designer\b/i, /\bvisual designer\b/i,
+  /\bweb designer\b/i, /\billustrat/i, /\bmotion design/i,
+  /\bдизайнер\b/i, /\bграфический дизайн/i, /\bвеб[-\s]?дизайн/i,
+];
+
+const PRODUCT_PATTERNS: RegExp[] = [
+  /\bproduct manager\b/i, /\bproduct owner\b/i, /\bproduct lead\b/i,
+  /\bpm\b/i, /\bpo\b/i, /\bproduct analyst\b/i,
+  /\bпродуктовый менеджер\b/i, /\bпродакт[-\s]?менеджер\b/i,
+  /\bпродакт[-\s]?оунер\b/i, /\bвладелец продукта\b/i,
+];
+
 const MAX_VACANCIES = 500;
+
+const VACANCY_TEXT_COUNT_RE = /(\d+)\s*(?:\+\s*)?(?:вакан|открыт|позици|open\s+position|job opening)/i;
 
 export interface HiringResult {
   vacancies_count: number;
   has_marketing: boolean;
   has_engineering: boolean;
   has_sales: boolean;
+  has_design: boolean;
+  has_product: boolean;
 }
 
 export function extractHiring(html: string): HiringResult {
   if (!html) {
-    return { vacancies_count: 0, has_marketing: false, has_engineering: false, has_sales: false };
+    return { vacancies_count: 0, has_marketing: false, has_engineering: false, has_sales: false, has_design: false, has_product: false };
   }
 
   const $ = cheerio.load(html);
@@ -52,13 +69,27 @@ export function extractHiring(html: string): HiringResult {
     if (t) titles.push(t);
   });
 
-  const vacancies_count = Math.min(elements.length, MAX_VACANCIES);
-  const allText = titles.join(' | ');
+  let vacancies_count = Math.min(elements.length, MAX_VACANCIES);
+
+  if (vacancies_count === 0) {
+    const bodyText = $('body').text();
+    const m = bodyText.match(VACANCY_TEXT_COUNT_RE);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > 0 && n <= MAX_VACANCIES) vacancies_count = n;
+    }
+  }
+
+  const allText = vacancies_count > 0 && titles.length > 0
+    ? titles.join(' | ')
+    : $('body').text();
 
   return {
     vacancies_count,
     has_marketing: MARKETING_PATTERNS.some((re) => re.test(allText)),
     has_engineering: ENGINEERING_PATTERNS.some((re) => re.test(allText)),
     has_sales: SALES_PATTERNS.some((re) => re.test(allText)),
+    has_design: DESIGN_PATTERNS.some((re) => re.test(allText)),
+    has_product: PRODUCT_PATTERNS.some((re) => re.test(allText)),
   };
 }

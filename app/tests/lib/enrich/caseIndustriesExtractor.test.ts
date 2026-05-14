@@ -38,16 +38,18 @@ describe('extractCaseIndustries', () => {
     expect(result).toContain('Ритейл и e-commerce');
   });
 
-  it('does NOT pick a niche on a single mention', () => {
+  it('does NOT pick a niche on a single mention (long text, threshold=2)', () => {
+    const filler = Array.from({ length: 100 }, (_, i) => `Фраза номер ${i} для заполнения текста страницы.`).join(' ');
     const html = `
       <html><body>
         <article>Сделали проект для производственной компании.</article>
         <article>Ритейл, магазины, маркетплейс — наш конёк.</article>
+        <div>${filler}</div>
       </body></html>
     `;
     const result = extractCaseIndustries(html);
     expect(result).toContain('Ритейл и e-commerce');
-    // «производственн» встречается ровно раз — порог не пройден.
+    // «производственн» встречается ровно раз — порог не пройден (длинный текст → порог=2).
     expect(result).not.toContain('Промышленность');
   });
 
