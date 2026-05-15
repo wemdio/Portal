@@ -19,10 +19,13 @@ export interface ClientSidebarProps {
 export function ClientSidebar({ activeId, locale }: ClientSidebarProps) {
   return (
     <aside
-      className="hidden md:block sticky top-0 self-start h-screen overflow-y-auto px-4 py-5 shrink-0 w-[220px] lg:w-[240px]"
+      className="hidden md:block sticky top-24 self-start max-h-[calc(100vh-6rem)] overflow-y-auto px-4 py-5 shrink-0 w-[250px] lg:w-[270px]"
+      style={{ direction: 'rtl' }}
       aria-label={locale === 'en' ? 'Sidebar' : 'Боковое меню'}
     >
-      <ClientNavList activeId={activeId} locale={locale} />
+      <div style={{ direction: 'ltr' }}>
+        <ClientNavList activeId={activeId} locale={locale} />
+      </div>
     </aside>
   );
 }

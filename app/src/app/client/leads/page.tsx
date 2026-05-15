@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
-import { Send } from 'lucide-react';
+import { Send, Users, MessageSquare } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LeadComment = {
@@ -318,7 +318,15 @@ export default function ClientLeadsPage() {
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold">Лиды</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
+          <span
+            className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
+            style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}
+          >
+            <Users className="h-4.5 w-4.5" />
+          </span>
+          Лиды
+        </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
           Квалифицированные лиды по вашим кампаниям
         </p>
@@ -335,8 +343,12 @@ export default function ClientLeadsPage() {
           <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>Загрузка...</p>
         </div>
       ) : leads.length === 0 ? (
-        <div className="neu-card py-12 sm:py-16 text-center px-6">
-          <p className="text-base sm:text-lg font-bold mb-2" style={{ color: 'var(--cp-text)' }}>
+        <div className="neu-card py-12 sm:py-16 text-center px-6 relative overflow-hidden">
+          <MessageSquare
+            className="absolute -right-4 -top-4 h-28 w-28 opacity-[0.05]"
+            style={{ color: '#10B981' }}
+          />
+          <p className="text-base sm:text-lg font-bold mb-2 relative" style={{ color: 'var(--cp-text)' }}>
             Лидов пока нет
           </p>
           <p className="text-xs sm:text-sm max-w-md mx-auto mb-5" style={{ color: 'var(--cp-text-m)' }}>
