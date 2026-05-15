@@ -5,12 +5,25 @@ import { join } from 'path';
 const SUPABASE_URL = process.env.SUPABASE_URL || process.argv[2];
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.argv[3];
 const XML_DIR = process.env.XML_DIR || process.argv[4] || 'C:\\Users\\wemd1\\Desktop\\fns_revexp';
+// За какой отчётный год эти XML. ФНС выкладывает отдельные дампы за каждый
+// год — содержимое одного дампа не содержит явной метки года, год указан
+// только в названии каталога. Поэтому передаём через ENV/CLI.
+//
+// Schema после миграции 20260514_0002: PRIMARY KEY (inn, report_year),
+// то есть 2024 и 2025 в одной таблице не конфликтуют.
+const REPORT_YEAR = Number(process.env.REPORT_YEAR || process.argv[5] || 2024);
 const BATCH_SIZE = 500;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('Usage: node import-fns-revenue.mjs <SUPABASE_URL> <SUPABASE_SERVICE_KEY> [XML_DIR]');
+  console.error('Usage: node import-fns-revenue.mjs <SUPABASE_URL> <SUPABASE_SERVICE_KEY> [XML_DIR] [REPORT_YEAR]');
+  console.error('  REPORT_YEAR можно задать через env REPORT_YEAR=2025 или 5-м аргументом. Default: 2024.');
   process.exit(1);
 }
+if (!Number.isInteger(REPORT_YEAR) || REPORT_YEAR < 2000 || REPORT_YEAR > 2100) {
+  console.error(`Invalid REPORT_YEAR: ${REPORT_YEAR}. Expected integer 2000..2100.`);
+  process.exit(1);
+}
+console.log(`Importing as report_year=${REPORT_YEAR}`);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -35,16 +48,19 @@ function parseXmlFile(filePath) {
       org_name: names[i] || '',
       income: parseFloat(incomes[i] || '0'),
       expense: parseFloat(expenses[i] || '0'),
-      report_year: 2024,
+      report_year: REPORT_YEAR,
     });
   }
   return records;
 }
 
 async function upsertBatch(records) {
+  // onConflict: 'inn,report_year' — соответствует композитному PK после
+  // миграции 20260514_0002. ignoreDuplicates снят: повторный импорт
+  // ОБНОВЛЯЕТ существующие записи (если ФНС перезалила дамп с правками).
   const { error } = await supabase
     .from('fns_revenue')
-    .upsert(records, { onConflict: 'inn', ignoreDuplicates: true });
+    .upsert(records, { onConflict: 'inn,report_year' });
   if (error) throw new Error(`Supabase upsert error: ${error.message}`);
 }
 

@@ -13,12 +13,26 @@ import type {
 } from '../types';
 
 /**
- * Fields the AI is allowed to fill from a public website.
- * Everything else (deal_cycle, avg_check, price_tier, persona_*, lead_recipient_*,
- * lead_magnets, guarantees, special_offer, client_problems, common_questions)
- * stays in the user's hands.
+ * Поля, которые AI может пытаться заполнить с публичного сайта.
+ *
+ * Намеренно ИСКЛЮЧЕНЫ из автозаполнения только два класса:
+ *   - persona_name / persona_position — «от чьего лица ведём диалог».
+ *     Это бизнес-решение клиента (хочет ли он писать от имени основателя,
+ *     RPA-роли, фейкового персонажа), сайт ничего об этом не говорит.
+ *   - lead_recipient_name / lead_recipient_email / lead_recipient_position
+ *     — кому передавать лидов. Это внутреннее распределение,
+ *     не публичная информация.
+ *
+ * Всё остальное AI попытается заполнить, **клиент в UI потом подтверждает
+ * или правит**. Лучше получить «AI считает что у вас средний чек 50-150k
+ * по тарифам на сайте» и подтвердить/поправить, чем оставить поле
+ * пустым.
+ *
+ * price_tier — единственное enum-поле, нормализуется отдельно
+ * (mapPriceTier), потому что mapper для string-полей пустит мусор.
  */
 const ALLOWED_TEXT_FIELDS = [
+  // Существующие
   'company_website',
   'company_description',
   'company_contacts',
@@ -30,9 +44,24 @@ const ALLOWED_TEXT_FIELDS = [
   'impressive_results',
   'target_audience',
   'additional_notes',
+  // Новые — добавлены 2026-05-14 по запросу клиентского flow:
+  'deal_cycle',
+  'avg_check',
+  'competitors_problems',
+  'special_offer',
+  'client_problems',
+  'common_questions',
+  'lead_magnets',
+  'guarantees',
 ] as const satisfies readonly (keyof ClientBriefFields)[];
 
-export type AllowedAutofillField = (typeof ALLOWED_TEXT_FIELDS)[number] | 'social_proof';
+const PRICE_TIER_VALUES = ['economy', 'middle', 'business', 'premium'] as const;
+type PriceTier = (typeof PRICE_TIER_VALUES)[number];
+
+export type AllowedAutofillField =
+  | (typeof ALLOWED_TEXT_FIELDS)[number]
+  | 'social_proof'
+  | 'price_tier';
 
 export interface AutofillMappedResult {
   patch: Partial<ClientBriefFields>;
@@ -117,7 +146,7 @@ function mapSocialProof(raw: unknown): Partial<ClientBriefFields['social_proof']
 function mapSources(raw: unknown): Partial<Record<keyof ClientBriefFields, string>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const obj = raw as Record<string, unknown>;
-  const allowed = new Set<string>([...ALLOWED_TEXT_FIELDS, 'social_proof']);
+  const allowed = new Set<string>([...ALLOWED_TEXT_FIELDS, 'social_proof', 'price_tier']);
   const out: Partial<Record<keyof ClientBriefFields, string>> = {};
   for (const [key, value] of Object.entries(obj)) {
     if (!allowed.has(key)) continue;
@@ -126,6 +155,14 @@ function mapSources(raw: unknown): Partial<Record<keyof ClientBriefFields, strin
     (out as Record<string, string>)[key] = text;
   }
   return out;
+}
+
+function mapPriceTier(raw: unknown): PriceTier | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  return (PRICE_TIER_VALUES as readonly string[]).includes(normalized)
+    ? (normalized as PriceTier)
+    : undefined;
 }
 
 function mapQuestions(raw: unknown): string[] {
@@ -152,6 +189,11 @@ export function mapAutofillToBriefPatch(input: unknown): AutofillMappedResult {
   const socialProof = mapSocialProof(parsed.social_proof);
   if (socialProof) {
     patch.social_proof = socialProof as ClientBriefFields['social_proof'];
+  }
+
+  const priceTier = mapPriceTier(parsed.price_tier);
+  if (priceTier) {
+    patch.price_tier = priceTier;
   }
 
   const questions = mapQuestions(parsed.questions);

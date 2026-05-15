@@ -68,19 +68,16 @@ describe('mapAutofillToBriefPatch — allowed fields', () => {
 });
 
 describe('mapAutofillToBriefPatch — disallowed fields are dropped', () => {
+  // После расширения whitelist'а в 9290c7a (feat(client-brief/autofill):
+  // expand whitelist) реально остаются под запретом только persona_* и
+  // lead_recipient_* — это бизнес-решения клиента (от чьего лица ведём
+  // диалог / кому передаём лидов), сайт об этом ничего не знает.
   const DISALLOWED_FIELDS: Array<keyof ClientBriefFields> = [
-    'deal_cycle',
-    'avg_check',
-    'client_problems',
-    'common_questions',
     'persona_name',
     'persona_position',
     'lead_recipient_name',
     'lead_recipient_email',
     'lead_recipient_position',
-    'lead_magnets',
-    'guarantees',
-    'special_offer',
   ];
 
   it.each(DISALLOWED_FIELDS)('drops "%s" from the patch even if AI returns it', (field) => {
@@ -93,10 +90,17 @@ describe('mapAutofillToBriefPatch — disallowed fields are dropped', () => {
     expect(patch.company_website).toBe('acme.com');
   });
 
-  it('drops price_tier even when value is technically valid', () => {
+  it('keeps price_tier when value is one of the known enums', () => {
     const raw = { price_tier: 'business', company_website: 'acme.com' };
     const { patch } = mapAutofillToBriefPatch(raw);
+    expect(patch.price_tier).toBe('business');
+  });
+
+  it('drops price_tier when value is outside the enum (AI hallucination)', () => {
+    const raw = { price_tier: 'super-cheap', company_website: 'acme.com' };
+    const { patch } = mapAutofillToBriefPatch(raw);
     expect((patch as Record<string, unknown>).price_tier).toBeUndefined();
+    expect(patch.company_website).toBe('acme.com');
   });
 
   it('drops totally unknown keys silently', () => {
@@ -206,16 +210,19 @@ describe('mapAutofillToBriefPatch — questions and sources', () => {
   it('returns "sources" mapping fields to text snippets (only for allowed fields)', () => {
     const raw = {
       company_website: 'acme.com',
-      deal_cycle: 'we do not allow this',
+      // persona_name остаётся вне whitelist'а (бизнес-решение клиента,
+      // не выводимо с сайта), поэтому используется как пример «должно
+      // отфильтроваться» — deal_cycle с 9290c7a уже валидный.
+      persona_name: 'we do not allow this',
       sources: {
         company_website: 'Found in <title>',
-        deal_cycle: 'Should be filtered out',
+        persona_name: 'Should be filtered out',
         nonexistent: 'noise',
       },
     };
     const { sources } = mapAutofillToBriefPatch(raw);
     expect(sources.company_website).toBe('Found in <title>');
-    expect((sources as Record<string, unknown>).deal_cycle).toBeUndefined();
+    expect((sources as Record<string, unknown>).persona_name).toBeUndefined();
     expect((sources as Record<string, unknown>).nonexistent).toBeUndefined();
   });
 });

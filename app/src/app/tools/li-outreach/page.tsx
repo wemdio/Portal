@@ -1251,7 +1251,9 @@ function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated:
       </div>
       <div className="flex items-end gap-2">
         <div className="flex-1">
-          <label className="text-xs text-gray-500">Proxy (ip:port:user:pass)</label>
+          <label className="text-xs text-gray-500">
+            Proxy <span className="text-gray-400">(любой формат: ip:port:user:pass, http://user:pass@host:port, host:port)</span>
+          </label>
           <input
             type="text"
             placeholder="154.81.199.122:63310:VtVmt51R:7GnJr2Yb"
