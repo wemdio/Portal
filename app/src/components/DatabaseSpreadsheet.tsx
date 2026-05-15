@@ -7812,11 +7812,24 @@ export function DatabaseSpreadsheet() {
           signal: abortCtrl.signal,
         });
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // Тянем тело ошибки — БД-ошибка/таймаут видны юзеру, а не «HTTP 500».
+          let detail = '';
+          try {
+            const errJson = (await res.json()) as { error?: string };
+            detail = errJson?.error ? `: ${errJson.error}` : '';
+          } catch { /* тело не JSON — ок */ }
+          throw new Error(`HTTP ${res.status}${detail}`);
+        }
         // Новый формат: results[inn][year] = { org_name, income, expense }.
         const json = (await res.json()) as {
-          results: Record<string, Record<number, { org_name: string; income: number; expense: number }>>;
+          results?: Record<string, Record<number, { org_name: string; income: number; expense: number }>>;
         };
+        // Защита от старого формата API (deploy-рассинхрон): без results[]
+        // нечего писать — падать молча нельзя, иначе колонки пустые без причины.
+        if (!json || typeof json.results !== 'object' || json.results === null) {
+          throw new Error('API вернул неожиданный формат ответа — обновите страницу (F5) и повторите');
+        }
         const results = json.results;
 
         setTabs((prev) => prev.map((tab) => {
@@ -7900,6 +7913,15 @@ export function DatabaseSpreadsheet() {
     } catch (err) {
       if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
         setLastAction({ message: `ФНС отменено (обработано: ${processedCount})`, time: Date.now() });
+      } else {
+        // Раньше любая не-abort ошибка глоталась молча: колонки создавались
+        // (это происходит ДО batch-цикла), а данные не подтягивались — юзер
+        // видел пустые поля без объяснения. Теперь ошибка всегда видна.
+        const msg = err instanceof Error ? err.message : String(err);
+        setLastAction({
+          message: `ФНС: ошибка — ${msg} (обработано: ${processedCount}, найдено: ${foundCount})`,
+          time: Date.now(),
+        });
       }
       setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
     } finally {
