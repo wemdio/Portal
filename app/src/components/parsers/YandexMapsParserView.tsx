@@ -8,7 +8,7 @@ import type { QueueStatusResponse } from '@/app/api/parsers/yandexmaps/queue-sta
 import { YandexMapsParserForm } from '@/components/parsers/YandexMapsParserForm';
 import { JobStatus, isStoppedByUser } from '@/components/parsers/JobStatus';
 import { normalizeYandexOrgUrls } from '@/lib/parsers/yandexMapsUrlUtils';
-import { Download, RefreshCw, FileSpreadsheet, Database } from 'lucide-react';
+import { Download, RefreshCw, FileSpreadsheet, Database, MapPin, Clock, Link2, Table2 } from 'lucide-react';
 
 import { saveAs } from 'file-saver';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
@@ -437,9 +437,14 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         </div>
       ) : null}
       {/* Top Section: New Run */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden" style={{ borderTop: '3px solid #F43F5E' }}>
         <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900">Новый парсинг</h3>
+          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-rose-100 text-rose-600">
+              <MapPin className="h-4 w-4" />
+            </span>
+            Новый парсинг
+          </h3>
         </div>
         <div className="p-6">
           <YandexMapsParserForm busy={busy} onCreate={handleCreate} />
@@ -461,7 +466,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
         <div className="lg:col-span-3 space-y-6">
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[800px]">
             <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-gray-900">История запусков</h3>
+              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-amber-100 text-amber-600">
+                  <Clock className="h-3.5 w-3.5" />
+                </span>
+                История запусков
+              </h3>
               <button
                 type="button"
                 className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors bg-white border border-gray-200 rounded-md px-2.5 py-1.5 shadow-sm hover:bg-gray-50"
@@ -694,7 +704,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
               {/* Links Editor */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900">Ссылки организаций</h3>
+                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                      <Link2 className="h-3.5 w-3.5" />
+                    </span>
+                    Ссылки организаций
+                  </h3>
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-gray-500">
                       {linksText.split('\n').map((s) => s.trim()).filter(Boolean).length} шт.
@@ -722,7 +737,12 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
               {/* Results Table */}
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col h-[600px]">
                 <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-                  <h3 className="text-base font-semibold text-gray-900">Результаты</h3>
+                  <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-100 text-emerald-600">
+                      <Table2 className="h-3.5 w-3.5" />
+                    </span>
+                    Результаты
+                  </h3>
                   <div className="flex gap-2">
                     {!clientMode && (
                       <button

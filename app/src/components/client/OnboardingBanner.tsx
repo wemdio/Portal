@@ -65,7 +65,7 @@ export function OnboardingBanner() {
     >
       <span
         className="inline-flex items-center justify-center h-8 w-8 rounded-xl shrink-0"
-        style={{ background: 'rgba(74,111,165,0.12)', color: 'var(--cp-accent)' }}
+        style={{ background: 'rgba(99,102,241,0.12)', color: '#6366F1' }}
       >
         <Sparkles className="h-4 w-4" />
       </span>
@@ -80,7 +80,7 @@ export function OnboardingBanner() {
       <Link
         href={'/client/dashboard' as Route}
         className="neu-pill px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0"
-        style={{ color: 'var(--cp-accent)' }}
+        style={{ color: '#6366F1' }}
       >
         Открыть дашборд →
       </Link>

@@ -458,7 +458,7 @@ export default function ClientLaunchPage() {
   if (presetError) {
     return (
       <div className="mx-auto max-w-5xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8">Запуск кампаний</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Запуск кампаний</h1>
         <div className="neu-inset rounded-2xl px-5 py-4 text-sm font-medium" style={{ color: 'var(--cp-danger)' }}>
           {presetError}
         </div>
@@ -469,7 +469,7 @@ export default function ClientLaunchPage() {
   if (!preset || preset.email_account_ids.length === 0) {
     return (
       <div className="mx-auto max-w-5xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8">Создать кампанию</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Создать кампанию</h1>
         <div className="neu-card py-12 sm:py-16 text-center px-6">
           <Settings className="mx-auto h-10 w-10 mb-4" style={{ color: 'var(--cp-text-l)' }} />
           <p className="text-sm sm:text-base font-semibold mb-2" style={{ color: 'var(--cp-text)' }}>
@@ -495,7 +495,7 @@ export default function ClientLaunchPage() {
   if (result) {
     return (
       <div className="mx-auto max-w-3xl">
-        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8">Кампания запущена</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold mb-6 sm:mb-8 flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><CheckCircle2 className="h-4.5 w-4.5" /></span>Кампания запущена</h1>
         <div className="neu-card p-8 sm:p-10 text-center">
           <CheckCircle2 className="mx-auto h-14 w-14 mb-5" style={{ color: 'var(--cp-accent)' }} />
           <h2 className="text-lg sm:text-xl font-bold mb-2">{result.campaign_name}</h2>
@@ -539,7 +539,7 @@ export default function ClientLaunchPage() {
     <div className="mx-auto max-w-5xl">
       <div className="mb-6 sm:mb-8 flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold">Запуск кампаний</h1>
+          <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5"><span className="inline-flex items-center justify-center w-8 h-8 rounded-xl" style={{ background: 'rgba(16,185,129,0.12)', color: '#10B981' }}><Send className="h-4.5 w-4.5" /></span>Запуск кампаний</h1>
           <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
             Загрузите базу, напишите цепочку и запустите
           </p>
@@ -848,7 +848,7 @@ function Section({
   return (
     <section className="neu-card overflow-hidden">
       <header className="px-5 sm:px-6 py-4 flex items-start gap-3" style={{ borderBottom: '1px solid rgba(180,173,164,0.15)' }}>
-        <div className="neu-well flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0" style={{ color: 'var(--cp-accent)' }}>
+        <div className="flex h-7 w-7 items-center justify-center text-xs font-bold shrink-0 rounded-full text-white" style={{ background: 'linear-gradient(135deg, #10B981, #059669)' }}>
           {number}
         </div>
         <div className="min-w-0 flex-1">
