@@ -1210,6 +1210,7 @@ function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated:
   const cooling = isAccountInCooldown(a);
   const [proxyDraft, setProxyDraft] = useState(a.proxy_url ?? '');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   const dirty = proxyDraft !== (a.proxy_url ?? '');
@@ -1225,6 +1226,21 @@ function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated:
       setMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm(`Удалить запись аккаунта «${a.name || a.unipile_account_id}»?\n\nАккаунт в Unipile НЕ удалится — убирается только локальная карточка. Используйте для устаревших дубликатов.`)) {
+      return;
+    }
+    setDeleting(true);
+    setMsg(null);
+    try {
+      await api(`/accounts/${a.id}`, { method: 'DELETE' });
+      onUpdated();
+    } catch (e) {
+      setMsg(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+      setDeleting(false);
     }
   };
 
@@ -1245,9 +1261,19 @@ function AccountCard({ account: a, onUpdated }: { account: LiAccount; onUpdated:
             </div>
           )}
         </div>
-        <span className={`text-xs px-2 py-0.5 rounded shrink-0 ml-3 ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-          {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
-        </span>
+        <div className="flex items-center gap-2 shrink-0 ml-3">
+          <span className={`text-xs px-2 py-0.5 rounded ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+            {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
+          </span>
+          <button
+            onClick={() => void remove()}
+            disabled={deleting}
+            title="Удалить локальную запись аккаунта (устаревший дубликат)"
+            className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+          >
+            {deleting ? '...' : 'Удалить'}
+          </button>
+        </div>
       </div>
       <div className="flex items-end gap-2">
         <div className="flex-1">
