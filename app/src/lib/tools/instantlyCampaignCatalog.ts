@@ -554,27 +554,40 @@ Return {"matches": []} if no confident matches.`;
 
     try {
       aiCalls++;
-      const response = await fetch('https://router.requesty.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-          'HTTP-Referer': 'https://portal.app',
-          'X-Title': 'Portal - Campaign Project Matcher (per-client)',
-        },
-        body: JSON.stringify({
-          model: 'google/gemini-2.0-flash-001',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0,
-          max_tokens: 1500,
-          response_format: { type: 'json_object' },
-        }),
-      });
+      // Retry на 429 (rate limit) с экспоненциальным бэкоффом. Requesty
+      // отдаёт 429 примерно после 50 запросов подряд — типичный «нагревочный»
+      // прогон с 99 клиентами без ретраев пропускает половину.
+      let response = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        response = await fetch('https://router.requesty.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://portal.app',
+            'X-Title': 'Portal - Campaign Project Matcher (per-client)',
+          },
+          body: JSON.stringify({
+            model: 'google/gemini-2.0-flash-001',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0,
+            max_tokens: 1500,
+            response_format: { type: 'json_object' },
+          }),
+        });
+        if (response.status !== 429) break;
+        // 4s, 8s, 16s, 32s — суммарно до 60s ожидания на клиента
+        const wait = 4000 * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, wait));
+      }
 
-      if (!response.ok) {
-        console.error(`[ai-match] API ${response.status} for client "${client}"`);
+      if (!response || !response.ok) {
+        console.error(`[ai-match] API ${response?.status ?? 'no-response'} for client "${client}"`);
         continue;
       }
+      // Базовый throttle между клиентами (даже после успешного ответа) — без
+      // него Requesty 429-ит уже на ~50-м запросе подряд.
+      await new Promise((r) => setTimeout(r, 1500));
 
       const json = (await response.json()) as {
         choices?: { message?: { content?: string } }[];

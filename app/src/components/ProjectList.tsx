@@ -1292,13 +1292,70 @@ export function ProjectList() {
 
   // Хелпер: проект считается «проблемным» если он отстаёт по любой
   // активной оси. У проектов без плана (no contacts_obligation и no kpi_plan)
-  // axes пустой — они «не проблемные», их сюда не включаем.
+  // ни одно из условий не сработает — они «не проблемные».
+  //
+  // Логика проверки идёт ОТ ДЕШЁВОГО К ДОРОГОМУ, чтобы фильтр работал даже
+  // когда paceByProjectId ещё не подгрузился (он async после fetchProjects):
+  //
+  //   1) HARD-FAILURE: дедлайн уже прошёл, обязательство не выполнено.
+  //      Самый болезненный случай, ЛПР всегда хочет видеть. Не требует истории.
+  //   2) PACE-BASED: forecastDays > daysUntilDeadline (summarizeProjectRisk).
+  //      Требует ≥2 точек истории и положительный темп — иначе onTrack=null
+  //      и проект не считается «проблемным» по pace. Но если темп НУЛЕВОЙ
+  //      или отрицательный, а обязательство значительное — это тоже проблема,
+  //      она ловится через п.3.
+  //   3) ZERO-PACE: дедлайн близко (≤14 дней) и осталось значимое обязательство,
+  //      а pace либо null либо ≤ 0 (контакты/KPI не растут).
   const isProblemProject = (project: typeof projects[number]): boolean => {
+    if (isCompletedStatus(project.status)) return false;
+
+    const contactsOblig = parseInt(project.contacts_obligation ?? '0', 10) || 0;
+    const contactsDone = parseInt(project.contacts_done ?? '0', 10) || 0;
+    const kpiPlan = parseInt(project.kpi_plan ?? '0', 10) || 0;
+    const kpiFact = parseInt(project.kpi_fact ?? '0', 10) || 0;
+
+    // У проекта вообще нет обязательств — никогда не проблемный.
+    if (contactsOblig === 0 && kpiPlan === 0) return false;
+
+    const deadlineStr = project.deadline?.trim();
+    let daysUntilDeadline: number | null = null;
+    if (deadlineStr) {
+      const dl = new Date(deadlineStr);
+      if (!isNaN(dl.getTime())) {
+        daysUntilDeadline = Math.ceil((dl.getTime() - Date.now()) / 86_400_000);
+      }
+    }
+
+    // 1) HARD-FAILURE: дедлайн в прошлом, не доехали.
+    if (daysUntilDeadline !== null && daysUntilDeadline < 0) {
+      if (contactsOblig > 0 && contactsDone < contactsOblig) return true;
+      if (kpiPlan > 0 && kpiFact < kpiPlan) return true;
+    }
+
+    // 2) PACE-BASED (форкаст видим только если есть история).
     const risk = summarizeProjectRisk(
       paceByProjectId.get(project.id),
-      isCompletedStatus(project.status),
+      false, // isCompleted уже отсеян выше
     );
-    return risk.axes.length > 0;
+    if (risk.axes.length > 0) return true;
+
+    // 3) ZERO/NEGATIVE-PACE: дедлайн ≤14 дней и темп нулевой/отрицательный.
+    if (daysUntilDeadline !== null && daysUntilDeadline >= 0 && daysUntilDeadline <= 14) {
+      const pace = paceByProjectId.get(project.id);
+      const contactsRemaining = Math.max(0, contactsOblig - contactsDone);
+      const kpiRemaining = Math.max(0, kpiPlan - kpiFact);
+      // Контакты: pace.contacts == null (нет истории/плана) ИЛИ avg≤0 ИЛИ форкаст недостижим.
+      if (contactsOblig > 0 && contactsRemaining > 0) {
+        const c = pace?.contacts;
+        if (!c || c.avgPerDay <= 0) return true;
+      }
+      if (kpiPlan > 0 && kpiRemaining > 0) {
+        const k = pace?.kpi;
+        if (!k || k.avgPerDay <= 0) return true;
+      }
+    }
+
+    return false;
   };
 
   const filteredProjects = projects.filter((project) => {
