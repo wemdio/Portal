@@ -452,6 +452,13 @@ async function aiMatchUnmatchedCampaigns(
   const CONFIDENCE_THRESHOLD = Number(
     process.env.INSTANTLY_AI_MATCH_THRESHOLD ?? '0.85',
   );
+  // Пауза между per-client AI-запросами. Gemini Flash через Requesty имеет
+  // лимит ~15 RPM, и этот же ключ параллельно жжёт lead-qualifier worker.
+  // 4с/запрос → ~15 RPM на нашу долю; даёт ~7 мин на 99 клиентов (ок для
+  // hourly cron). Настраивается без редеплоя через env.
+  const AI_MATCH_THROTTLE_MS = Number(
+    process.env.INSTANTLY_AI_MATCH_THROTTLE_MS ?? '4000',
+  );
   const MAX_CANDIDATES_PER_CLIENT = 60; // топ-N кандидатов в одном AI запросе
 
   // 1. Найти кампании, ещё не привязанные ни к какому проекту.
@@ -537,7 +544,9 @@ CAMPAIGNS (id|name):
 ${candidateList}
 
 Rules:
-- A campaign belongs to this client ONLY if the client's name (or its transliteration / close spelling variant / clear abbreviation) appears explicitly in the campaign name.
+- A campaign belongs to this client ONLY if the client's distinctive name (or its transliteration / close spelling variant / clear abbreviation) appears explicitly in the campaign name.
+- A SINGLE generic word ("Software", "Cats", "Marketing", "Agency", "Group", "Pro", "Tech") shared with the client name is NOT a match. Only the FULL distinctive client name (or its transliteration) counts.
+  Example: client "Software Cats" → "Computer Software ..." is NOT a match (only the generic "software" overlaps; "Cats" is missing). Client "Asti Group" → "Asti Group Animals" IS a match (both distinctive tokens present).
 - Do NOT match by industry, theme, or generic keyword similarity.
 - Do NOT use "default bucket" reasoning. If unsure, skip the campaign.
 - Same campaign can only belong to one client; if it could plausibly belong to several different clients (e.g. a generic name), confidence should be low.
@@ -576,8 +585,9 @@ Return {"matches": []} if no confident matches.`;
           }),
         });
         if (response.status !== 429) break;
-        // 4s, 8s, 16s, 32s — суммарно до 60s ожидания на клиента
-        const wait = 4000 * Math.pow(2, attempt);
+        // 8s, 16s, 32s, 64s — суммарно до 2 мин ожидания на клиента.
+        // Requesty 429 при шторме держится дольше 60s, поэтому бэкофф длинный.
+        const wait = 8000 * Math.pow(2, attempt);
         await new Promise((r) => setTimeout(r, wait));
       }
 
@@ -587,7 +597,7 @@ Return {"matches": []} if no confident matches.`;
       }
       // Базовый throttle между клиентами (даже после успешного ответа) — без
       // него Requesty 429-ит уже на ~50-м запросе подряд.
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, AI_MATCH_THROTTLE_MS));
 
       const json = (await response.json()) as {
         choices?: { message?: { content?: string } }[];
