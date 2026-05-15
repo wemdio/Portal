@@ -21,6 +21,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   Building2, Briefcase, Search, MapPin, Upload, Eraser, ArrowRight,
+  Database, Lightbulb,
 } from 'lucide-react';
 import type { ComponentType } from 'react';
 
@@ -29,7 +30,8 @@ interface SourceCard {
   label: string;
   description: string;
   icon: ComponentType<{ className?: string }>;
-  /** Free-form hint shown as small badge. Use sparingly to avoid clutter. */
+  color: string;
+  bg: string;
   badge?: string;
 }
 
@@ -39,6 +41,8 @@ const SOURCES: readonly SourceCard[] = [
     label: 'B2B-поиск компаний',
     description: 'По ОКВЭД, регионам, выручке. Российские компании с реквизитами.',
     icon: Building2,
+    color: '#3B82F6',
+    bg: 'rgba(59,130,246,0.10)',
     badge: 'Россия',
   },
   {
@@ -46,24 +50,32 @@ const SOURCES: readonly SourceCard[] = [
     label: 'HH.ru',
     description: 'Парсинг компаний по их вакансиям — отличный сигнал найма.',
     icon: Briefcase,
+    color: '#6366F1',
+    bg: 'rgba(99,102,241,0.10)',
   },
   {
     href: '/client/parsers?tab=search',
     label: 'Поисковая выдача',
     description: 'Сбор сайтов по любым ключевым запросам через Google/Яндекс.',
     icon: Search,
+    color: '#8B5CF6',
+    bg: 'rgba(139,92,246,0.10)',
   },
   {
     href: '/client/parsers?tab=yandexmaps',
     label: 'Яндекс.Карты',
     description: 'Локальный бизнес: рестораны, клиники, магазины с адресами.',
     icon: MapPin,
+    color: '#F43F5E',
+    bg: 'rgba(244,63,94,0.10)',
   },
   {
     href: '/client/base-constructor',
     label: 'Загрузить файл',
     description: 'Уже есть CSV/XLSX? Загрузите — мы очистим и обогатим.',
     icon: Upload,
+    color: '#F59E0B',
+    bg: 'rgba(245,158,11,0.10)',
     badge: 'Свой файл',
   },
 ];
@@ -72,11 +84,24 @@ export default function ClientBuildHubPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-8 sm:space-y-10">
       {/* ── Hero ───────────────────────────────────────────────────────── */}
-      <header>
-        <h1 className="text-2xl sm:text-3xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
+      <header
+        className="neu-card relative overflow-hidden p-6 sm:p-8"
+        style={{ background: 'linear-gradient(135deg, rgba(59,130,246,0.06), rgba(139,92,246,0.05))' }}
+      >
+        <Database
+          className="absolute -right-4 -top-4 h-32 w-32 opacity-[0.05]"
+          style={{ color: '#3B82F6' }}
+        />
+        <h1 className="text-2xl sm:text-3xl font-extrabold relative flex items-center gap-3" style={{ color: 'var(--cp-text)' }}>
+          <span
+            className="inline-flex items-center justify-center w-9 h-9 rounded-xl"
+            style={{ background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}
+          >
+            <Database className="h-5 w-5" />
+          </span>
           Базы
         </h1>
-        <p className="mt-2 text-sm sm:text-base" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="mt-2 text-sm sm:text-base relative" style={{ color: 'var(--cp-text-m)' }}>
           Соберите контакты из любого источника и подготовьте базу к рассылке.
           Это два шага: сначала источник, затем очистка и обогащение.
         </p>
@@ -87,7 +112,7 @@ export default function ClientBuildHubPage() {
         <div className="flex items-baseline gap-3 mb-4">
           <span
             className="inline-flex items-center justify-center h-7 w-7 rounded-full text-[12px] font-bold shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
+            style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)', color: '#fff' }}
           >
             1
           </span>
@@ -109,10 +134,11 @@ export default function ClientBuildHubPage() {
                 key={s.href}
                 href={s.href as Route}
                 className="neu-card group flex items-start gap-4 p-5 transition-all"
+                style={{ borderLeft: `3px solid ${s.color}` }}
               >
                 <span
                   className="inline-flex items-center justify-center h-11 w-11 rounded-2xl shrink-0"
-                  style={{ background: 'rgba(74,111,165,0.10)', color: 'var(--cp-accent)' }}
+                  style={{ background: s.bg, color: s.color }}
                 >
                   <Icon className="h-5 w-5" />
                 </span>
@@ -125,7 +151,7 @@ export default function ClientBuildHubPage() {
                     {s.badge && (
                       <span
                         className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-                        style={{ background: 'rgba(74,111,165,0.15)', color: 'var(--cp-accent)' }}
+                        style={{ background: `${s.color}20`, color: s.color }}
                       >
                         {s.badge}
                       </span>
@@ -151,7 +177,7 @@ export default function ClientBuildHubPage() {
         <div className="flex items-baseline gap-3 mb-4">
           <span
             className="inline-flex items-center justify-center h-7 w-7 rounded-full text-[12px] font-bold shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
+            style={{ background: 'linear-gradient(135deg, #10B981, #059669)', color: '#fff' }}
           >
             2
           </span>
@@ -168,10 +194,11 @@ export default function ClientBuildHubPage() {
         <Link
           href={'/client/base-constructor' as Route}
           className="neu-card group flex items-start gap-4 p-5 sm:p-6 transition-all"
+          style={{ borderLeft: '3px solid #10B981' }}
         >
           <span
             className="inline-flex items-center justify-center h-12 w-12 rounded-2xl shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
+            style={{ background: 'linear-gradient(135deg, #10B981, #059669)', color: '#fff' }}
           >
             <Eraser className="h-5 w-5" />
           </span>
@@ -194,12 +221,14 @@ export default function ClientBuildHubPage() {
 
       {/* ── Tip ────────────────────────────────────────────────────────── */}
       <aside
-        className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-4 text-xs sm:text-sm"
-        style={{ color: 'var(--cp-text-m)' }}
+        className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-4 text-xs sm:text-sm flex items-start gap-3"
+        style={{ color: 'var(--cp-text-m)', borderLeft: '3px solid #F59E0B' }}
       >
-        <strong style={{ color: 'var(--cp-text)' }}>Совет.</strong>{' '}
+        <Lightbulb className="h-4 w-4 shrink-0 mt-0.5" style={{ color: '#F59E0B' }} />
+        <span><strong style={{ color: 'var(--cp-text)' }}>Совет.</strong>{' '}
         Один источник можно совмещать с другим — например, собрать список из B2B-поиска,
         затем добавить компании из Яндекс.Карт, и пропустить всё вместе через Конструктор.
+        </span>
       </aside>
     </div>
   );

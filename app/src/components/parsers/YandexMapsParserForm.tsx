@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, type FormEvent } from 'react';
-import { Info } from 'lucide-react';
+import { Info, Globe, Layers } from 'lucide-react';
 import { CITIES, RUBRICS, generateSearchUrls } from '@/lib/parsers/yandexMapsData';
 
 type ProxyForm = {
@@ -181,7 +181,12 @@ export function YandexMapsParserForm(props: {
         <div className="p-5 border-b border-gray-100 bg-gray-50/50">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h3 className="text-base font-semibold text-gray-900">URL поиска</h3>
+              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-600">
+                  <Globe className="h-3.5 w-3.5" />
+                </span>
+                URL поиска
+              </h3>
               <p className="text-sm text-gray-500 mt-1">
                 Добавьте ссылки на поиск в Яндекс.Картах вручную или сгенерируйте их по городам и рубрикам.
               </p>
@@ -216,7 +221,12 @@ export function YandexMapsParserForm(props: {
       {/* Generator Section */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="p-5 border-b border-gray-100 bg-gray-50/50">
-          <h3 className="text-base font-semibold text-gray-900">Генератор ссылок</h3>
+          <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-violet-100 text-violet-600">
+              <Layers className="h-3.5 w-3.5" />
+            </span>
+            Генератор ссылок
+          </h3>
           <p className="text-sm text-gray-500 mt-1">Массовая генерация ссылок по городам и рубрикам.</p>
         </div>
         

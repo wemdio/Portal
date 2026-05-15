@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { Route } from 'next';
-import { Check, ChevronDown, Circle, Clock, Loader2 } from 'lucide-react';
+import { Check, ChevronDown, Circle, Clock, Loader2, Sparkles } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface ChecklistItem {
@@ -90,7 +90,7 @@ export function OnboardingChecklist() {
       >
         <span
           className="inline-flex items-center justify-center h-8 w-8 rounded-full"
-          style={{ background: 'rgba(74,111,165,0.12)', color: 'var(--cp-accent)' }}
+          style={{ background: 'linear-gradient(135deg, #10B981, #059669)', color: '#fff' }}
         >
           <Check className="h-4 w-4" />
         </span>
@@ -111,7 +111,8 @@ export function OnboardingChecklist() {
     <div className="neu-card p-5 sm:p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="min-w-0">
-          <h2 className="text-base font-bold" style={{ color: 'var(--cp-text)' }}>
+          <h2 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--cp-text)' }}>
+            <Sparkles className="h-4 w-4" style={{ color: '#F59E0B' }} />
             С чего начать
           </h2>
           <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
@@ -150,9 +151,9 @@ function ChecklistRow({
   isNext: boolean;
 }) {
   const indicator = item.done ? (
-    <Check className="h-4 w-4" style={{ color: 'var(--cp-accent)' }} />
+    <Check className="h-4 w-4" style={{ color: '#fff' }} />
   ) : isNext ? (
-    <Clock className="h-4 w-4" style={{ color: 'var(--cp-accent)' }} />
+    <Clock className="h-4 w-4" style={{ color: '#fff' }} />
   ) : (
     <Circle className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} />
   );
@@ -173,7 +174,11 @@ function ChecklistRow({
       <span
         className="inline-flex items-center justify-center h-7 w-7 rounded-full shrink-0 mt-0.5"
         style={{
-          background: item.done ? 'rgba(74,111,165,0.12)' : 'transparent',
+          background: item.done
+            ? 'linear-gradient(135deg, #10B981, #059669)'
+            : isNext
+              ? 'linear-gradient(135deg, #6366F1, #8B5CF6)'
+              : 'transparent',
           boxShadow: !item.done && !isNext ? 'inset 1.5px 1.5px 3px var(--cp-shadow-d), inset -1.5px -1.5px 3px var(--cp-shadow-l)' : undefined,
         }}
       >
@@ -191,7 +196,7 @@ function ChecklistRow({
           {isNext && (
             <span
               className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(74,111,165,0.15)', color: 'var(--cp-accent)' }}
+              style={{ background: 'rgba(99,102,241,0.15)', color: '#6366F1' }}
             >
               следующий
             </span>

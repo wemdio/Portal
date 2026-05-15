@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { HHSearchConfig, HHVacancyRow, ParserJobStatus } from '@/types';
-import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database } from 'lucide-react';
+import { Download, ExternalLink, Copy, Check, ChevronLeft, ChevronRight, Database, Table2 } from 'lucide-react';
 
 type Props = {
   items: HHVacancyRow[];
@@ -268,7 +268,12 @@ export function VacancyResults({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="text-lg font-semibold text-gray-900">Результаты</h3>
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-100 text-emerald-600">
+                  <Table2 className="h-4 w-4" />
+                </span>
+                Результаты
+              </h3>
               {jobId ? (
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {jobStatus === 'running' ? (
