@@ -365,9 +365,14 @@ export function HHArchiveParserView() {
           return (
             <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm space-y-2">
               <div className="font-semibold text-blue-900">
-                Найдётся около {preview.total_estimated.toLocaleString()} вакансий
+                HH насчитал около {preview.total_estimated.toLocaleString()} вакансий
               </div>
               <div className="text-xs text-blue-700">{preview.note}</div>
+              <div className="text-xs text-gray-600">
+                ℹ Реально уникально достать обычно 70-85% от этого числа.
+                HH `found` включает повторы вакансий в нескольких регионах, скрытые/приватные
+                позиции и архивные дубли.
+              </div>
               {errored.length > 0 && (
                 <div className="text-xs text-amber-800 font-medium">
                   ⚠ Часть запросов упала ({errored.length} из {preview.per_query.length}):
@@ -447,8 +452,30 @@ export function HHArchiveParserView() {
                     <span className="text-gray-700 truncate">{j.search_queries.slice(0, 3).join(', ')}{j.search_queries.length > 3 ? '…' : ''}</span>
                   </div>
                   <div className="text-xs text-gray-500 mt-0.5">
-                    {j.date_from} → {j.date_to} · {formatAreas(j.area)} · {j.saved_total.toLocaleString()} строк
+                    {j.date_from} → {j.date_to} · {formatAreas(j.area)}
                   </div>
+                  {j.status === 'completed' && (
+                    <div className="text-xs text-gray-600 mt-0.5">
+                      HH found: <span className="font-mono">{(j.found_total ?? 0).toLocaleString()}</span>
+                      {' · '}уникальных сохранено: <span className="font-mono font-medium">{j.saved_total.toLocaleString()}</span>
+                      {j.errors_count > 0 && (
+                        <> · <span className="text-amber-700">ошибок: {j.errors_count}</span></>
+                      )}
+                      {(j.found_total ?? 0) > j.saved_total && j.saved_total > 0 && (
+                        <span
+                          className="text-gray-400 italic ml-1"
+                          title="HH `found` включает повторы вакансий в нескольких регионах, скрытые/приватные позиции и архивные дубли. Реально уникально достать обычно 70-85% от found."
+                        >
+                          ({Math.round((j.saved_total / (j.found_total || 1)) * 100)}%, почему?)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {j.status !== 'completed' && (
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {j.saved_total.toLocaleString()} строк сохранено
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-2 shrink-0">
                   {j.status === 'completed' && j.saved_total > 0 && (
