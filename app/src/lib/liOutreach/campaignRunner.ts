@@ -64,6 +64,31 @@ export async function runCampaignTick(
   if (!supabaseAdmin) return { processed: 0, errors: 0 };
   const db = supabaseAdmin;
 
+  // Log helper — writes to DB so the UI logs tab can display entries.
+  // IMPORTANT: supabase-js PostgrestBuilder is lazy — it only fires the HTTP
+  // request when `.then()` / `await` is called. Using `void builder` does NOT
+  // trigger execution, so we must invoke `.then()` (fire-and-forget, but still
+  // actually fire). Errors are logged to stderr so they're visible in worker logs.
+  // Определён здесь (а не ниже) чтобы ранние return'ы тоже могли логировать —
+  // иначе кампания «молча не запускается» и причину никак не увидеть в UI.
+  const log: LogFn = (level, message, leadName, stepIndex) => {
+    db.from('li_campaign_logs')
+      .insert({
+        campaign_id: campaignId,
+        level,
+        message,
+        lead_name: leadName ?? null,
+        step_index: stepIndex ?? null,
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.warn(`[li-outreach] log insert failed for campaign ${campaignId}:`, error.message);
+        }
+      }, (err) => {
+        console.warn(`[li-outreach] log insert threw for campaign ${campaignId}:`, err);
+      });
+  };
+
   // Load campaign
   const { data: campaign } = await db
     .from('li_campaigns')
@@ -80,6 +105,7 @@ export async function runCampaignTick(
     .maybeSingle<LiSettings>();
   if (!settings?.unipile_dsn || !settings?.unipile_api_key) {
     console.warn(`[li-outreach] campaign ${campaignId}: no Unipile settings, skipping`);
+    log('error', 'Тик пропущен — не настроены Unipile DSN / API Key. Откройте вкладку «Настройки» и заполните их.');
     return { processed: 0, errors: 0 };
   }
 
@@ -125,32 +151,21 @@ export async function runCampaignTick(
     : { apiKey: process.env.OPENROUTER_LI_OUTREACH_API_KEY ?? '', model: 'gpt-4o-mini' };
 
   const steps = (campaign.steps ?? []) as LiCampaignStep[];
-  if (steps.length === 0) return { processed: 0, errors: 0 };
+  if (steps.length === 0) {
+    log('warning', 'Тик пропущен — в кампании нет ни одного шага. Добавьте хотя бы один шаг (инвайт / сообщение / ожидание) и сохраните кампанию.');
+    return { processed: 0, errors: 0 };
+  }
 
-  // Log helper — writes to DB so the UI logs tab can display entries.
-  // IMPORTANT: supabase-js PostgrestBuilder is lazy — it only fires the HTTP
-  // request when `.then()` / `await` is called. Using `void builder` does NOT
-  // trigger execution, so we must invoke `.then()` (fire-and-forget, but still
-  // actually fire). Errors are logged to stderr so they're visible in worker logs.
-  const log: LogFn = (level, message, leadName, stepIndex) => {
-    db.from('li_campaign_logs')
-      .insert({
-        campaign_id: campaignId,
-        level,
-        message,
-        lead_name: leadName ?? null,
-        step_index: stepIndex ?? null,
-      })
-      .then(({ error }) => {
-        if (error) {
-          console.warn(`[li-outreach] log insert failed for campaign ${campaignId}:`, error.message);
-        }
-      }, (err) => {
-        console.warn(`[li-outreach] log insert threw for campaign ${campaignId}:`, err);
-      });
-  };
+  if (!campaign.account_id) {
+    log('error', 'Тик пропущен — к кампании не привязан LinkedIn-аккаунт. Выберите аккаунт в настройках кампании.');
+    return { processed: 0, errors: 0 };
+  }
+  if (!account) {
+    log('error', 'Тик пропущен — привязанный LinkedIn-аккаунт не найден (возможно, устаревшая запись). Откройте вкладку «Аккаунты», синхронизируйте и переназначьте аккаунт кампании.');
+    return { processed: 0, errors: 0 };
+  }
 
-  log('info', `Тик запущен — кампания «${campaign.name}», аккаунт ${account?.unipile_account_id ?? 'N/A'}`);
+  log('info', `Тик запущен — кампания «${campaign.name}», аккаунт ${account.unipile_account_id ?? 'N/A'}`);
 
   // Daily-counter reset is now atomic inside `li_campaign_increment_invite`
   // (see migration 20260420_0002). For the in-memory state used by the
