@@ -30,7 +30,8 @@
       "Bash(Get-ChildItem -Path \"G:\\\\PycharmProjects\\\\Portal\\\\app\\\\src\\\\app\\\\client\" -Directory -ErrorAction SilentlyContinue)",
       "Bash(Select-Object -ExpandProperty Name)",
       "mcp__Claude_in_Chrome__navigate",
-      "Bash(G:\\\\NodeJs\\\\npm.cmd run *)"
+      "Bash(G:\\\\NodeJs\\\\npm.cmd run *)",
+      "Bash(git status *)"
     ]
   }
 }
