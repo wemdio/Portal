@@ -1042,6 +1042,28 @@ async def run_sync(manual: bool = False) -> dict:
             print(f"[sync] Client leads sync ERROR: {e}")
             traceback.print_exc()
 
+        # Авто-привязка кампаний к проектам портала (substring + AI matcher).
+        # Эту логику держит Node-роут портала; сам по себе он триггерится
+        # только когда кто-то открывает страницу кампаний (catalog stale > 65м).
+        # Cron на Vercel у нас не работает (self-hosted), поэтому дёргаем
+        # роут отсюда — sync-бот и так крутится строго раз в час. Не валит
+        # цикл при ошибке: каталог/аналитика/лиды уже синхронизированы выше.
+        try:
+            portal_url = os.environ.get("PORTAL_INTERNAL_URL", "http://portal:3000")
+            cron_secret = os.environ.get("CRON_SECRET", "")
+            if cron_secret:
+                async with httpx.AsyncClient(timeout=900) as _cl:
+                    _r = await _cl.get(
+                        f"{portal_url}/api/tools/auto-report/campaigns/sync",
+                        headers={"Authorization": f"Bearer {cron_secret}"},
+                    )
+                _body = _r.text[:200].replace("\n", " ")
+                print(f"[sync] Campaign auto-match: HTTP {_r.status_code} {_body}")
+            else:
+                print("[sync] CRON_SECRET not set — skipping campaign auto-match")
+        except Exception as e:
+            print(f"[sync] Campaign auto-match warning: {e}")
+
         duration = round(loop.time() - t0, 1)
 
         result: dict = {
