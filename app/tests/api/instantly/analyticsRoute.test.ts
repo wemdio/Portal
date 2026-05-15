@@ -114,6 +114,10 @@ beforeEach(() => {
   jest.resetModules();
   getCampaignAnalytics.mockReset();
   mockDb = createMockSupabase();
+  // Route ретраит bulk-вызов до 3 раз на 5xx/timeout. Базовая задержка из
+  // ENV — в тесте обнуляем, иначе один кейс «Instantly stably failing» висит
+  // 3+ секунды на reald-time waits.
+  process.env.INSTANTLY_ANALYTICS_RETRY_BASE_MS = '0';
 });
 
 async function seedCatalog(
@@ -187,7 +191,9 @@ describe('GET /api/instantly/analytics?type=campaigns — source=api with Instan
       },
     ]);
 
-    getCampaignAnalytics.mockRejectedValueOnce(
+    // mockRejectedValue (не Once): route ретраит до 3 раз; падаем в db-fallback
+    // только если ВСЕ попытки провалились.
+    getCampaignAnalytics.mockRejectedValue(
       new FakeInstantlyApiError(
         'Instantly API 500: {"statusCode":500,"error":"Internal Server Error","message":"Unable to count leads"}',
         500,
@@ -203,12 +209,14 @@ describe('GET /api/instantly/analytics?type=campaigns — source=api with Instan
     expect(res.headers.get('X-Api-Error')).toContain('Unable to count leads');
     expect(body.map((r) => r.campaign_id).sort()).toEqual(['c1', 'c2']);
     expect(body.find((r) => r.campaign_id === 'c1')!.leads_count).toBe(111);
+    // sanity: ретрай-логика реально прокатилась 3 раза, не один.
+    expect(getCampaignAnalytics).toHaveBeenCalledTimes(3);
   });
 
   it('returns 5xx when both Instantly AND DB fail (no usable source)', async () => {
     mockDb = null;
 
-    getCampaignAnalytics.mockRejectedValueOnce(
+    getCampaignAnalytics.mockRejectedValue(
       new FakeInstantlyApiError('Instantly API 500: Unable to count leads', 500),
     );
 

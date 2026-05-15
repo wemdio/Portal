@@ -107,6 +107,10 @@ async function getCampaignAnalyticsWithRetry(
   params: { campaign_id?: string },
   maxAttempts = 3,
 ): Promise<unknown> {
+  // Базовая задержка retry. В проде дефолт 1000ms (экспонента → 1s, 2s).
+  // В тестах ставим '0' через INSTANTLY_ANALYTICS_RETRY_BASE_MS — иначе
+  // один тест-кейс «Instantly stably failing» висит 3+ секунды.
+  const baseMs = Number(process.env.INSTANTLY_ANALYTICS_RETRY_BASE_MS ?? '1000');
   let lastErr: unknown = new Error('unreachable');
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -121,11 +125,11 @@ async function getCampaignAnalyticsWithRetry(
         /unable to count/i.test(msg) ||
         /timeout|ETIMEDOUT|ECONN|fetch failed/i.test(msg);
       if (!retriable || attempt === maxAttempts - 1) throw err;
-      const wait = 1000 * Math.pow(2, attempt); // 1s, 2s
+      const wait = baseMs * Math.pow(2, attempt); // 1s, 2s по дефолту
       console.warn(
         `[instantly-analytics] retry ${attempt + 1}/${maxAttempts} after ${wait}ms: ${msg.slice(0, 120)}`,
       );
-      await new Promise((r) => setTimeout(r, wait));
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     }
   }
   throw lastErr;
