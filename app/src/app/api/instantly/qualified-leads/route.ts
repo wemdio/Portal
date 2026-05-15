@@ -7,26 +7,17 @@ import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 export const dynamic = 'force-dynamic';
 
 /**
- * Resolve campaign IDs for a user via:
- * 1. Manual preferences (user_instantly_campaign_preferences)
- * 2. If none — auto-resolve via projects where user is specialist_user_id
- *    → project_instantly_campaigns junction
+ * Resolve campaign IDs for a user: projects where the user is
+ * specialist_user_id → project_instantly_campaigns junction.
+ *
+ * Раньше первым шагом был ручной выбор кампаний
+ * (user_instantly_campaign_preferences), но автопривязка кампаний к
+ * проектам перекрыла этот сценарий — блок «Кампании для лидов» в профиле
+ * убран (16 мая 2026). Лид-фид теперь всегда работает по проектам
+ * специалиста.
  */
 async function resolveCampaignIdsForUser(userId: string): Promise<string[] | null> {
-  if (!supabaseInstantly) return null;
-
-  // 1. Manual preferences
-  const { data: prefs } = await supabaseInstantly
-    .from('user_instantly_campaign_preferences')
-    .select('campaign_id')
-    .eq('user_id', userId);
-
-  if (prefs && prefs.length > 0) {
-    return prefs.map((p) => p.campaign_id as string);
-  }
-
-  // 2. Auto: user's projects → linked campaigns
-  if (!supabaseMain) return null;
+  if (!supabaseInstantly || !supabaseMain) return null;
 
   const { data: projects } = await supabaseMain
     .from('projects')
