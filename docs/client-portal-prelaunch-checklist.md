@@ -50,11 +50,12 @@ On `/client/dashboard`:
 - [ ] Sidebar lists exactly the groups: **Старт** (Бриф / Базы / Цепочки писем / Создать кампанию), **Мониторинг** (Кампании / Лиды / Базы кампаний), **Архив** (Проекты).
 - [ ] Active item is highlighted.
 - [ ] On mobile (<768px) the sidebar collapses into a hamburger drawer that opens correctly and closes when you click a link.
-- [ ] The onboarding checklist on the dashboard renders 5 items in order: Бриф → Пресет → Собрать первую базу → Очистить первую базу → Запустить первую кампанию.
+- [ ] The onboarding checklist on the dashboard renders 6 items in order: Бриф → Пресет → Собрать первую базу → Очистить первую базу → Написать первую цепочку писем → Запустить первую кампанию.
 - [ ] Each unfinished item has a working link (except "Менеджер настроил пресет" — that one is `href: null` with a "Обратитесь к менеджеру" tooltip when the preset is missing).
 - [ ] Steps that are already done show a checkmark.
+- [ ] "Написать первую цепочку писем" links to `/client/parsers?tab=email-sequence` and is done only when the client has an `email_sequence_runs` row with `status='completed'` — a freshly-created `draft` run (auto-created on tool open) must NOT tick it.
 
-**Red flags.** A nav item points to a 404, the sidebar layout breaks (overlaps content, no scroll on small viewports), checklist shows fewer than 5 items, or `next_id` highlight desyncs from the actual checklist state.
+**Red flags.** A nav item points to a 404, the sidebar layout breaks (overlaps content, no scroll on small viewports), checklist shows fewer than 6 items, or `next_id` highlight desyncs from the actual checklist state.
 
 ---
 
