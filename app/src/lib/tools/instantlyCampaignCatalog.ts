@@ -410,12 +410,26 @@ function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/[\s\-_.!'"()«»❗‼️⭕️|/+]/g, '');
 }
 
+/**
+ * Generic-токены, которые НЕ являются брендом и не должны участвовать в
+ * token-overlap pre-filter. Иначе клиент «Beautylizer eng» по токену "eng"
+ * притягивает в кандидаты кампании «Polza eng_partners» (15 мая 2026 — 13
+ * ложных привязок). Это языковые/региональные/версионные суффиксы и
+ * слишком общие слова.
+ */
+const GENERIC_TOKENS = new Set([
+  'eng', 'rus', 'global', 'intl', 'international', 'new', 'copy', 'test',
+  'group', 'agency', 'media', 'digital', 'online', 'studio', 'company',
+  'service', 'services', 'solutions', 'systems', 'consulting', 'team',
+  'software', 'marketing', 'sales', 'tech', 'pro', 'data', 'base',
+]);
+
 function tokenizeClient(s: string): Set<string> {
   return new Set(
     transliterate(s)
       .split(/[\s\-_.!"'()«»|/+,:;]+/)
       .map((t) => t.replace(/[^a-z0-9]/g, ''))
-      .filter((t) => t.length >= 3),
+      .filter((t) => t.length >= 3 && !GENERIC_TOKENS.has(t)),
   );
 }
 
@@ -544,9 +558,13 @@ CAMPAIGNS (id|name):
 ${candidateList}
 
 Rules:
-- A campaign belongs to this client ONLY if the client's distinctive name (or its transliteration / close spelling variant / clear abbreviation) appears explicitly in the campaign name.
-- A SINGLE generic word ("Software", "Cats", "Marketing", "Agency", "Group", "Pro", "Tech") shared with the client name is NOT a match. Only the FULL distinctive client name (or its transliteration) counts.
-  Example: client "Software Cats" → "Computer Software ..." is NOT a match (only the generic "software" overlaps; "Cats" is missing). Client "Asti Group" → "Asti Group Animals" IS a match (both distinctive tokens present).
+- First, identify the client's CORE BRAND NAME — the distinctive, unique part of the client name. Strip generic language/region/version suffixes that are NOT part of the brand: "eng", "rus", "ru", "en", "global", "intl", "2", "new", etc.
+  Examples: client "Beautylizer eng" → core brand is "Beautylizer". Client "Profit-Gateway" → core brand is "Profit-Gateway". Client "Software Cats" → core brand is the full phrase "Software Cats" (both words are distinctive — neither is a language suffix).
+- A campaign belongs to this client ONLY if the campaign name explicitly contains the client's CORE BRAND NAME (or its transliteration / close spelling variant / clear abbreviation).
+- Sharing only a generic word OR a generic suffix is NOT a match:
+  * "Beautylizer eng" vs "Polza eng_partners" — only the suffix "eng" overlaps; core brands "Beautylizer" and "Polza" differ → NOT a match.
+  * "Software Cats" vs "Computer Software" — only the generic word "software" overlaps; "Cats" is missing → NOT a match.
+  * "Asti Group" vs "Asti Group Animals" — the full core brand "Asti Group" is present → IS a match.
 - Do NOT match by industry, theme, or generic keyword similarity.
 - Do NOT use "default bucket" reasoning. If unsure, skip the campaign.
 - Same campaign can only belong to one client; if it could plausibly belong to several different clients (e.g. a generic name), confidence should be low.
