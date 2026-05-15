@@ -598,7 +598,12 @@ Return {"matches": []} if no confident matches.`;
             model: 'google/gemini-2.0-flash-001',
             messages: [{ role: 'user', content: prompt }],
             temperature: 0,
-            max_tokens: 1500,
+            // 1500 обрезало ответ для клиентов с многими кандидатами
+            // (cold-run 15 мая: 14 из 78 клиентов вернули "Unterminated
+            // string in JSON" — Асти Групп, Beautylizer eng, Let's String,
+            // Staff Line и др. с десятками кампаний). До 60 кандидатов ×
+            // ~80 токенов на матч ≈ 5K; 8000 даёт запас.
+            max_tokens: 8000,
             response_format: { type: 'json_object' },
           }),
         });
@@ -623,19 +628,30 @@ Return {"matches": []} if no confident matches.`;
       const content = json.choices?.[0]?.message?.content ?? '';
       type AIMatch = { campaign_id: string; confidence: number; reason?: string };
       let parsed: AIMatch[] = [];
+      let parseOk = false;
       try {
         const raw = JSON.parse(content) as { matches?: AIMatch[] } | AIMatch[];
         parsed = Array.isArray(raw) ? raw : (raw.matches ?? []);
+        parseOk = true;
       } catch {
         const objMatch = content.match(/\{[\s\S]*\}/);
         if (objMatch) {
           try {
             const raw = JSON.parse(objMatch[0]) as { matches?: AIMatch[] };
             parsed = raw.matches ?? [];
+            parseOk = true;
           } catch {
-            /* skip — модель вернула мусор, не валим всю операцию */
+            /* падаем в лог ниже */
           }
         }
+      }
+      if (!parseOk) {
+        // Не молча: обрезанный ответ (Unterminated string) = клиент не
+        // привязан, и без лога это невидимо. Чаще всего — упёрлись в
+        // max_tokens на клиенте с очень большим числом кандидатов.
+        console.warn(
+          `[ai-match] unparseable AI response for client "${client}" (${candidates.length} candidates, content ${content.length} chars) — client skipped this cycle`,
+        );
       }
 
       const candidateIds = new Set(candidates.map((c) => c.id));
