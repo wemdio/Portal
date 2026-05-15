@@ -98,6 +98,10 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
     return;
   }
 
+  // Зафиксируем max_results в локальной const, чтобы TS не терял narrowing
+  // в closure processChunkRecursive (через await TS забывает что job != null).
+  const maxResults = job.max_results;
+
   await updateJob(db, jobId, {
     status: 'processing',
     started_at: new Date().toISOString(),
@@ -148,7 +152,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
     to: string,
     depth: number,
   ): Promise<void> {
-    if (seenVacancyIds.size >= job.max_results) return;
+    if (seenVacancyIds.size >= maxResults) return;
     if (await isCancelled(db, jobId)) return;
 
     // Стр. 0 — узнаём found / pages
@@ -175,7 +179,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
         );
         await sleep(REQUEST_DELAY_MS);
         await processChunkRecursive(query, halves[0].from, halves[0].to, depth + 1);
-        if (seenVacancyIds.size >= job.max_results) return;
+        if (seenVacancyIds.size >= maxResults) return;
         await sleep(REQUEST_DELAY_MS);
         await processChunkRecursive(query, halves[1].from, halves[1].to, depth + 1);
         return;
@@ -195,7 +199,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
 
     const pagesAvailable = Math.min(firstResp.pages ?? 0, HH_API_MAX_PAGE + 1);
     for (let page = 1; page < pagesAvailable; page += 1) {
-      if (seenVacancyIds.size >= job.max_results) return;
+      if (seenVacancyIds.size >= maxResults) return;
       if (await isCancelled(db, jobId)) return;
       await sleep(REQUEST_DELAY_MS);
       try {
@@ -213,9 +217,9 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
 
   try {
     for (const query of config.searchQueries) {
-      if (savedTotal >= job.max_results) {
+      if (savedTotal >= maxResults) {
         console.log(
-          `[hh-archive][${jobId}] hit max_results=${job.max_results}, stopping`,
+          `[hh-archive][${jobId}] hit max_results=${maxResults}, stopping`,
         );
         break;
       }
@@ -225,7 +229,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       }
 
       for (const { from, to } of dateChunks) {
-        if (savedTotal >= job.max_results) break;
+        if (savedTotal >= maxResults) break;
         if (await isCancelled(db, jobId)) return;
 
         processedChunks += 1;
