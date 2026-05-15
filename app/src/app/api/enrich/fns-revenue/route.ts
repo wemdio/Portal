@@ -10,8 +10,12 @@ function jsonError(message: string, status: number) {
 }
 
 /**
- * GET — возвращает список доступных report_year в БД для рендера селектора
- * в UI. Один запрос, кешируемый на стороне фронта.
+ * GET — возвращает список доступных report_year в БД для рендера селектора.
+ *
+ * Через RPC get_fns_revenue_years (миграция 20260514_0003): PostgREST
+ * не умеет SELECT DISTINCT, а попытка достать года через select+limit
+ * берёт N произвольных строк (на 2M строк одного года → все одинаковые).
+ * Функция делает array_agg(distinct ...) на стороне Postgres.
  */
 export async function GET(req: NextRequest) {
   const token = getBearerToken(req.headers.get('authorization'));
@@ -23,18 +27,11 @@ export async function GET(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-  // DISTINCT report_year — на 2M записей через индекс idx_fns_revenue_year
-  // занимает миллисекунды (index-only scan).
-  const { data, error } = await supabaseAdmin
-    .from('fns_revenue')
-    .select('report_year')
-    .order('report_year', { ascending: false })
-    .limit(50); // годы редко выйдут за 5-10, 50 — sane cap
-
+  const { data, error } = await supabaseAdmin.rpc('get_fns_revenue_years');
   if (error) return jsonError(`Database error: ${error.message}`, 500);
-  const years = Array.from(new Set((data ?? []).map((r) => r.report_year as number))).sort(
-    (a, b) => b - a,
-  );
+
+  // RPC возвращает integer[] уже отсортированный desc. Защищаемся от null.
+  const years = Array.isArray(data) ? (data as number[]) : [];
   return NextResponse.json({ years });
 }
 
