@@ -67,7 +67,7 @@ export function ClientMobileDrawer({ open, onClose, activeId, locale }: ClientMo
           <span
             className="text-base font-extrabold tracking-tight"
             style={{
-              background: 'linear-gradient(135deg, var(--cp-accent), #7C3AED)',
+              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
             }}

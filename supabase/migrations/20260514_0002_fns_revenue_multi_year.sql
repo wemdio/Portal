@@ -14,7 +14,28 @@ DO $$
 DECLARE
   pk_name text;
   pk_cols text;
+  table_exists boolean;
 BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relname = 'fns_revenue'
+  ) INTO table_exists;
+
+  -- Таблицы нет (свежая dev-БД) — создаём сразу с нужным PK.
+  IF NOT table_exists THEN
+    CREATE TABLE public.fns_revenue (
+      inn         text        NOT NULL,
+      org_name    text,
+      income      numeric,
+      expense     numeric,
+      report_year integer     NOT NULL DEFAULT 2024,
+      CONSTRAINT fns_revenue_pkey PRIMARY KEY (inn, report_year)
+    );
+    RAISE NOTICE 'fns_revenue created with composite PK (inn, report_year)';
+    RETURN;
+  END IF;
+
   SELECT conname,
          pg_get_constraintdef(oid)
     INTO pk_name, pk_cols
