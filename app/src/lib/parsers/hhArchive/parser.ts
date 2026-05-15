@@ -184,6 +184,33 @@ export function extractVacancies(response: HHRawResponse): HHVacancy[] {
   return out;
 }
 
+/**
+ * Тащит сайт работодателя по его id. HH /vacancies в search-ответе НЕ
+ * отдаёт `employer.site_url` — только id/name/url. Чтобы получить
+ * настоящий внешний сайт компании, надо отдельно дёрнуть /employers/{id}.
+ *
+ * Returns `null` если у работодателя сайта нет (HH вернул site_url=null
+ * или пустую строку), либо если employer удалён/недоступен.
+ */
+export async function fetchEmployerSite(
+  employerId: string,
+  config: Pick<HHParseConfig, 'userAgent' | 'oauthToken'>,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const headers = buildHhRequestHeaders(config.userAgent);
+  if (config.oauthToken) headers.Authorization = `Bearer ${config.oauthToken}`;
+
+  const res = await fetch(`https://api.hh.ru/employers/${employerId}`, { headers, signal });
+  if (res.status === 404) return null; // employer удалён → не валим всё
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`HH employer API ${res.status}: ${body.slice(0, 120)}`);
+  }
+  const json = (await res.json()) as { site_url?: string | null };
+  const url = (json.site_url ?? '').trim();
+  return url || null;
+}
+
 /** Утилита sleep — для requestDelayMs. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
