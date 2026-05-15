@@ -20,12 +20,19 @@ import {
   buildSearchUrl,
   chunkDateRange,
   extractVacancies,
+  fetchEmployerSite,
   fetchHHJson,
   sleep,
   type ChunkStrategy,
   type HHParseConfig,
   type HHRawResponse,
 } from './parser';
+
+/** Задержка между запросами к /employers/{id}. Чуть короче чем для /vacancies
+ *  (там per_page=100, дороже; здесь маленький JSON). 700мс ≈ 1.4 RPS. */
+const EMPLOYER_REQUEST_DELAY_MS = Number(
+  process.env.HH_ARCHIVE_EMPLOYER_DELAY_MS ?? '700',
+);
 
 // User-Agent: можно переопределить через HH_ARCHIVE_USER_AGENT, иначе
 // используем общий default из hhParser.ts (через buildHhRequestHeaders в
@@ -194,6 +201,18 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       }
     }
 
+    // Перед завершением — обогащаем сайт компании (HH search не отдаёт
+    // employer.site_url, надо отдельно дёрнуть /employers/{id}).
+    // Долгий шаг (1500 уник работодателей ≈ 20 мин при 700мс delay),
+    // но без него column company_site_url остаётся пустым.
+    if (!(await isCancelled(db, jobId))) {
+      const enriched = await enrichEmployerSites(db, jobId, config);
+      console.log(
+        `[hh-archive][${jobId}] employer enrichment: ${enriched.updated}/${enriched.total} got sites (${enriched.errors} errors)`,
+      );
+      errorsCount += enriched.errors;
+    }
+
     await updateJob(db, jobId, {
       status: 'completed',
       completed_at: new Date().toISOString(),
@@ -203,7 +222,7 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       processed_chunks: processedChunks,
     });
     console.log(
-      `[hh-archive][${jobId}] completed: saved ${savedTotal}/${foundTotal} (${errorsCount} chunk errors)`,
+      `[hh-archive][${jobId}] completed: saved ${savedTotal}/${foundTotal} (${errorsCount} errors)`,
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -216,6 +235,85 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
       errors_count: errorsCount + 1,
     });
   }
+}
+
+/**
+ * Пост-обработка: для каждого уникального employer_id из этого job'а
+ * дёргает /employers/{id}, обновляет company_site_url во ВСЕХ строках
+ * этого employer в текущем job.
+ *
+ * Долгий шаг (1500 уник × 700ms ≈ 17 мин). Идёт последовательно —
+ * параллелить страшнее: на HH общий rate-limit, а воркер уже занят этим
+ * job-slot'ом, спешить некуда.
+ *
+ * Не валит job целиком при отдельных 403/404/500 — лучше сохранить часть
+ * сайтов, чем отказаться от всех.
+ */
+async function enrichEmployerSites(
+  db: SupabaseClient,
+  jobId: string,
+  config: HHParseConfig,
+): Promise<{ updated: number; total: number; errors: number }> {
+  // Берём уникальные employer_id из этого job'а, у которых сайт ещё не
+  // подтянут. Limit 50000 (упёрлись бы и в max_results).
+  const { data: rows, error } = await db
+    .from('hh_archive_results')
+    .select('employer_id')
+    .eq('job_id', jobId)
+    .or('company_site_url.is.null,company_site_url.eq.')
+    .not('employer_id', 'is', null)
+    .neq('employer_id', '')
+    .limit(50000);
+  if (error) {
+    console.error(`[hh-archive][${jobId}] enrich: select failed:`, error.message);
+    return { updated: 0, total: 0, errors: 1 };
+  }
+
+  const uniqueIds = Array.from(
+    new Set((rows ?? []).map((r) => String(r.employer_id)).filter(Boolean)),
+  );
+  if (uniqueIds.length === 0) return { updated: 0, total: 0, errors: 0 };
+
+  console.log(`[hh-archive][${jobId}] enriching ${uniqueIds.length} unique employers...`);
+  let updated = 0;
+  let errors = 0;
+
+  for (let i = 0; i < uniqueIds.length; i += 1) {
+    if (await isCancelled(db, jobId)) {
+      console.log(`[hh-archive][${jobId}] enrichment cancelled at ${i}/${uniqueIds.length}`);
+      break;
+    }
+    const employerId = uniqueIds[i];
+    try {
+      const site = await fetchEmployerSite(employerId, config);
+      if (site) {
+        const { error: updErr } = await db
+          .from('hh_archive_results')
+          .update({ company_site_url: site })
+          .eq('job_id', jobId)
+          .eq('employer_id', employerId);
+        if (updErr) {
+          errors += 1;
+          console.warn(`[hh-archive][${jobId}] employer ${employerId} UPDATE failed:`, updErr.message);
+        } else {
+          updated += 1;
+        }
+      }
+    } catch (e) {
+      errors += 1;
+      console.warn(`[hh-archive][${jobId}] employer ${employerId} fetch failed:`, (e as Error).message);
+    }
+
+    // Heartbeat каждые 50 — иначе startup-recovery решит, что воркер мёртв.
+    if ((i + 1) % 50 === 0) {
+      await updateJob(db, jobId, { /* updated_at bumps via trigger */ });
+      console.log(`[hh-archive][${jobId}] enriched ${i + 1}/${uniqueIds.length} (${updated} with sites)`);
+    }
+
+    await sleep(EMPLOYER_REQUEST_DELAY_MS);
+  }
+
+  return { updated, total: uniqueIds.length, errors };
 }
 
 async function persistVacancies(
