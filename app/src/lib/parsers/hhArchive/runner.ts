@@ -23,10 +23,15 @@ import {
   fetchEmployerSite,
   fetchHHJson,
   sleep,
+  splitDateRangeHalf,
   type ChunkStrategy,
   type HHParseConfig,
   type HHRawResponse,
 } from './parser';
+
+/** Максимальная глубина рекурсивного разбиения чанка. На monthly старте даёт
+ *  ≈ 30 / 2^MAX_SPLIT_DEPTH дней минимальный чанк. 5 = ~1 день. */
+const MAX_SPLIT_DEPTH = 5;
 
 /** Задержка между запросами к /employers/{id}. Чуть короче чем для /vacancies
  *  (там per_page=100, дороже; здесь маленький JSON). 700мс ≈ 1.4 RPS. */
@@ -129,6 +134,83 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
   let errorsCount = 0;
   let processedChunks = 0;
 
+  /**
+   * Обработка одного чанка с рекурсивным разбиением.
+   * Если HH репортит `found > 2000` И мы ещё не достигли MAX_SPLIT_DEPTH —
+   * режем чанк пополам по дате и рекурсивно обрабатываем половинки.
+   * Иначе пагинируем все доступные страницы (макс 19 × 100 = 1900 items).
+   *
+   * Side-effects на outer let: foundTotal, errorsCount, seenVacancyIds.
+   */
+  async function processChunkRecursive(
+    query: string,
+    from: string,
+    to: string,
+    depth: number,
+  ): Promise<void> {
+    if (seenVacancyIds.size >= job.max_results) return;
+    if (await isCancelled(db, jobId)) return;
+
+    // Стр. 0 — узнаём found / pages
+    let firstResp: HHRawResponse;
+    try {
+      firstResp = await fetchHHJson(buildSearchUrl(config, query, 0, from, to), config);
+    } catch (e) {
+      errorsCount += 1;
+      console.error(
+        `[hh-archive][${jobId}] chunk failed ${query}/${from}..${to} (depth=${depth}):`,
+        (e as Error).message,
+      );
+      return;
+    }
+
+    const found = firstResp.found ?? 0;
+
+    // Если over-cap и есть куда разбивать → recurse.
+    if (found > HH_API_RESULTS_HARD_CAP && depth < MAX_SPLIT_DEPTH && from !== to) {
+      const halves = splitDateRangeHalf(from, to);
+      if (halves.length === 2) {
+        console.log(
+          `[hh-archive][${jobId}] split ${query}/${from}..${to}: found=${found} > 2000, depth=${depth} → halves`,
+        );
+        await sleep(REQUEST_DELAY_MS);
+        await processChunkRecursive(query, halves[0].from, halves[0].to, depth + 1);
+        if (seenVacancyIds.size >= job.max_results) return;
+        await sleep(REQUEST_DELAY_MS);
+        await processChunkRecursive(query, halves[1].from, halves[1].to, depth + 1);
+        return;
+      }
+    }
+
+    // Лист рекурсии. Если по-прежнему found > 2000 — accept loss.
+    foundTotal += Math.min(found, HH_API_RESULTS_HARD_CAP);
+    if (found > HH_API_RESULTS_HARD_CAP) {
+      console.warn(
+        `[hh-archive][${jobId}] LEAF ${query}/${from}..${to}: found=${found} > 2000, losing ${found - HH_API_RESULTS_HARD_CAP} (depth=${depth} → дальше не дробится)`,
+      );
+    }
+
+    // Сохраняем page 0
+    await persistVacancies(db, jobId, query, firstResp, seenVacancyIds);
+
+    const pagesAvailable = Math.min(firstResp.pages ?? 0, HH_API_MAX_PAGE + 1);
+    for (let page = 1; page < pagesAvailable; page += 1) {
+      if (seenVacancyIds.size >= job.max_results) return;
+      if (await isCancelled(db, jobId)) return;
+      await sleep(REQUEST_DELAY_MS);
+      try {
+        const resp = await fetchHHJson(buildSearchUrl(config, query, page, from, to), config);
+        await persistVacancies(db, jobId, query, resp, seenVacancyIds);
+      } catch (e) {
+        errorsCount += 1;
+        console.error(
+          `[hh-archive][${jobId}] page ${page} failed ${query}/${from}..${to}:`,
+          (e as Error).message,
+        );
+      }
+    }
+  }
+
   try {
     for (const query of config.searchQueries) {
       if (savedTotal >= job.max_results) {
@@ -148,46 +230,9 @@ export async function runHHArchiveJob(db: SupabaseClient, jobId: string): Promis
 
         processedChunks += 1;
 
-        // Стр. 0 — узнаём found / pages
-        let firstResp;
-        try {
-          firstResp = await fetchHHJson(buildSearchUrl(config, query, 0, from, to), config);
-        } catch (e) {
-          errorsCount += 1;
-          console.error(`[hh-archive][${jobId}] chunk failed ${query}/${from}..${to}:`, (e as Error).message);
-          await updateJob(db, jobId, { errors_count: errorsCount, processed_chunks: processedChunks });
-          await sleep(REQUEST_DELAY_MS);
-          continue;
-        }
-
-        const found = firstResp.found ?? 0;
-        foundTotal += Math.min(found, HH_API_RESULTS_HARD_CAP); // потому что больше не достать
-        const pagesAvailable = Math.min(firstResp.pages ?? 0, HH_API_MAX_PAGE + 1);
-
-        if (found > HH_API_RESULTS_HARD_CAP) {
-          // Юзер должен переключить chunk_strategy. Записываем в errors_count
-          // и сообщение, но продолжаем — лучше взять 2000 чем ничего.
-          console.warn(
-            `[hh-archive][${jobId}] chunk ${query}/${from}..${to}: found=${found} > 2000, will lose ${found - HH_API_RESULTS_HARD_CAP}`,
-          );
-        }
-
-        // Сохраняем page 0
-        await persistVacancies(db, jobId, query, firstResp, seenVacancyIds);
-
-        // Pages 1..pagesAvailable-1
-        for (let page = 1; page < pagesAvailable; page += 1) {
-          if (savedTotal + seenVacancyIds.size >= job.max_results) break;
-          if (await isCancelled(db, jobId)) return;
-          await sleep(REQUEST_DELAY_MS);
-          try {
-            const resp = await fetchHHJson(buildSearchUrl(config, query, page, from, to), config);
-            await persistVacancies(db, jobId, query, resp, seenVacancyIds);
-          } catch (e) {
-            errorsCount += 1;
-            console.error(`[hh-archive][${jobId}] page ${page} failed:`, (e as Error).message);
-          }
-        }
+        // Рекурсивно обрабатываем чанк: если found > 2000 → режем пополам.
+        // Это устраняет основной источник потерь от HH-лимита 2000/запрос.
+        await processChunkRecursive(query, from, to, 0);
 
         savedTotal = seenVacancyIds.size;
         await updateJob(db, jobId, {
