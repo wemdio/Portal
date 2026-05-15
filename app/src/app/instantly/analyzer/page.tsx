@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   ChevronLeft, Loader2, Search, Trash2, ExternalLink, AlertTriangle,
-  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, Clock,
+  ArrowUpDown, ArrowUp, ArrowDown, ShieldAlert, Clock, RefreshCw,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
@@ -74,7 +74,11 @@ interface AnalyticsMeta {
 
 const ANALYZABLE_SET = new Set<number>(ANALYZABLE_STATUSES as unknown as number[]);
 
-const FRESHNESS_WARN_MS = 6 * 60 * 60 * 1000;
+// 30 мин — компромисс между «не пугать на каждый чих» и «не молчать сутки».
+// Sync-bot пишет в кэш раз в час, так что баннер начнёт показываться примерно
+// в конце цикла обновления — это то поведение, что нужно ЛПР для аналитической
+// работы (видишь предупреждение → жмёшь Обновить → получаешь свежее).
+const FRESHNESS_WARN_MS = 30 * 60 * 1000;
 
 function formatFreshness(iso: string | null): string {
   if (!iso) return 'неизвестно';
@@ -194,6 +198,60 @@ export default function CompletedCampaignAnalyzer() {
     if (authorized) load();
   }, [authorized, load]);
 
+  /**
+   * Live re-check одной кампании. Дёргает тот же analytics-эндпоинт, но
+   * с `campaign_id=` — это намного быстрее bulk-вызова и (важно!) форсит
+   * source=api, минуя возможный db-fallback. Возвращает текущий live
+   * leads_count или null если запрос упал/вернулся пустым.
+   *
+   * Используем перед открытием диалога «Очистить лиды» и после удаления:
+   * пользователь часто открывает анализатор с устаревшим кэшем (sync-bot
+   * обновляет раз в час), видит «есть лиды» там, где их уже нет, жмёт
+   * «Очистить» — а удалять нечего. Лучше прозрачно сообщить и убрать
+   * строку из списка.
+   */
+  const recheckCampaignLeads = useCallback(async (campaignId: string): Promise<number | null> => {
+    try {
+      const res = await authFetch(`/api/instantly/analytics?type=campaigns&source=api&campaign_id=${encodeURIComponent(campaignId)}`);
+      if (!res.ok) return null;
+      const body = (await res.json()) as Array<{ campaign_id?: string; leads_count?: number }>;
+      const arr = Array.isArray(body) ? body : [];
+      const match = arr.find((a) => a.campaign_id === campaignId) ?? arr[0];
+      const count = typeof match?.leads_count === 'number' ? match.leads_count : null;
+      return count;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /**
+   * Клик «Очистить»: сначала live re-check, потом подтверждение.
+   * Если БД говорит «есть лиды», а live-API уже отдаёт 0 — это типичный
+   * случай «уже почистили в Instantly UI», диалог не нужен. Просто
+   * обновляем строку в state и информируем.
+   */
+  const handleClearClick = useCallback(async (row: CampaignRow) => {
+    setClearing(row.id);
+    try {
+      const liveCount = await recheckCampaignLeads(row.id);
+      if (liveCount === 0) {
+        // Уже почищено — обновим строку и не открываем диалог.
+        setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, leadsCount: 0 } : r));
+        setError(`«${row.name}»: лидов уже нет (по данным Instantly). Список обновлён.`);
+        return;
+      }
+      // Live > 0 или unknown — открываем диалог с актуальным числом
+      // (если есть). Иначе оставляем кэш-значение, как было.
+      setConfirmClear({
+        id: row.id,
+        name: row.name,
+        count: liveCount ?? row.leadsCount,
+      });
+    } finally {
+      setClearing(null);
+    }
+  }, [recheckCampaignLeads]);
+
   const handleClearLeads = useCallback(async (campaignId: string) => {
     setClearing(campaignId);
     setConfirmClear(null);
@@ -204,12 +262,16 @@ export default function CompletedCampaignAnalyzer() {
       });
       const deleted = result?.count ?? 0;
       setRows((prev) => prev.map((r) => r.id === campaignId ? { ...r, leadsCount: Math.max(0, r.leadsCount - deleted) } : r));
+      // Instantly bulk-аналитика обновляется не сразу после delete — даём
+      // ему 5 сек и заново загружаем всё. Это гарантирует свежие числа без
+      // ручного F5 и убирает кейс «удалил, но всё ещё висит».
+      setTimeout(() => { void load(); }, 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка удаления лидов');
     } finally {
       setClearing(null);
     }
-  }, []);
+  }, [load]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -289,14 +351,26 @@ export default function CompletedCampaignAnalyzer() {
         <ChevronLeft className="h-3 w-3" /> Instantly
       </Link>
 
-      <div className="mb-6">
-        <h1 className="text-xl font-bold text-zinc-900 flex items-center gap-2">
-          <AlertTriangle className="h-5 w-5 text-amber-500" />
-          Анализатор неактивных кампаний
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Завершённые, паузнутые и черновые кампании с загруженными лидами, которые занимают место по тарифу.
-        </p>
+      <div className="mb-6 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-zinc-900 flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+            Анализатор неактивных кампаний
+          </h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Завершённые, паузнутые и черновые кампании с загруженными лидами, которые занимают место по тарифу.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          disabled={loading}
+          title="Перезагрузить из Instantly API"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 transition-colors whitespace-nowrap"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Обновить
+        </button>
       </div>
 
       {error && (
@@ -520,7 +594,7 @@ export default function CompletedCampaignAnalyzer() {
                             {r.leadsCount > 0 && (
                               <button
                                 type="button"
-                                onClick={() => setConfirmClear({ id: r.id, name: r.name, count: r.leadsCount })}
+                                onClick={() => void handleClearClick(r)}
                                 disabled={clearing === r.id}
                                 className="inline-flex items-center gap-0.5 rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-600 hover:bg-red-100 transition-colors disabled:opacity-50 whitespace-nowrap"
                                 title="Удалить всех лидов из этой кампании"

@@ -131,31 +131,94 @@ export function buildSearchUrl(
   return `${HH_API_BASE}?${params.toString()}`;
 }
 
-/** Делает GET к HH API, парсит JSON. Кидает Error при HTTP/network ошибках. */
+/**
+ * GET к HH API c автоматическими ретраями на 429/5xx.
+ *
+ * Ретраи только для transient ошибок:
+ *   - 429 Too Many Requests → ждём Retry-After, затем повторяем
+ *   - 5xx Server Error      → экспоненциальный backoff (2s/4s/8s)
+ *   - network errors        → то же
+ *
+ * НЕ ретраим 4xx (кроме 429) — они не починятся от повтора (403, 404, 400).
+ */
 export async function fetchHHJson(
   url: string,
   config: Pick<HHParseConfig, 'userAgent' | 'oauthToken'>,
   signal?: AbortSignal,
+  maxRetries: number = 3,
 ): Promise<HHRawResponse> {
   // Используем тот же auth-стек что и стандартный HH-парсер: env-переменная
-  // HH_ACCESS_TOKEN (установлена на проде), default UA. Это даёт OAuth
-  // авторизацию, без которой /vacancies возвращает 403 с 2026-04-15.
+  // HH_ACCESS_TOKEN (установлена на проде), default UA.
   const headers = buildHhRequestHeaders(config.userAgent);
-  // Если caller передал явный oauthToken (тест/override), он перебивает env.
-  if (config.oauthToken) {
-    headers.Authorization = `Bearer ${config.oauthToken}`;
-  }
+  if (config.oauthToken) headers.Authorization = `Bearer ${config.oauthToken}`;
 
-  const res = await fetch(url, { headers, signal });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`HH API ${res.status}: ${body.slice(0, 200)}`);
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      const res = await fetch(url, { headers, signal });
+      if (res.ok) {
+        const json = (await res.json()) as HHRawResponse;
+        if (json.errors?.length) {
+          throw new Error(`HH API returned errors: ${JSON.stringify(json.errors)}`);
+        }
+        return json;
+      }
+
+      // Retryable codes
+      if (res.status === 429 || res.status >= 500) {
+        const retryAfter = Number(res.headers.get('retry-after') ?? '0');
+        const backoff =
+          retryAfter > 0 ? retryAfter * 1000 : Math.min(2000 * 2 ** attempt, 30000);
+        lastErr = new Error(`HH API ${res.status}, retry ${attempt + 1}/${maxRetries} after ${backoff}ms`);
+        if (attempt < maxRetries) {
+          await sleep(backoff);
+          continue;
+        }
+      }
+
+      // Non-retryable (4xx кроме 429) — сразу throw без ретраев.
+      const body = await res.text().catch(() => '');
+      throw new Error(`HH API ${res.status}: ${body.slice(0, 200)}`);
+    } catch (e) {
+      // network error (TypeError, AbortError, etc.) — ретраим
+      if (e instanceof Error && (e.name === 'AbortError' || (e as { status?: number }).status)) {
+        throw e;
+      }
+      lastErr = e as Error;
+      if (attempt < maxRetries) {
+        await sleep(Math.min(2000 * 2 ** attempt, 30000));
+        continue;
+      }
+      throw e;
+    }
   }
-  const json = (await res.json()) as HHRawResponse;
-  if (json.errors?.length) {
-    throw new Error(`HH API returned errors: ${JSON.stringify(json.errors)}`);
+  throw lastErr ?? new Error('HH API: exhausted retries');
+}
+
+/**
+ * Делит [from, to] пополам по датам. Если from === to → возвращает single
+ * (нечего делить — это уже минимальный 1-дневный чанк).
+ */
+export function splitDateRangeHalf(
+  fromIso: string,
+  toIso: string,
+): { from: string; to: string }[] {
+  const from = new Date(`${fromIso}T00:00:00Z`);
+  const to = new Date(`${toIso}T00:00:00Z`);
+  if (isNaN(from.getTime()) || isNaN(to.getTime()) || from >= to) {
+    return [{ from: fromIso, to: toIso }];
   }
-  return json;
+  const days = Math.floor((to.getTime() - from.getTime()) / 86400000);
+  if (days < 1) return [{ from: fromIso, to: toIso }];
+  const midOffset = Math.floor(days / 2);
+  const mid = new Date(from);
+  mid.setUTCDate(mid.getUTCDate() + midOffset);
+  const midPlus1 = new Date(mid);
+  midPlus1.setUTCDate(midPlus1.getUTCDate() + 1);
+  return [
+    { from: fromIso, to: mid.toISOString().slice(0, 10) },
+    { from: midPlus1.toISOString().slice(0, 10), to: toIso },
+  ];
 }
 
 /** Достаёт массив вакансий из ответа API в нашу типизированную форму. */
