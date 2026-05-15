@@ -384,19 +384,11 @@ async function notifySpecialistsAboutLead(
       }
     }
 
-    // Fallback: manual campaign preferences
-    if (userIds.size === 0) {
-      const { data: prefs } = await instantlyDb
-        .from('user_instantly_campaign_preferences')
-        .select('user_id')
-        .eq('campaign_id', campaignId);
-
-      if (prefs) {
-        for (const p of prefs) {
-          userIds.add((p as { user_id: string }).user_id);
-        }
-      }
-    }
+    // Раньше тут был fallback на user_instantly_campaign_preferences
+    // (ручной выбор кампаний). Убран 16 мая 2026 вместе с UI-блоком:
+    // worker и так квалифицирует только project-linked кампании
+    // (getPortalLinkedCampaignIds), поэтому specialist_user_id проекта
+    // — единственный реальный источник получателя.
 
     if (userIds.size === 0) {
       workerLog('warn', `No specialist found for campaign ${campaignId} — no lead notification sent`);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { logAudit, logError } from '@/lib/loggerClient';
@@ -119,12 +119,6 @@ export default function ProfilePage() {
   const [tgLoading, setTgLoading] = useState(false);
   const [tgDeeplink, setTgDeeplink] = useState<string | null>(null);
   const [tgUsername, setTgUsername] = useState<string | null>(null);
-
-  const [campaignPrefs, setCampaignPrefs] = useState<string[]>([]);
-  const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string; status: number }[]>([]);
-  const [campaignsLoading, setCampaignsLoading] = useState(false);
-  const [campaignSearch, setCampaignSearch] = useState('');
-  const [savingPrefs, setSavingPrefs] = useState(false);
 
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -256,61 +250,6 @@ export default function ProfilePage() {
   }, [userId]);
 
   const userIsClient = useMemo(() => isClient((profile?.role ?? null) as UserRole | null), [profile?.role]);
-
-  const loadCampaignPrefs = useCallback(async () => {
-    if (userIsClient) return;
-    setCampaignsLoading(true);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const t = session?.access_token;
-      if (!t) return;
-
-      const [prefsRes, campsRes] = await Promise.all([
-        fetch('/api/user/campaign-preferences', { headers: { Authorization: `Bearer ${t}` } }),
-        fetch('/api/instantly/campaigns?limit=all', { headers: { Authorization: `Bearer ${t}` } }),
-      ]);
-
-      if (prefsRes.ok) {
-        const prefsData = (await prefsRes.json()) as { campaign_ids?: string[] };
-        setCampaignPrefs(prefsData.campaign_ids ?? []);
-      }
-      if (campsRes.ok) {
-        const campsData = (await campsRes.json()) as { items?: { id: string; name: string; status: number }[] };
-        setAllCampaigns((campsData.items ?? []).map((c) => ({ id: c.id, name: c.name, status: c.status ?? 0 })));
-      }
-    } catch { /* ignore */ } finally {
-      setCampaignsLoading(false);
-    }
-  }, [userIsClient]);
-
-  useEffect(() => {
-    if (userId && !userIsClient) void loadCampaignPrefs();
-  }, [userId, userIsClient, loadCampaignPrefs]);
-
-  async function handleSaveCampaignPrefs(overrideIds?: string[]) {
-    const idsToSave = overrideIds ?? campaignPrefs;
-    setSavingPrefs(true);
-    setError('');
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const t = session?.access_token;
-      if (!t) throw new Error('Not authenticated');
-      const res = await fetch('/api/user/campaign-preferences', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
-        body: JSON.stringify({ campaign_ids: idsToSave }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error || `Ошибка сохранения (${res.status})`);
-      }
-      setMessage(locale === 'en' ? 'Lead campaign preferences saved' : 'Кампании для лидов сохранены');
-    } catch (err) {
-      setError(getErrorMessage(err));
-    } finally {
-      setSavingPrefs(false);
-    }
-  }
 
   async function handleTelegramLink() {
     setTgLoading(true);
@@ -691,81 +630,6 @@ export default function ProfilePage() {
                 </div>
                 <p className="text-xs text-gray-400">{tr(locale, 'Ссылка действительна 10 минут', 'Link is valid for 10 minutes')}</p>
               </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {!userIsClient && (
-        <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-          <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-4">
-            <h2 className="text-sm font-semibold text-gray-900">{tr(locale, 'Кампании для лидов', 'Lead campaigns')}</h2>
-            <p className="mt-1 text-xs text-gray-500">
-              {tr(locale, 'Выберите кампании Instantly, по которым хотите видеть AI-квалифицированных лидов', 'Select Instantly campaigns for AI-qualified leads')}
-            </p>
-          </div>
-          <div className="p-5 space-y-3">
-            {campaignsLoading ? (
-              <p className="text-sm text-gray-500">{tr(locale, 'Загрузка кампаний…', 'Loading campaigns…')}</p>
-            ) : allCampaigns.length === 0 ? (
-              <p className="text-sm text-gray-500">{tr(locale, 'Кампании не найдены', 'No campaigns found')}</p>
-            ) : (
-              <>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={campaignSearch}
-                    onChange={(e) => setCampaignSearch(e.target.value)}
-                    placeholder={tr(locale, 'Поиск по названию…', 'Search by name…')}
-                    className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <span className="text-xs text-gray-400 whitespace-nowrap">
-                    {tr(locale, 'Выбрано', 'Selected')}: {campaignPrefs.length}
-                  </span>
-                </div>
-                <div className="max-h-60 overflow-y-auto space-y-0.5 border border-gray-100 rounded-lg p-2">
-                  {allCampaigns
-                    .filter((c) => !campaignSearch || c.name.toLowerCase().includes(campaignSearch.toLowerCase()))
-                    .map((c) => {
-                      const checked = campaignPrefs.includes(c.id);
-                      return (
-                        <label
-                          key={c.id}
-                          className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-gray-50 cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => {
-                              setCampaignPrefs((prev) =>
-                                checked ? prev.filter((id) => id !== c.id) : [...prev, c.id],
-                              );
-                            }}
-                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                          />
-                          <span className="text-sm text-gray-700 truncate">{c.name}</span>
-                        </label>
-                      );
-                    })}
-                </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void handleSaveCampaignPrefs()}
-                    disabled={savingPrefs}
-                    className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    {savingPrefs ? tr(locale, 'Сохранение…', 'Saving…') : tr(locale, 'Сохранить', 'Save')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setCampaignPrefs([]); void handleSaveCampaignPrefs([]); }}
-                    className="text-xs text-gray-400 hover:text-gray-600"
-                  >
-                    {tr(locale, 'Сбросить', 'Reset')}
-                  </button>
-                </div>
-              </>
             )}
           </div>
         </div>
