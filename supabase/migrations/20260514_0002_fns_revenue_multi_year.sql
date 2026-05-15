@@ -64,3 +64,9 @@ CREATE INDEX IF NOT EXISTS idx_fns_revenue_inn ON public.fns_revenue (inn);
 -- Индекс по году — для UI-фильтра «какие года вообще есть в БД»
 -- (SELECT DISTINCT report_year ... быстрее).
 CREATE INDEX IF NOT EXISTS idx_fns_revenue_year ON public.fns_revenue (report_year);
+
+-- ACL для self-hosted: миграции идут от postgres, без явного GRANT service_role
+-- не видит таблицу (см. client_support, May 2026).
+GRANT ALL ON public.fns_revenue TO service_role;
+GRANT ALL ON public.fns_revenue TO postgres;
+GRANT SELECT ON public.fns_revenue TO authenticated;
