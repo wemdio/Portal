@@ -94,6 +94,43 @@ function normalizeApiList(raw: unknown): unknown[] {
   return Array.isArray(data) ? data : [];
 }
 
+/**
+ * Instantly bulk-аналитика (/campaigns/analytics) на воркспейсах с >1000
+ * кампаний даёт sporadic 5xx и сообщения «Unable to count leads». Retry
+ * с экспоненциальной задержкой кардинально уменьшает частоту падения
+ * в db-fallback с устаревшими данными.
+ *
+ * Не ретраим клиентские 4xx (400, 401, 403) — они стабильны и retry
+ * лишь даст лишний latency.
+ */
+async function getCampaignAnalyticsWithRetry(
+  params: { campaign_id?: string },
+  maxAttempts = 3,
+): Promise<unknown> {
+  let lastErr: unknown = new Error('unreachable');
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await instantly.getCampaignAnalytics(params);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // Грубая эвристика: код 5xx, "unable to count", "timeout", "ECONN*" → retry.
+      // Всё остальное (4xx, валидация) — fail fast.
+      const retriable =
+        /\b5\d\d\b/.test(msg) ||
+        /unable to count/i.test(msg) ||
+        /timeout|ETIMEDOUT|ECONN|fetch failed/i.test(msg);
+      if (!retriable || attempt === maxAttempts - 1) throw err;
+      const wait = 1000 * Math.pow(2, attempt); // 1s, 2s
+      console.warn(
+        `[instantly-analytics] retry ${attempt + 1}/${maxAttempts} after ${wait}ms: ${msg.slice(0, 120)}`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
 export const GET = withAuth(async (req) => {
   const url = new URL(req.url);
   const type = url.searchParams.get('type') ?? 'campaigns';
@@ -183,7 +220,7 @@ export const GET = withAuth(async (req) => {
       // when that happens we transparently fall back to the cache so the
       // analyzer keeps working — the UI shows a freshness banner instead.
       try {
-        const raw = await instantly.getCampaignAnalytics({ campaign_id });
+        const raw = await getCampaignAnalyticsWithRetry({ campaign_id });
         return jsonWithSource(normalizeApiList(raw), 'api');
       } catch (apiErr) {
         if (supabaseInstantly) {
