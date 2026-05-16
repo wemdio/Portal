@@ -19,17 +19,13 @@
 
 import Link from 'next/link';
 import type { Route } from 'next';
-import {
-  Building2, Briefcase, Search, MapPin, Upload, Eraser, ArrowRight,
-} from 'lucide-react';
-import type { ComponentType } from 'react';
+import { ArrowRight } from 'lucide-react';
 
 interface SourceCard {
   href: string;
   label: string;
   description: string;
-  icon: ComponentType<{ className?: string }>;
-  /** Free-form hint shown as small badge. Use sparingly to avoid clutter. */
+  color: string;
   badge?: string;
 }
 
@@ -38,32 +34,32 @@ const SOURCES: readonly SourceCard[] = [
     href: '/client/companies-search',
     label: 'B2B-поиск компаний',
     description: 'По ОКВЭД, регионам, выручке. Российские компании с реквизитами.',
-    icon: Building2,
+    color: '#3B82F6',
     badge: 'Россия',
   },
   {
     href: '/client/parsers?tab=hh',
     label: 'HH.ru',
     description: 'Парсинг компаний по их вакансиям — отличный сигнал найма.',
-    icon: Briefcase,
+    color: '#6366F1',
   },
   {
     href: '/client/parsers?tab=search',
     label: 'Поисковая выдача',
     description: 'Сбор сайтов по любым ключевым запросам через Google/Яндекс.',
-    icon: Search,
+    color: '#8B5CF6',
   },
   {
     href: '/client/parsers?tab=yandexmaps',
     label: 'Яндекс.Карты',
     description: 'Локальный бизнес: рестораны, клиники, магазины с адресами.',
-    icon: MapPin,
+    color: '#F43F5E',
   },
   {
     href: '/client/base-constructor',
     label: 'Загрузить файл',
     description: 'Уже есть CSV/XLSX? Загрузите — мы очистим и обогатим.',
-    icon: Upload,
+    color: '#F59E0B',
     badge: 'Свой файл',
   },
 ];
@@ -72,7 +68,10 @@ export default function ClientBuildHubPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-8 sm:space-y-10">
       {/* ── Hero ───────────────────────────────────────────────────────── */}
-      <header>
+      <header
+        className="neu-card relative overflow-hidden p-6 sm:p-8"
+        style={{ background: 'linear-gradient(135deg, rgba(59,130,246,0.06), rgba(139,92,246,0.05))' }}
+      >
         <h1 className="text-2xl sm:text-3xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
           Базы
         </h1>
@@ -87,7 +86,7 @@ export default function ClientBuildHubPage() {
         <div className="flex items-baseline gap-3 mb-4">
           <span
             className="inline-flex items-center justify-center h-7 w-7 rounded-full text-[12px] font-bold shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
+            style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)', color: '#fff' }}
           >
             1
           </span>
@@ -102,47 +101,38 @@ export default function ClientBuildHubPage() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-          {SOURCES.map((s) => {
-            const Icon = s.icon;
-            return (
-              <Link
-                key={s.href}
-                href={s.href as Route}
-                className="neu-card group flex items-start gap-4 p-5 transition-all"
-              >
-                <span
-                  className="inline-flex items-center justify-center h-11 w-11 rounded-2xl shrink-0"
-                  style={{ background: 'rgba(74,111,165,0.10)', color: 'var(--cp-accent)' }}
-                >
-                  <Icon className="h-5 w-5" />
-                </span>
-
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <h3 className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
-                      {s.label}
-                    </h3>
-                    {s.badge && (
-                      <span
-                        className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-                        style={{ background: 'rgba(74,111,165,0.15)', color: 'var(--cp-accent)' }}
-                      >
-                        {s.badge}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs leading-snug" style={{ color: 'var(--cp-text-m)' }}>
-                    {s.description}
-                  </p>
+          {SOURCES.map((s) => (
+            <Link
+              key={s.href}
+              href={s.href as Route}
+              className="neu-card group flex items-start gap-4 p-5 transition-all"
+              style={{ borderLeft: `3px solid ${s.color}` }}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <h3 className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>
+                    {s.label}
+                  </h3>
+                  {s.badge && (
+                    <span
+                      className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                      style={{ background: `${s.color}20`, color: s.color }}
+                    >
+                      {s.badge}
+                    </span>
+                  )}
                 </div>
+                <p className="text-xs leading-snug" style={{ color: 'var(--cp-text-m)' }}>
+                  {s.description}
+                </p>
+              </div>
 
-                <ArrowRight
-                  className="h-4 w-4 shrink-0 mt-1 transition-transform group-hover:translate-x-0.5"
-                  style={{ color: 'var(--cp-text-l)' }}
-                />
-              </Link>
-            );
-          })}
+              <ArrowRight
+                className="h-4 w-4 shrink-0 mt-1 transition-transform group-hover:translate-x-0.5"
+                style={{ color: 'var(--cp-text-l)' }}
+              />
+            </Link>
+          ))}
         </div>
       </section>
 
@@ -151,7 +141,7 @@ export default function ClientBuildHubPage() {
         <div className="flex items-baseline gap-3 mb-4">
           <span
             className="inline-flex items-center justify-center h-7 w-7 rounded-full text-[12px] font-bold shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
+            style={{ background: 'linear-gradient(135deg, #10B981, #059669)', color: '#fff' }}
           >
             2
           </span>
@@ -168,13 +158,8 @@ export default function ClientBuildHubPage() {
         <Link
           href={'/client/base-constructor' as Route}
           className="neu-card group flex items-start gap-4 p-5 sm:p-6 transition-all"
+          style={{ borderLeft: '3px solid #10B981' }}
         >
-          <span
-            className="inline-flex items-center justify-center h-12 w-12 rounded-2xl shrink-0"
-            style={{ background: 'var(--cp-accent)', color: '#fff' }}
-          >
-            <Eraser className="h-5 w-5" />
-          </span>
           <div className="flex-1 min-w-0">
             <h3 className="text-sm sm:text-base font-bold mb-1" style={{ color: 'var(--cp-text)' }}>
               Конструктор баз
@@ -195,7 +180,7 @@ export default function ClientBuildHubPage() {
       {/* ── Tip ────────────────────────────────────────────────────────── */}
       <aside
         className="neu-inset rounded-2xl px-4 py-3 sm:px-5 sm:py-4 text-xs sm:text-sm"
-        style={{ color: 'var(--cp-text-m)' }}
+        style={{ color: 'var(--cp-text-m)', borderLeft: '3px solid #F59E0B' }}
       >
         <strong style={{ color: 'var(--cp-text)' }}>Совет.</strong>{' '}
         Один источник можно совмещать с другим — например, собрать список из B2B-поиска,

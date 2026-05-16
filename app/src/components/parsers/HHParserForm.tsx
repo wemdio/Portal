@@ -1,9 +1,8 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Info } from 'lucide-react';
+import { Info, Play, Loader2, Briefcase } from 'lucide-react';
 import type { HHSearchConfig } from '@/types';
-import { Play, Loader2 } from 'lucide-react';
 
 type Props = {
   onStart: (config: HHSearchConfig) => Promise<void>;
@@ -193,10 +192,15 @@ export function HHParserForm({ onStart, busy }: Props) {
   }, [linkConfig, manualConfig, mode]);
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6" style={{ borderTop: '3px solid #6366F1' }}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">HH.ru парсер</h2>
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-100 text-indigo-600">
+              <Briefcase className="h-4 w-4" />
+            </span>
+            HH.ru парсер
+          </h2>
           <p className="text-sm text-gray-500 mt-1">Запуск поиска вакансий через официальный API HH.ru.</p>
         </div>
         <div className="flex flex-col items-end gap-2">
@@ -226,8 +230,8 @@ export function HHParserForm({ onStart, busy }: Props) {
           <button
             type="button"
             onClick={() => setMode('link')}
-            className={`px-3 py-1.5 text-sm rounded-md transition ${
-              mode === 'link' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+            className={`px-3 py-1.5 text-sm rounded-md font-medium transition ${
+              mode === 'link' ? 'parser-mode-active bg-indigo-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-900'
             }`}
           >
             По ссылке HH.ru
@@ -235,8 +239,8 @@ export function HHParserForm({ onStart, busy }: Props) {
           <button
             type="button"
             onClick={() => setMode('manual')}
-            className={`px-3 py-1.5 text-sm rounded-md transition ${
-              mode === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+            className={`px-3 py-1.5 text-sm rounded-md font-medium transition ${
+              mode === 'manual' ? 'parser-mode-active bg-indigo-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-900'
             }`}
           >
             Ручной ввод

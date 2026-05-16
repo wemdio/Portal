@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
+import { FileBarChart2, Send, Eye, MessageSquare, Layers } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface CampaignRow {
@@ -100,7 +101,15 @@ export default function ClientReportsPage() {
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold">Отчёты</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
+          <span
+            className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
+            style={{ background: 'rgba(139,92,246,0.12)', color: '#8B5CF6' }}
+          >
+            <FileBarChart2 className="h-4.5 w-4.5" />
+          </span>
+          Отчёты
+        </h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>Выберите кампании и сформируйте отчёт</p>
       </div>
 
@@ -188,20 +197,26 @@ export default function ClientReportsPage() {
               <hr className="neu-divider mx-3 sm:mx-5" />
 
               <div className="p-3 sm:p-5 grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4">
-                {[
-                  { label: 'Кампаний', value: report.summary.totalCampaigns },
-                  { label: 'Отправлено', value: report.summary.totalEmailsSent },
-                  { label: 'Открытия', value: report.summary.totalOpened, sub: report.summary.conversion.openPctAllEmails },
-                  { label: 'Ответы', value: report.summary.totalReplies, sub: report.summary.conversion.replyPctByLeads },
-                ].map((m) => (
-                  <div key={m.label} className="neu-sm p-2.5 sm:p-3.5">
-                    <p className="text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{m.label}</p>
+                {([
+                  { label: 'Кампаний', value: report.summary.totalCampaigns, sub: undefined as string | undefined, icon: Layers, color: '#4A6FA5' },
+                  { label: 'Отправлено', value: report.summary.totalEmailsSent, sub: undefined as string | undefined, icon: Send, color: '#3B82F6' },
+                  { label: 'Открытия', value: report.summary.totalOpened, sub: report.summary.conversion.openPctAllEmails, icon: Eye, color: '#8B5CF6' },
+                  { label: 'Ответы', value: report.summary.totalReplies, sub: report.summary.conversion.replyPctByLeads, icon: MessageSquare, color: '#10B981' },
+                ]).map((m) => {
+                  const Icon = m.icon;
+                  return (
+                  <div key={m.label} className="neu-sm p-2.5 sm:p-3.5" style={{ borderTop: `3px solid ${m.color}` }}>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[9px] sm:text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>{m.label}</p>
+                      <Icon className="h-3.5 w-3.5" style={{ color: m.color }} />
+                    </div>
                     <p className="text-base sm:text-lg font-bold mt-1">
                       {m.value}
                       {m.sub && <span className="text-[10px] sm:text-xs font-normal ml-1 sm:ml-1.5" style={{ color: 'var(--cp-text-l)' }}>{m.sub}</span>}
                     </p>
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               {report.rows && report.rows.length > 0 && (

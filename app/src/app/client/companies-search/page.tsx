@@ -1,6 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import {
+  Building2, Filter, UserCheck, Download as DownloadIcon,
+} from 'lucide-react';
 import { Switch } from '@/components/Switch';
 import { supabase } from '@/lib/supabaseClient';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
@@ -198,7 +201,13 @@ export default function CompaniesSearchPage() {
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-20">
       <header>
-        <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900">
+        <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900 flex items-center gap-3">
+          <span
+            className="inline-flex items-center justify-center w-9 h-9 rounded-xl"
+            style={{ background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}
+          >
+            <Building2 className="h-5 w-5" />
+          </span>
           {t('B2B-поиск компаний', 'B2B company search', locale)}
         </h1>
         <p className="mt-2 text-sm sm:text-base text-gray-500">
@@ -211,7 +220,7 @@ export default function CompaniesSearchPage() {
       </header>
 
       {/* Step 1 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
+      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #3B82F6' }}>
         <div className="flex items-center gap-6 mb-6 text-sm">
           <button
             type="button"
@@ -231,8 +240,14 @@ export default function CompaniesSearchPage() {
           </button>
         </div>
 
-        <h2 className="text-xl font-bold mb-4">
-          {t('1. Выберите регионы и виды деятельности', '1. Select regions and activity types', locale)}
+        <h2 className="text-xl font-bold mb-4 flex items-center gap-2.5">
+          <span
+            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
+            style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)', color: '#fff' }}
+          >
+            1
+          </span>
+          {t('Выберите регионы и виды деятельности', 'Select regions and activity types', locale)}
         </h2>
 
         {mode === 'activity' ? (
@@ -311,9 +326,15 @@ export default function CompaniesSearchPage() {
       </div>
 
       {/* Step 2 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="text-xl font-bold mb-6">
-          {t('2. Дополнительные фильтры', '2. Additional filters', locale)}
+      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #8B5CF6' }}>
+        <h2 className="text-xl font-bold mb-6 flex items-center gap-2.5">
+          <span
+            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
+            style={{ background: 'linear-gradient(135deg, #8B5CF6, #7C3AED)', color: '#fff' }}
+          >
+            2
+          </span>
+          {t('Дополнительные фильтры', 'Additional filters', locale)}
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
@@ -460,9 +481,15 @@ export default function CompaniesSearchPage() {
       </div>
 
       {/* Step 3 */}
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="text-xl font-bold mb-4">
-          {t('3. Данные по ИП', '3. Individual entrepreneurs', locale)}
+      <div className="bg-white rounded-xl shadow-sm p-6" style={{ borderTop: '3px solid #F59E0B' }}>
+        <h2 className="text-xl font-bold mb-4 flex items-center gap-2.5">
+          <span
+            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold"
+            style={{ background: 'linear-gradient(135deg, #F59E0B, #D97706)', color: '#fff' }}
+          >
+            3
+          </span>
+          {t('Данные по ИП', 'Individual entrepreneurs', locale)}
         </h2>
         <Switch
           checked={includeIp}
@@ -492,7 +519,8 @@ export default function CompaniesSearchPage() {
           type="button"
           onClick={handleCalculate}
           disabled={calcLoading}
-          className="bg-yellow-400 hover:bg-yellow-500 disabled:opacity-60 text-gray-900 font-semibold px-12 py-4 rounded-md text-base shadow-sm transition-colors"
+          className="disabled:opacity-60 text-white font-semibold px-12 py-4 rounded-xl text-base shadow-sm transition-all hover:shadow-md active:scale-[0.98]"
+          style={{ background: 'linear-gradient(135deg, #3B82F6, #6366F1)' }}
         >
           {calcLoading
             ? t('Считаем...', 'Calculating...', locale)

@@ -66,7 +66,11 @@ export function ClientMobileDrawer({ open, onClose, activeId, locale }: ClientMo
         <div className="flex items-center justify-between mb-3">
           <span
             className="text-base font-extrabold tracking-tight"
-            style={{ color: 'var(--cp-accent)' }}
+            style={{
+              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+            }}
           >
             Portal
           </span>

@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
+import {
+  BarChart3, Send, Mail, Eye, MessageSquare, Percent,
+} from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingBanner } from '@/components/client/OnboardingBanner';
 
@@ -24,12 +27,15 @@ interface CampaignsResponse {
   lastSyncedAt: string | null;
 }
 
-function MetricCard({ label, value }: { label: string; value: number | string }) {
+function MetricCard({ label, value, icon: Icon, color }: { label: string; value: number | string; icon: React.ElementType; color: string }) {
   return (
-    <div className="neu-sm p-3 sm:p-5">
-      <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
-        {label}
-      </p>
+    <div className="neu-sm p-3 sm:p-5" style={{ borderTop: `3px solid ${color}` }}>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--cp-text-l)' }}>
+          {label}
+        </p>
+        <Icon className="h-4 w-4" style={{ color }} />
+      </div>
       <p className="mt-1 sm:mt-2 text-xl sm:text-2xl font-bold">{value}</p>
     </div>
   );
@@ -77,7 +83,7 @@ function LoadingProgress({ loaded, total }: { loaded: number; total: number | nu
             className="h-full rounded-full"
             style={{
               width: '40%',
-              background: 'var(--cp-accent)',
+              background: 'linear-gradient(90deg, var(--cp-accent), #7C3AED)',
               animation: 'cp-slide 1.4s ease-in-out infinite',
             }}
           />
@@ -85,7 +91,7 @@ function LoadingProgress({ loaded, total }: { loaded: number; total: number | nu
           // Determinate — fill to pct
           <div
             className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${pct}%`, background: 'var(--cp-accent)' }}
+            style={{ width: `${pct}%`, background: 'linear-gradient(90deg, var(--cp-accent), #818CF8)' }}
           />
         )}
       </div>
@@ -201,7 +207,15 @@ export default function ClientCampaignsPage() {
       <OnboardingBanner />
       <div className="mb-6 sm:mb-8 flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold">Кампании</h1>
+          <h1 className="text-xl sm:text-2xl font-extrabold flex items-center gap-2.5">
+            <span
+              className="inline-flex items-center justify-center w-8 h-8 rounded-xl"
+              style={{ background: 'rgba(59,130,246,0.12)', color: '#3B82F6' }}
+            >
+              <BarChart3 className="h-4.5 w-4.5" />
+            </span>
+            Кампании
+          </h1>
           <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
             Статистика по вашим email-кампаниям
           </p>
@@ -224,11 +238,11 @@ export default function ClientCampaignsPage() {
       ) : (
         <>
           <div className="mb-6 sm:mb-8 grid grid-cols-2 gap-3 sm:gap-5 sm:grid-cols-3 lg:grid-cols-5">
-            <MetricCard label="Отправлено" value={totals.sent.toLocaleString('ru-RU')} />
-            <MetricCard label="Открытия" value={totals.opened.toLocaleString('ru-RU')} />
-            <MetricCard label="Ответы" value={totals.replied} />
-            <MetricCard label="Open rate" value={`${openRate}%`} />
-            <MetricCard label="Reply rate" value={`${replyRate}%`} />
+            <MetricCard label="Отправлено" value={totals.sent.toLocaleString('ru-RU')} icon={Send} color="#4A6FA5" />
+            <MetricCard label="Открытия" value={totals.opened.toLocaleString('ru-RU')} icon={Eye} color="#8B5CF6" />
+            <MetricCard label="Ответы" value={totals.replied} icon={MessageSquare} color="#10B981" />
+            <MetricCard label="Open rate" value={`${openRate}%`} icon={Percent} color="#F59E0B" />
+            <MetricCard label="Reply rate" value={`${replyRate}%`} icon={Percent} color="#F43F5E" />
           </div>
 
           {campaigns.length === 0 ? (

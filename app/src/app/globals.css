@@ -1171,13 +1171,13 @@ input[type=number]::-webkit-outer-spin-button {
 
 /* ===== CLIENT PORTAL — Neumorphic Design System ===== */
 body:has(.client-portal) {
-  background: #F0EEEC !important;
+  background: #F5F5F4 !important;
 }
 
 .client-portal {
-  --cp-bg: #F0EEEC;
-  --cp-shadow-d: rgba(190, 186, 182, 0.45);
-  --cp-shadow-l: rgba(255, 255, 255, 0.65);
+  --cp-bg: #F5F5F4;
+  --cp-shadow-d: rgba(150, 140, 130, 0.60);
+  --cp-shadow-l: rgba(255, 255, 255, 0.94);
   --cp-accent: #4A6FA5;
   --cp-accent-h: #3D5A87;
   --cp-text: #3A3530;
@@ -1264,6 +1264,9 @@ body:has(.client-portal) {
 .client-portal .neu-pill.active {
   box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
   color: var(--cp-accent);
+}
+.client-portal .neu-pill:focus-visible {
+  outline: none;
 }
 
 .client-portal .neu-pill:not(.active):hover {
@@ -1395,7 +1398,7 @@ body:has(.client-portal) {
 .client-portal .border-gray-300,
 .client-portal .border-slate-200,
 .client-portal .border {
-  border-color: rgba(180, 173, 164, 0.22);
+  border-color: rgba(180, 173, 164, 0.32);
 }
 
 .client-portal .text-blue-600,
@@ -1449,16 +1452,17 @@ body:has(.client-portal) {
   border-color: rgba(184, 84, 80, 0.3);
 }
 
-/* Admin "card-like" containers (white bg + rounded + shadow) → soft neumorphic */
+/* Admin "card-like" containers → elevated white card (readable over #F5F5F4 page bg) */
 .client-portal .bg-white.rounded-xl,
 .client-portal .bg-white.rounded-2xl,
 .client-portal .bg-white.rounded-lg {
-  border-color: transparent !important;
-  box-shadow: 4px 4px 12px var(--cp-shadow-d), -4px -4px 12px var(--cp-shadow-l);
+  background-color: #FFFFFF !important;
+  border: 1px solid rgba(180, 173, 164, 0.22) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 18px rgba(0, 0, 0, 0.05) !important;
 }
-/* The `shadow-sm` admin utility on white cards becomes a softer neumorphic */
+/* The `shadow-sm` admin utility on white cards → soft lift */
 .client-portal .shadow-sm {
-  box-shadow: 3px 3px 8px var(--cp-shadow-d), -3px -3px 8px var(--cp-shadow-l);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 4px 14px rgba(0, 0, 0, 0.04);
 }
 
 /* Price tier buttons and similar toggle buttons in admin components */
@@ -1514,10 +1518,10 @@ body:has(.client-portal) {
   color: var(--cp-text);
 }
 
-/* Divide-y in admin lists → use neumorphic divider line */
+/* Divide-y in admin lists */
 .client-portal .divide-gray-100 > :not([hidden]) ~ :not([hidden]),
 .client-portal .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
-  border-color: rgba(180, 173, 164, 0.18);
+  border-color: rgba(180, 173, 164, 0.26);
 }
 
 /* Make any badge with bg-emerald/yellow/etc keep its tint but soften saturation */
@@ -1527,4 +1531,51 @@ body:has(.client-portal) {
 .client-portal .text-emerald-600,
 .client-portal .text-emerald-700 {
   color: #2f8f6e;
+}
+
+/* ── Parser components: vibrant accents inside client portal ─── */
+
+/* Primary action buttons → clean monochromatic blue */
+.client-portal button.bg-blue-600,
+.client-portal button.bg-blue-500 {
+  background: linear-gradient(160deg, #5E86C4, var(--cp-accent-h)) !important;
+  box-shadow: 0 2px 8px rgba(74, 111, 165, 0.35);
+  transition: all 0.2s ease;
+}
+.client-portal button.bg-blue-600:hover:not(:disabled),
+.client-portal button.bg-blue-500:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 4px 14px rgba(74, 111, 165, 0.45);
+  transform: translateY(-1px);
+}
+.client-portal button.bg-emerald-600,
+.client-portal button.bg-emerald-500 {
+  background: linear-gradient(135deg, #10B981, #059669) !important;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+.client-portal button.bg-emerald-600:hover:not(:disabled),
+.client-portal button.bg-emerald-500:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+/* Progress bars → gradient fills */
+.client-portal .bg-emerald-500[style*="width"],
+.client-portal .bg-emerald-400[style*="width"] {
+  background: linear-gradient(90deg, #10B981, #34D399) !important;
+}
+.client-portal .bg-blue-500[style*="width"] {
+  background: linear-gradient(90deg, var(--cp-accent), #818CF8) !important;
+}
+
+/* Table header rows — subtle warm tint */
+.client-portal thead.bg-gray-50 {
+  background-color: rgba(180, 173, 164, 0.12) !important;
+}
+
+/* Mode switcher tabs in parser forms — accent when active */
+.client-portal .parser-mode-active {
+  background: var(--cp-accent) !important;
+  color: #fff !important;
+  box-shadow: 0 1px 4px rgba(74, 111, 165, 0.3);
 }

@@ -2,7 +2,7 @@
 
 import type { ParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
-import { ChevronRight, RefreshCw } from 'lucide-react';
+import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
 const STAGE_LABELS: Record<string, string> = {
   pending: 'Ожидание',
@@ -91,7 +91,10 @@ export function JobsList({
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4 flex-nowrap">
-        <div>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-100 text-amber-600">
+            <Clock className="h-4 w-4" />
+          </span>
           <h3 className="text-lg font-semibold text-gray-900 whitespace-nowrap">
             История запусков ({displayJobs.length})
           </h3>

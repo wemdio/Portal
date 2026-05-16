@@ -1,17 +1,5 @@
 'use client';
 
-/**
- * Renders the client portal navigation tree (Dashboard + 3 grouped sections).
- *
- * Shared between desktop Sidebar and mobile Drawer to keep label/order/styling
- * consistent. The CTA item (Создать кампанию) is rendered as a filled pill
- * with the Send icon so a novice never has to look for "where to launch".
- *
- * The component is intentionally dumb: it doesn't know about open/close state,
- * which keeps the mobile drawer logic out of here. Parent passes onItemClick
- * to do whatever post-navigation cleanup is needed (e.g. closing the drawer).
- */
-
 import Link from 'next/link';
 import type { Route } from 'next';
 import {
@@ -23,7 +11,6 @@ import {
 import type { Locale } from '@/lib/i18n';
 
 export interface ClientNavListProps {
-  /** Stable id of the currently active item, or null. See resolveActiveNavId. */
   activeId: string | null;
   locale: Locale;
   onItemClick?: () => void;

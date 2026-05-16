@@ -95,12 +95,12 @@ const startGroup: ClientNavGroup = {
       descriptionEn: 'Collect contacts from sources and prepare for outreach',
     },
     {
-      id: 'sequence',
-      label: 'Цепочки писем',
-      labelEn: 'Email sequences',
-      href: '/client/parsers?tab=email-sequence',
-      description: 'AI-генерация цепочки холодных писем под сегмент',
-      descriptionEn: 'AI-generated cold email chain for the segment',
+      id: 'parsers',
+      label: 'Инструменты парсинга',
+      labelEn: 'Parsing tools',
+      href: '/client/parsers',
+      description: 'Парсеры HH, Google, Яндекс.Карт и генерация цепочек',
+      descriptionEn: 'HH, Google, Yandex Maps parsers and chain generation',
     },
     {
       id: 'launch',
@@ -193,7 +193,6 @@ export const CLIENT_NAV_GROUPS: readonly ClientNavGroup[] = [
 const BUILD_LEGACY_PREFIXES: readonly string[] = [
   '/client/build',
   '/client/companies-search',
-  '/client/parsers',
   '/client/base-constructor',
 ];
 
@@ -208,6 +207,9 @@ const BUILD_LEGACY_PREFIXES: readonly string[] = [
 export function resolveActiveNavId(pathname: string): string | null {
   if (pathname === '/client/dashboard' || pathname.startsWith('/client/dashboard/')) {
     return 'dashboard';
+  }
+  if (pathname === '/client/parsers' || pathname.startsWith('/client/parsers/')) {
+    return 'parsers';
   }
   // Кампании — both the list (/client) and the detail page (/client/campaigns/:id).
   if (pathname === '/client' || pathname.startsWith('/client/campaigns')) {

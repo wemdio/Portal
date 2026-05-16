@@ -16,6 +16,13 @@ function parseTab(value: string | null | undefined): Tab {
   return 'hh';
 }
 
+const TABS: { tab: Tab; label: string }[] = [
+  { tab: 'hh', label: 'HH.ru парсер' },
+  { tab: 'search', label: 'Поиск' },
+  { tab: 'yandexmaps', label: 'Яндекс.Карты' },
+  { tab: 'email-sequence', label: 'Цепочки писем' },
+];
+
 export default function ClientParsersPage() {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>(() => parseTab(searchParams?.get('tab')));
@@ -23,58 +30,28 @@ export default function ClientParsersPage() {
   return (
     <div className="mx-auto max-w-5xl">
       <div className="mb-6 sm:mb-8">
-        <h1 className="text-xl sm:text-2xl font-extrabold">Инструменты</h1>
+        <h1 className="text-xl sm:text-2xl font-extrabold">Инструменты парсинга</h1>
         <p className="mt-1 text-xs sm:text-sm" style={{ color: 'var(--cp-text-m)' }}>
           Парсеры и генерация контента
         </p>
       </div>
 
       <div className="mb-6">
-        <div className="inline-flex rounded-xl p-1 neu-inset">
-          <button
-            type="button"
-            onClick={() => setActiveTab('hh')}
-            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
-              activeTab === 'hh'
-                ? 'neu-card shadow-sm'
-                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
-            }`}
-          >
-            HH.ru парсер
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('search')}
-            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
-              activeTab === 'search'
-                ? 'neu-card shadow-sm'
-                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
-            }`}
-          >
-            Поиск
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('yandexmaps')}
-            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
-              activeTab === 'yandexmaps'
-                ? 'neu-card shadow-sm'
-                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
-            }`}
-          >
-            Яндекс.Карты
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('email-sequence')}
-            className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
-              activeTab === 'email-sequence'
-                ? 'neu-card shadow-sm'
-                : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
-            }`}
-          >
-            Цепочки писем
-          </button>
+        <div className="inline-flex rounded-xl p-1 neu-inset flex-wrap gap-1">
+          {TABS.map(({ tab, label }) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 text-sm font-semibold rounded-lg transition ${
+                activeTab === tab
+                  ? 'neu-card shadow-sm'
+                  : 'text-[var(--cp-text-m)] hover:text-[var(--cp-text)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 

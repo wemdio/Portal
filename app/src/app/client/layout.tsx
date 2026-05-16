@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Menu } from 'lucide-react';
 import { Nunito } from 'next/font/google';
@@ -21,7 +21,6 @@ const nunito = Nunito({
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
   const router = useRouter();
   const [locale, setLocale] = useState<Locale>('ru');
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -64,15 +63,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     });
   };
 
-  // Active item resolution: pathname + special-case for /client/parsers?tab=email-sequence
-  // (the AI letter generator lives there as a Старт item, not as Парсеры).
-  const activeId = useMemo(() => {
-    const tab = searchParams?.get('tab');
-    if (pathname === '/client/parsers' && tab === 'email-sequence') {
-      return 'sequence';
-    }
-    return resolveActiveNavId(pathname);
-  }, [pathname, searchParams]);
+  const activeId = useMemo(() => resolveActiveNavId(pathname), [pathname]);
 
   return (
     <PortalLoadingProvider>
@@ -92,7 +83,11 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
           <span
             className="text-sm sm:text-base font-extrabold tracking-tight select-none shrink-0"
-            style={{ color: 'var(--cp-accent)' }}
+            style={{
+              background: 'linear-gradient(160deg, #5E86C4, var(--cp-accent-h))',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+            }}
           >
             Portal
           </span>
@@ -103,14 +98,16 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             <button
               type="button"
               onClick={() => void persistLocale('ru')}
-              className={`rounded-full px-2 py-1 text-[11px] font-semibold ${locale === 'ru' ? 'active' : ''}`}
+              className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
+              style={locale === 'ru' ? { background: '#6366F1', color: '#fff' } : { color: 'var(--cp-text-l)' }}
             >
               RU
             </button>
             <button
               type="button"
               onClick={() => void persistLocale('en')}
-              className={`rounded-full px-2 py-1 text-[11px] font-semibold ${locale === 'en' ? 'active' : ''}`}
+              className="rounded-full px-2 py-1 text-[11px] font-semibold transition-colors"
+              style={locale === 'en' ? { background: '#6366F1', color: '#fff' } : { color: 'var(--cp-text-l)' }}
             >
               EN
             </button>

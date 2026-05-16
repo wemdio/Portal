@@ -81,7 +81,7 @@ describe('client nav IA', () => {
       '/client/reports',
       '/client/tariff',
       '/client/build',
-      '/client/parsers?tab=email-sequence',
+      '/client/parsers',
       '/client/launch',
       '/client/brief',
       '/client/support',
@@ -112,18 +112,16 @@ describe('client nav IA', () => {
     expect(start.items.map((i) => i.id)).toEqual([
       'brief',
       'build',
-      'sequence',
+      'parsers',
       'launch',
     ]);
   });
 
-  it('hub «Базы» replaces the three split items (Собрать/Парсеры/Очистить)', () => {
+  it('hub «Базы» replaces the three split items (Собрать/Очистить)', () => {
     const build = allItems.find((i) => i.id === 'build');
     expect(build?.href).toBe('/client/build');
     expect(build?.label).toBe('Базы');
-    // Sanity: the old standalone items must NOT appear in the sidebar.
     const ids = new Set(allItems.map((i) => i.id));
-    expect(ids.has('parsers')).toBe(false);
     expect(ids.has('clean')).toBe(false);
   });
 
@@ -168,9 +166,9 @@ describe('client nav IA', () => {
     expect(bases?.label).toBe('Базы в кампаниях');
   });
 
-  it('Email Sequences live in Старт via query param (not as a Парсеры tab)', () => {
-    const sequence = allItems.find((i) => i.id === 'sequence');
-    expect(sequence?.href).toBe('/client/parsers?tab=email-sequence');
-    expect(sequence?.label).toBe('Цепочки писем');
+  it('Инструменты парсинга live in Старт as a standalone page', () => {
+    const parsers = allItems.find((i) => i.id === 'parsers');
+    expect(parsers?.href).toBe('/client/parsers');
+    expect(parsers?.label).toBe('Инструменты парсинга');
   });
 });

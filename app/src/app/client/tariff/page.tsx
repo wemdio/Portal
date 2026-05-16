@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Zap, Users, Database, Sparkles } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 type LimitKey = 'max_contacts' | 'max_rows' | 'max_chains_per_month' | 'max_domains' | 'max_emails';
@@ -22,10 +22,10 @@ type TariffResponse = {
   usage: Record<LimitKey, LimitUsage>;
 };
 
-const LIMITS: Array<{ key: LimitKey; label: string; hint: string; unit: string }> = [
-  { key: 'max_contacts', label: 'Контакты Instantly', hint: 'Лиды, загруженные в кампании', unit: 'контактов' },
-  { key: 'max_rows', label: 'Запросы на сбор и базы', hint: 'HH, Яндекс.Карты, поисковая выдача, конструктор баз', unit: 'запросов' },
-  { key: 'max_chains_per_month', label: 'Цепочки писем', hint: 'AI-генерации цепочек за период', unit: 'цепочек' },
+const LIMITS: Array<{ key: LimitKey; label: string; hint: string; unit: string; icon: React.ElementType; color: string }> = [
+  { key: 'max_contacts', label: 'Контакты Instantly', hint: 'Лиды, загруженные в кампании', unit: 'контактов', icon: Users, color: '#3B82F6' },
+  { key: 'max_rows', label: 'Запросы на сбор и базы', hint: 'HH, Яндекс.Карты, поисковая выдача, конструктор баз', unit: 'запросов', icon: Database, color: '#8B5CF6' },
+  { key: 'max_chains_per_month', label: 'Цепочки писем', hint: 'AI-генерации цепочек за период', unit: 'цепочек', icon: Sparkles, color: '#F59E0B' },
 ];
 
 const TARIFF_LABELS: Record<TariffResponse['tariff_type'], string> = {
@@ -113,7 +113,13 @@ export default function ClientTariffPage() {
     <div className="mx-auto max-w-5xl space-y-6 sm:space-y-8">
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
+          <h1 className="text-2xl sm:text-3xl font-extrabold flex items-center gap-2.5" style={{ color: 'var(--cp-text)' }}>
+            <span
+              className="inline-flex items-center justify-center w-9 h-9 rounded-xl"
+              style={{ background: 'rgba(245,158,11,0.12)', color: '#F59E0B' }}
+            >
+              <Zap className="h-5 w-5" />
+            </span>
             Тариф
           </h1>
           <p className="mt-2 text-sm sm:text-base" style={{ color: 'var(--cp-text-m)' }}>
@@ -150,7 +156,13 @@ export default function ClientTariffPage() {
                   <h2 className="text-2xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
                     {TARIFF_LABELS[data.tariff_type]}
                   </h2>
-                  <span className="neu-well rounded-full px-3 py-1 text-xs font-bold" style={{ color: 'var(--cp-accent)' }}>
+                  <span
+                    className="neu-well rounded-full px-3 py-1 text-xs font-bold"
+                    style={{
+                      color: data.status === 'active' ? '#10B981' : data.status === 'expired' ? '#EF4444' : '#F59E0B',
+                      background: data.status === 'active' ? 'rgba(16,185,129,0.12)' : data.status === 'expired' ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
+                    }}
+                  >
                     {STATUS_LABELS[data.status]}
                   </span>
                 </div>
@@ -175,19 +187,28 @@ export default function ClientTariffPage() {
             {LIMITS.map((item) => {
               const usage = data.usage[item.key];
               const pct = usage.limit > 0 ? Math.min(100, Math.round((usage.used / usage.limit) * 100)) : 0;
+              const Icon = item.icon;
               return (
-                <article key={item.key} className="neu-card p-5">
+                <article key={item.key} className="neu-card p-5" style={{ borderTop: `3px solid ${item.color}` }}>
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>{item.label}</h3>
-                      <p className="mt-1 text-xs leading-snug" style={{ color: 'var(--cp-text-m)' }}>{item.hint}</p>
+                    <div className="flex items-start gap-3">
+                      <span
+                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg shrink-0 mt-0.5"
+                        style={{ background: `${item.color}18`, color: item.color }}
+                      >
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-bold" style={{ color: 'var(--cp-text)' }}>{item.label}</h3>
+                        <p className="mt-1 text-xs leading-snug" style={{ color: 'var(--cp-text-m)' }}>{item.hint}</p>
+                      </div>
                     </div>
-                    <span className="text-xs font-bold" style={{ color: 'var(--cp-accent)' }}>
+                    <span className="text-xs font-bold" style={{ color: item.color }}>
                       {pct}%
                     </span>
                   </div>
                   <div className="mt-4 h-2 overflow-hidden rounded-full" style={{ background: 'rgba(180,173,164,0.2)' }}>
-                    <div className="h-full rounded-full" style={{ width: `${pct}%`, background: 'var(--cp-accent)' }} />
+                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: item.color }} />
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
                     <div className="neu-inset rounded-xl px-2 py-2">

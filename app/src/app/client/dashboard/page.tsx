@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import type { Route } from 'next';
 import {
   Send, Mail, ArrowRight, Loader2,
+  LayoutDashboard, FileText, Database, Sparkles, Rocket,
 } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingChecklist } from '@/components/client/OnboardingChecklist';
@@ -27,6 +28,9 @@ interface QuickAction {
   label: string;
   description: string;
   primary?: boolean;
+  icon: React.ElementType;
+  color: string;
+  bg: string;
 }
 
 const QUICK_ACTIONS: readonly QuickAction[] = [
@@ -34,22 +38,34 @@ const QUICK_ACTIONS: readonly QuickAction[] = [
     href: '/client/brief',
     label: 'Заполнить бриф',
     description: 'AI-инструменты используют его для лучших результатов',
+    icon: FileText,
+    color: '#F59E0B',
+    bg: 'rgba(245,158,11,0.12)',
   },
   {
     href: '/client/build',
     label: 'Подготовить базу',
     description: 'Собрать контакты из источников и очистить под рассылку',
+    icon: Database,
+    color: '#3B82F6',
+    bg: 'rgba(59,130,246,0.12)',
   },
   {
     href: '/client/parsers?tab=email-sequence',
     label: 'Цепочки писем',
     description: 'AI-генерация холодных писем под сегмент',
+    icon: Sparkles,
+    color: '#F97316',
+    bg: 'rgba(249,115,22,0.12)',
   },
   {
     href: '/client/launch',
     label: 'Создать кампанию',
     description: 'Загрузить базу, написать цепочку и запустить',
     primary: true,
+    icon: Rocket,
+    color: '#10B981',
+    bg: 'rgba(16,185,129,0.12)',
   },
 ];
 
@@ -88,11 +104,18 @@ export default function ClientDashboardPage() {
   return (
     <div className="mx-auto max-w-5xl space-y-6 sm:space-y-8">
       {/* ── Hero ─────────────────────────────────────────────────────── */}
-      <header>
-        <h1 className="text-2xl sm:text-3xl font-extrabold" style={{ color: 'var(--cp-text)' }}>
+      <header
+        className="neu-card relative overflow-hidden p-6 sm:p-8"
+        style={{ background: 'linear-gradient(135deg, rgba(74,111,165,0.08), rgba(124,58,237,0.06))' }}
+      >
+        <LayoutDashboard
+          className="absolute -right-4 -top-4 h-32 w-32 opacity-[0.06]"
+          style={{ color: 'var(--cp-accent)' }}
+        />
+        <h1 className="text-2xl sm:text-3xl font-extrabold relative" style={{ color: 'var(--cp-text)' }}>
           Дашборд
         </h1>
-        <p className="mt-2 text-sm sm:text-base" style={{ color: 'var(--cp-text-m)' }}>
+        <p className="mt-2 text-sm sm:text-base relative" style={{ color: 'var(--cp-text-m)' }}>
           Здесь начинается ваш email-аутрич. Пройдите чеклист справа — за шесть шагов
           вы запустите первую кампанию.
         </p>
@@ -109,6 +132,7 @@ export default function ClientDashboardPage() {
           </h2>
           <div className="space-y-2.5">
             {QUICK_ACTIONS.map((action) => {
+              const Icon = action.icon;
               return (
                 <Link
                   key={action.href}
@@ -116,7 +140,14 @@ export default function ClientDashboardPage() {
                   className={`neu-row flex items-center gap-3 sm:gap-4 px-4 py-3.5 rounded-2xl ${
                     action.primary ? 'neu-card' : 'neu-sm'
                   }`}
+                  style={{ borderLeft: `3px solid ${action.color}` }}
                 >
+                  <span
+                    className="inline-flex items-center justify-center w-9 h-9 rounded-xl shrink-0"
+                    style={{ background: action.bg, color: action.color }}
+                  >
+                    <Icon className="h-4.5 w-4.5" />
+                  </span>
                   <div className="flex-1 min-w-0">
                     <p
                       className="text-sm font-bold"
@@ -139,7 +170,7 @@ export default function ClientDashboardPage() {
         </section>
 
         {/* ── Onboarding checklist ─────────────────────────────────── */}
-        <aside className="lg:sticky lg:top-24 lg:self-start">
+        <aside>
           <OnboardingChecklist />
         </aside>
       </div>
