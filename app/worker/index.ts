@@ -11,6 +11,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
+import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
 import { runWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentWorker';
 import { runBriefScoringJob } from '@/lib/briefScoring/briefScoringWorker';
 import { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } from '@/lib/parsers/yandexMapsWorker';
@@ -136,6 +137,17 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (evErr) log('warn', 'Startup recovery: email_validation_jobs update failed', evErr);
   else if (evJobs?.length) log('info', `Startup recovery: reset ${evJobs.length} email_validation_jobs to pending`);
+
+  // Yandex Direct parser — сбрасываем 'processing' в 'pending'. Полный
+  // повтор безопасен: дедуп по UNIQUE(job_id, domain) не даст дублей строк
+  // (повторный прогон лишь заново тратит XMLStock-запросы).
+  const { data: ydJobs, error: ydErr } = await db
+    .from('yandex_direct_jobs')
+    .update({ status: 'pending' })
+    .eq('status', 'processing')
+    .select('id');
+  if (ydErr) log('warn', 'Startup recovery: yandex_direct_jobs update failed', ydErr);
+  else if (ydJobs?.length) log('info', `Startup recovery: reset ${ydJobs.length} yandex_direct_jobs to pending`);
 }
 
 // --------------------------------------------------------------------------
@@ -319,6 +331,30 @@ async function claimLeadImportJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
+async function claimYandexDirectJob(): Promise<string | null> {
+  const db = supabaseAdmin!;
+
+  const { data: pending } = await db
+    .from('yandex_direct_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('yandex_direct_jobs')
+    .update({ status: 'processing', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+
+  return claimed?.id ?? null;
+}
+
 // --------------------------------------------------------------------------
 // RDP booking expiry — marks bookings as 'expired' when starts_at + 5 min
 // has passed without an active session being started.
@@ -455,6 +491,13 @@ async function pollOnce(): Promise<boolean> {
     return true;
   }
 
+  const yandexDirectJobId = await claimYandexDirectJob();
+  if (yandexDirectJobId) {
+    log('info', `Running Yandex Direct job ${yandexDirectJobId}`);
+    await runYandexDirectJob(supabaseAdmin, yandexDirectJobId);
+    return true;
+  }
+
   // Instantly lead qualification: poll Instantly API for new reply emails and qualify via AI
   try {
     const qualCount = await pollAndQualifyReplies();
@@ -503,6 +546,7 @@ const REALTIME_TABLES = [
   'yandex_maps_jobs',
   'email_validation_jobs',
   'lead_import_jobs',
+  'yandex_direct_jobs',
 ];
 const FALLBACK_POLL_MS = 30_000;
 
