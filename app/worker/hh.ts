@@ -1,5 +1,6 @@
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runHHArchiveJob } from '@/lib/parsers/hhArchive/runner';
+import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -13,6 +14,10 @@ const running = new Set<Promise<void>>();
 // бан. Обычные HTML-парс задачи (parser_jobs) могут бежать MAX_CONCURRENCY=3
 // параллельно, потому что hh.ru/search/vacancy менее agressive на rate.
 let archiveJobActive = false;
+// Yandex Direct job'ы — тоже глобально один за раз: XMLStock rate-limit на
+// аккаунт. Источник данных (xmlstock.com) не пересекается с hh.ru, поэтому
+// может бежать параллельно обычным HH-парс задачам.
+let yandexDirectJobActive = false;
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -23,6 +28,17 @@ async function startupRecovery(): Promise<void> {
     .select('id');
   if (hhErr) log('warn', 'Startup recovery: parser_jobs update failed', hhErr);
   else if (hhJobs?.length) log('info', `Startup recovery: reset ${hhJobs.length} parser_jobs to pending`);
+
+  // Yandex Direct processing-задачи без heartbeat — сбрасываем в pending.
+  const ydCutoff = new Date(Date.now() - 30 * 60_000).toISOString();
+  const { data: ydJobs, error: ydErr } = await db
+    .from('yandex_direct_jobs')
+    .update({ status: 'pending' })
+    .eq('status', 'processing')
+    .lt('updated_at', ydCutoff)
+    .select('id');
+  if (ydErr) log('warn', 'Startup recovery: yandex_direct_jobs update failed', ydErr);
+  else if (ydJobs?.length) log('info', `Startup recovery: reset ${ydJobs.length} yandex_direct_jobs to pending`);
 
   // Архивные processing-задачи без heartbeat — сбрасываем в pending для повторного клейма.
   // Heartbeat-cutoff 30 мин: реальная работа на чанке = 1-2 минуты, 30 мин без
@@ -89,6 +105,30 @@ async function claimHHArchiveJob(): Promise<string | null> {
   return claimed?.id ?? null;
 }
 
+/** Атомарно клеймит один pending yandex_direct_jobs (concurrency=1). */
+async function claimYandexDirectJob(): Promise<string | null> {
+  if (yandexDirectJobActive) return null;
+  const db = requireSupabaseAdmin(log);
+
+  const { data: pending } = await db
+    .from('yandex_direct_jobs')
+    .select('id')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('yandex_direct_jobs')
+    .update({ status: 'processing', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  return claimed?.id ?? null;
+}
+
 async function pollOnce(): Promise<boolean> {
   // Сначала пробуем обычный HH-парсер (concurrency=3, обычно есть свободный слот).
   if (running.size < MAX_CONCURRENCY) {
@@ -127,6 +167,29 @@ async function pollOnce(): Promise<boolean> {
     }
   }
 
+  // Yandex Direct — глобально один на воркер (XMLStock rate-limit).
+  if (!yandexDirectJobActive) {
+    const ydJobId = await claimYandexDirectJob();
+    if (ydJobId) {
+      yandexDirectJobActive = true;
+      const task = (async () => {
+        log('info', `Running Yandex Direct job ${ydJobId}`);
+        try {
+          const db = requireSupabaseAdmin(log);
+          await runYandexDirectJob(db, ydJobId);
+        } catch (err) {
+          log('error', `Yandex Direct job ${ydJobId} crashed`, err);
+        }
+      })();
+      running.add(task);
+      void task.finally(() => {
+        running.delete(task);
+        yandexDirectJobActive = false;
+      });
+      return true;
+    }
+  }
+
   if (running.size >= MAX_CONCURRENCY) {
     await sleep(250);
     return true;
@@ -148,7 +211,7 @@ async function main(): Promise<void> {
     pollIntervalMs: POLL_INTERVAL_MS,
     shouldStop,
     pollOnce,
-    realtimeTables: ['parser_jobs', 'hh_archive_jobs'],
+    realtimeTables: ['parser_jobs', 'hh_archive_jobs', 'yandex_direct_jobs'],
   });
 }
 
