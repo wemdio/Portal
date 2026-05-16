@@ -48,13 +48,27 @@ describe('buildCampaignPayloadFromPreset', () => {
 
   it('transfers tracking and stop flags from the preset', () => {
     const payload = buildCampaignPayloadFromPreset({
-      preset: { ...validPreset, open_tracking: false, link_tracking: false, stop_on_reply: false, text_only: true },
+      preset: { ...validPreset, open_tracking: false, link_tracking: false, stop_on_reply: false },
       sequence: validSequence,
     });
     expect(payload.open_tracking).toBe(false);
     expect(payload.link_tracking).toBe(false);
     expect(payload.stop_on_reply).toBe(false);
-    expect(payload.text_only).toBe(true);
+  });
+
+  it('always forces text_only=true (client emails are plain text, no HTML)', () => {
+    // Client emails must go out exactly as typed — plain text, line breaks
+    // preserved, no HTML. text_only is forced regardless of the preset.
+    const fromTextPreset = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, text_only: true },
+      sequence: validSequence,
+    });
+    const fromHtmlPreset = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, text_only: false },
+      sequence: validSequence,
+    });
+    expect(fromTextPreset.text_only).toBe(true);
+    expect(fromHtmlPreset.text_only).toBe(true);
   });
 
   it('transfers daily_limit, daily_max_leads, and email_gap from the preset', () => {

@@ -94,6 +94,10 @@ export function buildCampaignPayloadFromPreset(
     open_tracking: preset.open_tracking,
     link_tracking: preset.link_tracking,
     stop_on_reply: preset.stop_on_reply,
-    text_only: preset.text_only,
+    // Клиентские письма всегда уходят plain-text: никакого HTML, переносы
+    // строк сохраняются ровно как их набрал клиент. Поэтому text_only
+    // форсим в true независимо от пресета — в клиентском портале HTML
+    // запрещён, письмо уходит как написано.
+    text_only: true,
   };
 }
