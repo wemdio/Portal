@@ -56,20 +56,34 @@ export function buildCampaignPayloadFromPreset(
     },
     sequences: [
       {
-        steps: sequence.steps.map<SequenceStep>((s) => {
-          const step: SequenceStep = {
-            type: 'email',
-            subject: s.subject,
-            body: s.body,
-            wait_days: s.wait_days,
-          };
-          if (s.variants && s.variants.length > 0) {
-            step.variants = s.variants.map<SequenceVariant>((v) => ({
+        steps: sequence.steps.map<SequenceStep>((s, i, arr) => {
+          // Instantly API v2 требует на каждом шаге `delay` (+ `delay_unit`),
+          // а не `wait_days` — иначе POST /campaigns падает с 400
+          // "steps/0 must have required property 'delay'". По докам Instantly
+          // `delay` — это сколько дней ждать перед СЛЕДУЮЩИМ письмом. В нашем
+          // UI этот промежуток хранится как `wait_days` следующего шага
+          // («Письмо N — через X дн»). У последнего шага следующего письма
+          // нет → ставим 1 (как в админском флоу instantly/campaigns/new).
+          const delay = i < arr.length - 1 ? arr[i + 1].wait_days : 1;
+
+          // Instantly v2 держит контент письма в `variants[]` (тоже
+          // обязательное поле), а не в subject/body самого шага. subject/body
+          // шага — это Вариант A; s.variants — дополнительные B/C. Instantly
+          // случайно выбирает один вариант на каждого лида.
+          const variants: SequenceVariant[] = [
+            { subject: s.subject, body: s.body },
+            ...(s.variants ?? []).map<SequenceVariant>((v) => ({
               subject: v.subject ?? '',
               body: v.body,
-            }));
-          }
-          return step;
+            })),
+          ];
+
+          return {
+            type: 'email',
+            delay,
+            delay_unit: 'days',
+            variants,
+          };
         }),
       },
     ],
