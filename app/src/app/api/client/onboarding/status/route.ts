@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 /**
  * Onboarding checklist for /client/dashboard.
  *
- * Returns a 5-step progress object (see computeOnboardingStatus). Wrapped in
+ * Returns a 6-step progress object (see computeOnboardingStatus). Wrapped in
  * a 15-second TTL cache because the dashboard polls this on mount and we
  * don't want a cold-tap on the database every page navigation.
  *

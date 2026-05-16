@@ -7,8 +7,9 @@ import { HHArchiveParserView } from '@/components/parsers/HHArchiveParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
 import { YandexMapsParserView } from '@/components/parsers/YandexMapsParserView';
 import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParserView';
+import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 
-type Tab = 'hh' | 'hh-archive' | 'search' | 'yandexmaps' | 'crypto';
+type Tab = 'hh' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto';
 
 export default function ParsersPage() {
   const [activeTab, setActiveTab] = useState<Tab>('hh');
@@ -67,6 +68,17 @@ export default function ParsersPage() {
             Яндекс.Карты
           </button>
           <button
+            onClick={() => setActiveTab('yandexdirect')}
+            className={`
+              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
+              ${activeTab === 'yandexdirect'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+            `}
+          >
+            Яндекс.Директ
+          </button>
+          <button
             onClick={() => setActiveTab('crypto')}
             className={`
               whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
@@ -88,7 +100,9 @@ export default function ParsersPage() {
             ? <SearchParserView />
             : activeTab === 'yandexmaps'
               ? <YandexMapsParserView />
-              : <CryptoPaymentParserView />}
+              : activeTab === 'yandexdirect'
+                ? <YandexDirectParserView />
+                : <CryptoPaymentParserView />}
     </div>
   );
 }

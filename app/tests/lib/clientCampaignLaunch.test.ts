@@ -48,13 +48,27 @@ describe('buildCampaignPayloadFromPreset', () => {
 
   it('transfers tracking and stop flags from the preset', () => {
     const payload = buildCampaignPayloadFromPreset({
-      preset: { ...validPreset, open_tracking: false, link_tracking: false, stop_on_reply: false, text_only: true },
+      preset: { ...validPreset, open_tracking: false, link_tracking: false, stop_on_reply: false },
       sequence: validSequence,
     });
     expect(payload.open_tracking).toBe(false);
     expect(payload.link_tracking).toBe(false);
     expect(payload.stop_on_reply).toBe(false);
-    expect(payload.text_only).toBe(true);
+  });
+
+  it('always forces text_only=true (client emails are plain text, no HTML)', () => {
+    // Client emails must go out exactly as typed — plain text, line breaks
+    // preserved, no HTML. text_only is forced regardless of the preset.
+    const fromTextPreset = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, text_only: true },
+      sequence: validSequence,
+    });
+    const fromHtmlPreset = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, text_only: false },
+      sequence: validSequence,
+    });
+    expect(fromTextPreset.text_only).toBe(true);
+    expect(fromHtmlPreset.text_only).toBe(true);
   });
 
   it('transfers daily_limit, daily_max_leads, and email_gap from the preset', () => {
@@ -93,17 +107,33 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(entry.timing.to).toBe('17:30');
   });
 
-  it('passes sequence steps as-is wrapped in sequences[].steps', () => {
+  it('maps each step to the Instantly v2 shape: type / delay_unit / variants[]', () => {
     const payload = buildCampaignPayloadFromPreset({
       preset: validPreset,
       sequence: validSequence,
     });
     expect(payload.sequences).toBeDefined();
     expect(payload.sequences?.[0].steps).toHaveLength(2);
-    expect(payload.sequences?.[0].steps[0].subject).toBe('Hi {{firstName}}');
-    expect(payload.sequences?.[0].steps[0].body).toBe('Body 1');
-    expect(payload.sequences?.[0].steps[0].wait_days).toBe(0);
-    expect(payload.sequences?.[0].steps[1].wait_days).toBe(3);
+    const step0 = payload.sequences![0].steps[0];
+    expect(step0.type).toBe('email');
+    expect(step0.delay_unit).toBe('days');
+    // Content lives in variants[], not on the step itself (Instantly v2).
+    expect(step0.variants?.[0].subject).toBe('Hi {{firstName}}');
+    expect(step0.variants?.[0].body).toBe('Body 1');
+    expect(payload.sequences?.[0].steps[1].variants?.[0].body).toBe('Body 2');
+  });
+
+  it('sets per-step delay to the NEXT step wait_days; last step is filler', () => {
+    // validSequence: step0 wait_days=0, step1 wait_days=3. Instantly `delay`
+    // is "days before the next email", so step0.delay = 3 (gap before
+    // step1); the last step has no next email → filler 1.
+    const payload = buildCampaignPayloadFromPreset({
+      preset: validPreset,
+      sequence: validSequence,
+    });
+    const steps = payload.sequences![0].steps;
+    expect(steps[0].delay).toBe(3);
+    expect(steps[1].delay).toBe(1);
   });
 
   it('preserves empty subject for follow-up steps (continues thread)', () => {
@@ -117,10 +147,10 @@ describe('buildCampaignPayloadFromPreset', () => {
         ],
       },
     });
-    expect(payload.sequences?.[0].steps[1].subject).toBe('');
+    expect(payload.sequences?.[0].steps[1].variants?.[0].subject).toBe('');
   });
 
-  it('passes A/B variants through to payload.sequences[].steps[].variants', () => {
+  it('emits variants in A/B/C order: the step subject/body first, then extras', () => {
     const payload = buildCampaignPayloadFromPreset({
       preset: validPreset,
       sequence: {
@@ -139,21 +169,20 @@ describe('buildCampaignPayloadFromPreset', () => {
       },
     });
     const step = payload.sequences?.[0].steps[0];
-    expect(step?.subject).toBe('A subj');
-    expect(step?.body).toBe('A body');
-    expect(step?.variants).toHaveLength(2);
-    expect(step?.variants?.[0].subject).toBe('B subj');
-    expect(step?.variants?.[0].body).toBe('B body');
-    expect(step?.variants?.[1].subject).toBe('C subj');
-    expect(step?.variants?.[1].body).toBe('C body');
+    expect(step?.variants).toHaveLength(3);
+    expect(step?.variants?.[0]).toEqual({ subject: 'A subj', body: 'A body' });
+    expect(step?.variants?.[1]).toEqual({ subject: 'B subj', body: 'B body' });
+    expect(step?.variants?.[2]).toEqual({ subject: 'C subj', body: 'C body' });
   });
 
-  it('omits variants key when no variants are provided', () => {
+  it('always emits variants[]: a step with no extra variants still has Variant A', () => {
     const payload = buildCampaignPayloadFromPreset({
       preset: validPreset,
       sequence: validSequence,
     });
-    expect(payload.sequences?.[0].steps[0].variants).toBeUndefined();
+    const step = payload.sequences?.[0].steps[0];
+    expect(step?.variants).toHaveLength(1);
+    expect(step?.variants?.[0].body).toBe('Body 1');
   });
 });
 
