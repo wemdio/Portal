@@ -64,3 +64,9 @@ CREATE INDEX IF NOT EXISTS idx_fns_revenue_inn ON public.fns_revenue (inn);
 -- Индекс по году — для UI-фильтра «какие года вообще есть в БД»
 -- (SELECT DISTINCT report_year ... быстрее).
 CREATE INDEX IF NOT EXISTS idx_fns_revenue_year ON public.fns_revenue (report_year);
+
+-- GRANT: миграционный раннер коннектится как `postgres`, новая таблица
+-- получает пустые ACL для service_role (см. app/src/lib/migrationLint.ts).
+-- Серверный код ходит в БД под service_role — выдаём доступ явно.
+-- Идемпотентно: повторный GRANT — no-op.
+GRANT ALL ON public.fns_revenue TO service_role;

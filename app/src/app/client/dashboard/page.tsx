@@ -116,7 +116,7 @@ export default function ClientDashboardPage() {
           Дашборд
         </h1>
         <p className="mt-2 text-sm sm:text-base relative" style={{ color: 'var(--cp-text-m)' }}>
-          Здесь начинается ваш email-аутрич. Пройдите чеклист справа — за пять шагов
+          Здесь начинается ваш email-аутрич. Пройдите чеклист справа — за шесть шагов
           вы запустите первую кампанию.
         </p>
       </header>

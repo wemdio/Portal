@@ -4,21 +4,23 @@
  * Tests for computeOnboardingStatus — the pure backend logic that powers
  * the /client/dashboard onboarding checklist (Phase 3).
  *
- * The function returns 5 progress items in fixed order:
- *   brief → preset → first_base → first_clean → first_launch
+ * The function returns 6 progress items in fixed order:
+ *   brief → preset → first_base → first_clean → first_sequence → first_launch
  *
  * Sources of truth (matches Phase 0 design doc):
- *   brief:        instantly schema → client_briefs.fields (any of the
- *                 three core fields: company_description, product_description,
- *                 target_audience must be non-empty)
- *   preset:       instantly schema → client_campaign_presets row exists with
- *                 email_account_ids[].length > 0; if row exists with empty
- *                 array, blocked_reason mentions the manager
- *   first_base:   public schema   → ANY base_constructor_jobs row, OR
- *                 instantly schema → ANY client_campaign_launches row
- *   first_clean:  public schema   → base_constructor_jobs status='completed'
- *   first_launch: instantly schema → client_campaign_launches status IN
- *                 ('active','paused','completed')
+ *   brief:          instantly schema → client_briefs.fields (any of the
+ *                   three core fields: company_description, product_description,
+ *                   target_audience must be non-empty)
+ *   preset:         instantly schema → client_campaign_presets row exists with
+ *                   email_account_ids[].length > 0; if row exists with empty
+ *                   array, blocked_reason mentions the manager
+ *   first_base:     public schema   → ANY base_constructor_jobs row, OR
+ *                   instantly schema → ANY client_campaign_launches row
+ *   first_clean:    public schema   → base_constructor_jobs status='completed'
+ *   first_sequence: public schema   → email_sequence_runs status='completed'
+ *                   (draft rows are auto-created on tool open — don't count)
+ *   first_launch:   instantly schema → client_campaign_launches status IN
+ *                   ('active','paused','completed')
  *
  * The function does NOT touch the cache — the route handler does. Keeping
  * caching out of the unit under test makes assertions deterministic.
@@ -109,13 +111,14 @@ function callStatus() {
 }
 
 describe('computeOnboardingStatus', () => {
-  it('all empty: returns 5 items, all done=false, complete=false, next=brief', async () => {
+  it('all empty: returns 6 items, all done=false, complete=false, next=brief', async () => {
     const res = await callStatus();
     expect(res.items.map((i) => i.id)).toEqual([
       'brief',
       'preset',
       'first_base',
       'first_clean',
+      'first_sequence',
       'first_launch',
     ]);
     expect(res.items.every((i) => i.done === false)).toBe(true);
@@ -197,6 +200,20 @@ describe('computeOnboardingStatus', () => {
     expect(res2.items.find((i) => i.id === 'first_clean')?.done).toBe(true);
   });
 
+  it('first_sequence requires status=completed; draft does NOT count', async () => {
+    // A draft run is auto-created the moment the client opens the email
+    // sequence tool — it must not tick the checklist on its own.
+    state.rowsByTable.email_sequence_runs = [
+      { user_id: USER_ID, status: 'draft' },
+    ];
+    const res = await callStatus();
+    expect(res.items.find((i) => i.id === 'first_sequence')?.done).toBe(false);
+
+    state.rowsByTable.email_sequence_runs.push({ user_id: USER_ID, status: 'completed' });
+    const res2 = await callStatus();
+    expect(res2.items.find((i) => i.id === 'first_sequence')?.done).toBe(true);
+  });
+
   it('first_launch only counts active/paused/completed; uploading/failed do not', async () => {
     state.rowsByTable.client_campaign_launches = [
       { client_user_id: USER_ID, status: 'uploading' },
@@ -210,7 +227,7 @@ describe('computeOnboardingStatus', () => {
     expect(res2.items.find((i) => i.id === 'first_launch')?.done).toBe(true);
   });
 
-  it('all 5 done → complete=true, next_id=null', async () => {
+  it('all 6 done → complete=true, next_id=null', async () => {
     state.rowsByTable.client_briefs = [
       { client_user_id: USER_ID, fields: { product_description: 'X', company_description: '', target_audience: '' } },
     ];
@@ -218,6 +235,9 @@ describe('computeOnboardingStatus', () => {
       { client_user_id: USER_ID, email_account_ids: ['acc-1'] },
     ];
     state.rowsByTable.base_constructor_jobs = [
+      { user_id: USER_ID, status: 'completed' },
+    ];
+    state.rowsByTable.email_sequence_runs = [
       { user_id: USER_ID, status: 'completed' },
     ];
     state.rowsByTable.client_campaign_launches = [
@@ -239,13 +259,14 @@ describe('computeOnboardingStatus', () => {
     expect(res.items.find((i) => i.id === 'first_launch')?.done).toBe(true);
   });
 
-  it('hrefs: brief / first_base / first_clean / first_launch point to client routes', async () => {
+  it('hrefs: brief / first_base / first_clean / first_sequence / first_launch point to client routes', async () => {
     const res = await callStatus();
     const itemHref = (id: string) => res.items.find((i) => i.id === id)?.href;
     expect(itemHref('brief')).toBe('/client/brief');
     // After Phase 4 consolidation, first_base points at the /client/build hub.
     expect(itemHref('first_base')).toBe('/client/build');
     expect(itemHref('first_clean')).toBe('/client/base-constructor');
+    expect(itemHref('first_sequence')).toBe('/client/parsers?tab=email-sequence');
     expect(itemHref('first_launch')).toBe('/client/launch');
   });
 });

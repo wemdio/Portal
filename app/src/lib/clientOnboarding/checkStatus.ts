@@ -2,14 +2,14 @@
  * Backend logic for the /client/dashboard onboarding checklist.
  *
  * Pure-ish function: takes a userId + two supabase clients (public schema +
- * instantly schema) and returns the 5-item progress structure that matches
+ * instantly schema) and returns the 6-item progress structure that matches
  * Phase 0 of the May 2026 UX redesign.
  *
  * Keeping this OUTSIDE the route handler so it's testable without involving
  * Next.js request lifecycle or the cache wrapper. The route file imports this
  * and wraps the call in `cached()` for a short TTL.
  *
- * Performance: 4 small queries to the database in parallel (most return 0-1
+ * Performance: 5 small queries to the database in parallel (most return 0-1
  * rows). On a warm connection this is < 50ms total, well below the 15s cache
  * TTL we set in the route handler.
  */
@@ -21,6 +21,7 @@ export type OnboardingStepId =
   | 'preset'
   | 'first_base'
   | 'first_clean'
+  | 'first_sequence'
   | 'first_launch';
 
 export interface OnboardingStatusItem {
@@ -53,6 +54,7 @@ const STEP_ORDER: readonly OnboardingStepId[] = [
   'preset',
   'first_base',
   'first_clean',
+  'first_sequence',
   'first_launch',
 ] as const;
 
@@ -90,8 +92,8 @@ export async function computeOnboardingStatus(
 ): Promise<OnboardingStatusResponse> {
   const { supabaseAdmin, supabaseInstantly } = deps;
 
-  // All four queries run in parallel — none depend on each other's output.
-  const [briefRes, presetRes, jobsRes, launchesRes] = await Promise.all([
+  // All five queries run in parallel — none depend on each other's output.
+  const [briefRes, presetRes, jobsRes, launchesRes, sequencesRes] = await Promise.all([
     supabaseInstantly
       .from('client_briefs')
       .select('fields')
@@ -110,6 +112,12 @@ export async function computeOnboardingStatus(
       .from('client_campaign_launches')
       .select('status')
       .eq('client_user_id', userId),
+    // email_sequence_runs живёт в public-схеме, ключ user_id = auth-юзер
+    // (см. /api/tools/email-sequence/runs). Нужен только status.
+    supabaseAdmin
+      .from('email_sequence_runs')
+      .select('status')
+      .eq('user_id', userId),
   ]);
 
   // ── Brief ────────────────────────────────────────────────────────────
@@ -134,6 +142,15 @@ export async function computeOnboardingStatus(
   const hasLaunchedCampaign = launches.some(
     (l) => typeof l.status === 'string' && LAUNCH_DONE_STATUSES.includes(l.status),
   );
+
+  // ── first_sequence (from email_sequence_runs) ────────────────────────
+  // ВАЖНО: пустой run создаётся со status='draft' уже при первом POST в
+  // инструмент (/api/tools/email-sequence/runs). Засчитывать draft нельзя
+  // — иначе шаг «пройден» только от того, что клиент открыл вкладку.
+  // Считаем выполненным, когда есть run со status='completed' (его ставят
+  // generate-segments и generate-chain). Симметрично с first_clean.
+  const sequences = (sequencesRes.data ?? []) as { status?: unknown }[];
+  const firstSequenceDone = sequences.some((s) => s.status === 'completed');
 
   const firstBaseDone = hasAnyJob || hasAnyLaunch;
   const firstCleanDone = hasCompletedJob;
@@ -174,6 +191,12 @@ export async function computeOnboardingStatus(
       label: 'Очистить первую базу',
       done: firstCleanDone,
       href: '/client/base-constructor',
+    },
+    {
+      id: 'first_sequence',
+      label: 'Написать первую цепочку писем',
+      done: firstSequenceDone,
+      href: '/client/parsers?tab=email-sequence',
     },
     {
       id: 'first_launch',

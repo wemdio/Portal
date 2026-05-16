@@ -179,10 +179,23 @@ export async function middleware(request: NextRequest) {
       })
     }
 
-    if (user && pathname === '/login') {
+    // Авторизованного пользователя С РОЛЬЮ уводим с /login в его раздел.
+    // Аккаунт без роли НЕ уводим — пусть остаётся на /login (внутрь портала
+    // его всё равно не пустит default-deny ниже). Иначе был бы
+    // редирект-цикл /login → / → /login.
+    if (user && userRole && pathname === '/login') {
       return NextResponse.redirect(
         new URL(userRole === 'client' ? '/client' : '/', request.url)
       )
+    }
+
+    // Default-deny для аккаунтов без роли. Саморегистрация закрыта
+    // (см. app/login/page.tsx) — все аккаунты заводит админ и сразу
+    // назначает роль. Пользователь без роли — это либо недопровиженный
+    // аккаунт, либо остаток от старой открытой регистрации; внутрь портала
+    // не пускаем. Публичные пути уже отсеяны через isPublicPath.
+    if (user && !userRole && !isPublicPath) {
+      return NextResponse.redirect(new URL('/login', request.url))
     }
 
     if (user && userRole === 'client') {

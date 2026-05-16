@@ -3,12 +3,12 @@
 /**
  * Persistent setup checklist shown on /client/dashboard.
  *
- * Five steps in fixed order: brief → preset → first base → first clean →
- * first launch. Done items render with a soft inset checkmark; the next
- * not-done item gets a highlighted ring and a "следующий шаг" tag so the
- * user always knows what to tackle next.
+ * Six steps in fixed order: brief → preset → first base → first clean →
+ * first sequence → first launch. Done items render with a soft inset
+ * checkmark; the next not-done item gets a highlighted ring and a
+ * "следующий шаг" tag so the user always knows what to tackle next.
  *
- * When all five are done the widget collapses to a slim "Setup complete ✓"
+ * When all six are done the widget collapses to a slim "Setup complete ✓"
  * badge with a chevron to expand for review.
  *
  * Status is fetched from /api/client/onboarding/status on mount and on
@@ -24,7 +24,7 @@ import { Check, ChevronDown, Circle, Clock, Loader2, Sparkles } from 'lucide-rea
 import { clientApiFetch } from '@/lib/clientFetcher';
 
 interface ChecklistItem {
-  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_launch';
+  id: 'brief' | 'preset' | 'first_base' | 'first_clean' | 'first_sequence' | 'first_launch';
   label: string;
   done: boolean;
   href: string | null;
@@ -66,7 +66,7 @@ export function OnboardingChecklist() {
     () => data?.items.filter((i) => i.done).length ?? 0,
     [data],
   );
-  const total = data?.items.length ?? 5;
+  const total = data?.items.length ?? 6;
 
   if (loading && !data) {
     return (
@@ -99,7 +99,7 @@ export function OnboardingChecklist() {
             Настройка завершена
           </p>
           <p className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-            Все 5 шагов пройдены — портал готов к работе
+            Все {total} шагов пройдены — портал готов к работе
           </p>
         </div>
         <ChevronDown className="h-4 w-4" style={{ color: 'var(--cp-text-l)' }} />
@@ -116,7 +116,7 @@ export function OnboardingChecklist() {
             С чего начать
           </h2>
           <p className="text-xs mt-0.5" style={{ color: 'var(--cp-text-m)' }}>
-            Пройдите 5 шагов — и ваша первая кампания запущена
+            Пройдите {total} шагов — и ваша первая кампания запущена
           </p>
         </div>
         <span
