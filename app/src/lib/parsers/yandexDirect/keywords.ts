@@ -105,7 +105,7 @@ export async function suggestExpand(
       headers: { 'User-Agent': 'Mozilla/5.0' },
     });
     if (!res.ok) return [];
-    let text = (await res.text()).trim();
+    const text = (await res.text()).trim();
 
     // JSONP: suggest.apply(ARG1, ARG2) → оборачиваем в [] для валидного JSON
     let data: unknown;
