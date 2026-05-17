@@ -494,6 +494,12 @@ const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 2500;
 const STORAGE_SAVE_DELAY_LARGE = 10_000;
 const LARGE_DATASET_ROW_THRESHOLD = 10_000;
+// Потолок дебаунса. Cleanup автосейв-эффекта сбрасывает таймер на КАЖДОЕ
+// изменение (правка ячейки, клик вкладки, ресайз колонки). При активной
+// работе с большой базой 10-секундное окно не закрывалось никогда — база
+// не сохранялась, хотя пользователь был на странице минутами. С потолком
+// сохранение принудительно срабатывает не реже, чем раз в MAX_SAVE_WAIT.
+const MAX_SAVE_WAIT = 25_000;
 const REMOTE_SAVE_BACKOFF_MS = 15_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
@@ -1021,6 +1027,8 @@ export function DatabaseSpreadsheet() {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Время первого несохранённого изменения — для потолка дебаунса (MAX_SAVE_WAIT).
+  const firstPendingSaveAtRef = useRef<number | null>(null);
   const accessTokenRef = useRef<string | null>(null);
   const hydratedStateRef = useRef<string | null>(null);
   const remoteSaveInFlightRef = useRef(false);
@@ -1095,27 +1103,42 @@ export function DatabaseSpreadsheet() {
       /* quota exceeded — acceptable for very large datasets */
     }
     if (userId) {
-      const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const sbKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (sbUrl && sbKey && accessTokenRef.current) {
-        try {
-          void fetch(`${sbUrl}/rest/v1/database_spreadsheet_states`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Prefer': 'resolution=merge-duplicates,return=minimal',
-              'apikey': sbKey,
-              'Authorization': `Bearer ${accessTokenRef.current}`,
-            },
-            body: JSON.stringify({
-              user_id: userId,
-              state: payload,
-              updated_at: new Date().toISOString(),
-            }),
-            keepalive: true,
-          });
-        } catch {
-          /* best-effort during unload */
+      const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+      const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+      firstPendingSaveAtRef.current = null;
+      // Надёжный путь: обычный async-запрос (chunked backgroundSave для
+      // больших баз). Раньше flushSave полагался ТОЛЬКО на keepalive-fetch,
+      // у которого лимит тела 64 КБ — большая база (мегабайты JSON) туда
+      // не влезала и молча терялась.
+      queueRemoteStateSave(userId, payload, isLargeDataset);
+
+      // Доп. last-resort для beforeunload на МАЛЕНЬКИХ базах: keepalive
+      // успевает уйти, даже когда вкладка закрывается. Для больших баз он
+      // бесполезен (лимит 64 КБ) — там спасают queueRemoteStateSave выше
+      // и потолок дебаунса MAX_SAVE_WAIT.
+      if (!isLargeDataset) {
+        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const sbKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+        if (sbUrl && sbKey && accessTokenRef.current) {
+          try {
+            void fetch(`${sbUrl}/rest/v1/database_spreadsheet_states`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Prefer': 'resolution=merge-duplicates,return=minimal',
+                'apikey': sbKey,
+                'Authorization': `Bearer ${accessTokenRef.current}`,
+              },
+              body: JSON.stringify({
+                user_id: userId,
+                state: payload,
+                updated_at: new Date().toISOString(),
+              }),
+              keepalive: true,
+            });
+          } catch {
+            /* best-effort during unload */
+          }
         }
       }
     }
@@ -8369,16 +8392,35 @@ export function DatabaseSpreadsheet() {
       /* quota exceeded — acceptable for very large datasets */
     }
 
+    // Потолок дебаунса: cleanup ниже сбрасывает таймер на каждый ре-рендер
+    // (правка ячейки / клик вкладки / ресайз колонки). При активной работе
+    // с большой базой 10-секундное окно не закрывалось никогда. Считаем
+    // время с первого несохранённого изменения и не откладываем сохранение
+    // дольше MAX_SAVE_WAIT.
+    if (firstPendingSaveAtRef.current === null) {
+      firstPendingSaveAtRef.current = now;
+    }
+    const elapsedSinceFirstChange = now - firstPendingSaveAtRef.current;
+    const effectiveDelay = Math.max(
+      0,
+      Math.min(delay, MAX_SAVE_WAIT - elapsedSinceFirstChange),
+    );
+
     saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
+      firstPendingSaveAtRef.current = null;
       queueRemoteStateSave(userIdSnapshot, payload, isLargeDataset);
-    }, delay);
+    }, effectiveDelay);
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
       }
-      cancelBackgroundSave();
+      // НЕ вызываем cancelBackgroundSave() здесь. Cleanup срабатывает на
+      // каждый ре-рендер, и это обрывало уже идущую чанковую сериализацию
+      // большой базы (serializeStateChunked возвращал null → fetch не
+      // уходил). Пусть начатое сохранение допишется; saveGeneration внутри
+      // backgroundSave сам отсечёт устаревший проход, если стартует новый.
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave]);
 
