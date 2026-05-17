@@ -6,6 +6,8 @@ type SpreadsheetState = {
   columnWidths?: number[];
 };
 
+import { compressStateToBase64 } from './stateCompression';
+
 const CHUNK_ROWS = 2000;
 
 let saveGeneration = 0;
@@ -63,9 +65,26 @@ export async function backgroundSave(
   const stateJson = await serializeStateChunked(payload.state, generation);
   if (!stateJson) return false;
 
-  const body =
-    `{"user_id":${JSON.stringify(payload.user_id)},"state":${stateJson}` +
-    `,"updated_at":${JSON.stringify(payload.updated_at)}}`;
+  // Сжимаем перед отправкой: 30 МБ JSON → ~4-5 МБ base64. Без этого
+  // запись висела десятками секунд и большие базы терялись.
+  let compressed: string;
+  try {
+    compressed = await compressStateToBase64(stateJson);
+  } catch (err) {
+    onError?.(`compress failed: ${String(err)}`);
+    return false;
+  }
+  // Ещё одна проверка поколения — сжатие могло идти заметное время.
+  if (saveGeneration !== generation) return false;
+
+  // state шлём null: данные теперь в state_compressed, дублировать
+  // несжатый jsonb незачем (он же — лишние мегабайты в строке).
+  const body = JSON.stringify({
+    user_id: payload.user_id,
+    state: null,
+    state_compressed: compressed,
+    updated_at: payload.updated_at,
+  });
 
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/database_spreadsheet_states`, {
