@@ -1,3 +1,7 @@
+// Worker читает состояние в фоне, чтобы парсинг большого JSON не блокировал
+// UI. Приоритет — сжатая колонка state_compressed (gzip+base64); если её
+// нет (старая запись) — fallback на несжатый jsonb state.
+// atob / DecompressionStream / Blob / Response доступны в Worker-контексте.
 const WORKER_CODE = `
 self.onmessage = async (e) => {
   const { url, headers } = e.data;
@@ -8,8 +12,25 @@ self.onmessage = async (e) => {
       return;
     }
     const rows = await res.json();
-    const state = rows && rows.length > 0 && rows[0].state ? rows[0].state : null;
-    self.postMessage({ ok: true, state });
+    const row = rows && rows.length > 0 ? rows[0] : null;
+    if (!row) {
+      self.postMessage({ ok: true, state: null });
+      return;
+    }
+    if (row.state_compressed) {
+      try {
+        const binary = atob(row.state_compressed);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        const json = await new Response(stream).text();
+        self.postMessage({ ok: true, state: JSON.parse(json) });
+      } catch (err) {
+        self.postMessage({ ok: false, error: 'decompress: ' + String(err) });
+      }
+      return;
+    }
+    self.postMessage({ ok: true, state: row.state ? row.state : null });
   } catch (err) {
     self.postMessage({ ok: false, error: String(err) });
   }
@@ -79,7 +100,7 @@ export function loadStateViaWorker(
 
     const url =
       `${supabaseUrl}/rest/v1/database_spreadsheet_states` +
-      `?select=state&user_id=eq.${userId}&limit=1`;
+      `?select=state_compressed,state&user_id=eq.${userId}&limit=1`;
 
     worker.postMessage({
       url,

@@ -12,6 +12,7 @@ import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
+import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
@@ -1110,41 +1111,14 @@ export function DatabaseSpreadsheet() {
       const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
       const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
       firstPendingSaveAtRef.current = null;
-      // Надёжный путь: обычный async-запрос (chunked backgroundSave для
-      // больших баз). Раньше flushSave полагался ТОЛЬКО на keepalive-fetch,
-      // у которого лимит тела 64 КБ — большая база (мегабайты JSON) туда
-      // не влезала и молча терялась.
+      // Единый путь сохранения — queueRemoteStateSave → backgroundSave
+      // (chunked + gzip в state_compressed). Раньше для малых баз тут был
+      // ещё keepalive-fetch несжатым jsonb в колонку state — он создавал
+      // рассинхрон state / state_compressed (чтение приоритизирует
+      // compressed, и keepalive-запись «терялась»). Убран. На unload
+      // несохранённое прикрывает потолок дебаунса MAX_SAVE_WAIT + копия
+      // в localStorage.
       queueRemoteStateSave(userId, payload, isLargeDataset);
-
-      // Доп. last-resort для beforeunload на МАЛЕНЬКИХ базах: keepalive
-      // успевает уйти, даже когда вкладка закрывается. Для больших баз он
-      // бесполезен (лимит 64 КБ) — там спасают queueRemoteStateSave выше
-      // и потолок дебаунса MAX_SAVE_WAIT.
-      if (!isLargeDataset) {
-        const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-        const sbKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-        if (sbUrl && sbKey && accessTokenRef.current) {
-          try {
-            void fetch(`${sbUrl}/rest/v1/database_spreadsheet_states`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Prefer': 'resolution=merge-duplicates,return=minimal',
-                'apikey': sbKey,
-                'Authorization': `Bearer ${accessTokenRef.current}`,
-              },
-              body: JSON.stringify({
-                user_id: userId,
-                state: payload,
-                updated_at: new Date().toISOString(),
-              }),
-              keepalive: true,
-            });
-          } catch {
-            /* best-effort during unload */
-          }
-        }
-      }
     }
   };
 
@@ -1179,40 +1153,20 @@ export function DatabaseSpreadsheet() {
           }
         };
 
-        if (queued.isLargeDataset) {
-          if (!accessTokenRef.current) {
-            onDone(false);
-            return;
-          }
-          void backgroundSave(
-            { user_id: queued.userId, state: queued.payload, updated_at: new Date().toISOString() },
-            accessTokenRef.current,
-            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
-          ).then((ok) => onDone(Boolean(ok)));
+        // Единый путь сохранения для баз любого размера: backgroundSave
+        // сериализует state чанками и сжимает (gzip) перед отправкой в
+        // state_compressed. Раньше малые базы шли отдельной веткой через
+        // supabase.upsert несжатым jsonb — это давало рассинхрон колонок
+        // state / state_compressed (чтение приоритизирует compressed).
+        if (!accessTokenRef.current) {
+          onDone(false);
           return;
         }
-
-        void Promise.resolve(
-          supabase
-            .from('database_spreadsheet_states')
-            .upsert({
-              user_id: queued.userId,
-              state: queued.payload,
-              updated_at: new Date().toISOString(),
-            }),
-        )
-          .then(({ error }) => {
-            if (error) {
-              void logError('spreadsheet.state.remote_save.failed', error);
-              onDone(false);
-              return;
-            }
-            onDone(true);
-          })
-          .catch((error: unknown) => {
-            void logError('spreadsheet.state.remote_save.failed', error);
-            onDone(false);
-          });
+        void backgroundSave(
+          { user_id: queued.userId, state: queued.payload, updated_at: new Date().toISOString() },
+          accessTokenRef.current,
+          (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+        ).then((ok) => onDone(Boolean(ok)));
       };
 
       pump();
@@ -8331,16 +8285,26 @@ export function DatabaseSpreadsheet() {
         try {
           const { data, error } = await supabase
             .from('database_spreadsheet_states')
-            .select('state')
+            .select('state_compressed, state')
             .eq('user_id', userId)
             .limit(1);
           if (!error) {
             remoteReadOk = true;
-            if (data?.[0]?.state) {
-              remoteState = readPersistedState(data[0].state);
+            const row = data?.[0] as
+              | { state_compressed?: string | null; state?: unknown }
+              | undefined;
+            if (row?.state_compressed) {
+              // Сжатое состояние имеет приоритет (см. 20260518_0001).
+              const json = await decompressStateFromBase64(row.state_compressed);
+              remoteState = readPersistedState(JSON.parse(json));
+            } else if (row?.state) {
+              remoteState = readPersistedState(row.state);
             }
           }
         } catch (error) {
+          // Ошибка разжатия/чтения — считаем чтение неуспешным, чтобы
+          // сработала защита от затирания ниже.
+          remoteReadOk = false;
           void logError('spreadsheet.state.load.failed', error);
         }
       }
@@ -8362,25 +8326,20 @@ export function DatabaseSpreadsheet() {
 
       if (isMounted) applyState(bestState);
 
-      // Переписываем remote локальной копией ТОЛЬКО если чтение БД удалось.
-      // Иначе можно затереть несчитанный большой state.
+      // Если локальная копия новее remote — переписываем remote, но ТОЛЬКО
+      // если чтение БД удалось (иначе можно затереть несчитанный state).
+      // Через queueRemoteStateSave → backgroundSave (сжато в state_compressed),
+      // а не прямым upsert несжатого jsonb — чтобы не разойтись по колонкам.
       if (remoteReadOk && bestState && bestState !== remoteState) {
-        try {
-          await supabase.from('database_spreadsheet_states').upsert({
-            user_id: userId,
-            state: bestState,
-            updated_at: new Date().toISOString(),
-          });
-        } catch (error) {
-          void logError('spreadsheet.state.remote_save.failed', error);
-        }
+        const totalRows = bestState.tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+        queueRemoteStateSave(userId, bestState, totalRows > LARGE_DATASET_ROW_THRESHOLD);
       }
     })();
 
     return () => {
       isMounted = false;
     };
-  }, [storageKey, userId]);
+  }, [storageKey, userId, queueRemoteStateSave]);
 
   useEffect(() => {
     if (tabs.length === 0) return;

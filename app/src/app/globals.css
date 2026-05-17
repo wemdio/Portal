@@ -1471,10 +1471,12 @@ body:has(.client-portal) {
   border-color: transparent !important;
 }
 .client-portal button.price-tier-btn.active {
-  box-shadow: inset 2px 2px 5px var(--cp-shadow-d), inset -2px -2px 5px var(--cp-shadow-l);
+  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.18);
   border-color: transparent !important;
-  color: var(--cp-accent) !important;
-  background-color: var(--cp-bg) !important;
+  /* Выбранная кнопка — заливка accent + белый текст (как neu-btn).
+     Раньше было color: var(--cp-accent) на accent-фоне → текст не виден. */
+  color: #fff !important;
+  background-color: var(--cp-accent) !important;
 }
 
 /* Inputs / selects / textareas in admin components: make them clean and readable */
