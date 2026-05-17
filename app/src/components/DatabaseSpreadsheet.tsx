@@ -1026,6 +1026,10 @@ export function DatabaseSpreadsheet() {
     progress: 0,
   });
   const [isHydrated, setIsHydrated] = useState(false);
+  // true, если из БД не удалось прочитать состояние (таймаут/ошибка) и
+  // локальной копии нет. В этом случае НЕЛЬЗЯ показывать пустую вкладку —
+  // иначе автосохранение затрёт реально существующий в БД большой state.
+  const [loadFailed, setLoadFailed] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Время первого несохранённого изменения — для потолка дебаунса (MAX_SAVE_WAIT).
   const firstPendingSaveAtRef = useRef<number | null>(null);
@@ -8266,6 +8270,7 @@ export function DatabaseSpreadsheet() {
     let isMounted = true;
     hydratedStateRef.current = '__pending__';
     setIsHydrated(false);
+    setLoadFailed(false);
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
@@ -8302,26 +8307,38 @@ export function DatabaseSpreadsheet() {
 
     void (async () => {
       let remoteState: PersistedSpreadsheetState | null = null;
+      // Удалось ли НАДЁЖНО прочитать из БД. Критично отличать «прочитали,
+      // там пусто» от «не смогли прочитать»: при неудаче чтения нельзя
+      // показывать пустую вкладку — автосохранение затёрло бы большой
+      // state, который просто не успел загрузиться.
+      let remoteReadOk = false;
 
       const token = accessTokenRef.current;
       if (token) {
         try {
-          const raw = await loadStateViaWorker(userId, token);
-          if (raw) remoteState = readPersistedState(raw);
+          const result = await loadStateViaWorker(userId, token);
+          if (result.ok) {
+            remoteReadOk = true;
+            if (result.state) remoteState = readPersistedState(result.state);
+          }
         } catch {
-          /* worker failed, try supabase client below */
+          /* worker упал — пробуем supabase-клиент ниже */
         }
       }
 
-      if (!remoteState) {
+      // Fallback через supabase-клиент, если worker не смог.
+      if (!remoteReadOk) {
         try {
           const { data, error } = await supabase
             .from('database_spreadsheet_states')
             .select('state')
             .eq('user_id', userId)
             .limit(1);
-          if (!error && data?.[0]?.state) {
-            remoteState = readPersistedState(data[0].state);
+          if (!error) {
+            remoteReadOk = true;
+            if (data?.[0]?.state) {
+              remoteState = readPersistedState(data[0].state);
+            }
           }
         } catch (error) {
           void logError('spreadsheet.state.load.failed', error);
@@ -8329,12 +8346,25 @@ export function DatabaseSpreadsheet() {
       }
 
       const localState = readPersistedState(window.localStorage.getItem(storageKey));
+
+      // ЗАЩИТА ОТ ПОТЕРИ ДАННЫХ. Если из БД прочитать не удалось (таймаут
+      // или ошибка обоих путей) и локальной копии нет — НЕ применяем пустое
+      // состояние. Иначе пустая вкладка + автосохранение затёрли бы
+      // существующий в БД state. Показываем ошибку; isHydrated остаётся
+      // false, поэтому автосейв-эффект ничего не пишет.
+      if (!remoteReadOk && !localState) {
+        if (isMounted) setLoadFailed(true);
+        return;
+      }
+
       const localIsNewer = localState && (localState.savedAt ?? 0) > (remoteState?.savedAt ?? 0);
       const bestState = localIsNewer ? localState : (remoteState ?? localState);
 
       if (isMounted) applyState(bestState);
 
-      if (bestState && bestState !== remoteState) {
+      // Переписываем remote локальной копией ТОЛЬКО если чтение БД удалось.
+      // Иначе можно затереть несчитанный большой state.
+      if (remoteReadOk && bestState && bestState !== remoteState) {
         try {
           await supabase.from('database_spreadsheet_states').upsert({
             user_id: userId,
@@ -9223,11 +9253,29 @@ export function DatabaseSpreadsheet() {
               setContextMenu({ x: event.clientX, y: event.clientY });
             }}
           >
-            {!isHydrated ? (
+            {loadFailed ? (
+              <div className="px-6 py-14 text-center">
+                <div className="text-sm font-semibold text-red-600">Не удалось загрузить базу</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Сервер не ответил вовремя. Ваши данные в безопасности — обновите
+                  страницу, чтобы попробовать снова. Ничего не редактируйте на этой
+                  странице до успешной загрузки.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="mt-3 inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+                >
+                  Обновить страницу
+                </button>
+              </div>
+            ) : !isHydrated ? (
               <div className="px-6 py-14 text-center text-gray-500">
                 <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
                 <div className="text-sm font-medium text-gray-700">Загружаем вашу базу…</div>
-                <div className="mt-1 text-xs text-gray-500">Это может занять несколько секунд.</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Большая база может загружаться до 1–2 минут. Не закрывайте вкладку.
+                </div>
               </div>
             ) : (
             <table ref={tableElementRef} className="min-w-max border-separate border-spacing-0">
