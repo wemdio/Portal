@@ -14,6 +14,7 @@ import type {
   ClientLaunchSequenceVariant,
 } from '@/lib/clientLaunch/types';
 import { activateCampaign, createCampaign, createLeads } from '@/lib/instantly/client';
+import { upsertInstantlyCatalogFromCampaign } from '@/lib/tools/instantlyCampaignCatalog';
 import {
   countClientContacts,
   getBillingPeriodStart,
@@ -232,7 +233,15 @@ export async function POST(req: NextRequest) {
       leads.length);
     const skipped = leads.length - accepted;
 
-    await activateCampaign(instantlyCampaignId);
+    const activatedCampaign = await activateCampaign(instantlyCampaignId);
+
+    // Сразу пишем кампанию в каталог: /api/client/campaigns читает
+    // instantly_campaign_catalog, а не Instantly API напрямую. Без этого
+    // свежезапущенная кампания не появляется в списке кампаний клиента
+    // (и на дашборде) до ближайшего часового синка каталога. Админские
+    // флоу создания/активации/паузы делают то же. upsert не бросает —
+    // сбой записи в каталог не должен ломать уже успешный запуск.
+    await upsertInstantlyCatalogFromCampaign(activatedCampaign);
 
     await supabaseInstantly.from('client_instantly_access').upsert(
       {
