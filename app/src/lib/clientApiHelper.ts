@@ -20,6 +20,16 @@ export interface ClientAuthResult {
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
+ * POST-роуты, которые по сути read-only (формируют отчёт / выполняют поиск,
+ * ничего не меняют). Демо-аккаунту они разрешены — роут вернёт фикстуру
+ * через serveClientDemo. Всё остальное мутирующее под демо режется.
+ */
+const DEMO_READONLY_POST_PATHS = new Set([
+  '/api/client/reports',
+  '/api/client/companies-search',
+]);
+
+/**
  * Standardised 403 for any write attempt under the demo account. The client
  * fetcher recognises `code: 'DEMO_READONLY'` and surfaces a friendly toast.
  */
@@ -65,7 +75,12 @@ export async function requireClientAuth(
   // Демо-аккаунт строго read-only. Любой мутирующий запрос режем здесь,
   // централизованно — ни один клиентский роут физически не сможет ничего
   // изменить под демо-юзером (сколько бы человек одновременно ни зашло).
-  if (isDemo && MUTATING_METHODS.has(req.method)) {
+  // Исключение — read-only POST'ы (отчёт, поиск): они отдают фикстуру.
+  if (
+    isDemo &&
+    MUTATING_METHODS.has(req.method) &&
+    !DEMO_READONLY_POST_PATHS.has(req.nextUrl.pathname)
+  ) {
     return { error: demoReadonlyError() };
   }
 

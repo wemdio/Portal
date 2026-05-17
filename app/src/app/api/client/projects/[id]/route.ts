@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
@@ -34,6 +35,7 @@ export async function GET(
 ) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { userId } = result.auth;

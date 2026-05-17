@@ -13,6 +13,7 @@ import { GlobalTextTranslator } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId } from '@/lib/clientNav';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
+import { DemoBanner } from '@/components/client/DemoBanner';
 
 const nunito = Nunito({
   subsets: ['latin', 'cyrillic'],
@@ -69,6 +70,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <PortalLoadingProvider>
     <GlobalTextTranslator locale={locale} />
     <div className={`client-portal ${nunito.className} flex flex-col min-h-screen`}>
+      <DemoBanner />
       <header className="sticky top-0 z-40 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
         <div className="neu-card flex items-center gap-2 sm:gap-3 px-3 py-2.5 sm:px-5 sm:py-3 mx-auto max-w-[1400px]">
           <button

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { scopeAutoReportCampaignIds } from '@/lib/clientAccess';
 import { readCampaignAnalyticsFromDb, buildClientReport } from '@/lib/tools/instantlyCampaignCatalog';
 
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
   const { accessRows } = result.auth;
 
   let body: { campaignIds?: string[] };
