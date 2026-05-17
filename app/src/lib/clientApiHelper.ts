@@ -12,6 +12,25 @@ export function jsonError(message: string, status: number) {
 export interface ClientAuthResult {
   userId: string;
   accessRows: ClientAccessRow[];
+  /** True for the shared demo account (see lib/clientDemo). Strictly read-only. */
+  isDemo: boolean;
+}
+
+/** HTTP methods that change state — blocked outright for the demo account. */
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * Standardised 403 for any write attempt under the demo account. The client
+ * fetcher recognises `code: 'DEMO_READONLY'` and surfaces a friendly toast.
+ */
+export function demoReadonlyError(): NextResponse {
+  return NextResponse.json(
+    {
+      error: 'Демо-режим: это витрина портала с тестовыми данными, изменять ничего нельзя.',
+      code: 'DEMO_READONLY',
+    },
+    { status: 403 },
+  );
 }
 
 /**
@@ -32,13 +51,22 @@ export async function requireClientAuth(
 
   const { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('role')
+    .select('role, is_demo')
     .eq('id', user.id)
     .single();
 
   const role = profile?.role ?? null;
   if (role !== 'client' && role !== 'admin') {
     return { error: jsonError('Forbidden', 403) };
+  }
+
+  const isDemo = profile?.is_demo === true;
+
+  // Демо-аккаунт строго read-only. Любой мутирующий запрос режем здесь,
+  // централизованно — ни один клиентский роут физически не сможет ничего
+  // изменить под демо-юзером (сколько бы человек одновременно ни зашло).
+  if (isDemo && MUTATING_METHODS.has(req.method)) {
+    return { error: demoReadonlyError() };
   }
 
   const { data: rows } = await supabaseInstantly
@@ -50,6 +78,7 @@ export async function requireClientAuth(
     auth: {
       userId: user.id,
       accessRows: (rows ?? []) as ClientAccessRow[],
+      isDemo,
     },
   };
 }
