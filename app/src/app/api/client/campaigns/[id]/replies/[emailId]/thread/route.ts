@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToThreadMessage } from '@/lib/clientCampaignReplies/mapEmail';
@@ -23,6 +24,7 @@ export async function GET(
 ) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
   const { accessRows } = result.auth;
 
   const { id: campaignId, emailId } = await ctx.params;

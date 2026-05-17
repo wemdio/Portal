@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { filterAllowedIds } from '@/lib/clientAccess';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 
@@ -26,6 +27,7 @@ interface CampaignGroup {
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
   const { userId, accessRows } = result.auth;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
