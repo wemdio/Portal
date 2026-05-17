@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { cached } from '@/lib/clientCache';
@@ -25,6 +26,7 @@ const CACHE_TTL_MS = 15_000;
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
   const adminClient = supabaseAdmin;
   const instantlyClient = supabaseInstantly;
   if (!adminClient || !instantlyClient) return jsonError('Server misconfigured', 500);
