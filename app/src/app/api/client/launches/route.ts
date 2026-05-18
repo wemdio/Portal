@@ -223,9 +223,13 @@ export async function POST(req: NextRequest) {
       .update({ instantly_campaign_id: instantlyCampaignId })
       .eq('id', launchId);
 
+    // skip_if_in_workspace НЕ выставляем: иначе Instantly пропускает любого
+    // лида, который уже есть где-либо в воркспейсе (из прошлых кампаний), и
+    // он не попадает в эту кампанию — клиент загрузил базу, а кампания
+    // пустая. skip_if_in_campaign оставляем: дедуп внутри самой кампании
+    // безвреден (свежая кампания всё равно пустая на старте).
     const leadResult = await createLeads(leads, {
       campaign_id: instantlyCampaignId,
-      skip_if_in_workspace: true,
       skip_if_in_campaign: true,
     });
 
