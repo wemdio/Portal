@@ -223,6 +223,8 @@ export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buf
 /**
  * Stream a file from Telegram Bot API (cloud or local) directly to disk.
  */
+const HTTP_CHUNK_STALL_MS = 120_000;
+
 async function downloadTelegramFileToDisk(fileId: string, destPath: string): Promise<string> {
   const filePath = await resolveTelegramFilePath(fileId);
   const downloadUrl = `${tgFileBase()}/${filePath}`;
@@ -239,7 +241,15 @@ async function downloadTelegramFileToDisk(fileId: string, destPath: string): Pro
   try {
     const reader = (downloadRes.body as ReadableStream<Uint8Array>).getReader();
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`HTTP download stalled: no data for ${HTTP_CHUNK_STALL_MS / 1000}s`)),
+            HTTP_CHUNK_STALL_MS,
+          ),
+        ),
+      ]);
       if (done) break;
       await fileHandle.write(value);
     }

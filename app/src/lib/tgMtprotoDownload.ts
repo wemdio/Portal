@@ -14,9 +14,26 @@ let client: TelegramClient | null = null;
 let connecting: Promise<TelegramClient> | null = null;
 const MT_RETRY_ATTEMPTS = 3;
 const MT_RETRY_DELAY_MS = 1500;
+const CHUNK_STALL_TIMEOUT_MS = 120_000; // 2 min with no data = stalled
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextChunkWithTimeout<T>(
+  iter: AsyncIterator<T>,
+  timeoutMs: number,
+): Promise<IteratorResult<T>> {
+  return Promise.race([
+    iter.next(),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`MTProto download stalled: no data for ${timeoutMs / 1000}s`)),
+        timeoutMs,
+      ),
+    ),
+  ]);
+}
 }
 
 function isRetryableMtprotoError(err: unknown): boolean {
@@ -160,8 +177,11 @@ export async function downloadFileByFileIdToPath(
 
       let totalBytes = resumeOffset;
       let lastProgressAt = 0;
-      for await (const chunk of iterDownload) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const iter = iterDownload[Symbol.asyncIterator]();
+      while (true) {
+        const result = await nextChunkWithTimeout(iter, CHUNK_STALL_TIMEOUT_MS);
+        if (result.done) break;
+        const buf = Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value as string);
         const canContinue = writeStream.write(buf);
         totalBytes += buf.byteLength;
         if (onProgress) {
