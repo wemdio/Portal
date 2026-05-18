@@ -105,3 +105,16 @@ export interface CollectResult {
   hhEmployers: number;
   errors: string[];
 }
+
+export type JobStatus = 'running' | 'completed' | 'failed';
+
+/** A row of event_outreach_jobs — one collect run. */
+export interface EventJob {
+  id: string;
+  status: JobStatus;
+  params: SelectFilters | null;
+  stats: CollectResult | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}

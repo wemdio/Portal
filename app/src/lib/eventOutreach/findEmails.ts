@@ -8,9 +8,9 @@
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import type { EmailSource } from './types';
 
-const SCRAPE_TIMEOUT = 12_000;
-const SCRAPE_MAX_PAGES = 6;
-const CONCURRENCY = 6;
+const SCRAPE_TIMEOUT = 10_000;
+const SCRAPE_MAX_PAGES = 5;
+const CONCURRENCY = 12;
 
 const JUNK_PREFIXES = [
   'noreply', 'no-reply', 'donotreply', 'do-not-reply', 'mailer-daemon',
