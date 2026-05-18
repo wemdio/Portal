@@ -48,8 +48,10 @@ export interface DirectoryCompany {
 /** Result of running signal detection on one company. */
 export interface DetectedSignals {
   company_age: number | null;
+  registration_date: string | null;
   is_anniversary: boolean;
-  anniversary_year: number | null;
+  anniversary_date: string | null;
+  days_to_anniversary: number | null;
   hh_vacancies_count: number;
   seeking_event_manager: boolean;
   detected_signals: EventSignal[];
@@ -83,8 +85,10 @@ export interface EventLead {
   email: string | null;
   email_source: EmailSource;
   company_age: number | null;
+  registration_date: string | null;
   is_anniversary: boolean;
-  anniversary_year: number | null;
+  anniversary_date: string | null;
+  days_to_anniversary: number | null;
   hh_vacancies_count: number;
   seeking_event_manager: boolean;
   detected_signals: EventSignal[];

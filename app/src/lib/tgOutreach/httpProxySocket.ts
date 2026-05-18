@@ -11,6 +11,13 @@ import { Mutex } from 'async-mutex';
 const mutex = new Mutex();
 const closeError = new Error('NetSocket was closed');
 
+/**
+ * Таймаут установки CONNECT-туннеля. 15с было мало для мобильных прокси
+ * (Infatica и пр.): когда модем занят, рукопожатие легко занимает 20-30с,
+ * и легитимные подключения резались. 40с — с запасом.
+ */
+const CONNECT_TIMEOUT_MS = Number(process.env.TG_PROXY_CONNECT_TIMEOUT_MS ?? '40000');
+
 function proxyLog(msg: string) {
   console.log(`[HttpConnectSocket] ${msg}`);
 }
@@ -162,6 +169,12 @@ export class HttpConnectSocket {
         proxyLog(`CONNECT response: ${statusCode} | headers: ${allHeaders.replace(/\r\n/g, ' | ')}`);
 
         if (statusCode === 200) {
+          // Снимаем idle-таймаут: он должен покрывать ТОЛЬКО фазу установки
+          // туннеля. Дальше сокет уходит в gramJS под долгоживущее
+          // MTProto-соединение, где паузы без трафика 15-60с (между пингами
+          // и апдейтами) — норма. Если таймаут оставить, он убивал бы живое
+          // соединение каждые N секунд → постоянные реконнекты в логах.
+          socket.setTimeout(0);
           const remaining = Buffer.from(responseBuffer.slice(headerEnd + 4));
           if (remaining.length > 0) {
             proxyLog(`CONNECT had ${remaining.length} trailing bytes`);
@@ -180,8 +193,8 @@ export class HttpConnectSocket {
         proxyLog(`CONNECT socket error: ${err.message}`);
         reject(err);
       });
-      socket.setTimeout(15000, () => {
-        proxyLog(`CONNECT timeout after 15s to ${destIp}:${destPort}`);
+      socket.setTimeout(CONNECT_TIMEOUT_MS, () => {
+        proxyLog(`CONNECT timeout after ${CONNECT_TIMEOUT_MS}ms to ${destIp}:${destPort}`);
         socket.destroy();
         reject(new Error('HTTP CONNECT timeout'));
       });

@@ -7,7 +7,8 @@ export const runtime = 'nodejs';
 const CSV_HEADERS = [
   'Компания', 'ИНН', 'КПП', 'ОГРН', 'Адрес', 'Отрасль', 'ОКВЭД',
   'Сотрудников', 'Выручка', 'Сайт', 'Email', 'Источник email',
-  'Возраст', 'Юбилей', 'Год юбилея', 'Вакансий ивент', 'Ищут ивент-менеджера',
+  'Возраст', 'Дата регистрации', 'Дата юбилея', 'Дней до юбилея',
+  'Вакансий ивент', 'Ищут ивент-менеджера',
   'Сигналы', 'Tier', 'Hook', 'Тема письма', 'Дата',
 ];
 
@@ -59,8 +60,9 @@ export async function GET(req: NextRequest) {
       lead.email,
       lead.email_source,
       lead.company_age,
-      lead.is_anniversary ? 'да' : 'нет',
-      lead.anniversary_year,
+      lead.registration_date,
+      lead.anniversary_date,
+      lead.days_to_anniversary,
       lead.hh_vacancies_count,
       lead.seeking_event_manager ? 'да' : 'нет',
       Array.isArray(lead.detected_signals) ? lead.detected_signals.join('; ') : '',
