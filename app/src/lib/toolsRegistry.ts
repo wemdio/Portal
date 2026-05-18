@@ -44,6 +44,7 @@ export const ALL_TOOL_IDS = [
   'knowledge-base',
   'bugor-outreach',
   'nash-outreach',
+  'event-outreach',
   'reputation-finder',
   'our-bases',
 ] as const;
@@ -286,6 +287,15 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/nash-outreach',
     accentColor: 'blue',
   },
+  'event-outreach': {
+    id: 'event-outreach',
+    title: 'Ивент аутрич',
+    title_en: 'Event Outreach',
+    description: 'Сбор базы под ивент-агентство: фильтр реестра, сигналы (юбилей, HH, размер) и персонализированный hook.',
+    description_en: 'Base building for event agencies: registry filter, signals (anniversary, HH, size), and a personalized hook.',
+    href: '/tools/event-outreach',
+    accentColor: 'blue',
+  },
   'reputation-finder': {
     id: 'reputation-finder',
     title: 'Reputation Finder',
@@ -316,7 +326,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach'],
   },
   {
     label: 'Базы и данные',

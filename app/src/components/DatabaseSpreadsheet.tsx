@@ -8277,12 +8277,7 @@ export function DatabaseSpreadsheet() {
             remoteReadOk = true;
             if (result.state) remoteState = readPersistedState(result.state);
           }
-          const loadedRows = remoteState
-            ? remoteState.tabs.reduce((s, t) => s + t.data.length, 0)
-            : 0;
-          console.log(`[sheet-diag] hydration worker: ok=${result.ok} hadStored=${result.hadStored} parsedTabs=${remoteState?.tabs.length ?? 'null'} parsedRows=${loadedRows}`);
-        } catch (err) {
-          console.error('[sheet-diag] hydration worker threw:', err);
+        } catch {
           /* worker упал — пробуем supabase-клиент ниже */
         }
       }
@@ -8414,11 +8409,9 @@ export function DatabaseSpreadsheet() {
       Math.min(delay, MAX_SAVE_WAIT - elapsedSinceFirstChange),
     );
 
-    console.log(`[sheet-diag] autosave scheduled: tabs=${tabs.length} rows=${totalRows} large=${isLargeDataset} delay=${effectiveDelay}ms`);
     saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
       firstPendingSaveAtRef.current = null;
-      console.log(`[sheet-diag] autosave timer fired → queueRemoteStateSave (rows=${totalRows})`);
       queueRemoteStateSave(userIdSnapshot, payload, isLargeDataset);
     }, effectiveDelay);
     return () => {
