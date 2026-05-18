@@ -47,3 +47,13 @@ COMMENT ON TABLE public.event_outreach_leads IS
 CREATE INDEX IF NOT EXISTS event_outreach_leads_batch_idx ON public.event_outreach_leads (batch_date DESC);
 CREATE INDEX IF NOT EXISTS event_outreach_leads_tier_idx ON public.event_outreach_leads (tier);
 CREATE INDEX IF NOT EXISTS event_outreach_leads_inn_idx ON public.event_outreach_leads (inn);
+
+-- GRANTs: the tool reaches the DB only via the service role (API routes use
+-- supabaseAdmin); without an explicit grant the service role gets permission denied.
+grant all on public.event_outreach_config to service_role, postgres;
+grant all on public.event_outreach_leads to service_role, postgres;
+
+-- RLS on with no policies: anon/authenticated clients have no direct access
+-- (all access is server-side); the service role bypasses RLS.
+alter table public.event_outreach_config enable row level security;
+alter table public.event_outreach_leads enable row level security;
