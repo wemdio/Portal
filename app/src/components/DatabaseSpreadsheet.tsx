@@ -8261,16 +8261,18 @@ export function DatabaseSpreadsheet() {
 
     void (async () => {
       let remoteState: PersistedSpreadsheetState | null = null;
-      // Удалось ли НАДЁЖНО прочитать из БД. Критично отличать «прочитали,
-      // там пусто» от «не смогли прочитать»: при неудаче чтения нельзя
-      // показывать пустую вкладку — автосохранение затёрло бы большой
-      // state, который просто не успел загрузиться.
+      // Удалось ли НАДЁЖНО прочитать из БД.
       let remoteReadOk = false;
+      // В БД РЕАЛЬНО лежали данные (непустой state/state_compressed).
+      // Если данные были, а валидный remoteState из них не получился —
+      // это сбой чтения/разжатия/парсинга, и применять пустое НЕЛЬЗЯ.
+      let remoteHadStored = false;
 
       const token = accessTokenRef.current;
       if (token) {
         try {
           const result = await loadStateViaWorker(userId, token);
+          remoteHadStored = remoteHadStored || result.hadStored;
           if (result.ok) {
             remoteReadOk = true;
             if (result.state) remoteState = readPersistedState(result.state);
@@ -8293,6 +8295,7 @@ export function DatabaseSpreadsheet() {
             const row = data?.[0] as
               | { state_compressed?: string | null; state?: unknown }
               | undefined;
+            if (row?.state_compressed || row?.state) remoteHadStored = true;
             if (row?.state_compressed) {
               // Сжатое состояние имеет приоритет (см. 20260518_0001).
               const json = await decompressStateFromBase64(row.state_compressed);
@@ -8311,12 +8314,17 @@ export function DatabaseSpreadsheet() {
 
       const localState = readPersistedState(window.localStorage.getItem(storageKey));
 
-      // ЗАЩИТА ОТ ПОТЕРИ ДАННЫХ. Если из БД прочитать не удалось (таймаут
-      // или ошибка обоих путей) и локальной копии нет — НЕ применяем пустое
-      // состояние. Иначе пустая вкладка + автосохранение затёрли бы
-      // существующий в БД state. Показываем ошибку; isHydrated остаётся
-      // false, поэтому автосейв-эффект ничего не пишет.
-      if (!remoteReadOk && !localState) {
+      // ЗАЩИТА ОТ ЗАТИРАНИЯ. Чтение ненадёжно, если:
+      //  - не удалось вовсе (!remoteReadOk), ИЛИ
+      //  - данные в БД были (remoteHadStored), но валидный state из них
+      //    не извлёкся (remoteState === null) — битый/нечитаемый/слишком
+      //    большой JSON.
+      // В обоих случаях НЕ применяем никакое состояние и НЕ даём автосейву
+      // работать (isHydrated остаётся false). Иначе пустая/локальная
+      // вкладка + автосохранение затёрли бы реальный большой state в БД.
+      // Лучше показать «не удалось загрузить», чем потерять данные.
+      const readUnreliable = !remoteReadOk || (remoteHadStored && !remoteState);
+      if (readUnreliable) {
         if (isMounted) setLoadFailed(true);
         return;
       }
@@ -8326,11 +8334,9 @@ export function DatabaseSpreadsheet() {
 
       if (isMounted) applyState(bestState);
 
-      // Если локальная копия новее remote — переписываем remote, но ТОЛЬКО
-      // если чтение БД удалось (иначе можно затереть несчитанный state).
-      // Через queueRemoteStateSave → backgroundSave (сжато в state_compressed),
-      // а не прямым upsert несжатого jsonb — чтобы не разойтись по колонкам.
-      if (remoteReadOk && bestState && bestState !== remoteState) {
+      // Если локальная копия новее remote — переписываем remote. Сюда
+      // попадаем только при надёжном чтении (readUnreliable отсеян выше).
+      if (bestState && bestState !== remoteState) {
         const totalRows = bestState.tabs.reduce((sum, tab) => sum + tab.data.length, 0);
         queueRemoteStateSave(userId, bestState, totalRows > LARGE_DATASET_ROW_THRESHOLD);
       }
