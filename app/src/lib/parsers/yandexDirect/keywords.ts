@@ -48,7 +48,7 @@ export async function generateSeeds(description: string, n = 20): Promise<string
   const content = await callOpenRouterChat({
     apiKey,
     model: KEYWORD_MODEL,
-    title: 'Portal — Yandex Direct keywords',
+    title: 'Portal Yandex Direct keywords',
     temperature: 0.4,
     maxTokens: 1024,
     messages: [
