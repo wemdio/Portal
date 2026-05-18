@@ -377,14 +377,20 @@ function LeadRow({
             {lead.detected_signals.length === 0 ? (
               <span className="text-xs text-gray-400">—</span>
             ) : (
-              lead.detected_signals.map((s) => (
-                <span
-                  key={s}
-                  className="inline-block rounded-md bg-gray-100 px-1.5 py-0.5 text-[11px] font-medium text-gray-700"
-                >
-                  {SIGNAL_LABELS[s] ?? s}
-                </span>
-              ))
+              lead.detected_signals.map((s) => {
+                const label =
+                  s === 'anniversary' && lead.days_to_anniversary != null
+                    ? `Юбилей · через ${lead.days_to_anniversary} дн.`
+                    : SIGNAL_LABELS[s] ?? s;
+                return (
+                  <span
+                    key={s}
+                    className="inline-block rounded-md bg-gray-100 px-1.5 py-0.5 text-[11px] font-medium text-gray-700"
+                  >
+                    {label}
+                  </span>
+                );
+              })
             )}
           </div>
         </td>
@@ -414,10 +420,19 @@ function LeadRow({
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <Detail label="ИНН" value={lead.inn} />
                 <Detail label="ОГРН" value={lead.ogrn} />
+                <Detail label="Дата регистрации" value={lead.registration_date} />
                 <Detail label="Возраст компании" value={lead.company_age != null ? `${lead.company_age} лет` : null} />
                 <Detail
                   label="Юбилей"
-                  value={lead.is_anniversary ? `да, в ${lead.anniversary_year}` : 'нет'}
+                  value={
+                    lead.anniversary_date
+                      ? `${lead.anniversary_date}${
+                          lead.days_to_anniversary != null
+                            ? ` — через ${lead.days_to_anniversary} дн.`
+                            : ''
+                        }`
+                      : 'нет'
+                  }
                 />
                 <Detail label="Сотрудников" value={lead.employees_count?.toLocaleString('ru')} />
                 <Detail label="Выручка" value={lead.revenue ? `${lead.revenue.toLocaleString('ru')} ₽` : null} />

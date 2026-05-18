@@ -34,10 +34,30 @@ export interface HookInput {
   employees_count: number | null;
   region_code: string | null;
   company_age: number | null;
-  anniversary_year: number | null;
+  anniversary_date: string | null;
+  days_to_anniversary: number | null;
   hh_vacancies_count: number;
   detected_signals: EventSignal[];
   tier: EventTier;
+}
+
+const MONTHS_RU = [
+  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+];
+
+/** Human phrase for the upcoming anniversary, used to ground the hook timing. */
+function anniversaryPhrase(lead: HookInput): string | null {
+  if (!lead.anniversary_date || lead.days_to_anniversary === null) return null;
+  const d = new Date(lead.anniversary_date);
+  if (Number.isNaN(d.getTime())) return null;
+  const days = lead.days_to_anniversary;
+  const milestone =
+    lead.company_age !== null ? lead.company_age + (days > 0 ? 1 : 0) : null;
+  const when =
+    days <= 0 ? 'сегодня' : days <= 14 ? `через ${days} дн.` : `примерно через ${Math.round(days / 7)} нед.`;
+  const ageStr = milestone ? `, компании исполняется ${milestone} лет` : '';
+  return `Юбилей ${d.getDate()} ${MONTHS_RU[d.getMonth()]} (${when})${ageStr} — пишем заранее, чтобы успеть подготовиться`;
 }
 
 export interface HookResult {
@@ -78,7 +98,7 @@ ${painPoints || '(не заданы)'}
 
 ПРАВИЛА:
 1. Начинай с наблюдения/факта про КОМПАНИЮ, а не про агентство.
-2. Если есть конкретный сигнал (юбилей, вакансия ивент-менеджера) — строй hook вокруг него.
+2. Если есть конкретный сигнал (юбилей, вакансия ивент-менеджера) — строй hook вокруг него. Для юбилея опирайся на дату и срок из входных данных («в июле», «через месяц») — смысл письма в том, что вы пишете заранее, пока есть время подготовиться.
 3. Если сигналов нет — используй отраслевую боль.
 4. Не выдумывай факты, которых нет во входных данных.
 5. Не здоровайся и не представляй агентство — это другие части письма.
@@ -100,7 +120,7 @@ function buildUserPrompt(lead: HookInput): string {
     lead.activity_type ? `Вид деятельности: ${lead.activity_type}` : null,
     lead.employees_count ? `Сотрудников: ${lead.employees_count}` : null,
     lead.company_age !== null ? `Возраст компании: ${lead.company_age} лет` : null,
-    lead.anniversary_year ? `Круглая дата в ${lead.anniversary_year} году` : null,
+    anniversaryPhrase(lead),
     lead.hh_vacancies_count > 0
       ? `Открытых ивент-вакансий на HH: ${lead.hh_vacancies_count}`
       : null,

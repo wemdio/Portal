@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { selectCompanies } from '@/lib/eventOutreach/selectCompanies';
 import { parseEventEmployers } from '@/lib/eventOutreach/hhEventParser';
-import { detectSignals, okvedToIndustry } from '@/lib/eventOutreach/detectSignals';
+import {
+  detectSignals,
+  okvedToIndustry,
+  isAnniversaryCandidate,
+  computeAnniversary,
+} from '@/lib/eventOutreach/detectSignals';
+import { fetchRegistrationDates } from '@/lib/eventOutreach/registrationDate';
 import { resolveEmails, type EmailInput } from '@/lib/eventOutreach/findEmails';
 import { generateHooks, type HookInput } from '@/lib/eventOutreach/generateHook';
 import { loadAgencyConfig } from '@/lib/eventOutreach/config';
@@ -73,9 +79,18 @@ async function runPipeline(jobId: string, filters: SelectFilters): Promise<void>
       return;
     }
 
+    // Phase 1b: exact registration dates (DaData) for anniversary candidates only.
+    const candidateInns = companies
+      .filter((c) => !!c.inn && isAnniversaryCandidate(c.ogrn))
+      .map((c) => c.inn as string);
+    const regDates = await fetchRegistrationDates(candidateInns);
+    const today = new Date();
+
     // Phase 2: per-company signal detection.
     const leads = companies.map((company) => {
-      const signals = detectSignals(company, hhEmployers);
+      const regDate = company.inn ? regDates.get(company.inn) ?? null : null;
+      const anniversary = computeAnniversary(regDate, today);
+      const signals = detectSignals(company, hhEmployers, anniversary);
       if (signals.tier === 'hot') result.hot++;
       else if (signals.tier === 'warm') result.warm++;
       else result.cold++;
@@ -118,7 +133,8 @@ async function runPipeline(jobId: string, filters: SelectFilters): Promise<void>
         employees_count: lead.company.employees_count,
         region_code: lead.company.region_code,
         company_age: lead.signals.company_age,
-        anniversary_year: lead.signals.anniversary_year,
+        anniversary_date: lead.signals.anniversary_date,
+        days_to_anniversary: lead.signals.days_to_anniversary,
         hh_vacancies_count: lead.signals.hh_vacancies_count,
         detected_signals: lead.signals.detected_signals,
         tier: lead.signals.tier,
@@ -155,8 +171,10 @@ async function runPipeline(jobId: string, filters: SelectFilters): Promise<void>
       email: lead.email,
       email_source: lead.email_source,
       company_age: lead.signals.company_age,
+      registration_date: lead.signals.registration_date,
       is_anniversary: lead.signals.is_anniversary,
-      anniversary_year: lead.signals.anniversary_year,
+      anniversary_date: lead.signals.anniversary_date,
+      days_to_anniversary: lead.signals.days_to_anniversary,
       hh_vacancies_count: lead.signals.hh_vacancies_count,
       seeking_event_manager: lead.signals.seeking_event_manager,
       detected_signals: lead.signals.detected_signals,
@@ -165,6 +183,10 @@ async function runPipeline(jobId: string, filters: SelectFilters): Promise<void>
       subject_line: lead.subject_line,
       raw_data: { phones: lead.company.phones, source: 'companies_directory' },
     }));
+
+    // Replace the previous base — each run produces one fresh, current base
+    // (done only now, after the new rows are ready, so a failed run keeps the old base).
+    await db.from('event_outreach_leads').delete().gte('batch_date', '1900-01-01');
 
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       const chunk = rows.slice(i, i + INSERT_CHUNK);

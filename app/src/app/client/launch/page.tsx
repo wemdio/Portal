@@ -1304,7 +1304,7 @@ function SequenceStepEditor({
       <textarea
         value={activeContent.body}
         onChange={(e) => onUpdateActive({ body: e.target.value })}
-        placeholder="Текст письма (поддерживает HTML)"
+        placeholder="Текст письма — обычный текст, HTML не используется"
         rows={6}
         className="neu-input w-full px-3 py-2 text-sm font-sans resize-y mt-3"
       />
