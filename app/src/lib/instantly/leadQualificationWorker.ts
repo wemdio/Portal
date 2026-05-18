@@ -9,6 +9,7 @@ const REPLY_EMAILS_PAGE_SIZE = 100;
 const MAX_QUALIFY_PER_TICK = 20;
 const PROJECT_BATCH_SIZE = 100;
 const briefCache = new Map<string, string | null>();
+const campaignNameCache = new Map<string, string | null>();
 const API_KEY = () =>
   process.env.OPENROUTER_INSTANTLY_LEAD_API_KEY ??
   process.env.OPENROUTER_BRIEF_API_KEY ??
@@ -84,14 +85,33 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
   return [...campaignIds];
 }
 
+/**
+ * Resolves a campaign's display name by ID, cached per worker process.
+ * Used to label lead alerts with the campaign the reply came from.
+ */
+async function resolveCampaignName(campaignId: string): Promise<string | null> {
+  if (campaignNameCache.has(campaignId)) {
+    return campaignNameCache.get(campaignId) ?? null;
+  }
+  let name: string | null = null;
+  try {
+    const campaign = await instantly.getCampaign(campaignId);
+    name = campaign?.name?.trim() || null;
+  } catch (err) {
+    workerLog('warn', `Failed to fetch campaign name for ${campaignId}`, err);
+  }
+  campaignNameCache.set(campaignId, name);
+  return name;
+}
+
 async function fetchRecentLinkedReplies(
   campaignIds: Set<string>,
-): Promise<(Email & { _campaignName?: string })[]> {
+): Promise<Email[]> {
   const maxPages = Math.max(
     1,
     Math.min(20, envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5)),
   );
-  const replyEmails: (Email & { _campaignName?: string })[] = [];
+  const replyEmails: Email[] = [];
   let startingAfter: string | undefined;
 
   for (let page = 0; page < maxPages; page++) {
@@ -109,7 +129,7 @@ async function fetchRecentLinkedReplies(
       'info',
       `Reply page ${page + 1}: ${allEmails.length} replies fetched, ${linkedReplies.length} linked to Portal projects`,
     );
-    replyEmails.push(...(linkedReplies as (Email & { _campaignName?: string })[]));
+    replyEmails.push(...linkedReplies);
 
     startingAfter = res.next_starting_after || undefined;
     if (!startingAfter || allEmails.length === 0) break;
@@ -222,7 +242,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
 async function qualifyOneReply(
   db: NonNullable<typeof supabaseAdmin>,
-  reply: Email & { _campaignName?: string },
+  reply: Email,
   apiKey: string,
 ): Promise<void> {
   const campaignId = reply.campaign_id;
@@ -244,7 +264,7 @@ async function qualifyOneReply(
     briefText: cachedBrief,
   });
 
-  const campaignName = reply._campaignName ?? null;
+  const campaignName = await resolveCampaignName(campaignId);
 
   let leadName: string | undefined;
   let companyName: string | undefined;
@@ -362,6 +382,7 @@ async function notifySpecialistsAboutLead(
 
   try {
     const userIds = new Set<string>();
+    let clientName: string | null = null;
 
     // Primary: find specialist via project link
     const { data: links } = await instantlyDb
@@ -373,13 +394,15 @@ async function notifySpecialistsAboutLead(
       const projectIds = links.map((l: { project_id: string }) => l.project_id);
       const { data: projects } = await supabaseMain
         .from('projects')
-        .select('specialist_user_id')
+        .select('specialist_user_id, client')
         .in('id', projectIds)
         .not('specialist_user_id', 'is', null);
 
       if (projects) {
         for (const p of projects) {
           if (p.specialist_user_id) userIds.add(p.specialist_user_id as string);
+          const client = typeof p.client === 'string' ? p.client.trim() : '';
+          if (client && !clientName) clientName = client;
         }
       }
     }
@@ -436,6 +459,7 @@ async function notifySpecialistsAboutLead(
       leadName,
       companyName,
       campaignName,
+      clientName,
       replySubject,
       replyPreview,
       aiReason,
@@ -455,6 +479,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   leadName: string | null;
   companyName: string | null;
   campaignName: string | null;
+  clientName: string | null;
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
@@ -503,6 +528,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
       leadName: data.leadName,
       companyName: data.companyName,
       campaignName: data.campaignName,
+      clientName: data.clientName,
       specialistMentions,
       replySubject: data.replySubject,
       replyPreview: data.replyPreview,

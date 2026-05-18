@@ -18,6 +18,7 @@ import {
 } from '@/lib/clientLaunch/types';
 import { INSTANTLY_TIMEZONE_OPTIONS, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
+import { EmailBodyField } from '@/components/client/EmailBodyField';
 
 interface PresetSummary {
   id: string;
@@ -1301,12 +1302,12 @@ function SequenceStepEditor({
           Будет отправлено в той же ветке, что и предыдущее письмо.
         </div>
       )}
-      <textarea
+      <EmailBodyField
         value={activeContent.body}
-        onChange={(e) => onUpdateActive({ body: e.target.value })}
+        onChange={(v) => onUpdateActive({ body: v })}
         placeholder="Текст письма — обычный текст, HTML не используется"
         rows={6}
-        className="neu-input w-full px-3 py-2 text-sm font-sans resize-y mt-3"
+        className="neu-input w-full px-3 py-2 text-sm font-sans resize-y"
       />
     </div>
   );
