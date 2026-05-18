@@ -575,6 +575,11 @@ export const DEMO_TARIFF_RESPONSE = {
   paid_at: '2026-05-01T00:00:00.000Z',
   paid_until: '2026-08-01T00:00:00.000Z',
   setup_until: null,
+  billing_mode: null,
+  payment_locked: false,
+  auto_renew: false,
+  payment_method_saved: false,
+  last_renewal_error: null,
   period_start: '2026-05-01',
   usage: {
     max_contacts: bucket(10000, 3630),

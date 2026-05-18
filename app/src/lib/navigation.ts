@@ -34,6 +34,13 @@ export const navItems: NavItem[] = [
   { id: 'regulation', name: 'Регламент', nameEn: 'Regulation', href: '/reglament' },
   { id: 'admin', name: 'Админ', nameEn: 'Admin', href: '/admin', adminOnly: true },
   {
+    id: 'invoices',
+    name: 'Счета',
+    nameEn: 'Invoices',
+    href: '/invoices',
+    technicianOrAdmin: true,
+  },
+  {
     id: 'support',
     name: 'Чаты клиентов',
     nameEn: 'Client support',
