@@ -226,11 +226,35 @@ export async function testAccountVitals(body: { emails: string[] }) {
 
 // ─── Leads ────────────────────────────────────────────────────────────────────
 
+/**
+ * Instantly's POST /leads/add ограничивает body.leads 1000 элементами
+ * (иначе 400 FST_ERR_VALIDATION "body/leads must NOT have more than 1000
+ * items"). Это лимит Instantly, не наш.
+ */
+const LEADS_PER_REQUEST = 1000;
+
 export async function createLeads(
   leads: LeadCreatePayload[],
   options?: { campaign_id?: string; list_id?: string; skip_if_in_workspace?: boolean; skip_if_in_campaign?: boolean },
 ) {
-  return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } });
+  // До 1000 — один запрос (поведение прежнее, отдаём сырой ответ Instantly).
+  if (leads.length <= LEADS_PER_REQUEST) {
+    return request<unknown>('/leads/add', { method: 'POST', body: { leads, ...options } });
+  }
+
+  // Больше 1000 — бьём на чанки и шлём последовательно, суммируя счётчик
+  // загруженных лидов. Клиентский запуск кампании допускает до 10 000 строк.
+  let uploaded = 0;
+  for (let i = 0; i < leads.length; i += LEADS_PER_REQUEST) {
+    const chunk = leads.slice(i, i + LEADS_PER_REQUEST);
+    const res = await request<Record<string, unknown>>('/leads/add', {
+      method: 'POST',
+      body: { leads: chunk, ...options },
+    });
+    const n = Number(res.uploaded ?? res.created ?? res.total_uploaded ?? chunk.length);
+    uploaded += Number.isFinite(n) ? n : chunk.length;
+  }
+  return { uploaded };
 }
 
 export async function listLeads(body: {
