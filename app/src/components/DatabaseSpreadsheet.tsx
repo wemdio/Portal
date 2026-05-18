@@ -8334,14 +8334,22 @@ export function DatabaseSpreadsheet() {
         return;
       }
 
-      const localIsNewer = localState && (localState.savedAt ?? 0) > (remoteState?.savedAt ?? 0);
-      const bestState = localIsNewer ? localState : (remoteState ?? localState);
+      // remoteState (БД) ВСЕГДА авторитетнее localStorage. Причина: в
+      // localStorage помещается только усечённая копия — большие базы не
+      // влезают в quota браузера (~5 МБ). Раньше сравнивали по savedAt
+      // (localIsNewer) — и устаревшая МАЛЕНЬКАЯ local-копия, у которой
+      // savedAt случайно оказывался новее, побеждала и затирала большой
+      // remote (диагностика 18 мая: БД отдала 35720 строк, затем портал
+      // сохранил 3198 из localStorage поверх). localState используем
+      // только как fallback, когда в БД реально ничего нет.
+      const bestState = remoteState ?? localState;
 
       if (isMounted) applyState(bestState);
 
-      // Если локальная копия новее remote — переписываем remote. Сюда
-      // попадаем только при надёжном чтении (readUnreliable отсеян выше).
-      if (bestState && bestState !== remoteState) {
+      // Заливаем local в remote ТОЛЬКО когда в БД пусто (remoteState нет).
+      // Если remoteState есть — он уже в БД, переписывать нечем и нельзя
+      // (можно затереть большую базу усечённой local-копией).
+      if (bestState && !remoteState) {
         const totalRows = bestState.tabs.reduce((sum, tab) => sum + tab.data.length, 0);
         queueRemoteStateSave(userId, bestState, totalRows > LARGE_DATASET_ROW_THRESHOLD);
       }
