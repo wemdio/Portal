@@ -61,9 +61,15 @@ export async function backgroundSave(
   if (!supabaseUrl || !supabaseAnonKey || !accessToken) return false;
 
   const generation = ++saveGeneration;
+  const totalRows = payload.state.tabs.reduce((s, t) => s + t.data.length, 0);
+  console.log(`[sheet-diag] backgroundSave START gen=${generation} tabs=${payload.state.tabs.length} rows=${totalRows}`);
 
   const stateJson = await serializeStateChunked(payload.state, generation);
-  if (!stateJson) return false;
+  if (!stateJson) {
+    console.warn(`[sheet-diag] backgroundSave ABORTED gen=${generation} — serialize cancelled (saveGeneration=${saveGeneration})`);
+    return false;
+  }
+  console.log(`[sheet-diag] backgroundSave serialized gen=${generation} json=${stateJson.length} chars`);
 
   // Сжимаем перед отправкой: 30 МБ JSON → ~4-5 МБ base64. Без этого
   // запись висела десятками секунд и большие базы терялись.
@@ -71,11 +77,16 @@ export async function backgroundSave(
   try {
     compressed = await compressStateToBase64(stateJson);
   } catch (err) {
+    console.error(`[sheet-diag] backgroundSave compress FAILED gen=${generation}:`, err);
     onError?.(`compress failed: ${String(err)}`);
     return false;
   }
   // Ещё одна проверка поколения — сжатие могло идти заметное время.
-  if (saveGeneration !== generation) return false;
+  if (saveGeneration !== generation) {
+    console.warn(`[sheet-diag] backgroundSave ABORTED gen=${generation} after compress (saveGeneration=${saveGeneration})`);
+    return false;
+  }
+  console.log(`[sheet-diag] backgroundSave compressed gen=${generation} body=${compressed.length} chars, sending...`);
 
   // state шлём null: данные теперь в state_compressed, дублировать
   // несжатый jsonb незачем (он же — лишние мегабайты в строке).
@@ -97,16 +108,19 @@ export async function backgroundSave(
       },
       body,
     });
+    console.log(`[sheet-diag] backgroundSave fetch DONE gen=${generation} http=${res.status} ok=${res.ok}`);
     if (!res.ok && onError) {
       onError(`HTTP ${res.status}`);
     }
     return res.ok;
   } catch (err) {
+    console.error(`[sheet-diag] backgroundSave fetch THREW gen=${generation}:`, err);
     onError?.(String(err));
     return false;
   }
 }
 
 export function cancelBackgroundSave(): void {
+  console.warn(`[sheet-diag] cancelBackgroundSave called (saveGeneration ${saveGeneration} → ${saveGeneration + 1})`);
   saveGeneration++;
 }
