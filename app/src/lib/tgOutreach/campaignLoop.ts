@@ -58,6 +58,29 @@ function randomRange([min, max]: [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * Сколько диалогов аккаунта забирать из getDialogs за итерацию.
+ * Было 20 — если аккаунт состоит в активных группах, болтовня в них
+ * выталкивает группы в топ списка, и личка от новых лидов проваливается
+ * ниже 20-й позиции → handleChat её не видит. 100 даёт большой запас
+ * (фактически обрабатываются только непрочитанные User-диалоги, так что
+ * лишние метаданные почти бесплатны — один MTProto-запрос).
+ */
+const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100');
+
+/**
+ * Таймстамп последнего сообщения, у которого есть дата. null — если ни у
+ * одного нет. Нужен чтобы last_message_at отражал РЕАЛЬНУЮ активность
+ * диалога, а не момент последнего upsert'а.
+ */
+function lastMessageTimestamp(messages: DialogMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const ts = messages[i]?.timestamp;
+    if (ts) return ts;
+  }
+  return null;
+}
+
 function isLowValueReply(text: string): boolean {
   const normalized = text
     .trim()
@@ -262,12 +285,18 @@ async function upsertDialog(
     .maybeSingle();
 
   const now = new Date().toISOString();
+  // last_message_at — таймстамп РЕАЛЬНОГО последнего сообщения, а не wall-clock
+  // now(). Иначе любой повторный upsert старого диалога (handleChat трогает
+  // его ещё до проверки can_send, backfill, refetch) поднимал дату на «сейчас»
+  // — старые лиды всплывали в списке как сегодняшние. fallback на now() только
+  // если у сообщений нет таймстампов (пустой диалог / старые данные).
+  const lastMessageAt = lastMessageTimestamp(messages) ?? now;
 
   if (existing) {
     const updatePayload: Record<string, unknown> = {
       messages,
       tg_username: tgUsername,
-      last_message_at: now,
+      last_message_at: lastMessageAt,
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
     };
@@ -287,7 +316,7 @@ async function upsertDialog(
       status: status ?? 'none',
       tg_is_bot: opts?.tgIsBot ?? false,
       can_send: opts?.canSend ?? !(opts?.tgIsBot ?? false),
-      last_message_at: now,
+      last_message_at: lastMessageAt,
     });
   }
 }
@@ -883,12 +912,12 @@ export async function runCampaignLoop(
         try {
           let dialogs: Awaited<ReturnType<typeof client.getDialogs>>;
           try {
-            dialogs = await client.getDialogs({ limit: 20 });
+            dialogs = await client.getDialogs({ limit: DIALOGS_FETCH_LIMIT });
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             if (errMsg.includes('offset') && errMsg.includes('out of range')) {
               // GramJS off-by-a-few bug in internal pagination; retry with smaller limit.
-              dialogs = await client.getDialogs({ limit: 10 });
+              dialogs = await client.getDialogs({ limit: Math.min(20, DIALOGS_FETCH_LIMIT) });
             } else {
               throw err;
             }
