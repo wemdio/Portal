@@ -497,6 +497,13 @@ export default function LiOutreachPage() {
 
   const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
 
+  // Дашборд: выбранная в селекторе воронки кампания и соответствующая воронка.
+  // Используется и для секции «Воронка лидов», и для верхних карточек.
+  const dashFunnelCampaign = funnelCampaignId
+    ? dashData?.campaign_stats.find((c) => c.id === funnelCampaignId) ?? null
+    : null;
+  const dashFunnel = dashFunnelCampaign ? dashFunnelCampaign.funnel : dashData?.funnel ?? null;
+
   return (
     <div className="space-y-6 text-left max-w-full">
       <div>
@@ -526,38 +533,40 @@ export default function LiOutreachPage() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active).length} total={accounts.length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
-            <StatCard label="Лиды" value={dashData?.funnel.total ?? leadsTotal} accent="violet" />
-            <StatCard label="Ответили" value={dashData?.funnel.replied ?? 0} total={dashData?.funnel.total} accent="green" />
+            <StatCard
+              label={dashFunnelCampaign ? `Лиды · ${dashFunnelCampaign.name}` : 'Лиды'}
+              value={dashFunnel?.total ?? leadsTotal}
+              accent="violet"
+            />
+            <StatCard
+              label="Ответили"
+              value={dashFunnel?.replied ?? 0}
+              total={dashFunnel?.total}
+              accent="green"
+            />
           </div>
 
           {/* Lead funnel (visual) — выбираемая по кампании */}
-          {dashData && (() => {
-            const selected = funnelCampaignId
-              ? dashData.campaign_stats.find((c) => c.id === funnelCampaignId)
-              : null;
-            // Если выбранная кампания пропала из данных — откатываемся на «все».
-            const funnel = selected ? selected.funnel : dashData.funnel;
-            return (
-              <div className="rounded-xl border border-gray-200 bg-white p-5">
-                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-                  <h3 className="text-sm font-semibold text-gray-900">
-                    Воронка лидов{selected ? ` — ${selected.name}` : ''}
-                  </h3>
-                  <select
-                    value={funnelCampaignId}
-                    onChange={(e) => setFunnelCampaignId(e.target.value)}
-                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
-                  >
-                    <option value="">Все кампании</option>
-                    {dashData.campaign_stats.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <FunnelChart funnel={funnel} />
+          {dashData && dashFunnel && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                <h3 className="text-sm font-semibold text-gray-900">
+                  Воронка лидов{dashFunnelCampaign ? ` — ${dashFunnelCampaign.name}` : ''}
+                </h3>
+                <select
+                  value={funnelCampaignId}
+                  onChange={(e) => setFunnelCampaignId(e.target.value)}
+                  className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
+                >
+                  <option value="">Все кампании</option>
+                  {dashData.campaign_stats.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
-            );
-          })()}
+              <FunnelChart funnel={dashFunnel} />
+            </div>
+          )}
 
           {/* Activity timeline (30 days) */}
           {dashData && dashData.timeline.length > 0 && (
