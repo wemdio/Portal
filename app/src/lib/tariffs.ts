@@ -30,6 +30,8 @@ export const TARIFF_DEFAULTS: Record<'standard' | 'pro', TariffLimits> = {
 
 export const SETUP_DAYS = 3;
 
+export type BillingMode = 'invoice' | 'autopayment';
+
 export type ClientTariffRow = {
   id: string;
   user_id: string;
@@ -43,6 +45,12 @@ export type ClientTariffRow = {
   paid_until: string | null;
   setup_until: string | null;
   is_active: boolean;
+  billing_mode: BillingMode | null;
+  payment_locked: boolean;
+  yookassa_payment_method_id?: string | null;
+  auto_renew?: boolean;
+  last_renewal_error?: string | null;
+  last_renewal_attempt_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -56,6 +64,25 @@ export function getClientStatus(row: ClientTariffRow | null): ClientStatus {
   if (row.paid_until && new Date(row.paid_until) <= now) return 'expired';
   if (row.setup_until && new Date(row.setup_until) > now) return 'setup';
   return 'active';
+}
+
+/**
+ * Returns true when the client's portal is locked pending payment.
+ *
+ * For autopayment mode: the lock auto-lifts once the 3-day setup period
+ * expires AND the client has already paid (paid_at is set). This avoids
+ * needing a cron job — the gate is evaluated at read time.
+ *
+ * For invoice mode: the lock is lifted only when the invoice webhook
+ * explicitly sets payment_locked = false.
+ */
+export function isPaymentLocked(row: ClientTariffRow | null): boolean {
+  if (!row || !row.payment_locked) return false;
+  if (row.billing_mode === 'autopayment' && row.paid_at && row.setup_until) {
+    const now = new Date();
+    if (new Date(row.setup_until) <= now) return false;
+  }
+  return true;
 }
 
 export function isSubscriptionActive(row: ClientTariffRow | null): boolean {
@@ -80,6 +107,8 @@ export type SubscriptionStatus = {
   paid_at: string | null;
   paid_until: string | null;
   setup_until: string | null;
+  billing_mode: BillingMode | null;
+  payment_locked: boolean;
 };
 
 export type LimitUsage = {
@@ -90,10 +119,18 @@ export type LimitUsage = {
 
 export type ClientTariffUsage = Record<keyof TariffLimits, LimitUsage>;
 
-export type ClientTariffUsageSummary = SubscriptionStatus & {
-  period_start: string;
-  usage: ClientTariffUsage;
+/** Автоплатежи для клиентского ЛК (без раскрытия id карты ЮKassa) */
+export type ClientAutopayFields = {
+  auto_renew: boolean;
+  payment_method_saved: boolean;
+  last_renewal_error: string | null;
 };
+
+export type ClientTariffUsageSummary = SubscriptionStatus &
+  ClientAutopayFields & {
+    period_start: string;
+    usage: ClientTariffUsage;
+  };
 
 function nonNegativeInt(value: unknown): number {
   const n = Number(value);
@@ -160,6 +197,8 @@ export async function getSubscriptionStatus(userId: string): Promise<Subscriptio
     paid_at: row?.paid_at ?? null,
     paid_until: row?.paid_until ?? null,
     setup_until: row?.setup_until ?? null,
+    billing_mode: row?.billing_mode ?? null,
+    payment_locked: isPaymentLocked(row),
   };
 }
 
@@ -274,6 +313,8 @@ export async function getClientTariffUsage(userId: string): Promise<ClientTariff
     countClientEmailAccountsAndDomains(userId),
   ]);
 
+  const paymentMethodSaved = Boolean(row?.yookassa_payment_method_id);
+
   return {
     status: getClientStatus(row),
     tariff_type: row?.tariff_type ?? 'standard',
@@ -281,6 +322,11 @@ export async function getClientTariffUsage(userId: string): Promise<ClientTariff
     paid_at: row?.paid_at ?? null,
     paid_until: row?.paid_until ?? null,
     setup_until: row?.setup_until ?? null,
+    billing_mode: row?.billing_mode ?? null,
+    payment_locked: isPaymentLocked(row),
+    auto_renew: row?.auto_renew === true,
+    payment_method_saved: paymentMethodSaved,
+    last_renewal_error: row?.last_renewal_error ?? null,
     period_start: periodStart,
     usage: {
       max_contacts: usageBucket(limits.max_contacts, contacts),

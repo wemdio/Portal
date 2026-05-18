@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText } from './nameQuality';
 
 const JUNK_RE: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -21,6 +22,10 @@ function isJunk(s: string): boolean {
   if (JUNK_RE.some((re) => re.test(s.trim()))) return true;
   if (DESCRIPTION_RE.test(s)) return true;
   if (s.split(/\s+/).length > 5) return true;
+  // CMS image hashes, design-tool exports, nav/CTA labels and marketing
+  // service names are the dominant noise classes — reject them outright.
+  if (isHashLike(s) || isDesignArtifact(s)) return true;
+  if (isNavOrCtaText(s) || isServiceText(s)) return true;
   return false;
 }
 
@@ -39,21 +44,27 @@ function nameFromSrc(src: string): string | null {
     .trim();
   if (name.length < 2 || name.length > 40) return null;
   if (/^(?:logo|img|image|icon|pic|photo|banner|bg|placeholder|default|noimage|pr)\s*\d*$/i.test(name)) return null;
+  if (isHashLike(name)) return null;
   return name;
 }
 
-// Containers that hold integration/tool/stack logos
-const INTEGRATION_CONTAINER_SELECTOR = [
+// Explicit integration containers — safe to read both logos and text.
+const STRICT_INTEGRATION_SELECTOR = [
   '[class*="integration"]', '[class*="connector"]',
-  '[class*="app-card"]', '[class*="ecosystem"]',
-  '[class*="marketplace"]', '[class*="compatible"]',
-  '[class*="connect"]', '[class*="stack"]',
-  '[class*="framework"]', '[class*="technolog"]',
-  '[class*="tool"]', '[class*="partner"]',
-  '#integrations', '#tools', '#stack', '#technologies', '#partners',
+  '#integrations', '#connectors',
 ].join(', ');
 
-const SECTION_HEADING_RE = /интеграци|подключени|совместимост|экосистем|integrations?|connectors?|apps?\s+(?:we|&)|works?\s+with|compatible|инструмент[аыов]|технологи[яи]|(?:наш|наши|we\s+use)\s+(?:стек|stack|tools)|стек\s+технологий|tech\s+stack|сервис[аыов]|(?:мы\s+)?работаем\s+с|(?:мы\s+)?используем/i;
+// Looser logo/stack containers. Text inside is unreliable (toolbars, menus,
+// generic layout classes), so we read images (logos) only.
+const LOGO_WALL_SELECTOR = [
+  '[class*="app-card"]', '[class*="ecosystem"]',
+  '[class*="marketplace"]', '[class*="compatible"]',
+  '[class*="stack"]', '[class*="framework"]',
+  '[class*="technolog"]', '[class*="partner"]',
+  '#tools', '#stack', '#technologies', '#partners',
+].join(', ');
+
+const SECTION_HEADING_RE = /интеграци|подключени|совместимост|экосистем|integrations?|connectors?|apps?\s+(?:we|&)|works?\s+with|compatible|инструмент[аыов]|технологи[яи]|(?:наш|наши|we\s+use)\s+(?:стек|stack|tools)|стек\s+технологий|tech\s+stack|(?:мы\s+)?работаем\s+с/i;
 
 const SLIDER_SELECTOR = [
   '[class*="swiper"]', '[class*="slick"]',
@@ -104,6 +115,7 @@ function findSectionFromHeading($: $Type, heading: CheerioSelection): CheerioSel
 export function extractIntegrations(html: string): string[] {
   if (!html) return [];
   const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
   const seen = new Set<string>();
   const result: string[] = [];
 
@@ -117,26 +129,34 @@ export function extractIntegrations(html: string): string[] {
     result.push(cleaned);
   }
 
-  // Strategy 1: containers by class/id
-  $(INTEGRATION_CONTAINER_SELECTOR).each((_, container) => {
+  // Strategy 1a: explicit integration containers — logos + text labels.
+  $(STRICT_INTEGRATION_SELECTOR).each((_, container) => {
     if (result.length >= MAX_INTEGRATIONS) return false;
     extractFromImages($, $(container), add);
     extractFromText($, $(container), add);
   });
 
-  // Strategy 2: slider/carousel in integration-like context
+  // Strategy 1b: looser logo/stack containers — logos only.
+  if (result.length < MAX_INTEGRATIONS) {
+    $(LOGO_WALL_SELECTOR).each((_, container) => {
+      if (result.length >= MAX_INTEGRATIONS) return false;
+      extractFromImages($, $(container), add);
+    });
+  }
+
+  // Strategy 2: slider/carousel in integration-like context — logos only.
   if (result.length < MAX_INTEGRATIONS) {
     $(SLIDER_SELECTOR).each((_, slider) => {
       if (result.length >= MAX_INTEGRATIONS) return false;
       const $slider = $(slider);
       const parentText = $slider.parent().text().toLowerCase();
-      if (!SECTION_HEADING_RE.test(parentText) && !$slider.closest('[class*="integration"], [class*="partner"], [class*="stack"], [class*="tool"], #integrations, #tools').length) return;
+      if (!SECTION_HEADING_RE.test(parentText) && !$slider.closest('[class*="integration"], [class*="partner"], [class*="stack"], #integrations').length) return;
       extractFromImages($, $slider, add);
-      extractFromText($, $slider, add);
     });
   }
 
-  // Strategy 3: find sections by heading text, traverse up to real container
+  // Strategy 3: find sections by heading text — logos only (text in an
+  // arbitrary heading-matched section is too noisy to trust).
   if (result.length < MAX_INTEGRATIONS) {
     $('h1, h2, h3, h4, [class*="title"], [class*="heading"]').each((_, heading) => {
       if (result.length >= MAX_INTEGRATIONS) return false;
@@ -145,7 +165,6 @@ export function extractIntegrations(html: string): string[] {
 
       const section = findSectionFromHeading($, $(heading));
       extractFromImages($, section, add);
-      extractFromText($, section, add);
     });
   }
 

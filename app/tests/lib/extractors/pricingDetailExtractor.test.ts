@@ -60,4 +60,23 @@ describe('extractPricingDetails', () => {
 
     expect(result.pricing_min).toEqual({ value: 990, currency: 'RUB' });
   });
+
+  it('ignores a bare number+currency that has no pricing context', () => {
+    const html = `
+      <p>Дарим бонус 2 ₽ за регистрацию</p>
+      <p>Комплексное продвижение от 30 000 ₽</p>
+    `;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 30000, currency: 'RUB' });
+  });
+
+  it('extracts an "от N ₽" price from body text', () => {
+    const html = `<h2>SEO-продвижение от 45 000 ₽ в месяц</h2>`;
+
+    const result = extractPricingDetails(html);
+
+    expect(result.pricing_min).toEqual({ value: 45000, currency: 'RUB' });
+  });
 });

@@ -97,7 +97,8 @@ _FAIL_COUNT: dict[str, int] = {}
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "8"))
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "20"))
+DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "18"))
 
 PROXY_URLS: list[str] = []
 
@@ -502,6 +503,28 @@ async def check_db() -> tuple[bool, str, int | None, int | None]:
     return False, error_text, None, None
 
 
+async def check_db_disk() -> int | None:
+    """Return total bytes used by Main Postgres (DB + WAL), or None on error."""
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            db_bytes = await conn.fetchval("SELECT pg_database_size(current_database())") or 0
+            try:
+                wal_bytes = await conn.fetchval(
+                    "SELECT coalesce(sum(size), 0)::bigint FROM pg_ls_waldir()"
+                ) or 0
+            except Exception:
+                wal_bytes = 0
+            return int(db_bytes) + int(wal_bytes)
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[health] check_db_disk error: {e}")
+        return None
+
+
 async def check_instantly_db() -> tuple[bool, str, int | None, int | None]:
     """Check Instantly DB connectivity. Returns (ok, message, connections, max)."""
     if not INSTANTLY_DATABASE_URL:
@@ -713,6 +736,23 @@ async def _run_health_check_inner():
             problems.append(
                 f"🟡 <b>Main Postgres connections</b>: {db_cur}/{db_max} ({usage_pct:.0f}%)"
             )
+
+    if db_ok and DISK_TOTAL_GB > 0:
+        disk_bytes = await check_db_disk()
+        if disk_bytes is not None:
+            disk_limit = DISK_TOTAL_GB * (1024 ** 3)
+            disk_warn = DISK_WARN_GB * (1024 ** 3)
+            disk_pct = disk_bytes / disk_limit * 100
+            if disk_bytes >= disk_limit:
+                problems.append(
+                    f"🔴 <b>Main Postgres disk</b>: {_fmt_bytes(disk_bytes)} / "
+                    f"{DISK_TOTAL_GB:g} GB ({disk_pct:.0f}%) — критический лимит!"
+                )
+            elif disk_bytes >= disk_warn:
+                problems.append(
+                    f"🟡 <b>Main Postgres disk</b>: {_fmt_bytes(disk_bytes)} / "
+                    f"{DISK_TOTAL_GB:g} GB ({disk_pct:.0f}%)"
+                )
 
     if INSTANTLY_DATABASE_URL:
         idb_ok, idb_msg, idb_cur, idb_max = await check_instantly_db()

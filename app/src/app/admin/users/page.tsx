@@ -23,6 +23,15 @@ type TariffData = {
   max_domains: number | null;
   max_emails: number | null;
 };
+
+/** Ответ GET /api/admin/users/:id/tariff — поле tariff */
+type AdminUserTariffPayload = TariffData & {
+  is_active?: boolean;
+  paid_until?: string | null;
+  setup_until?: string | null;
+  billing_mode?: 'invoice' | 'autopayment' | null;
+  payment_locked?: boolean;
+};
 const TARIFF_DEFAULTS: Record<'standard' | 'pro', Omit<TariffData, 'tariff_type'>> = {
   standard: { max_contacts: 10_000, max_rows: 20_000, max_chains_per_month: 10, max_domains: 4, max_emails: 16 },
   pro: { max_contacts: 20_000, max_rows: 40_000, max_chains_per_month: 20, max_domains: 8, max_emails: 32 },
@@ -115,6 +124,9 @@ export default function UsersPage() {
   const [subscriptionSetup, setSubscriptionSetup] = useState(false);
   const [paidUntil, setPaidUntil] = useState<string | null>(null);
   const [setupUntil, setSetupUntil] = useState<string | null>(null);
+  const [billingMode, setBillingMode] = useState<'invoice' | 'autopayment' | null>(null);
+  const [paymentLocked, setPaymentLocked] = useState(false);
+  const [activateBillingMode, setActivateBillingMode] = useState<'invoice' | 'autopayment' | 'manual'>('manual');
   const [activating, setActivating] = useState(false);
 
   type SortColumn = 'name' | 'email' | 'role';
@@ -283,8 +295,8 @@ export default function UsersPage() {
             )
           : Promise.resolve({ rows: [] as Array<{ resource_type: string; resource_id: string }> }),
         isClient
-          ? apiFetch<{ tariff: (TariffData & { is_active?: boolean; paid_until?: string | null; setup_until?: string | null }) | null }>(`/api/admin/users/${user.id}/tariff`)
-          : Promise.resolve({ tariff: null as (TariffData & { is_active?: boolean; paid_until?: string | null; setup_until?: string | null }) | null }),
+          ? apiFetch<{ tariff: AdminUserTariffPayload | null }>(`/api/admin/users/${user.id}/tariff`)
+          : Promise.resolve({ tariff: null as AdminUserTariffPayload | null }),
       ]);
       setToolVisibility(toolsRes.visibility ?? {});
       const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
@@ -307,6 +319,8 @@ export default function UsersPage() {
         setSubscriptionSetup(inSetup);
         setPaidUntil(tariffRes.tariff.paid_until ?? null);
         setSetupUntil(tariffRes.tariff.setup_until ?? null);
+        setBillingMode((tariffRes.tariff.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
+        setPaymentLocked(tariffRes.tariff.payment_locked ?? false);
       } else {
         setTariffType('standard');
         setCustomLimits({ ...TARIFF_DEFAULTS.pro });
@@ -314,6 +328,8 @@ export default function UsersPage() {
         setSubscriptionSetup(false);
         setPaidUntil(null);
         setSetupUntil(null);
+        setBillingMode(null);
+        setPaymentLocked(false);
       }
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
@@ -330,6 +346,8 @@ export default function UsersPage() {
       setSubscriptionActive(false);
       setSubscriptionSetup(false);
       setPaidUntil(null);
+      setBillingMode(null);
+      setPaymentLocked(false);
       setSetupUntil(null);
       setModalRole(user.role ?? null);
       setActionModalOrigin(origin);
@@ -997,34 +1015,78 @@ export default function UsersPage() {
                             </span>
                           )}
                         </div>
-                        <div className="flex gap-2">
+                        {/* Billing mode badge */}
+                        {(subscriptionActive || subscriptionSetup) && billingMode && (
+                          <div className="flex items-center gap-2 text-xs text-gray-500">
+                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
+                              billingMode === 'invoice'
+                                ? 'bg-blue-50 text-blue-700 ring-blue-200/60'
+                                : 'bg-purple-50 text-purple-700 ring-purple-200/60'
+                            }`}>
+                              {billingMode === 'invoice' ? '🧾 Счёт' : '💳 Автоплатёж'}
+                            </span>
+                            {paymentLocked && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 ring-1 ring-red-200/60">
+                                🔒 Ожидает оплаты
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="flex gap-2 flex-wrap">
                           {!subscriptionActive && !subscriptionSetup && (
-                            <button
-                              type="button"
-                              disabled={activating}
-                              onClick={async () => {
-                                if (!actionModalUserId) return;
-                                setActivating(true);
-                                try {
-                                  const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string }>(`/api/admin/users/${actionModalUserId}/tariff`, {
-                                    method: 'PUT',
-                                    body: JSON.stringify({ action: 'activate' }),
-                                  });
-                                  setSubscriptionSetup(true);
-                                  setSubscriptionActive(false);
-                                  setPaidUntil(res.paid_until ?? null);
-                                  setSetupUntil(res.setup_until ?? null);
-                                  setSaveSuccessMessage('Оплата отмечена, настройка ЛК начата');
-                                } catch (err: unknown) {
-                                  setError(getErrorMessage(err));
-                                } finally {
-                                  setActivating(false);
-                                }
-                              }}
-                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
-                            >
-                              {activating ? 'Активация...' : 'Отметить оплату'}
-                            </button>
+                            <>
+                              {/* Billing mode selector */}
+                              <div className="w-full flex gap-1.5 mb-1">
+                                {(['manual', 'invoice', 'autopayment'] as const).map((m) => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => setActivateBillingMode(m)}
+                                    className={`flex-1 px-2 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                                      activateBillingMode === m
+                                        ? 'bg-gray-900 text-white border-gray-900'
+                                        : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                                    }`}
+                                  >
+                                    {m === 'manual' ? 'Вручную' : m === 'invoice' ? '🧾 Счёт' : '💳 Автоплатёж'}
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                disabled={activating}
+                                onClick={async () => {
+                                  if (!actionModalUserId) return;
+                                  setActivating(true);
+                                  try {
+                                    const bm = activateBillingMode === 'manual' ? null : activateBillingMode;
+                                    const res = await apiFetch<{ ok: true; paid_until?: string; setup_until?: string; billing_mode?: string; payment_locked?: boolean }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                      method: 'PUT',
+                                      body: JSON.stringify({ action: 'activate', billing_mode: bm }),
+                                    });
+                                    setSubscriptionSetup(true);
+                                    setSubscriptionActive(false);
+                                    setPaidUntil(res.paid_until ?? null);
+                                    setSetupUntil(res.setup_until ?? null);
+                                    setBillingMode((res.billing_mode as 'invoice' | 'autopayment' | null) ?? null);
+                                    setPaymentLocked(res.payment_locked ?? false);
+                                    setSaveSuccessMessage(
+                                      bm === 'invoice' ? 'Активировано. Зайдите в Счета и выставьте счёт клиенту.' :
+                                      bm === 'autopayment' ? 'Активировано. Клиент оплатит в своём ЛК.' :
+                                      'Оплата отмечена, настройка ЛК начата'
+                                    );
+                                  } catch (err: unknown) {
+                                    setError(getErrorMessage(err));
+                                  } finally {
+                                    setActivating(false);
+                                  }
+                                }}
+                                className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50 transition-colors"
+                              >
+                                {activating ? 'Активация...' : 'Активировать'}
+                              </button>
+                            </>
                           )}
                           {subscriptionSetup && (
                             <button
@@ -1054,6 +1116,31 @@ export default function UsersPage() {
                               {activating ? 'Завершение...' : 'Завершить настройку досрочно'}
                             </button>
                           )}
+                          {(subscriptionActive || subscriptionSetup) && paymentLocked && (
+                            <button
+                              type="button"
+                              disabled={activating}
+                              onClick={async () => {
+                                if (!actionModalUserId) return;
+                                setActivating(true);
+                                try {
+                                  await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/tariff`, {
+                                    method: 'PUT',
+                                    body: JSON.stringify({ action: 'unlock_payment' }),
+                                  });
+                                  setPaymentLocked(false);
+                                  setSaveSuccessMessage('Блокировка оплаты снята, клиент получил доступ');
+                                } catch (err: unknown) {
+                                  setError(getErrorMessage(err));
+                                } finally {
+                                  setActivating(false);
+                                }
+                              }}
+                              className="flex-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-50 transition-colors"
+                            >
+                              🔓 Снять блокировку
+                            </button>
+                          )}
                           {(subscriptionActive || subscriptionSetup) && (
                             <button
                               type="button"
@@ -1068,6 +1155,8 @@ export default function UsersPage() {
                                   });
                                   setSubscriptionActive(false);
                                   setSubscriptionSetup(false);
+                                  setBillingMode(null);
+                                  setPaymentLocked(false);
                                   setSaveSuccessMessage('Подписка деактивирована');
                                 } catch (err: unknown) {
                                   setError(getErrorMessage(err));

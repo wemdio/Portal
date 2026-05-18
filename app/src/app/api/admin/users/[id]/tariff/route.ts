@@ -65,7 +65,8 @@ type TariffBody = {
   max_chains_per_month?: number | null;
   max_domains?: number | null;
   max_emails?: number | null;
-  action?: 'activate' | 'deactivate' | 'finish_setup';
+  action?: 'activate' | 'deactivate' | 'finish_setup' | 'unlock_payment';
+  billing_mode?: 'invoice' | 'autopayment' | null;
 };
 
 function clampInt(v: unknown): number | null {
@@ -90,6 +91,29 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     return jsonError('Invalid body', 400);
   }
 
+  if (body.action === 'unlock_payment') {
+    const { data: existingForUnlock } = await supabaseAdmin
+      .from('client_tariffs')
+      .select('id')
+      .eq('user_id', targetUserId)
+      .maybeSingle();
+
+    if (!existingForUnlock) return jsonError('Subscription not found', 404);
+
+    const { error: unlockErr } = await supabaseAdmin
+      .from('client_tariffs')
+      .update({ payment_locked: false, updated_at: new Date().toISOString() })
+      .eq('user_id', targetUserId);
+
+    if (unlockErr) {
+      await logError('admin.tariff.unlock.failed', unlockErr, { targetUserId });
+      return jsonError('Failed to unlock payment', 500);
+    }
+
+    await logAudit('admin.tariff.unlocked', 'Payment lock removed manually', { targetUserId }, { userId: user.id });
+    return NextResponse.json({ ok: true, action: 'unlock_payment' });
+  }
+
   if (body.action === 'activate') {
     const now = new Date();
     const setupUntil = new Date(now);
@@ -97,11 +121,16 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     const paidUntil = new Date(setupUntil);
     paidUntil.setMonth(paidUntil.getMonth() + 1);
 
+    const billingMode = body.billing_mode ?? null;
+    const paymentLocked = billingMode !== null;
+
     const subscriptionFields = {
       is_active: true,
-      paid_at: now.toISOString(),
+      paid_at: billingMode ? null : now.toISOString(),
       setup_until: setupUntil.toISOString(),
-      paid_until: paidUntil.toISOString(),
+      paid_until: billingMode ? null : paidUntil.toISOString(),
+      billing_mode: billingMode,
+      payment_locked: paymentLocked,
       updated_at: now.toISOString(),
     };
 
@@ -128,7 +157,7 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     await logAudit(
       'admin.tariff.activate',
       'Client subscription activated',
-      { targetUserId, setup_until: setupUntil.toISOString(), paid_until: paidUntil.toISOString() },
+      { targetUserId, setup_until: setupUntil.toISOString(), billing_mode: billingMode, payment_locked: paymentLocked },
       { userId: user.id },
     );
 
@@ -136,7 +165,9 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
       ok: true,
       action: 'activate',
       setup_until: setupUntil.toISOString(),
-      paid_until: paidUntil.toISOString(),
+      paid_until: billingMode ? null : paidUntil.toISOString(),
+      billing_mode: billingMode,
+      payment_locked: paymentLocked,
     });
   }
 

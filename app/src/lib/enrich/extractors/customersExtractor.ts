@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { isHashLike, isDesignArtifact, isNavOrCtaText, isServiceText } from './nameQuality';
 
 const JUNK_PATTERNS: RegExp[] = [
   /^logo$/i, /^image$/i, /^icon$/i, /^photo$/i, /^avatar$/i,
@@ -22,6 +23,10 @@ function isJunk(s: string): boolean {
   if (DESCRIPTION_RE.test(s)) return true;
   if (/^https?:\/\//i.test(s)) return true;
   if (s.split(/\s+/).length > 8) return true;
+  // CMS image hashes, design-tool exports, nav/CTA labels and marketing
+  // service names are the dominant noise classes — reject them outright.
+  if (isHashLike(s) || isDesignArtifact(s)) return true;
+  if (isNavOrCtaText(s) || isServiceText(s)) return true;
   return false;
 }
 
@@ -45,20 +50,24 @@ function nameFromSrc(src: string): string | null {
     .trim();
   if (name.length < 2 || name.length > 40) return null;
   if (/^(?:logo|img|image|icon|pic|photo|banner|bg|placeholder|default|noimage)\s*\d*$/i.test(name)) return null;
+  if (isHashLike(name)) return null;
   return name;
 }
 
-// Containers that typically hold client/partner logos
-const LOGO_CONTAINER_SELECTOR = [
+// Explicit client/customer containers — safe to read both logos and text.
+const STRICT_CLIENT_SELECTOR = [
   '[class*="client"]', '[class*="customer"]',
+  '#clients', '#customers',
+].join(', ');
+
+// Generic logo walls (partners / trust badges / marquees). Text inside these
+// is almost always nav or marketing noise, so we read images (logos) only.
+const LOGO_WALL_SELECTOR = [
   '[class*="-logos"]', '[class*="_logos"]',
   '[class*="partner"]', '[class*="trust"]',
-  '[class*="brand"]',
   '[class*="marquee"]',
-  // Tilda patterns
-  '[data-record-type="595"]',
-  // Section IDs
-  '#clients', '#partners', '#customers',
+  '[data-record-type="595"]', // Tilda logo gallery block
+  '#partners',
 ].join(', ');
 
 const CASE_CARD_SELECTOR = [
@@ -125,6 +134,7 @@ function findSectionFromHeading($: $Type, heading: CheerioSelection): CheerioSel
 export function extractCustomers(html: string): string[] {
   if (!html) return [];
   const $ = cheerio.load(html);
+  $('script, style, noscript, template').remove();
   const seen = new Set<string>();
   const result: string[] = [];
 
@@ -138,12 +148,20 @@ export function extractCustomers(html: string): string[] {
     result.push(cleaned);
   }
 
-  // Strategy 1: logo containers by class/id
-  $(LOGO_CONTAINER_SELECTOR).each((_, container) => {
+  // Strategy 1a: explicit client containers — logos + text labels.
+  $(STRICT_CLIENT_SELECTOR).each((_, container) => {
     if (result.length >= CAP) return false;
     extractFromImages($, $(container), add);
     extractFromText($, $(container), add);
   });
+
+  // Strategy 1b: generic logo walls — logos only (text here is nav noise).
+  if (result.length < CAP) {
+    $(LOGO_WALL_SELECTOR).each((_, container) => {
+      if (result.length >= CAP) return false;
+      extractFromImages($, $(container), add);
+    });
+  }
 
   // Strategy 2: case/project card headings + logos inside cards
   if (result.length < CAP) {
