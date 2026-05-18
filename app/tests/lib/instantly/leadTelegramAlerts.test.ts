@@ -44,6 +44,7 @@ describe('leadTelegramAlerts', () => {
       leadName: 'Ivan <Lead>',
       companyName: 'ACME & Co',
       campaignName: 'Growth <Q2>',
+      clientName: 'Client <Acme>',
       specialistMentions: [
         { userId: 'u-1', fullName: 'Sergey Petrov', telegramId: '123456', telegramUsername: 'sergey_portal' },
       ],
@@ -67,6 +68,7 @@ describe('leadTelegramAlerts', () => {
     expect(body.text).toContain('Ivan &lt;Lead&gt;');
     expect(body.text).toContain('ACME &amp; Co');
     expect(body.text).toContain('Growth &lt;Q2&gt;');
+    expect(body.text).toContain('Client &lt;Acme&gt;');
     expect(body.text).not.toContain('<script>');
   });
 
@@ -78,6 +80,7 @@ describe('leadTelegramAlerts', () => {
       leadName: null,
       companyName: null,
       campaignName: null,
+      clientName: null,
       specialistMentions: [
         { userId: 'u-2', fullName: 'Maria Ivanova', telegramId: '654321', telegramUsername: null },
       ],
@@ -100,6 +103,7 @@ describe('leadTelegramAlerts', () => {
       leadName: null,
       companyName: null,
       campaignName: null,
+      clientName: null,
       specialistMentions: [],
       replySubject: null,
       replyPreview: null,
