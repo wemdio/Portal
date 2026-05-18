@@ -51,6 +51,7 @@ type DashboardCampaignStat = {
   id: string; name: string; status: string; daily_invite_limit: number; invites_sent_today: number;
   leads_total: number; pending: number; in_progress: number; waiting: number; completed: number;
   error: number; skipped: number; replied: number; accepted: number; reply_rate: number; accept_rate: number;
+  funnel: DashboardFunnel;
 };
 type DashboardTimeline = { date: string; actions: number; errors: number };
 type DashboardFunnel = { new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
@@ -153,6 +154,8 @@ export default function LiOutreachPage() {
   // Dashboard data
   const [dashData, setDashData] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
+  // Воронка лидов на дашборде: '' = по всем кампаниям, иначе id кампании.
+  const [funnelCampaignId, setFunnelCampaignId] = useState('');
   const [companySearch, setCompanySearch] = useState('');
   const [companySortKey, setCompanySortKey] = useState<'total' | 'replied' | 'connected' | 'invited'>('total');
 
@@ -527,13 +530,34 @@ export default function LiOutreachPage() {
             <StatCard label="Ответили" value={dashData?.funnel.replied ?? 0} total={dashData?.funnel.total} accent="green" />
           </div>
 
-          {/* Lead funnel (visual) */}
-          {dashData && (
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Воронка лидов</h3>
-              <FunnelChart funnel={dashData.funnel} />
-            </div>
-          )}
+          {/* Lead funnel (visual) — выбираемая по кампании */}
+          {dashData && (() => {
+            const selected = funnelCampaignId
+              ? dashData.campaign_stats.find((c) => c.id === funnelCampaignId)
+              : null;
+            // Если выбранная кампания пропала из данных — откатываемся на «все».
+            const funnel = selected ? selected.funnel : dashData.funnel;
+            return (
+              <div className="rounded-xl border border-gray-200 bg-white p-5">
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                  <h3 className="text-sm font-semibold text-gray-900">
+                    Воронка лидов{selected ? ` — ${selected.name}` : ''}
+                  </h3>
+                  <select
+                    value={funnelCampaignId}
+                    onChange={(e) => setFunnelCampaignId(e.target.value)}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm bg-white max-w-[260px]"
+                  >
+                    <option value="">Все кампании</option>
+                    {dashData.campaign_stats.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <FunnelChart funnel={funnel} />
+              </div>
+            );
+          })()}
 
           {/* Activity timeline (30 days) */}
           {dashData && dashData.timeline.length > 0 && (
