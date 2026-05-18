@@ -34,7 +34,6 @@ function nextChunkWithTimeout<T>(
     ),
   ]);
 }
-}
 
 function isRetryableMtprotoError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
