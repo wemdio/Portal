@@ -34,14 +34,14 @@ function parseFilters(body: unknown): SelectFilters {
   };
 }
 
-/** Runs the full event-outreach pipeline: select -> signals -> email -> hook -> store. */
-export async function runCollection(filters: SelectFilters): Promise<NextResponse> {
-  if (!supabaseAdmin) {
-    return NextResponse.json(
-      { ok: false, error: 'Server misconfigured: missing Supabase service role' },
-      { status: 500 },
-    );
-  }
+/**
+ * Runs the full event-outreach pipeline (select -> signals -> email -> hook ->
+ * store) and writes the outcome to the event_outreach_jobs row. Designed to be
+ * called fire-and-forget: the collect endpoint returns before this finishes.
+ */
+async function runPipeline(jobId: string, filters: SelectFilters): Promise<void> {
+  if (!supabaseAdmin) return;
+  const db = supabaseAdmin;
 
   const result: CollectResult = {
     selected: 0,
@@ -66,7 +66,11 @@ export async function runCollection(filters: SelectFilters): Promise<NextRespons
     result.hhEmployers = hhEmployers.size;
 
     if (companies.length === 0) {
-      return NextResponse.json({ ok: true, ...result, message: 'No companies matched the filters' });
+      await db
+        .from('event_outreach_jobs')
+        .update({ status: 'completed', stats: result, completed_at: new Date().toISOString() })
+        .eq('id', jobId);
+      return;
     }
 
     // Phase 2: per-company signal detection.
@@ -104,10 +108,8 @@ export async function runCollection(filters: SelectFilters): Promise<NextRespons
 
     // Phase 4: LLM hook generation for HOT/WARM leads only.
     const hookInputs: HookInput[] = [];
-    const hookIndex: number[] = [];
     leads.forEach((lead, i) => {
       if (lead.signals.tier === 'cold') return;
-      hookIndex.push(i);
       hookInputs.push({
         id: String(i),
         company_name: lead.company.name,
@@ -166,7 +168,7 @@ export async function runCollection(filters: SelectFilters): Promise<NextRespons
 
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       const chunk = rows.slice(i, i + INSERT_CHUNK);
-      const { error } = await supabaseAdmin.from('event_outreach_leads').insert(chunk);
+      const { error } = await db.from('event_outreach_leads').insert(chunk);
       if (error) {
         result.errors.push(`DB insert: ${error.message}`);
       } else {
@@ -175,21 +177,79 @@ export async function runCollection(filters: SelectFilters): Promise<NextRespons
     }
 
     console.log('[event-outreach] collect complete:', JSON.stringify(result));
-    return NextResponse.json({ ok: result.errors.length === 0, ...result });
+    await db
+      .from('event_outreach_jobs')
+      .update({
+        status: result.errors.length === 0 ? 'completed' : 'failed',
+        stats: result,
+        error_message: result.errors[0] ?? null,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', jobId);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
-    result.errors.push(message);
     console.error('[event-outreach] pipeline error:', message);
-    return NextResponse.json({ ok: false, ...result }, { status: 500 });
+    result.errors.push(message);
+    await db
+      .from('event_outreach_jobs')
+      .update({
+        status: 'failed',
+        stats: result,
+        error_message: message,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', jobId);
   }
 }
 
+/**
+ * Starts a collection run. Inserts a job row, kicks off the pipeline in the
+ * background, and returns the job id immediately so the client never waits on
+ * the (multi-minute) pipeline. The client polls /status for completion.
+ */
 export async function POST(req: NextRequest) {
+  if (!supabaseAdmin) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
   let body: unknown = {};
   try {
     body = await req.json();
   } catch {
     /* empty body is fine — defaults apply */
   }
-  return runCollection(parseFilters(body));
+  const filters = parseFilters(body);
+
+  // If a run is already in progress, return it instead of starting a second.
+  const { data: running } = await supabaseAdmin
+    .from('event_outreach_jobs')
+    .select('id')
+    .eq('status', 'running')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (running) {
+    return NextResponse.json({ jobId: running.id, alreadyRunning: true });
+  }
+
+  const { data: job, error } = await supabaseAdmin
+    .from('event_outreach_jobs')
+    .insert({ status: 'running', params: filters })
+    .select('id')
+    .single();
+
+  if (error || !job) {
+    return NextResponse.json(
+      { error: `Failed to create job: ${error?.message ?? 'unknown'}` },
+      { status: 500 },
+    );
+  }
+
+  // Fire-and-forget: the portal runs as a long-lived Node process, so this
+  // promise keeps running after the response is sent.
+  void runPipeline(job.id, filters).catch((err) => {
+    console.error('[event-outreach] runPipeline crashed:', err);
+  });
+
+  return NextResponse.json({ jobId: job.id });
 }

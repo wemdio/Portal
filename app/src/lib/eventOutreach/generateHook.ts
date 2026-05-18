@@ -9,7 +9,7 @@ import type { AgencyConfig, EventSignal, EventTier } from './types';
 
 const LLM_URL = 'https://router.requesty.ai/v1/chat/completions';
 const MODEL = 'anthropic/claude-sonnet-4';
-const CONCURRENCY = 4;
+const CONCURRENCY = 6;
 
 function getApiKey(): string {
   return (

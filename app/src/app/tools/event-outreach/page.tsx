@@ -14,7 +14,6 @@ import {
   Snowflake,
 } from 'lucide-react';
 import type { EventLead } from '@/lib/eventOutreach/types';
-import { triggerEventCollect } from './actions';
 
 const TIER_META: Record<string, { label: string; color: string; icon: typeof Flame }> = {
   hot: { label: 'Hot', color: 'bg-orange-100 text-orange-700', icon: Flame },
@@ -34,6 +33,7 @@ export default function EventOutreachPage() {
   const [leads, setLeads] = useState<EventLead[]>([]);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [statusError, setStatusError] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -65,35 +65,99 @@ export default function EventOutreachPage() {
     void fetchLeads();
   }, [fetchLeads]);
 
-  /* ---- collect ---- */
+  /* ---- collect (background job + polling) ---- */
+
+  // On mount: if a collect run is already in progress, resume polling it.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/tools/event-outreach/status');
+        const data = await res.json();
+        if (data.job && data.job.status === 'running') {
+          setCollecting(true);
+          setStatusError(false);
+          setStatusMsg('Идёт сбор базы (запущен ранее)…');
+          setJobId(data.job.id);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  // While a job id is set, poll its status until it finishes.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/tools/event-outreach/status?jobId=${jobId}`);
+        const data = await res.json();
+        const job = data.job;
+        if (!job || cancelled) return;
+
+        if (job.status === 'completed') {
+          const s = job.stats ?? {};
+          setStatusError(false);
+          setStatusMsg(
+            `Готово: ${s.inserted ?? 0} компаний (hot ${s.hot ?? 0}, warm ${s.warm ?? 0}, ` +
+              `cold ${s.cold ?? 0}), email у ${s.emailsFound ?? 0}, хуков ${s.hooksGenerated ?? 0}.`,
+          );
+          setCollecting(false);
+          setJobId(null);
+          void fetchLeads();
+        } else if (job.status === 'failed') {
+          setStatusError(true);
+          setStatusMsg(job.error_message ?? 'Сбор не удался');
+          setCollecting(false);
+          setJobId(null);
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    };
+
+    void tick();
+    const interval = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [jobId, fetchLeads]);
 
   const handleCollect = useCallback(async () => {
-    setCollecting(true);
     setStatusMsg(null);
     setStatusError(false);
+    setCollecting(true);
     try {
-      const result = await triggerEventCollect({
-        limit,
-        minEmployees: minEmployees > 0 ? minEmployees : undefined,
+      const res = await fetch('/api/tools/event-outreach/collect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          limit,
+          minEmployees: minEmployees > 0 ? minEmployees : undefined,
+        }),
       });
-      if (result.ok && result.stats) {
-        const s = result.stats;
-        setStatusMsg(
-          `Готово: ${s.inserted} компаний (hot ${s.hot}, warm ${s.warm}, cold ${s.cold}), ` +
-            `email найден у ${s.emailsFound}, хуков ${s.hooksGenerated}.`,
-        );
-        await fetchLeads();
-      } else {
+      const data = await res.json();
+      if (!res.ok || !data.jobId) {
         setStatusError(true);
-        setStatusMsg(result.error ?? 'Сбор не удался');
+        setStatusMsg(data.error ?? 'Не удалось запустить сбор');
+        setCollecting(false);
+        return;
       }
+      setStatusMsg(
+        data.alreadyRunning
+          ? 'Сбор уже идёт — отслеживаю текущий запуск.'
+          : 'Сбор запущен — идёт в фоне, можно не ждать на этой странице.',
+      );
+      setJobId(data.jobId);
     } catch {
       setStatusError(true);
       setStatusMsg('Ошибка сети');
-    } finally {
       setCollecting(false);
     }
-  }, [limit, minEmployees, fetchLeads]);
+  }, [limit, minEmployees]);
 
   /* ---- export ---- */
 
