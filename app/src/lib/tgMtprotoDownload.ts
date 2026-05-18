@@ -14,7 +14,7 @@ let client: TelegramClient | null = null;
 let connecting: Promise<TelegramClient> | null = null;
 const MT_RETRY_ATTEMPTS = 3;
 const MT_RETRY_DELAY_MS = 1500;
-const CHUNK_STALL_TIMEOUT_MS = 120_000; // 2 min with no data = stalled
+const CHUNK_STALL_TIMEOUT_MS = 600_000; // 10 min with no data = stalled
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -223,7 +223,7 @@ export async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buf
 /**
  * Stream a file from Telegram Bot API (cloud or local) directly to disk.
  */
-const HTTP_CHUNK_STALL_MS = 120_000;
+const HTTP_CHUNK_STALL_MS = 600_000; // 10 min with no data = stalled
 
 async function downloadTelegramFileToDisk(fileId: string, destPath: string): Promise<string> {
   const filePath = await resolveTelegramFilePath(fileId);
