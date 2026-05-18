@@ -55,19 +55,17 @@ export function detectSignals(
 ): DetectedSignals {
   const signals: EventSignal[] = [];
 
-  // Anniversary from OGRN.
+  // Anniversary from OGRN — only a milestone that lands in the CURRENT year
+  // counts. Outreach targets companies whose round date is happening now, not
+  // next year (and the "+1" rule produced fake 2027 dates for the 2002 EGRUL
+  // cluster of companies whose OGRN year is 2002).
   const regYear = ogrnRegistrationYear(company.ogrn);
   const age = regYear === null ? null : CURRENT_YEAR - regYear;
   let isAnniversary = false;
   let anniversaryYear: number | null = null;
-  if (age !== null) {
-    if (MILESTONES.has(age)) {
-      isAnniversary = true;
-      anniversaryYear = CURRENT_YEAR;
-    } else if (MILESTONES.has(age + 1)) {
-      isAnniversary = true;
-      anniversaryYear = CURRENT_YEAR + 1;
-    }
+  if (age !== null && MILESTONES.has(age)) {
+    isAnniversary = true;
+    anniversaryYear = CURRENT_YEAR;
   }
   if (isAnniversary) signals.push('anniversary');
 

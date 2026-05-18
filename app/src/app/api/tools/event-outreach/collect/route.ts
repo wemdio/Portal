@@ -166,6 +166,10 @@ async function runPipeline(jobId: string, filters: SelectFilters): Promise<void>
       raw_data: { phones: lead.company.phones, source: 'companies_directory' },
     }));
 
+    // Replace the previous base — each run produces one fresh, current base
+    // (done only now, after the new rows are ready, so a failed run keeps the old base).
+    await db.from('event_outreach_leads').delete().gte('batch_date', '1900-01-01');
+
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       const chunk = rows.slice(i, i + INSERT_CHUNK);
       const { error } = await db.from('event_outreach_leads').insert(chunk);
