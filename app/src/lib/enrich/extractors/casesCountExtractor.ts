@@ -30,7 +30,9 @@ export function extractCasesCount(html: string): number {
   const m = text.match(TEXT_COUNT_RE) ?? text.match(TEXT_COUNT_RE2);
   if (m) {
     const n = parseInt(m[1], 10);
-    if (n > 0 && n <= MAX_CASES) return n;
+    // A stated count larger than the cap is still a valid "many cases"
+    // signal — clamp it rather than discarding the match.
+    if (n > 0) return Math.min(n, MAX_CASES);
   }
 
   return 0;
