@@ -95,21 +95,38 @@ export async function POST(req: NextRequest) {
     if (yearsFilter.length === 0) yearsFilter = null;
   }
 
-  let query = supabaseAdmin
-    .from('fns_revenue')
-    .select('inn, org_name, income, expense, report_year')
-    .in('inn', cleanedInns);
-  if (yearsFilter) query = query.in('report_year', yearsFilter);
-
-  const { data, error } = await query;
-  if (error) return jsonError(`Database error: ${error.message}`, 500);
+  // Запрос разбивается на под-чанки по ИНН: .in('inn', [...]) превращается
+  // в GET-фильтр PostgREST (inn=in.(...)). На 500+ ИНН строка запроса
+  // вырастает до ~7KB и может упереться в лимит URI у Kong/PostgREST на
+  // self-hosted Supabase → 500/414, и колонки в UI останутся пустыми.
+  // 200 ИНН на чанк — безопасный размер с большим запасом.
+  const IN_CHUNK = 200;
+  type FnsRow = {
+    inn: string;
+    org_name: string;
+    income: number;
+    expense: number;
+    report_year: number;
+  };
+  const rows: FnsRow[] = [];
+  for (let i = 0; i < cleanedInns.length; i += IN_CHUNK) {
+    const chunk = cleanedInns.slice(i, i + IN_CHUNK);
+    let query = supabaseAdmin
+      .from('fns_revenue')
+      .select('inn, org_name, income, expense, report_year')
+      .in('inn', chunk);
+    if (yearsFilter) query = query.in('report_year', yearsFilter);
+    const { data, error } = await query;
+    if (error) return jsonError(`Database error: ${error.message}`, 500);
+    if (data) rows.push(...(data as FnsRow[]));
+  }
 
   const results: Record<
     string,
     Record<number, { org_name: string; income: number; expense: number }>
   > = {};
   const yearsSeen = new Set<number>();
-  for (const row of data ?? []) {
+  for (const row of rows) {
     const inn = row.inn as string;
     const year = row.report_year as number;
     yearsSeen.add(year);

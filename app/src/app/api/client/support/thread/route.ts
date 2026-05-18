@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getOrCreateThread, listMessages } from '@/lib/clientSupport/threadStore';
 import { markSupportNotificationsRead } from '@/lib/clientSupport/notify';
@@ -23,6 +24,7 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
 
   const adminClient = supabaseAdmin;
   if (!adminClient) return jsonError('Server misconfigured', 500);

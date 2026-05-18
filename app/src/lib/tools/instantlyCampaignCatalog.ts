@@ -410,12 +410,26 @@ function normalizeForMatch(s: string): string {
   return s.toLowerCase().replace(/[\s\-_.!'"()«»❗‼️⭕️|/+]/g, '');
 }
 
+/**
+ * Generic-токены, которые НЕ являются брендом и не должны участвовать в
+ * token-overlap pre-filter. Иначе клиент «Beautylizer eng» по токену "eng"
+ * притягивает в кандидаты кампании «Polza eng_partners» (15 мая 2026 — 13
+ * ложных привязок). Это языковые/региональные/версионные суффиксы и
+ * слишком общие слова.
+ */
+const GENERIC_TOKENS = new Set([
+  'eng', 'rus', 'global', 'intl', 'international', 'new', 'copy', 'test',
+  'group', 'agency', 'media', 'digital', 'online', 'studio', 'company',
+  'service', 'services', 'solutions', 'systems', 'consulting', 'team',
+  'software', 'marketing', 'sales', 'tech', 'pro', 'data', 'base',
+]);
+
 function tokenizeClient(s: string): Set<string> {
   return new Set(
     transliterate(s)
       .split(/[\s\-_.!"'()«»|/+,:;]+/)
       .map((t) => t.replace(/[^a-z0-9]/g, ''))
-      .filter((t) => t.length >= 3),
+      .filter((t) => t.length >= 3 && !GENERIC_TOKENS.has(t)),
   );
 }
 
@@ -544,9 +558,13 @@ CAMPAIGNS (id|name):
 ${candidateList}
 
 Rules:
-- A campaign belongs to this client ONLY if the client's distinctive name (or its transliteration / close spelling variant / clear abbreviation) appears explicitly in the campaign name.
-- A SINGLE generic word ("Software", "Cats", "Marketing", "Agency", "Group", "Pro", "Tech") shared with the client name is NOT a match. Only the FULL distinctive client name (or its transliteration) counts.
-  Example: client "Software Cats" → "Computer Software ..." is NOT a match (only the generic "software" overlaps; "Cats" is missing). Client "Asti Group" → "Asti Group Animals" IS a match (both distinctive tokens present).
+- First, identify the client's CORE BRAND NAME — the distinctive, unique part of the client name. Strip generic language/region/version suffixes that are NOT part of the brand: "eng", "rus", "ru", "en", "global", "intl", "2", "new", etc.
+  Examples: client "Beautylizer eng" → core brand is "Beautylizer". Client "Profit-Gateway" → core brand is "Profit-Gateway". Client "Software Cats" → core brand is the full phrase "Software Cats" (both words are distinctive — neither is a language suffix).
+- A campaign belongs to this client ONLY if the campaign name explicitly contains the client's CORE BRAND NAME (or its transliteration / close spelling variant / clear abbreviation).
+- Sharing only a generic word OR a generic suffix is NOT a match:
+  * "Beautylizer eng" vs "Polza eng_partners" — only the suffix "eng" overlaps; core brands "Beautylizer" and "Polza" differ → NOT a match.
+  * "Software Cats" vs "Computer Software" — only the generic word "software" overlaps; "Cats" is missing → NOT a match.
+  * "Asti Group" vs "Asti Group Animals" — the full core brand "Asti Group" is present → IS a match.
 - Do NOT match by industry, theme, or generic keyword similarity.
 - Do NOT use "default bucket" reasoning. If unsure, skip the campaign.
 - Same campaign can only belong to one client; if it could plausibly belong to several different clients (e.g. a generic name), confidence should be low.
@@ -580,7 +598,12 @@ Return {"matches": []} if no confident matches.`;
             model: 'google/gemini-2.0-flash-001',
             messages: [{ role: 'user', content: prompt }],
             temperature: 0,
-            max_tokens: 1500,
+            // 1500 обрезало ответ для клиентов с многими кандидатами
+            // (cold-run 15 мая: 14 из 78 клиентов вернули "Unterminated
+            // string in JSON" — Асти Групп, Beautylizer eng, Let's String,
+            // Staff Line и др. с десятками кампаний). До 60 кандидатов ×
+            // ~80 токенов на матч ≈ 5K; 8000 даёт запас.
+            max_tokens: 8000,
             response_format: { type: 'json_object' },
           }),
         });
@@ -605,19 +628,30 @@ Return {"matches": []} if no confident matches.`;
       const content = json.choices?.[0]?.message?.content ?? '';
       type AIMatch = { campaign_id: string; confidence: number; reason?: string };
       let parsed: AIMatch[] = [];
+      let parseOk = false;
       try {
         const raw = JSON.parse(content) as { matches?: AIMatch[] } | AIMatch[];
         parsed = Array.isArray(raw) ? raw : (raw.matches ?? []);
+        parseOk = true;
       } catch {
         const objMatch = content.match(/\{[\s\S]*\}/);
         if (objMatch) {
           try {
             const raw = JSON.parse(objMatch[0]) as { matches?: AIMatch[] };
             parsed = raw.matches ?? [];
+            parseOk = true;
           } catch {
-            /* skip — модель вернула мусор, не валим всю операцию */
+            /* падаем в лог ниже */
           }
         }
+      }
+      if (!parseOk) {
+        // Не молча: обрезанный ответ (Unterminated string) = клиент не
+        // привязан, и без лога это невидимо. Чаще всего — упёрлись в
+        // max_tokens на клиенте с очень большим числом кандидатов.
+        console.warn(
+          `[ai-match] unparseable AI response for client "${client}" (${candidates.length} candidates, content ${content.length} chars) — client skipped this cycle`,
+        );
       }
 
       const candidateIds = new Set(candidates.map((c) => c.id));

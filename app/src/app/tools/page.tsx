@@ -24,6 +24,7 @@ import {
   BookOpen,
   ShieldAlert,
   Blocks,
+  PartyPopper,
   type LucideIcon,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
@@ -56,6 +57,7 @@ const TOOL_ICONS: Record<ToolId, LucideIcon> = {
   'knowledge-base': BookOpen,
   'bugor-outreach': Sparkles,
   'nash-outreach': Building2,
+  'event-outreach': PartyPopper,
   'reputation-finder': ShieldAlert,
   'our-bases': Database,
 };

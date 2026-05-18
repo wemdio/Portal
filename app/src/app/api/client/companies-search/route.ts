@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { searchCount, searchRows } from '@/lib/companiesSearch/rpcSearch';
 import {
   getClientTariffRow,
@@ -50,6 +51,7 @@ const MAX_LIMIT = 200;
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  if (result.auth.isDemo) return serveClientDemo(req);
 
   let body: CompaniesSearchFilters;
   try {

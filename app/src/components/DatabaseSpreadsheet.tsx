@@ -12,6 +12,7 @@ import { logError } from '@/lib/loggerClient';
 import { deletePendingDbImport, readPendingDbImport } from '@/lib/databases/pendingImport';
 import { parseXlsxInWorker } from '@/lib/databases/xlsxWorker';
 import { backgroundSave, cancelBackgroundSave } from '@/lib/databases/backgroundSave';
+import { decompressStateFromBase64 } from '@/lib/databases/stateCompression';
 import { loadStateViaWorker } from '@/lib/databases/backgroundLoad';
 import { SIGNAL_ERROR_MARKER, isStackCellRefillable } from '@/lib/enrich/signalConstants';
 import { resolveInnLookupColumns } from '@/lib/enrich/innLookupColumns';
@@ -494,6 +495,12 @@ const STORAGE_VERSION = 1;
 const STORAGE_SAVE_DELAY = 2500;
 const STORAGE_SAVE_DELAY_LARGE = 10_000;
 const LARGE_DATASET_ROW_THRESHOLD = 10_000;
+// Потолок дебаунса. Cleanup автосейв-эффекта сбрасывает таймер на КАЖДОЕ
+// изменение (правка ячейки, клик вкладки, ресайз колонки). При активной
+// работе с большой базой 10-секундное окно не закрывалось никогда — база
+// не сохранялась, хотя пользователь был на странице минутами. С потолком
+// сохранение принудительно срабатывает не реже, чем раз в MAX_SAVE_WAIT.
+const MAX_SAVE_WAIT = 25_000;
 const REMOTE_SAVE_BACKOFF_MS = 15_000;
 const ENRICHMENT_STORAGE_KEY_PREFIX = 'portal:website-enrichment';
 const ENRICHMENT_STORAGE_VERSION = 1;
@@ -1020,7 +1027,13 @@ export function DatabaseSpreadsheet() {
     progress: 0,
   });
   const [isHydrated, setIsHydrated] = useState(false);
+  // true, если из БД не удалось прочитать состояние (таймаут/ошибка) и
+  // локальной копии нет. В этом случае НЕЛЬЗЯ показывать пустую вкладку —
+  // иначе автосохранение затрёт реально существующий в БД большой state.
+  const [loadFailed, setLoadFailed] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Время первого несохранённого изменения — для потолка дебаунса (MAX_SAVE_WAIT).
+  const firstPendingSaveAtRef = useRef<number | null>(null);
   const accessTokenRef = useRef<string | null>(null);
   const hydratedStateRef = useRef<string | null>(null);
   const remoteSaveInFlightRef = useRef(false);
@@ -1095,29 +1108,17 @@ export function DatabaseSpreadsheet() {
       /* quota exceeded — acceptable for very large datasets */
     }
     if (userId) {
-      const sbUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const sbKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (sbUrl && sbKey && accessTokenRef.current) {
-        try {
-          void fetch(`${sbUrl}/rest/v1/database_spreadsheet_states`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Prefer': 'resolution=merge-duplicates,return=minimal',
-              'apikey': sbKey,
-              'Authorization': `Bearer ${accessTokenRef.current}`,
-            },
-            body: JSON.stringify({
-              user_id: userId,
-              state: payload,
-              updated_at: new Date().toISOString(),
-            }),
-            keepalive: true,
-          });
-        } catch {
-          /* best-effort during unload */
-        }
-      }
+      const totalRows = tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+      const isLargeDataset = totalRows > LARGE_DATASET_ROW_THRESHOLD;
+      firstPendingSaveAtRef.current = null;
+      // Единый путь сохранения — queueRemoteStateSave → backgroundSave
+      // (chunked + gzip в state_compressed). Раньше для малых баз тут был
+      // ещё keepalive-fetch несжатым jsonb в колонку state — он создавал
+      // рассинхрон state / state_compressed (чтение приоритизирует
+      // compressed, и keepalive-запись «терялась»). Убран. На unload
+      // несохранённое прикрывает потолок дебаунса MAX_SAVE_WAIT + копия
+      // в localStorage.
+      queueRemoteStateSave(userId, payload, isLargeDataset);
     }
   };
 
@@ -1152,40 +1153,20 @@ export function DatabaseSpreadsheet() {
           }
         };
 
-        if (queued.isLargeDataset) {
-          if (!accessTokenRef.current) {
-            onDone(false);
-            return;
-          }
-          void backgroundSave(
-            { user_id: queued.userId, state: queued.payload, updated_at: new Date().toISOString() },
-            accessTokenRef.current,
-            (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
-          ).then((ok) => onDone(Boolean(ok)));
+        // Единый путь сохранения для баз любого размера: backgroundSave
+        // сериализует state чанками и сжимает (gzip) перед отправкой в
+        // state_compressed. Раньше малые базы шли отдельной веткой через
+        // supabase.upsert несжатым jsonb — это давало рассинхрон колонок
+        // state / state_compressed (чтение приоритизирует compressed).
+        if (!accessTokenRef.current) {
+          onDone(false);
           return;
         }
-
-        void Promise.resolve(
-          supabase
-            .from('database_spreadsheet_states')
-            .upsert({
-              user_id: queued.userId,
-              state: queued.payload,
-              updated_at: new Date().toISOString(),
-            }),
-        )
-          .then(({ error }) => {
-            if (error) {
-              void logError('spreadsheet.state.remote_save.failed', error);
-              onDone(false);
-              return;
-            }
-            onDone(true);
-          })
-          .catch((error: unknown) => {
-            void logError('spreadsheet.state.remote_save.failed', error);
-            onDone(false);
-          });
+        void backgroundSave(
+          { user_id: queued.userId, state: queued.payload, updated_at: new Date().toISOString() },
+          accessTokenRef.current,
+          (msg) => void logError('spreadsheet.state.remote_save.chunked_failed', msg),
+        ).then((ok) => onDone(Boolean(ok)));
       };
 
       pump();
@@ -7812,11 +7793,24 @@ export function DatabaseSpreadsheet() {
           signal: abortCtrl.signal,
         });
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // Тянем тело ошибки — БД-ошибка/таймаут видны юзеру, а не «HTTP 500».
+          let detail = '';
+          try {
+            const errJson = (await res.json()) as { error?: string };
+            detail = errJson?.error ? `: ${errJson.error}` : '';
+          } catch { /* тело не JSON — ок */ }
+          throw new Error(`HTTP ${res.status}${detail}`);
+        }
         // Новый формат: results[inn][year] = { org_name, income, expense }.
         const json = (await res.json()) as {
-          results: Record<string, Record<number, { org_name: string; income: number; expense: number }>>;
+          results?: Record<string, Record<number, { org_name: string; income: number; expense: number }>>;
         };
+        // Защита от старого формата API (deploy-рассинхрон): без results[]
+        // нечего писать — падать молча нельзя, иначе колонки пустые без причины.
+        if (!json || typeof json.results !== 'object' || json.results === null) {
+          throw new Error('API вернул неожиданный формат ответа — обновите страницу (F5) и повторите');
+        }
         const results = json.results;
 
         setTabs((prev) => prev.map((tab) => {
@@ -7900,6 +7894,15 @@ export function DatabaseSpreadsheet() {
     } catch (err) {
       if (err instanceof Error && (err.name === 'AbortError' || err.message === 'Отменено пользователем')) {
         setLastAction({ message: `ФНС отменено (обработано: ${processedCount})`, time: Date.now() });
+      } else {
+        // Раньше любая не-abort ошибка глоталась молча: колонки создавались
+        // (это происходит ДО batch-цикла), а данные не подтягивались — юзер
+        // видел пустые поля без объяснения. Теперь ошибка всегда видна.
+        const msg = err instanceof Error ? err.message : String(err);
+        setLastAction({
+          message: `ФНС: ошибка — ${msg} (обработано: ${processedCount}, найдено: ${foundCount})`,
+          time: Date.now(),
+        });
       }
       setFnsEnrichment((prev) => ({ ...prev, isProcessing: false, isOpen: false }));
     } finally {
@@ -8221,6 +8224,7 @@ export function DatabaseSpreadsheet() {
     let isMounted = true;
     hydratedStateRef.current = '__pending__';
     setIsHydrated(false);
+    setLoadFailed(false);
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
@@ -8257,55 +8261,99 @@ export function DatabaseSpreadsheet() {
 
     void (async () => {
       let remoteState: PersistedSpreadsheetState | null = null;
+      // Удалось ли НАДЁЖНО прочитать из БД.
+      let remoteReadOk = false;
+      // В БД РЕАЛЬНО лежали данные (непустой state/state_compressed).
+      // Если данные были, а валидный remoteState из них не получился —
+      // это сбой чтения/разжатия/парсинга, и применять пустое НЕЛЬЗЯ.
+      let remoteHadStored = false;
 
       const token = accessTokenRef.current;
       if (token) {
         try {
-          const raw = await loadStateViaWorker(userId, token);
-          if (raw) remoteState = readPersistedState(raw);
+          const result = await loadStateViaWorker(userId, token);
+          remoteHadStored = remoteHadStored || result.hadStored;
+          if (result.ok) {
+            remoteReadOk = true;
+            if (result.state) remoteState = readPersistedState(result.state);
+          }
         } catch {
-          /* worker failed, try supabase client below */
+          /* worker упал — пробуем supabase-клиент ниже */
         }
       }
 
-      if (!remoteState) {
+      // Fallback через supabase-клиент, если worker не смог.
+      if (!remoteReadOk) {
         try {
           const { data, error } = await supabase
             .from('database_spreadsheet_states')
-            .select('state')
+            .select('state_compressed, state')
             .eq('user_id', userId)
             .limit(1);
-          if (!error && data?.[0]?.state) {
-            remoteState = readPersistedState(data[0].state);
+          if (!error) {
+            remoteReadOk = true;
+            const row = data?.[0] as
+              | { state_compressed?: string | null; state?: unknown }
+              | undefined;
+            if (row?.state_compressed || row?.state) remoteHadStored = true;
+            if (row?.state_compressed) {
+              // Сжатое состояние имеет приоритет (см. 20260518_0001).
+              const json = await decompressStateFromBase64(row.state_compressed);
+              remoteState = readPersistedState(JSON.parse(json));
+            } else if (row?.state) {
+              remoteState = readPersistedState(row.state);
+            }
           }
         } catch (error) {
+          // Ошибка разжатия/чтения — считаем чтение неуспешным, чтобы
+          // сработала защита от затирания ниже.
+          remoteReadOk = false;
           void logError('spreadsheet.state.load.failed', error);
         }
       }
 
       const localState = readPersistedState(window.localStorage.getItem(storageKey));
-      const localIsNewer = localState && (localState.savedAt ?? 0) > (remoteState?.savedAt ?? 0);
-      const bestState = localIsNewer ? localState : (remoteState ?? localState);
+
+      // ЗАЩИТА ОТ ЗАТИРАНИЯ. Чтение ненадёжно, если:
+      //  - не удалось вовсе (!remoteReadOk), ИЛИ
+      //  - данные в БД были (remoteHadStored), но валидный state из них
+      //    не извлёкся (remoteState === null) — битый/нечитаемый/слишком
+      //    большой JSON.
+      // В обоих случаях НЕ применяем никакое состояние и НЕ даём автосейву
+      // работать (isHydrated остаётся false). Иначе пустая/локальная
+      // вкладка + автосохранение затёрли бы реальный большой state в БД.
+      // Лучше показать «не удалось загрузить», чем потерять данные.
+      const readUnreliable = !remoteReadOk || (remoteHadStored && !remoteState);
+      if (readUnreliable) {
+        if (isMounted) setLoadFailed(true);
+        return;
+      }
+
+      // remoteState (БД) ВСЕГДА авторитетнее localStorage. Причина: в
+      // localStorage помещается только усечённая копия — большие базы не
+      // влезают в quota браузера (~5 МБ). Раньше сравнивали по savedAt
+      // (localIsNewer) — и устаревшая МАЛЕНЬКАЯ local-копия, у которой
+      // savedAt случайно оказывался новее, побеждала и затирала большой
+      // remote (диагностика 18 мая: БД отдала 35720 строк, затем портал
+      // сохранил 3198 из localStorage поверх). localState используем
+      // только как fallback, когда в БД реально ничего нет.
+      const bestState = remoteState ?? localState;
 
       if (isMounted) applyState(bestState);
 
-      if (bestState && bestState !== remoteState) {
-        try {
-          await supabase.from('database_spreadsheet_states').upsert({
-            user_id: userId,
-            state: bestState,
-            updated_at: new Date().toISOString(),
-          });
-        } catch (error) {
-          void logError('spreadsheet.state.remote_save.failed', error);
-        }
+      // Заливаем local в remote ТОЛЬКО когда в БД пусто (remoteState нет).
+      // Если remoteState есть — он уже в БД, переписывать нечем и нельзя
+      // (можно затереть большую базу усечённой local-копией).
+      if (bestState && !remoteState) {
+        const totalRows = bestState.tabs.reduce((sum, tab) => sum + tab.data.length, 0);
+        queueRemoteStateSave(userId, bestState, totalRows > LARGE_DATASET_ROW_THRESHOLD);
       }
     })();
 
     return () => {
       isMounted = false;
     };
-  }, [storageKey, userId]);
+  }, [storageKey, userId, queueRemoteStateSave]);
 
   useEffect(() => {
     if (tabs.length === 0) return;
@@ -8347,16 +8395,35 @@ export function DatabaseSpreadsheet() {
       /* quota exceeded — acceptable for very large datasets */
     }
 
+    // Потолок дебаунса: cleanup ниже сбрасывает таймер на каждый ре-рендер
+    // (правка ячейки / клик вкладки / ресайз колонки). При активной работе
+    // с большой базой 10-секундное окно не закрывалось никогда. Считаем
+    // время с первого несохранённого изменения и не откладываем сохранение
+    // дольше MAX_SAVE_WAIT.
+    if (firstPendingSaveAtRef.current === null) {
+      firstPendingSaveAtRef.current = now;
+    }
+    const elapsedSinceFirstChange = now - firstPendingSaveAtRef.current;
+    const effectiveDelay = Math.max(
+      0,
+      Math.min(delay, MAX_SAVE_WAIT - elapsedSinceFirstChange),
+    );
+
     saveTimeoutRef.current = setTimeout(() => {
       if (!userIdSnapshot) return;
+      firstPendingSaveAtRef.current = null;
       queueRemoteStateSave(userIdSnapshot, payload, isLargeDataset);
-    }, delay);
+    }, effectiveDelay);
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
         saveTimeoutRef.current = null;
       }
-      cancelBackgroundSave();
+      // НЕ вызываем cancelBackgroundSave() здесь. Cleanup срабатывает на
+      // каждый ре-рендер, и это обрывало уже идущую чанковую сериализацию
+      // большой базы (serializeStateChunked возвращал null → fetch не
+      // уходил). Пусть начатое сохранение допишется; saveGeneration внутри
+      // backgroundSave сам отсечёт устаревший проход, если стартует новый.
     };
   }, [tabs, activeTabId, tabCounter, columnWidths, storageKey, isHydrated, userId, queueRemoteStateSave]);
 
@@ -9159,11 +9226,29 @@ export function DatabaseSpreadsheet() {
               setContextMenu({ x: event.clientX, y: event.clientY });
             }}
           >
-            {!isHydrated ? (
+            {loadFailed ? (
+              <div className="px-6 py-14 text-center">
+                <div className="text-sm font-semibold text-red-600">Не удалось загрузить базу</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Сервер не ответил вовремя. Ваши данные в безопасности — обновите
+                  страницу, чтобы попробовать снова. Ничего не редактируйте на этой
+                  странице до успешной загрузки.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="mt-3 inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+                >
+                  Обновить страницу
+                </button>
+              </div>
+            ) : !isHydrated ? (
               <div className="px-6 py-14 text-center text-gray-500">
                 <div className="mx-auto mb-3 h-8 w-8 rounded-full border-2 border-gray-300 border-t-transparent animate-spin" />
                 <div className="text-sm font-medium text-gray-700">Загружаем вашу базу…</div>
-                <div className="mt-1 text-xs text-gray-500">Это может занять несколько секунд.</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Большая база может загружаться до 1–2 минут. Не закрывайте вкладку.
+                </div>
               </div>
             ) : (
             <table ref={tableElementRef} className="min-w-max border-separate border-spacing-0">
