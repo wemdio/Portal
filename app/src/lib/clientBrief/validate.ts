@@ -4,7 +4,7 @@ import type { ClientBriefFields } from './types';
 export type ValidateBriefResult = { ok: true } | { ok: false; error: string };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-// Голый домен (redev.ru, foo.bar.baz) или http(s)://...
+// Голый домен (roga-kopyta.example, foo.bar.baz) или http(s)://...
 const WEBSITE_RE = /^(https?:\/\/[^\s]+|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(\/[^\s]*)?)$/i;
 
 function totalCharCount(fields: ClientBriefFields): number {
@@ -29,7 +29,7 @@ export function validateBriefInput(fields: ClientBriefFields): ValidateBriefResu
   }
 
   if (fields.company_website && !WEBSITE_RE.test(fields.company_website)) {
-    return { ok: false, error: 'Сайт должен быть валидным URL или доменом (например, redev.ru).' };
+    return { ok: false, error: 'Сайт должен быть валидным URL или доменом (например, roga-kopyta.example).' };
   }
 
   const total = totalCharCount(fields);

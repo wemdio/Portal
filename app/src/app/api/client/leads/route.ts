@@ -4,20 +4,13 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { filterAllowedIds } from '@/lib/clientAccess';
-import { listEmails } from '@/lib/instantly/client';
-import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
-import { readCampaignAnalyticsFromDb } from '@/lib/tools/instantlyCampaignCatalog';
-import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-const MAX_FORWARD_FETCH = 1000;
-const REPLIES_PER_CAMPAIGN = 100;
 
-type LeadSource = 'forwarded_lead' | 'reply';
+type LeadSource = 'forwarded_lead';
 
 type CommentCount = { count: number };
 
@@ -62,66 +55,28 @@ function parsePositiveInt(value: string | null, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function itemTimestamp(item: LeadListItem): number {
-  const raw = item.reply_timestamp ?? item.created_at;
-  const parsed = raw ? Date.parse(raw) : NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function dedupeKey(item: LeadListItem): string {
-  const email = item.lead_email.trim().toLowerCase();
-  if (item.campaign_id && email && item.reply_timestamp) {
-    return `reply:${item.campaign_id}:${email}:${item.reply_timestamp}`;
-  }
-  if (item.email_id) return `email:${item.email_id}`;
-  return `${item.source}:${item.id}`;
-}
-
-function mergeAndSortItems(items: LeadListItem[]): LeadListItem[] {
-  const seen = new Set<string>();
-  const unique: LeadListItem[] = [];
-
-  for (const item of items) {
-    const key = dedupeKey(item);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(item);
-  }
-
-  unique.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
-  return unique;
-}
-
-async function readCampaignNames(campaignIds: string[]): Promise<Map<string, string>> {
-  const names = new Map<string, string>();
-  if (campaignIds.length === 0) return names;
-
-  try {
-    const { campaigns } = await readCampaignAnalyticsFromDb(campaignIds);
-    for (const campaign of campaigns) {
-      if (campaign.id && campaign.name) {
-        names.set(campaign.id, campaign.name);
-      }
-    }
-  } catch (err) {
-    await logError('client.leads.campaign_names_failed', err, { campaignIds });
-  }
-
-  return names;
-}
-
 async function readForwardedLeads(
   userId: string,
-  fetchLimit: number,
+  limit: number,
+  offset: number,
+  search?: string,
 ): Promise<{ items: LeadListItem[]; total: number }> {
   if (!supabaseInstantly) return { items: [], total: 0 };
 
-  const { data, count, error } = await supabaseInstantly
+  let query = supabaseInstantly
     .from('client_forwarded_leads')
     .select('*, client_lead_comments(count)', { count: 'exact' })
     .eq('client_user_id', userId)
-    .order('created_at', { ascending: false })
-    .range(0, fetchLimit - 1);
+    .order('created_at', { ascending: false });
+
+  if (search) {
+    const safeSearch = search.replaceAll(',', ' ').trim();
+    query = query.or(
+      `lead_email.ilike.%${safeSearch}%,lead_name.ilike.%${safeSearch}%,company_name.ilike.%${safeSearch}%,campaign_name.ilike.%${safeSearch}%`,
+    );
+  }
+
+  const { data, count, error } = await query.range(offset, offset + limit - 1);
 
   if (error) {
     throw new Error(error.message);
@@ -136,76 +91,6 @@ async function readForwardedLeads(
     })),
     total: count ?? rows.length,
   };
-}
-
-async function readReplyItems(
-  campaignIds: string[],
-  campaignNames: Map<string, string>,
-  search?: string,
-): Promise<{ items: LeadListItem[]; failures: number }> {
-  const settled = await Promise.allSettled(
-    campaignIds.map(async (campaignId) => {
-      const data = await listEmails({
-        campaign_id: campaignId,
-        ue_type: 2,
-        limit: REPLIES_PER_CAMPAIGN,
-        search,
-      });
-
-      return (data.items ?? []).map((email) => {
-        const reply = mapInstantlyEmailToReply(email);
-        const timestamp = reply.timestamp;
-        const createdAt = timestamp ?? new Date(0).toISOString();
-
-        return {
-          id: `reply:${campaignId}:${reply.id}`,
-          source: 'reply' as const,
-          qualification_id: null,
-          campaign_id: campaignId,
-          campaign_name: campaignNames.get(campaignId) ?? null,
-          lead_email: reply.from_email ?? '',
-          lead_name: reply.from_name,
-          company_name: null,
-          phone: null,
-          website: null,
-          linkedin_url: null,
-          reply_subject: reply.subject,
-          reply_body: reply.body_text,
-          last_outbound_preview: null,
-          reply_timestamp: timestamp,
-          status: reply.is_unread ? 'unread' : 'reply',
-          ai_reason: reply.ai_interest_value == null
-            ? null
-            : `Interest: ${reply.ai_interest_value}`,
-          created_at: createdAt,
-          client_lead_comments: [],
-          email_id: reply.id,
-          lead_id: reply.lead_id,
-          thread_id: reply.thread_id,
-          is_unread: reply.is_unread,
-          ai_interest_value: reply.ai_interest_value,
-        } satisfies LeadListItem;
-      });
-    }),
-  );
-
-  const items: LeadListItem[] = [];
-  let failures = 0;
-
-  for (let i = 0; i < settled.length; i += 1) {
-    const result = settled[i];
-    if (result.status === 'fulfilled') {
-      items.push(...result.value);
-      continue;
-    }
-
-    failures += 1;
-    await logError('client.leads.campaign_replies_failed', result.reason, {
-      campaignId: campaignIds[i],
-    });
-  }
-
-  return { items, failures };
 }
 
 async function enrichFromSyncedLeads(userId: string, items: LeadListItem[]) {
@@ -241,47 +126,27 @@ export async function GET(req: NextRequest) {
   if (result.auth.isDemo) return serveClientDemo(req);
   if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
 
-  const { accessRows, userId } = result.auth;
+  const { userId } = result.auth;
 
   const url = new URL(req.url);
   const limit = Math.min(parsePositiveInt(url.searchParams.get('limit'), DEFAULT_LIMIT), MAX_LIMIT);
   const offset = Math.max(0, parsePositiveInt(url.searchParams.get('offset'), 0));
   const search = url.searchParams.get('search')?.trim() || undefined;
 
-  const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
-  const forwardFetchLimit = Math.min(Math.max(offset + limit, limit), MAX_FORWARD_FETCH);
-
   let forwarded: { items: LeadListItem[]; total: number };
   try {
-    forwarded = await readForwardedLeads(userId, forwardFetchLimit);
+    forwarded = await readForwardedLeads(userId, limit, offset, search);
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : 'Ошибка загрузки', 500);
   }
 
-  const campaignNames = await readCampaignNames(allowedCampaignIds);
-  const { items: replyItems, failures } = await readReplyItems(
-    allowedCampaignIds,
-    campaignNames,
-    search,
-  );
-
-  if (
-    allowedCampaignIds.length > 0 &&
-    failures === allowedCampaignIds.length &&
-    forwarded.items.length === 0
-  ) {
-    return jsonError('Не удалось загрузить ответы', 502);
-  }
-
-  const merged = mergeAndSortItems([...forwarded.items, ...replyItems]);
-  const total = merged.length + Math.max(0, forwarded.total - forwarded.items.length);
-  const items = merged.slice(offset, offset + limit);
+  const items = forwarded.items;
 
   await enrichFromSyncedLeads(userId, items);
 
   return NextResponse.json({
     items,
-    total,
+    total: forwarded.total,
     limit,
     offset,
   });

@@ -27,6 +27,7 @@ import {
   DEMO_ACTIVITY_TYPES_RESPONSE,
   DEMO_LEAD_COMMENTS,
   getDemoLeadsResponse,
+  getDemoRepliesResponse,
   getDemoReplies,
   getDemoCampaignDetail,
   getDemoProjectDetail,
@@ -87,6 +88,13 @@ export async function serveClientDemo(req: NextRequest): Promise<NextResponse> {
       const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
       return json(getDemoLeadsResponse(limit, offset));
+    }
+    case '/replies': {
+      const rawLimit = Number(req.nextUrl.searchParams.get('limit') ?? '50');
+      const rawOffset = Number(req.nextUrl.searchParams.get('offset') ?? '0');
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+      return json(getDemoRepliesResponse(limit, offset));
     }
     default:
       break;

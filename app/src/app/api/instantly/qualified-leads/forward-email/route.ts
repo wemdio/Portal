@@ -11,6 +11,12 @@ interface ForwardEmailBody {
   reply_text: string;
 }
 
+function buildReplySubject(subject?: string | null): string {
+  const trimmed = subject?.trim();
+  if (!trimmed) return 'Re:';
+  return /^re:/i.test(trimmed) ? trimmed : `Re: ${trimmed}`;
+}
+
 export const POST = withAuth(async (req, user) => {
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
@@ -89,6 +95,7 @@ export const POST = withAuth(async (req, user) => {
     await instantly.replyToEmail({
       reply_to_uuid: instantlyEmailId,
       eaccount,
+      subject: buildReplySubject((qual.reply_subject as string | null) ?? null),
       body: { text: reply_text },
       ...(client_email ? { cc_address_email_list: client_email } : {}),
     });

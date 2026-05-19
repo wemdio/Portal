@@ -209,6 +209,47 @@ export function getDemoReplies(campaignId: string) {
   };
 }
 
+export function getDemoRepliesResponse(limit: number, offset: number) {
+  const items = DEMO_REPLIES
+    .slice()
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+    .map((reply) => ({
+      id: `reply:${reply.campaign_id}:${reply.id}`,
+      source: 'reply',
+      qualification_id: null,
+      campaign_id: reply.campaign_id,
+      campaign_name: null,
+      lead_email: reply.from_email,
+      lead_name: reply.from_name,
+      company_name: null,
+      phone: null,
+      website: null,
+      linkedin_url: null,
+      reply_subject: reply.subject,
+      reply_body: reply.body,
+      last_outbound_preview: null,
+      reply_timestamp: reply.timestamp,
+      status: reply.is_lead ? 'lead' : 'reply',
+      ai_reason: null,
+      created_at: reply.timestamp,
+      client_lead_comments: [],
+      email_id: reply.id,
+      lead_id: null,
+      thread_id: null,
+      is_unread: false,
+      ai_interest_value: null,
+      is_lead: reply.is_lead,
+      lead_entry_id: reply.is_lead ? `demo-lead-${reply.id.split('-').pop()}` : null,
+    }));
+
+  return {
+    items: items.slice(offset, offset + limit),
+    total: items.length,
+    limit,
+    offset,
+  };
+}
+
 // ─── Лиды (переданные клиенту) ───────────────────────────────────────────────
 
 interface DemoLead {
