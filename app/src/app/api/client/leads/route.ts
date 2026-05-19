@@ -4,11 +4,14 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { listEmails } from '@/lib/instantly/client';
+import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 
 export const dynamic = 'force-dynamic';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const REPLIES_PER_CAMPAIGN = 100;
 
 type LeadSource = 'forwarded_lead';
 
@@ -120,6 +123,58 @@ async function enrichFromSyncedLeads(userId: string, items: LeadListItem[]) {
   }
 }
 
+function timestampDistance(a: string | null, b: string | null): number {
+  const ta = a ? Date.parse(a) : NaN;
+  const tb = b ? Date.parse(b) : NaN;
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return Number.POSITIVE_INFINITY;
+  return Math.abs(ta - tb);
+}
+
+async function enrichFromInstantlyReplies(items: LeadListItem[]) {
+  const pending = items.filter((item) => item.campaign_id && item.lead_email && !item.email_id);
+  if (pending.length === 0) return;
+
+  const byCampaign = new Map<string, LeadListItem[]>();
+  for (const item of pending) {
+    const list = byCampaign.get(item.campaign_id) ?? [];
+    list.push(item);
+    byCampaign.set(item.campaign_id, list);
+  }
+
+  await Promise.allSettled([...byCampaign.entries()].map(async ([campaignId, campaignItems]) => {
+    const data = await listEmails({
+      campaign_id: campaignId,
+      ue_type: 2,
+      limit: REPLIES_PER_CAMPAIGN,
+    });
+
+    const replies = (data.items ?? []).map((email) => {
+      const reply = mapInstantlyEmailToReply(email);
+      return { email, reply };
+    });
+
+    for (const item of campaignItems) {
+      const itemEmail = item.lead_email.trim().toLowerCase();
+      const matches = replies.filter(({ reply }) => (
+        reply.from_email?.trim().toLowerCase() === itemEmail
+      ));
+      if (matches.length === 0) continue;
+
+      matches.sort((a, b) => (
+        timestampDistance(a.reply.timestamp, item.reply_timestamp) -
+        timestampDistance(b.reply.timestamp, item.reply_timestamp)
+      ));
+
+      const match = matches[0];
+      item.email_id = match.reply.id;
+      item.lead_id = match.reply.lead_id;
+      item.thread_id = match.reply.thread_id;
+      item.is_unread = match.reply.is_unread;
+      item.ai_interest_value = match.reply.ai_interest_value;
+    }
+  }));
+}
+
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -143,6 +198,7 @@ export async function GET(req: NextRequest) {
   const items = forwarded.items;
 
   await enrichFromSyncedLeads(userId, items);
+  await enrichFromInstantlyReplies(items);
 
   return NextResponse.json({
     items,

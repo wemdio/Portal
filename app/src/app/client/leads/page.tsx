@@ -122,7 +122,7 @@ function LeadDetail({
         className="neu-pill px-3 py-1.5 text-xs font-semibold mb-6"
         style={{ color: 'var(--cp-text-m)' }}
       >
-        ← Назад к ответам
+        ← Назад к лидам
       </button>
 
       <div className="neu-card p-5 sm:p-8 mb-6">

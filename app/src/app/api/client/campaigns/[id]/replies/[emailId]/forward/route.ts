@@ -68,7 +68,7 @@ export async function POST(
       eaccount,
       to_address_email_list: validation.to_email!,
       subject: buildForwardSubject(original.subject),
-      body: { text: 'Пересылаю письмо ниже.' },
+      body: { text: '' },
       include_original_body: true,
     });
 

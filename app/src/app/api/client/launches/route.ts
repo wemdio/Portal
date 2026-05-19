@@ -9,6 +9,7 @@ import { validateClientLaunchInput } from '@/lib/clientLaunch/validateLaunchInpu
 import { mapCsvRowsToLeads } from '@/lib/clientLaunch/mapRowsToLeads';
 import type {
   ClientCampaignPreset,
+  ClientLaunchBehaviorOverride,
   ClientLaunchColumnMapping,
   ClientLaunchScheduleOverride,
   ClientLaunchSequence,
@@ -35,6 +36,7 @@ interface LaunchBody {
   headers?: unknown;
   rows?: unknown;
   schedule?: unknown;
+  behavior?: unknown;
 }
 
 function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | undefined {
@@ -59,6 +61,18 @@ function parseScheduleOverride(raw: unknown): ClientLaunchScheduleOverride | und
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((s) => typeof s === 'string');
+}
+
+function parseBehaviorOverride(raw: unknown): ClientLaunchBehaviorOverride | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const openTracking = typeof obj.open_tracking === 'boolean' ? obj.open_tracking : undefined;
+  const stopOnReply = typeof obj.stop_on_reply === 'boolean' ? obj.stop_on_reply : undefined;
+  if (openTracking === undefined || stopOnReply === undefined) return undefined;
+  return {
+    open_tracking: openTracking,
+    stop_on_reply: stopOnReply,
+  };
 }
 
 export async function GET(req: NextRequest) {
@@ -147,6 +161,7 @@ export async function POST(req: NextRequest) {
   const preset = presetRow as ClientCampaignPreset | null;
 
   const scheduleOverride = parseScheduleOverride(body.schedule);
+  const behaviorOverride = parseBehaviorOverride(body.behavior);
 
   const validation = validateClientLaunchInput({
     preset,
@@ -213,7 +228,12 @@ export async function POST(req: NextRequest) {
   let instantlyCampaignId: string | null = null;
 
   try {
-    const payload = buildCampaignPayloadFromPreset({ preset: preset!, sequence, scheduleOverride });
+    const payload = buildCampaignPayloadFromPreset({
+      preset: preset!,
+      sequence,
+      scheduleOverride,
+      behaviorOverride,
+    });
     const created = await createCampaign(payload);
     instantlyCampaignId = (created as { id?: string }).id ?? null;
     if (!instantlyCampaignId) throw new Error('Instantly returned campaign without id');

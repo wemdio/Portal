@@ -56,6 +56,17 @@ describe('buildCampaignPayloadFromPreset', () => {
     expect(payload.stop_on_reply).toBe(false);
   });
 
+  it('allows per-launch overrides for open tracking and stop-on-reply', () => {
+    const payload = buildCampaignPayloadFromPreset({
+      preset: { ...validPreset, open_tracking: true, stop_on_reply: true },
+      sequence: validSequence,
+      behaviorOverride: { open_tracking: false, stop_on_reply: false },
+    });
+    expect(payload.open_tracking).toBe(false);
+    expect(payload.stop_on_reply).toBe(false);
+    expect(payload.link_tracking).toBe(true);
+  });
+
   it('always forces text_only=true (client emails are plain text, no HTML)', () => {
     // Client emails must go out exactly as typed — plain text, line breaks
     // preserved, no HTML. text_only is forced regardless of the preset.

@@ -54,6 +54,11 @@ export interface ClientLaunchScheduleOverride {
   timezone: string;
 }
 
+export interface ClientLaunchBehaviorOverride {
+  open_tracking: boolean;
+  stop_on_reply: boolean;
+}
+
 export interface ClientLaunchSequence {
   name: string;
   steps: ClientLaunchSequenceStep[];

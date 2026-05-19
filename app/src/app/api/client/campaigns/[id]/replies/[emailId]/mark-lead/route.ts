@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { isResourceAllowed } from '@/lib/clientAccess';
-import { getEmail } from '@/lib/instantly/client';
+import { getEmail, markThreadAsRead } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -71,6 +71,20 @@ export async function POST(
     const leadEmail = reply.from_email?.trim();
     if (!leadEmail) return jsonError('У ответа нет email лида', 400);
 
+    const markRead = async () => {
+      if (!original.thread_id) return;
+      try {
+        await markThreadAsRead(original.thread_id);
+      } catch (err) {
+        await logError('client.replies.mark_lead.mark_read_failed', err, {
+          campaignId,
+          emailId,
+          threadId: original.thread_id,
+          userId,
+        });
+      }
+    };
+
     const replyTimestamp = reply.timestamp ?? original.timestamp_created ?? new Date().toISOString();
     const existingQuery = supabaseInstantly
       .from('client_forwarded_leads')
@@ -78,12 +92,12 @@ export async function POST(
       .eq('client_user_id', userId)
       .eq('campaign_id', campaignId)
       .eq('lead_email', leadEmail)
-      .eq('reply_timestamp', replyTimestamp)
       .maybeSingle();
 
     const { data: existing, error: existingError } = await existingQuery;
     if (existingError) throw new Error(existingError.message);
     if (existing) {
+      await markRead();
       return NextResponse.json({ ok: true, lead: existing, already_marked: true });
     }
 
@@ -122,6 +136,7 @@ export async function POST(
       .single();
 
     if (error) throw new Error(error.message);
+    await markRead();
 
     void logAudit('client.replies.mark_lead.created', 'Client marked reply thread as lead', {
       campaignId,

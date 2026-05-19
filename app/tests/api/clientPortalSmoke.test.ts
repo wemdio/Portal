@@ -217,6 +217,7 @@ const mockListEmails = jest.fn();
 const mockGetEmail = jest.fn();
 const mockReplyToEmail = jest.fn();
 const mockForwardEmail = jest.fn();
+const mockMarkThreadAsRead = jest.fn();
 const mockActivateCampaign = jest.fn();
 const mockPauseCampaign = jest.fn();
 
@@ -228,6 +229,7 @@ jest.mock('@/lib/instantly/client', () => ({
   getEmail: (...args: unknown[]) => mockGetEmail(...args),
   replyToEmail: (...args: unknown[]) => mockReplyToEmail(...args),
   forwardEmail: (...args: unknown[]) => mockForwardEmail(...args),
+  markThreadAsRead: (...args: unknown[]) => mockMarkThreadAsRead(...args),
   activateCampaign: (...args: unknown[]) => mockActivateCampaign(...args),
   pauseCampaign: (...args: unknown[]) => mockPauseCampaign(...args),
 }));
@@ -326,6 +328,7 @@ beforeEach(() => {
   mockGetEmail.mockReset();
   mockReplyToEmail.mockReset().mockResolvedValue({ ok: true });
   mockForwardEmail.mockReset().mockResolvedValue({ ok: true });
+  mockMarkThreadAsRead.mockReset().mockResolvedValue({ ok: true });
   mockActivateCampaign.mockReset().mockResolvedValue({ ok: true });
   mockPauseCampaign.mockReset().mockResolvedValue({ ok: true });
 
@@ -678,6 +681,63 @@ describe('Client Portal — empty new-user state', () => {
     expect(mockReadCampaignAnalyticsFromDb).not.toHaveBeenCalled();
   });
 
+  it('GET /leads enriches marked leads with Instantly email metadata for reply actions', async () => {
+    dbState.rowsByTable.client_forwarded_leads = [
+      {
+        id: 'lead-1',
+        client_user_id: AUTH_USER_ID,
+        campaign_id: ALLOWED_CAMPAIGN,
+        campaign_name: 'Allowed Campaign',
+        lead_email: 'lead@example.com',
+        lead_name: 'Lead Person',
+        reply_subject: 'Re: Intro',
+        reply_body: 'Interested, send details.',
+        reply_timestamp: '2026-05-19T10:00:00.000Z',
+        created_at: '2026-05-19T10:01:00.000Z',
+      },
+    ];
+    mockListEmails.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'email-1',
+          campaign_id: ALLOWED_CAMPAIGN,
+          thread_id: 'thread-1',
+          lead: 'instantly-lead-1',
+          subject: 'Re: Intro',
+          body: { text: 'Interested, send details.' },
+          from_address_email: 'lead@example.com',
+          timestamp_email: '2026-05-19T10:00:00.000Z',
+          ue_type: 2,
+          is_unread: 0,
+          ai_interest_value: 5,
+        },
+      ],
+      next_starting_after: null,
+    });
+
+    const { GET } = await import('@/app/api/client/leads/route');
+    const res = await GET(makeReq('http://x/api/client/leads'));
+
+    expect((res as Response).status).toBe(200);
+    expect(mockListEmails).toHaveBeenCalledWith(expect.objectContaining({
+      campaign_id: ALLOWED_CAMPAIGN,
+      ue_type: 2,
+      limit: 100,
+    }));
+    const body = (await (res as Response).json()) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(body.items[0]).toMatchObject({
+      id: 'lead-1',
+      source: 'forwarded_lead',
+      email_id: 'email-1',
+      lead_id: 'instantly-lead-1',
+      thread_id: 'thread-1',
+      is_unread: false,
+      ai_interest_value: 5,
+    });
+  });
+
   it('GET /replies returns items: [] when no campaigns granted', async () => {
     const { GET } = await import('@/app/api/client/replies/route');
     const res = await GET(makeReq('http://x/api/client/replies'));
@@ -753,6 +813,56 @@ describe('Client Portal — empty new-user state', () => {
       ai_interest_value: 5,
       is_lead: false,
       lead_entry_id: null,
+    });
+  });
+
+  it('GET /replies recognizes a marked lead by campaign and email, not timestamp', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    dbState.rowsByTable.client_forwarded_leads = [
+      {
+        id: 'forwarded-1',
+        client_user_id: AUTH_USER_ID,
+        campaign_id: ALLOWED_CAMPAIGN,
+        lead_email: 'lead@example.com',
+        reply_timestamp: '2026-05-19 10:00:00+00',
+      },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValueOnce({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    mockListEmails.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'email-1',
+          campaign_id: ALLOWED_CAMPAIGN,
+          thread_id: 'thread-1',
+          lead: 'lead-1',
+          subject: 'Re: Intro',
+          body: { text: 'Interested, send details.' },
+          from_address_email: 'lead@example.com',
+          timestamp_email: '2026-05-19T10:00:00.000Z',
+          ue_type: 2,
+          is_unread: 1,
+        },
+      ],
+      next_starting_after: null,
+    });
+
+    const { GET } = await import('@/app/api/client/replies/route');
+    const res = await GET(makeReq('http://x/api/client/replies?limit=30&offset=0'));
+
+    expect((res as Response).status).toBe(200);
+    const body = (await (res as Response).json()) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(body.items[0]).toMatchObject({
+      is_lead: true,
+      lead_entry_id: 'forwarded-1',
+      is_unread: false,
+      status: 'lead',
     });
   });
 
@@ -1125,7 +1235,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
       eaccount: 'sender@me.com',
       to_address_email_list: 'client@example.com',
       subject: 'Fwd: Intro',
-      body: { text: 'Пересылаю письмо ниже.' },
+      body: { text: '' },
       include_original_body: true,
     }));
   });
@@ -1169,6 +1279,7 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
 
     expect((res as Response).status).toBe(201);
+    expect(mockMarkThreadAsRead).toHaveBeenCalledWith('t1');
     expect(dbState.insertCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'client_forwarded_leads',
