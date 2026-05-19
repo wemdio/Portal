@@ -14,6 +14,7 @@ export interface LeadTelegramAlertData {
   leadName: string | null;
   companyName: string | null;
   campaignName: string | null;
+  clientName: string | null;
   specialistMentions: LeadTelegramSpecialistMention[];
   replySubject: string | null;
   replyPreview: string | null;
@@ -102,6 +103,7 @@ function buildMessage(data: LeadTelegramAlertData): string {
   ];
 
   if (data.companyName) lines.push(`<b>Компания:</b> ${escapeHtml(data.companyName)}`);
+  if (data.clientName) lines.push(`<b>Клиент Portal:</b> ${escapeHtml(data.clientName)}`);
   if (data.campaignName) lines.push(`<b>Кампания:</b> ${escapeHtml(data.campaignName)}`);
   if (data.replySubject) lines.push(`<b>Тема:</b> ${escapeHtml(data.replySubject)}`);
 

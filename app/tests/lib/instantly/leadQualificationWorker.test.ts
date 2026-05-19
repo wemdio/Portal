@@ -8,6 +8,7 @@ let mockMainDb: MockSupabaseClient | null;
 
 const listEmails = jest.fn();
 const getLeadsByEmail = jest.fn();
+const getCampaign = jest.fn();
 const qualifyReply = jest.fn();
 const fetchBriefByCampaign = jest.fn();
 const sendLeadTelegramAlert = jest.fn();
@@ -28,6 +29,7 @@ jest.mock('@/lib/instantly/client', () => ({
   __esModule: true,
   listEmails: (...args: unknown[]) => listEmails(...args),
   getLeadsByEmail: (...args: unknown[]) => getLeadsByEmail(...args),
+  getCampaign: (...args: unknown[]) => getCampaign(...args),
 }));
 
 jest.mock('@/lib/instantly/leadQualifier', () => ({
@@ -69,6 +71,7 @@ describe('pollAndQualifyReplies', () => {
     jest.resetModules();
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
+    getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
     sendLeadTelegramAlert.mockReset().mockResolvedValue({ sent: true, messageId: 42 });
     fetchBriefByCampaign.mockReset().mockResolvedValue(null);
     qualifyReply.mockReset().mockResolvedValue({
@@ -207,7 +210,8 @@ describe('pollAndQualifyReplies', () => {
       leadEmail: 'lead@example.com',
       leadName: null,
       companyName: null,
-      campaignName: null,
+      campaignName: 'Кампания Новикова',
+      clientName: 'Acme',
       replySubject: 'Re: proposal',
       replyPreview: 'Давайте созвонимся',
       aiReason: 'Просит созвон',

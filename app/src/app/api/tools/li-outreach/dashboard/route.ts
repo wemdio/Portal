@@ -5,7 +5,17 @@ import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-type LeadRow = { company: string | null; status: string };
+type LeadRow = { id: string; company: string | null; status: string };
+type Funnel = { new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number; total: number };
+
+function emptyFunnel(): Funnel {
+  return { new: 0, invited: 0, connected: 0, messaged: 0, replied: 0, completed: 0, error: 0, total: 0 };
+}
+
+function addToFunnel(f: Funnel, status: string): void {
+  f.total++;
+  if (status !== 'total' && status in f) (f[status as keyof Funnel] as number)++;
+}
 type CampaignLeadRow = {
   status: string;
   user_replied: boolean;
@@ -34,7 +44,7 @@ export async function GET(req: NextRequest) {
     const campaignIds = (campaignIdsRes.data ?? []).map((c: { id: string }) => c.id);
 
     const [leadsRes, campaignsRes, campaignLeadsRes, logsRes] = await Promise.all([
-      db.from('li_leads').select('company, status').eq('user_id', auth.user.id),
+      db.from('li_leads').select('id, company, status').eq('user_id', auth.user.id),
       db
         .from('li_campaigns')
         .select('id, name, status, daily_invite_limit, invites_sent_today, lead_list_id')
@@ -84,6 +94,12 @@ export async function GET(req: NextRequest) {
       if (s in funnel && s !== 'total') (funnel[s] as number)++;
     }
 
+    // Статус лида по id — для пер-кампанийной воронки. li_leads.status это
+    // общий стейдж лида; per-campaign funnel = воронка по лидам конкретной
+    // кампании (через li_campaign_leads.lead_id).
+    const leadStatusById = new Map<string, string>();
+    for (const lead of leads) leadStatusById.set(lead.id, lead.status);
+
     // --- Per-campaign stats ---
     const campaignStats = campaigns.map((c) => {
       const cls = campaignLeads.filter((cl) => cl.campaign_id === c.id);
@@ -95,9 +111,16 @@ export async function GET(req: NextRequest) {
       const skipped = cls.filter((cl) => cl.status === 'skipped').length;
       const replied = cls.filter((cl) => cl.user_replied).length;
       const accepted = cls.filter((cl) => cl.invite_accepted).length;
+      // Воронка лидов именно этой кампании.
+      const campaignFunnel = emptyFunnel();
+      for (const cl of cls) {
+        const st = leadStatusById.get(cl.lead_id);
+        if (st) addToFunnel(campaignFunnel, st);
+      }
       return {
         id: c.id,
         name: c.name,
+        funnel: campaignFunnel,
         status: c.status,
         daily_invite_limit: c.daily_invite_limit,
         invites_sent_today: c.invites_sent_today,
