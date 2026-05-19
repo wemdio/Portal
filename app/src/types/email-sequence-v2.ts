@@ -7,6 +7,9 @@ export type EmailSequenceV2RunStatus =
   | 'failed'
   | 'cancelled';
 
+/** Язык, на котором генерируются ценности и цепочка писем. */
+export type EmailSequenceV2OutputLanguage = 'ru' | 'en' | 'pl';
+
 export interface EmailSequenceV2RunRow {
   id: string;
   user_id: string;
@@ -26,6 +29,8 @@ export interface EmailSequenceV2RunRow {
 
   values_model: string | null;
   writer_model: string | null;
+
+  output_language: EmailSequenceV2OutputLanguage;
 
   custom_regulation_key: string | null;
   custom_structure_key: string | null;

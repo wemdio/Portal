@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { withToolTrace } from '@/lib/toolTrace';
+import { normalizeOutputLanguage } from '@/lib/emailSequenceV2/prompts';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -44,7 +45,12 @@ export async function POST(req: NextRequest) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return jsonError('Unauthorized', 401);
 
-      let body: { company_name?: string; values_model?: string; writer_model?: string } = {};
+      let body: {
+        company_name?: string;
+        values_model?: string;
+        writer_model?: string;
+        output_language?: string;
+      } = {};
       try {
         body = await req.json();
       } catch {
@@ -57,6 +63,7 @@ export async function POST(req: NextRequest) {
         company_name: body.company_name?.slice(0, 200) ?? null,
         values_model: body.values_model?.slice(0, 120) ?? null,
         writer_model: body.writer_model?.slice(0, 120) ?? null,
+        output_language: normalizeOutputLanguage(body.output_language),
       };
 
       const { data, error } = await supabase
