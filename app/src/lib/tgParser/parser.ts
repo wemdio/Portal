@@ -159,6 +159,31 @@ async function resolveEntityByLink(client: TelegramClient, rawLink: string): Pro
 
   const publicRef = extractPublicChatRefFromMessageLink(link);
   if (publicRef) return client.getEntity(publicRef);
+
+  // Private invite links: t.me/+hash or t.me/joinchat/hash
+  const privateInviteMatch = link.match(/^https?:\/\/(?:t\.me|telegram\.me)\/(?:joinchat\/|\+)([A-Za-z0-9_-]+)/i);
+  if (privateInviteMatch) {
+    const hash = privateInviteMatch[1];
+    try {
+      const info = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+      if (info instanceof Api.ChatInviteAlready) {
+        // Already a member — entity is directly available
+        return info.chat;
+      }
+      // Not yet a member — join the chat
+      const joined = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+      const chats = (joined as { chats?: Api.TypeChat[] }).chats;
+      if (chats?.length) return chats[0];
+    } catch (e) {
+      if (String(e).includes('USER_ALREADY_PARTICIPANT')) {
+        // Joined via another path — warm cache and retry
+        await client.getDialogs({ limit: 500 });
+        return client.getEntity(link);
+      }
+      throw e;
+    }
+  }
+
   return client.getEntity(link);
 }
 

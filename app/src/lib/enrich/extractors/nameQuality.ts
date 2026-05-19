@@ -17,7 +17,7 @@ const VOWEL_RE = /[aeiouyаеёиоуыэюя]/i;
 export function isHashLike(s: string): boolean {
   const t = s.trim();
   if (!t || /\s/.test(t)) return false; // multi-word → not a hash
-  if (/^[0-9a-f]{10,}$/i.test(t)) return true; // pure hex blob
+  if (/^[0-9a-f]{8,}$/i.test(t)) return true; // pure hex blob
   if (t.length >= 14 && /\d/.test(t)) return true; // long token with a digit
   if (t.length >= 24) return true; // implausibly long single word
   return false;
@@ -54,6 +54,12 @@ const NAV_EXACT = new Set<string>([
   'преимущества', 'карьера', 'войти', 'регистрация',
   'политика конфиденциальности', 'согласие на обработку данных',
   'все новости', 'все кейсы', 'все проекты',
+  // section headings that can leak into client name extraction
+  'клиенты', 'наши клиенты', 'партнёры', 'партнеры', 'наши партнёры', 'наши партнеры',
+  'нам доверяют', 'они выбрали нас', 'с нами работают',
+  'clients', 'our clients', 'customers', 'our customers', 'partners', 'trusted by',
+  // CTA / legal boilerplate that appears after client logos
+  'send', 'отправить', 'подробнее', 'узнать больше', 'все клиенты', 'all clients',
 ]);
 
 export function isNavOrCtaText(s: string): boolean {
