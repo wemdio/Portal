@@ -536,13 +536,13 @@ export function ClientBriefForm({
             label="Сайт"
             value={fields.company_website}
             onChange={(v) => update('company_website', v)}
-            placeholder="например, redev.ru"
+            placeholder="например, roga-kopyta.example"
           />
           <TextAreaField
             label="Краткое описание деятельности / компании / товара"
             value={fields.company_description}
             onChange={(v) => update('company_description', v)}
-            placeholder="Группа компаний .redev — технологический партнёр для бизнеса…"
+            placeholder="ООО «Рога и Копыта» — поставщик товаров для бизнеса…"
             rows={5}
           />
           <TextField

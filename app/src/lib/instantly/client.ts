@@ -463,6 +463,7 @@ export async function getEmail(id: string) {
 export async function replyToEmail(body: {
   reply_to_uuid: string;
   eaccount: string;
+  subject: string;
   body: { html?: string; text?: string } | string;
   cc_address_email_list?: string;
   bcc_address_email_list?: string;
@@ -470,7 +471,14 @@ export async function replyToEmail(body: {
   return request<Email>('/emails/reply', { method: 'POST', body });
 }
 
-export async function forwardEmail(body: { email_uuid: string; from_email: string; to_email: string }) {
+export async function forwardEmail(body: {
+  reply_to_uuid: string;
+  eaccount: string;
+  to_address_email_list: string;
+  subject: string;
+  body: { html?: string; text?: string } | string;
+  include_original_body: boolean;
+}) {
   return request<Email>('/emails/forward', { method: 'POST', body });
 }
 

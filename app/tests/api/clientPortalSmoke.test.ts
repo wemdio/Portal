@@ -503,6 +503,21 @@ describe('Client Portal — auth boundary on every endpoint', () => {
     expect((res as Response).status).toBe(401);
   });
 
+  it('GET /api/client/replies → 401', async () => {
+    const { GET } = await import('@/app/api/client/replies/route');
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(401);
+  });
+
+  it('POST /api/client/campaigns/[id]/replies/[emailId]/mark-lead → 401', async () => {
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/mark-lead/route');
+    const res = await POST(
+      makeReq('http://x/api/client/campaigns/c1/replies/e1/mark-lead', { method: 'POST' }),
+      { params: Promise.resolve({ id: 'c1', emailId: 'e1' }) },
+    );
+    expect((res as Response).status).toBe(401);
+  });
+
   it('GET /api/client/leads/[id]/comments → 401', async () => {
     const { GET } = await import('@/app/api/client/leads/[id]/comments/route');
     const res = await GET(makeReq('http://x/api/client/leads/l1/comments'), {
@@ -663,7 +678,24 @@ describe('Client Portal — empty new-user state', () => {
     expect(mockReadCampaignAnalyticsFromDb).not.toHaveBeenCalled();
   });
 
-  it('GET /leads includes raw campaign replies even before they are forwarded as leads', async () => {
+  it('GET /replies returns items: [] when no campaigns granted', async () => {
+    const { GET } = await import('@/app/api/client/replies/route');
+    const res = await GET(makeReq('http://x/api/client/replies'));
+    expect((res as Response).status).toBe(200);
+    const body = (await (res as Response).json()) as {
+      items: unknown[];
+      total: number;
+      limit: number;
+      offset: number;
+    };
+    expect(body.items).toEqual([]);
+    expect(body.total).toBe(0);
+    expect(body.limit).toBe(50);
+    expect(body.offset).toBe(0);
+    expect(mockListEmails).not.toHaveBeenCalled();
+  });
+
+  it('GET /replies includes raw campaign replies before they are marked as leads', async () => {
     authState.accessRows = [
       { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
     ];
@@ -691,8 +723,8 @@ describe('Client Portal — empty new-user state', () => {
       next_starting_after: null,
     });
 
-    const { GET } = await import('@/app/api/client/leads/route');
-    const res = await GET(makeReq('http://x/api/client/leads?limit=30&offset=0'));
+    const { GET } = await import('@/app/api/client/replies/route');
+    const res = await GET(makeReq('http://x/api/client/replies?limit=30&offset=0'));
 
     expect((res as Response).status).toBe(200);
     expect(mockListEmails).toHaveBeenCalledWith(expect.objectContaining({
@@ -719,6 +751,8 @@ describe('Client Portal — empty new-user state', () => {
       thread_id: 'thread-1',
       is_unread: true,
       ai_interest_value: 5,
+      is_lead: false,
+      lead_entry_id: null,
     });
   });
 
@@ -1000,6 +1034,160 @@ describe('Client Portal — RBAC isolation across clients', () => {
     );
     expect((res as Response).status).toBe(404);
     expect(mockForwardEmail).not.toHaveBeenCalled();
+  });
+
+  it('POST /campaigns/[id]/replies/[emailId]/mark-lead of unallowed campaign → 404', async () => {
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/mark-lead/route');
+    const res = await POST(
+      makeReq(
+        `http://x/api/client/campaigns/${FORBIDDEN_CAMPAIGN}/replies/e1/mark-lead`,
+        { method: 'POST' },
+      ),
+      { params: Promise.resolve({ id: FORBIDDEN_CAMPAIGN, emailId: 'e1' }) },
+    );
+    expect((res as Response).status).toBe(404);
+    expect(mockGetEmail).not.toHaveBeenCalled();
+  });
+
+  it('reply sends Instantly-required subject with the body', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      eaccount: 'sender@me.com',
+      subject: 'Intro',
+    });
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/reply/route');
+    const res = await POST(
+      makeJsonReq(
+        `http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/reply`,
+        'POST',
+        { body_text: 'Hi' },
+      ),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(mockReplyToEmail).toHaveBeenCalledWith(expect.objectContaining({
+      reply_to_uuid: 'e1',
+      eaccount: 'sender@me.com',
+      subject: 'Re: Intro',
+      body: { text: 'Hi' },
+    }));
+  });
+
+  it('reply does not double-prefix an existing Re: subject', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      eaccount: 'sender@me.com',
+      subject: 'Re: Intro',
+    });
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/reply/route');
+    const res = await POST(
+      makeJsonReq(
+        `http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/reply`,
+        'POST',
+        { body_text: 'Hi again' },
+      ),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(mockReplyToEmail).toHaveBeenCalledWith(expect.objectContaining({
+      subject: 'Re: Intro',
+      body: { text: 'Hi again' },
+    }));
+  });
+
+  it('forward sends Instantly-required body and include_original_body', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      eaccount: 'sender@me.com',
+      subject: 'Intro',
+    });
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/forward/route');
+    const res = await POST(
+      makeJsonReq(
+        `http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/forward`,
+        'POST',
+        { to_email: 'client@example.com' },
+      ),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+    expect((res as Response).status).toBe(200);
+    expect(mockForwardEmail).toHaveBeenCalledWith(expect.objectContaining({
+      reply_to_uuid: 'e1',
+      eaccount: 'sender@me.com',
+      to_address_email_list: 'client@example.com',
+      subject: 'Fwd: Intro',
+      body: { text: 'Пересылаю письмо ниже.' },
+      include_original_body: true,
+    }));
+  });
+
+  it('mark-lead stores the reply as a client forwarded lead', async () => {
+    mockGetEmail.mockResolvedValueOnce({
+      id: 'e1',
+      campaign_id: ALLOWED_CAMPAIGN,
+      thread_id: 't1',
+      lead: 'l1',
+      subject: 'Re: Intro',
+      body: { text: 'Interested, send details.' },
+      from_address_email: 'lead@example.com',
+      from_address_json: [{ address: 'lead@example.com', name: 'Lead Person' }],
+      timestamp_email: '2026-05-19T10:00:00.000Z',
+      ue_type: 2,
+    });
+    mockReadCampaignAnalyticsFromDb.mockResolvedValueOnce({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    dbState.rowsByTable.client_campaign_leads = [
+      {
+        client_user_id: AUTH_USER_ID,
+        email: 'lead@example.com',
+        first_name: 'Lead',
+        last_name: 'Person',
+        company_name: 'Acme',
+        website: 'acme.com',
+        linkedin_url: 'linkedin.com/in/lead',
+      },
+    ];
+
+    const { POST } = await import('@/app/api/client/campaigns/[id]/replies/[emailId]/mark-lead/route');
+    const res = await POST(
+      makeReq(
+        `http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}/replies/e1/mark-lead`,
+        { method: 'POST' },
+      ),
+      { params: Promise.resolve({ id: ALLOWED_CAMPAIGN, emailId: 'e1' }) },
+    );
+
+    expect((res as Response).status).toBe(201);
+    expect(dbState.insertCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'client_forwarded_leads',
+        payload: expect.objectContaining({
+          client_user_id: AUTH_USER_ID,
+          forwarded_by: AUTH_USER_ID,
+          campaign_id: ALLOWED_CAMPAIGN,
+          campaign_name: 'Allowed Campaign',
+          lead_email: 'lead@example.com',
+          lead_name: 'Lead Person',
+          company_name: 'Acme',
+          reply_subject: 'Re: Intro',
+          reply_body: 'Interested, send details.',
+          reply_timestamp: '2026-05-19T10:00:00.000Z',
+          status: 'lead',
+          forwarded_via: 'portal',
+        }),
+      }),
+    ]));
   });
 
   it('POST /campaigns/[id]/activate of unallowed campaign → 404', async () => {
