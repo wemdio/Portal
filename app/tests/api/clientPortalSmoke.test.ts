@@ -159,6 +159,7 @@ interface AuthState {
   errorStatus: number;
   errorMessage: string;
   accessRows: Array<{ resource_type: 'campaign' | 'lead_list'; resource_id: string }>;
+  isDemo: boolean;
 }
 
 const authState: AuthState = {
@@ -166,6 +167,7 @@ const authState: AuthState = {
   errorStatus: 401,
   errorMessage: 'Unauthorized',
   accessRows: [],
+  isDemo: false,
 };
 
 jest.mock('@/lib/clientApiHelper', () => {
@@ -186,6 +188,7 @@ jest.mock('@/lib/clientApiHelper', () => {
         auth: {
           userId: AUTH_USER_ID,
           accessRows: authState.accessRows,
+          isDemo: authState.isDemo,
         },
       };
     }),
@@ -314,6 +317,7 @@ beforeEach(() => {
   authState.errorStatus = 401;
   authState.errorMessage = 'Unauthorized';
   authState.accessRows = [];
+  authState.isDemo = false;
 
   mockGetCampaign.mockReset();
   mockGetCampaignAnalytics.mockReset().mockResolvedValue([]);
@@ -1076,6 +1080,29 @@ describe('Client Portal — RBAC isolation across clients', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('Client Portal — reports scope validation', () => {
+  it('POST /reports in demo mode only includes selected campaigns', async () => {
+    authState.isDemo = true;
+    const { POST } = await import('@/app/api/client/reports/route');
+    const res = await POST(
+      makeJsonReq('http://x/api/client/reports', 'POST', {
+        campaignIds: ['demo-cmp-retail', 'demo-cmp-3pl'],
+      }),
+    );
+
+    expect((res as Response).status).toBe(200);
+    const body = (await (res as Response).json()) as {
+      rows: (string | number)[][];
+      summary: { totalCampaigns: number; totalEmailsSent: number; totalReplies: number };
+    };
+    expect(body.summary.totalCampaigns).toBe(2);
+    expect(body.summary.totalEmailsSent).toBe(2960);
+    expect(body.summary.totalReplies).toBe(115);
+    expect(body.rows.slice(1).map((row) => row[1])).toEqual([
+      'Орбита — розничные сети',
+      'Орбита — 3PL и фулфилмент',
+    ]);
+  });
+
   it('POST /reports with no granted campaigns and no requested IDs → 400', async () => {
     authState.accessRows = [];
     const { POST } = await import('@/app/api/client/reports/route');
