@@ -20,6 +20,14 @@ export async function GET(req: NextRequest) {
 
       const limit = Math.min(100, Math.max(1, Number(req.nextUrl.searchParams.get('limit')) || 50));
 
+      // Try lightweight RPC (no result_users payload) — falls back to full select if RPC not deployed yet
+      const { data: rpcData, error: rpcError } = await supabase.rpc('tg_parser_jobs_list', { row_limit: limit });
+
+      if (!rpcError) {
+        return NextResponse.json({ items: rpcData ?? [] });
+      }
+
+      // Fallback: full select (before migration is applied)
       const { data, error } = await supabase
         .from('tg_parser_jobs')
         .select(
