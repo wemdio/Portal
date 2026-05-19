@@ -1,11 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Download } from 'lucide-react';
 import { authFetchJson } from '@/lib/authFetch';
 import type {
   SalesChatAccountRow,
   SalesChatAccountStatus,
-  SalesChatBackfillStatus,
+  SalesChatSyncRunRow,
 } from '@/types';
 
 const API = '/api/tools/sales-chat-analyzer';
@@ -50,6 +51,40 @@ function formatDate(value: string | null | undefined): string {
   });
 }
 
+function safeTxtFilename(title: string | null, tgPeerId: number): string {
+  const base =
+    (title?.trim() ? title.replace(/[/\\?%*:|"<>[\]\n\r\t]/g, '_').slice(0, 80) : '') ||
+    `dialog_${tgPeerId}`;
+  return `${base}.txt`;
+}
+
+function buildMessagesTxt(dialog: DialogRow, messages: MessageRow[]): string {
+  const title = dialog.peer_title ?? `Диалог ${dialog.tg_peer_id}`;
+  const lines = messages.map((m) => {
+    const who = m.sender_name ?? (m.direction === 'out' ? 'Менеджер' : 'Собеседник');
+    const when = formatDate(m.sent_at);
+    const parts: string[] = [];
+    if (m.text?.trim()) parts.push(m.text.trim());
+    if (m.media_type) parts.push(`[${m.media_type}]`);
+    const body = parts.length > 0 ? parts.join('\n') : '(пустое сообщение)';
+    return `[${when}] ${who}\n${body}`;
+  });
+  return `${title}\n${'─'.repeat(48)}\n\n${lines.join('\n\n')}\n`;
+}
+
+function downloadTextFile(filename: string, content: string): void {
+  const blob = new Blob([`\uFEFF${content}`], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function statusBadge(s: SalesChatAccountStatus): { label: string; cls: string } {
   switch (s) {
     case 'active':
@@ -63,25 +98,44 @@ function statusBadge(s: SalesChatAccountStatus): { label: string; cls: string } 
   }
 }
 
-function backfillLabel(s: SalesChatBackfillStatus, done: number, total: number | null): string {
-  switch (s) {
+function accountSyncLabel(acc: AccountListRow): string {
+  switch (acc.backfill_status) {
     case 'pending':
-      return 'Бэкфилл в очереди';
+      return 'Ожидает синхронизации';
     case 'running':
-      return `Бэкфилл: ${done}${total != null ? ` / ${total}` : ''} диалогов`;
+      return `Синхронизация: ${acc.backfill_dialogs_done}${
+        acc.backfill_dialogs_total != null ? ` / ${acc.backfill_dialogs_total}` : ''
+      } диалогов`;
     case 'done':
-      return 'История загружена';
+      return acc.last_synced_at
+        ? `Синхронизировано: ${formatDate(acc.last_synced_at)}`
+        : 'Синхронизировано';
     case 'error':
-      return 'Ошибка бэкфилла';
+      return 'Ошибка синхронизации';
     default:
-      return String(s);
+      return String(acc.backfill_status);
   }
+}
+
+/** Текст статуса синхронизации по последним запускам. */
+function syncStatusText(runs: SalesChatSyncRunRow[]): string {
+  const latest = runs[0];
+  if (latest && (latest.status === 'pending' || latest.status === 'running')) {
+    return `Идёт синхронизация… ${latest.accounts_done}${
+      latest.accounts_total != null ? ` / ${latest.accounts_total}` : ''
+    } аккаунтов`;
+  }
+  const lastDone = runs.find((r) => r.status === 'done');
+  if (lastDone) return `Последняя синхронизация: ${formatDate(lastDone.finished_at)}`;
+  if (runs.some((r) => r.status === 'error')) return 'Последняя синхронизация завершилась ошибкой';
+  return 'Синхронизаций ещё не было';
 }
 
 export function SalesChatAnalyzerView() {
   const [accounts, setAccounts] = useState<AccountListRow[]>([]);
   const [dialogs, setDialogs] = useState<DialogRow[]>([]);
   const [messages, setMessages] = useState<MessageRow[]>([]);
+  const [syncRuns, setSyncRuns] = useState<SalesChatSyncRunRow[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [selectedDialog, setSelectedDialog] = useState<DialogRow | null>(null);
   const [dialogQuery, setDialogQuery] = useState('');
@@ -118,21 +172,49 @@ export function SalesChatAnalyzerView() {
     setMessages(data.messages ?? []);
   }, []);
 
+  const loadSync = useCallback(async () => {
+    const data = await authFetchJson<{ runs: SalesChatSyncRunRow[] }>(`${API}/sync`, { method: 'GET' });
+    setSyncRuns(data.runs ?? []);
+  }, []);
+
+  const triggerSync = useCallback(async () => {
+    if (
+      !window.confirm(
+        'Синхронизация и так выполняется автоматически каждую ночь в 01:00 МСК.\n\n' +
+          'Запустить выгрузку прямо сейчас?',
+      )
+    ) {
+      return;
+    }
+    setBusy('sync');
+    setError(null);
+    try {
+      await authFetchJson(`${API}/sync`, { method: 'POST' });
+      await loadSync();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setBusy(null);
+    }
+  }, [loadSync]);
+
   useEffect(() => {
     if (initialLoaded.current) return;
     initialLoaded.current = true;
     loadAccounts().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка'));
-  }, [loadAccounts]);
+    loadSync().catch(() => {});
+  }, [loadAccounts, loadSync]);
 
   // Периодическое обновление: статусы аккаунтов, диалоги, сообщения открытого диалога.
   useEffect(() => {
     const timer = window.setInterval(() => {
       loadAccounts().catch(() => {});
+      loadSync().catch(() => {});
       if (selectedAccount) loadDialogs(selectedAccount, dialogQuery).catch(() => {});
       if (selectedDialog) loadMessages(selectedDialog.id).catch(() => {});
     }, POLL_MS);
     return () => window.clearInterval(timer);
-  }, [loadAccounts, loadDialogs, loadMessages, selectedAccount, selectedDialog, dialogQuery]);
+  }, [loadAccounts, loadSync, loadDialogs, loadMessages, selectedAccount, selectedDialog, dialogQuery]);
 
   const selectAccount = useCallback(
     async (accountId: string) => {
@@ -260,7 +342,12 @@ export function SalesChatAnalyzerView() {
 
   const deleteAccount = useCallback(
     async (acc: AccountListRow) => {
-      if (!window.confirm(`Удалить аккаунт «${acc.label ?? acc.phone}» со всеми перепиской? Это необратимо.`)) {
+      if (
+        !window.confirm(
+          `Удалить аккаунт «${acc.label ?? acc.phone}»? ` +
+            'Захват остановится, но уже выгруженные переписки останутся в базе.',
+        )
+      ) {
         return;
       }
       setBusy(acc.id);
@@ -283,22 +370,31 @@ export function SalesChatAnalyzerView() {
     [loadAccounts, selectedAccount],
   );
 
+  const downloadChatTxt = useCallback(() => {
+    if (!selectedDialog || messages.length === 0) return;
+    const name = safeTxtFilename(selectedDialog.peer_title, selectedDialog.tg_peer_id);
+    downloadTextFile(name, buildMessagesTxt(selectedDialog, messages));
+  }, [selectedDialog, messages]);
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Анализатор сейлз-переписок</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Подключите Telegram-аккаунты сейлз-менеджеров — все диалоги пишутся в базу
-            (полная история + новые сообщения в реальном времени).
-          </p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Анализатор сейлз-переписок</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Подключите Telegram-аккаунты сейлз-менеджеров — все диалоги выгружаются в базу.
+          Синхронизация выполняется автоматически каждую ночь в 01:00 МСК.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
+        <div className="text-sm text-gray-600">{syncStatusText(syncRuns)}</div>
         <button
           type="button"
-          onClick={() => setConnectOpen(true)}
-          className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+          onClick={triggerSync}
+          disabled={busy != null}
+          className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
         >
-          + Подключить аккаунт
+          {busy === 'sync' ? 'Запуск…' : 'Выгрузить сейчас'}
         </button>
       </div>
 
@@ -404,8 +500,17 @@ export function SalesChatAnalyzerView() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Колонка 1: аккаунты */}
-        <div className="lg:col-span-4 rounded-2xl border border-gray-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">Аккаунты ({accounts.length})</h2>
+        <div className="lg:col-span-2 rounded-2xl border border-gray-200 bg-white p-4">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <h2 className="text-sm font-semibold text-gray-900">Аккаунты ({accounts.length})</h2>
+            <button
+              type="button"
+              onClick={() => setConnectOpen(true)}
+              className="inline-flex items-center rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+            >
+              + Подключить аккаунт
+            </button>
+          </div>
           <div className="space-y-2 max-h-[560px] overflow-y-auto pr-1">
             {accounts.length === 0 ? (
               <div className="text-sm text-gray-500">Нет подключённых аккаунтов.</div>
@@ -415,35 +520,43 @@ export function SalesChatAnalyzerView() {
                 return (
                   <div
                     key={acc.id}
-                    className={`rounded-xl border p-3 text-sm transition ${
-                      selectedAccount === acc.id ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-white'
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => selectAccount(acc.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        selectAccount(acc.id);
+                      }
+                    }}
+                    className={`cursor-pointer rounded-xl border p-3 text-sm transition ${
+                      selectedAccount === acc.id
+                        ? 'border-blue-300 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:bg-gray-50'
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => selectAccount(acc.id)}
-                      className="w-full text-left"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium text-gray-900 truncate">
-                          {acc.label ?? acc.phone}
-                        </span>
-                        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badge.cls}`}>
-                          {badge.label}
-                        </span>
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">{acc.phone}</div>
-                      <div className="mt-1 text-xs text-gray-500">
-                        {backfillLabel(acc.backfill_status, acc.backfill_dialogs_done, acc.backfill_dialogs_total)}
-                      </div>
-                      {acc.last_error ? (
-                        <div className="mt-1 text-xs text-red-600 truncate">{acc.last_error}</div>
-                      ) : null}
-                    </button>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-gray-900 truncate">
+                        {acc.label ?? acc.phone}
+                      </span>
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badge.cls}`}>
+                        {badge.label}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">{acc.phone}</div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      {accountSyncLabel(acc)}
+                    </div>
+                    {acc.last_error ? (
+                      <div className="mt-1 text-xs text-red-600 truncate">{acc.last_error}</div>
+                    ) : null}
                     <div className="mt-2 flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => toggleAccount(acc)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleAccount(acc);
+                        }}
                         disabled={busy === acc.id}
                         className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                       >
@@ -451,7 +564,10 @@ export function SalesChatAnalyzerView() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => deleteAccount(acc)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteAccount(acc);
+                        }}
                         disabled={busy === acc.id}
                         className="rounded-lg border border-red-200 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                       >
@@ -512,10 +628,22 @@ export function SalesChatAnalyzerView() {
         </div>
 
         {/* Колонка 3: сообщения */}
-        <div className="lg:col-span-5 rounded-2xl border border-gray-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">
-            {selectedDialog ? selectedDialog.peer_title ?? `Диалог ${selectedDialog.tg_peer_id}` : 'Переписка'}
-          </h2>
+        <div className="lg:col-span-7 rounded-2xl border border-gray-200 bg-white p-4">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <h2 className="text-sm font-semibold text-gray-900 min-w-0 flex-1">
+              {selectedDialog ? selectedDialog.peer_title ?? `Диалог ${selectedDialog.tg_peer_id}` : 'Переписка'}
+            </h2>
+            <button
+              type="button"
+              onClick={downloadChatTxt}
+              disabled={!selectedDialog || messages.length === 0}
+              title="Скачать всю переписку в текстовый файл"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              Скачать .txt
+            </button>
+          </div>
           {!selectedDialog ? (
             <div className="text-sm text-gray-500">Выберите диалог.</div>
           ) : messages.length === 0 ? (

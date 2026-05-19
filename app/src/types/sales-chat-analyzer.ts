@@ -4,6 +4,8 @@ export type SalesChatAccountStatus = 'active' | 'auth_error' | 'disabled';
 export type SalesChatBackfillStatus = 'pending' | 'running' | 'done' | 'error';
 export type SalesChatPeerType = 'user' | 'chat' | 'channel';
 export type SalesChatDirection = 'in' | 'out';
+export type SalesChatSyncTrigger = 'manual' | 'scheduled';
+export type SalesChatSyncStatus = 'pending' | 'running' | 'done' | 'error';
 
 export interface SalesChatAccountRow {
   id: string;
@@ -25,15 +27,31 @@ export interface SalesChatAccountRow {
 
   last_connected_at: string | null;
   last_event_at: string | null;
+  last_synced_at: string | null;
   last_error: string | null;
 
   created_at: string;
   updated_at: string;
 }
 
+export interface SalesChatSyncRunRow {
+  id: string;
+  trigger: SalesChatSyncTrigger;
+  sync_date: string;
+  status: SalesChatSyncStatus;
+  requested_by: string | null;
+  accounts_total: number | null;
+  accounts_done: number;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface SalesChatDialogRow {
   id: string;
-  account_id: string;
+  // null, если аккаунт был удалён (переписка сохраняется в базе).
+  account_id: string | null;
   tg_peer_id: number;
   peer_type: SalesChatPeerType;
   peer_title: string | null;
@@ -46,7 +64,8 @@ export interface SalesChatDialogRow {
 
 export interface SalesChatMessageRow {
   id: string;
-  account_id: string;
+  // null, если аккаунт был удалён (переписка сохраняется в базе).
+  account_id: string | null;
   dialog_id: string;
   tg_message_id: number;
   tg_peer_id: number;

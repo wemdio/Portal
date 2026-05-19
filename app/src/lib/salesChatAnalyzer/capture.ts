@@ -7,8 +7,8 @@ import { mapMessage, bigToNum, type MappedMessage } from './messageMapper';
 /** Простой логгер, совместимый с WorkerLogger воркера. */
 type LogFn = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
 
-/** Сколько максимум сообщений выкачивать на один диалог при бэкфилле. */
-const MAX_BACKFILL_MESSAGES_PER_DIALOG = 5000;
+/** Максимум сообщений на диалог при ПОЛНОЙ выгрузке (инкремент не ограничен). */
+const MAX_MESSAGES_PER_DIALOG = 5000;
 /** Размер батча для вставки сообщений. */
 const INSERT_BATCH = 200;
 
@@ -59,6 +59,18 @@ export function extractPeer(entity: unknown): PeerInfo | null {
     };
   }
   return null;
+}
+
+/** Дата (unix-секунды) последнего сообщения диалога, если известна. */
+function dialogLastDate(dialog: { message?: { date?: number } | null; date?: number }): number | null {
+  const d = dialog.message?.date ?? dialog.date;
+  return typeof d === 'number' ? d : null;
+}
+
+/** Дата (unix-секунды) произвольного Telegram-сообщения. */
+function rawMessageDate(msg: unknown): number | null {
+  const d = (msg as { date?: number }).date;
+  return typeof d === 'number' ? d : null;
 }
 
 /** Создаёт/обновляет строку диалога, возвращает её id. */
@@ -136,84 +148,76 @@ async function insertMessages(admin: SupabaseClient, rows: ReturnType<typeof toR
 }
 
 /**
- * Полный бэкфилл истории: перебирает все диалоги аккаунта и выкачивает сообщения.
- * Обновляет backfill_* поля аккаунта по ходу.
+ * Синхронизирует переписки аккаунта.
+ * sinceUnix = 0 — полная выгрузка истории (первый запуск).
+ * sinceUnix > 0 — инкремент: тянем только сообщения новее этой отметки;
+ *   диалоги без новой активности пропускаются целиком.
  */
-export async function backfillAccount(opts: {
+export async function syncAccount(opts: {
   admin: SupabaseClient;
   account: SalesChatAccountLite;
   client: TelegramClient;
   selfName: string;
+  sinceUnix: number;
   log: LogFn;
 }): Promise<void> {
-  const { admin, account, client, selfName, log } = opts;
+  const { admin, account, client, selfName, sinceUnix, log } = opts;
 
-  const dialogs: Array<{ entity: unknown }> = [];
+  const dialogs: Array<{ entity: unknown; lastDate: number | null }> = [];
   for await (const dialog of client.iterDialogs({})) {
-    dialogs.push({ entity: dialog.entity });
+    dialogs.push({ entity: dialog.entity, lastDate: dialogLastDate(dialog) });
   }
 
   await admin
     .from('sales_chat_accounts')
     .update({ backfill_dialogs_total: dialogs.length, backfill_dialogs_done: 0 })
     .eq('id', account.id);
-  log('info', `[${account.id}] backfill: ${dialogs.length} dialogs`);
+  log('info', `[${account.id}] sync: ${dialogs.length} dialogs (since=${sinceUnix})`);
 
   let done = 0;
-  for (const { entity } of dialogs) {
+  for (const { entity, lastDate } of dialogs) {
     const peer = extractPeer(entity);
     if (peer) {
       try {
         const dialogId = await upsertDialog(admin, account.id, peer);
-        let batch: ReturnType<typeof toRow>[] = [];
-        for await (const msg of client.iterMessages(
-          entity as Parameters<typeof client.iterMessages>[0],
-          { limit: MAX_BACKFILL_MESSAGES_PER_DIALOG },
-        )) {
-          const mapped = mapMessage(msg);
-          if (!mapped) continue;
-          batch.push(toRow(mapped, account.id, dialogId, peer, selfName));
-          if (batch.length >= INSERT_BATCH) {
-            await insertMessages(admin, batch);
-            batch = [];
+        // Инкремент: если в диалоге нет ничего нового — пропускаем сообщения.
+        const unchanged = sinceUnix > 0 && lastDate !== null && lastDate <= sinceUnix;
+        if (!unchanged) {
+          let batch: ReturnType<typeof toRow>[] = [];
+          let inserted = false;
+          for await (const msg of client.iterMessages(
+            entity as Parameters<typeof client.iterMessages>[0],
+            { limit: MAX_MESSAGES_PER_DIALOG },
+          )) {
+            // iterMessages идёт от новых к старым — на старых обрываем инкремент.
+            const msgDate = rawMessageDate(msg);
+            if (sinceUnix > 0 && msgDate !== null && msgDate <= sinceUnix) break;
+            const mapped = mapMessage(msg);
+            if (!mapped) continue;
+            batch.push(toRow(mapped, account.id, dialogId, peer, selfName));
+            if (batch.length >= INSERT_BATCH) {
+              await insertMessages(admin, batch);
+              batch = [];
+              inserted = true;
+            }
           }
+          if (batch.length) {
+            await insertMessages(admin, batch);
+            inserted = true;
+          }
+          if (inserted) await recountDialog(admin, dialogId);
         }
-        await insertMessages(admin, batch);
-        await recountDialog(admin, dialogId);
       } catch (err) {
-        log('warn', `[${account.id}] backfill dialog ${peer.tg_peer_id} failed`, err);
+        log('warn', `[${account.id}] sync dialog ${peer.tg_peer_id} failed`, err);
       }
     }
     done += 1;
-    if (done % 5 === 0 || done === dialogs.length) {
+    if (done % 10 === 0 || done === dialogs.length) {
       await admin
         .from('sales_chat_accounts')
         .update({ backfill_dialogs_done: done })
         .eq('id', account.id);
     }
   }
-  log('info', `[${account.id}] backfill done (${done} dialogs)`);
-}
-
-/** Записывает одно «живое» сообщение (из обработчика NewMessage). */
-export async function persistLiveMessage(opts: {
-  admin: SupabaseClient;
-  account: SalesChatAccountLite;
-  chat: unknown;
-  msg: unknown;
-  selfName: string;
-}): Promise<void> {
-  const { admin, account, chat, msg, selfName } = opts;
-  const mapped = mapMessage(msg);
-  if (!mapped) return;
-  const peer = extractPeer(chat);
-  if (!peer) return;
-
-  const dialogId = await upsertDialog(admin, account.id, peer);
-  await insertMessages(admin, [toRow(mapped, account.id, dialogId, peer, selfName)]);
-  await recountDialog(admin, dialogId);
-  await admin
-    .from('sales_chat_accounts')
-    .update({ last_event_at: new Date().toISOString() })
-    .eq('id', account.id);
+  log('info', `[${account.id}] sync done (${done} dialogs)`);
 }

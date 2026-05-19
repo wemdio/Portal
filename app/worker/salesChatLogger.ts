@@ -1,39 +1,50 @@
 /**
  * Воркер «Анализатор сейлз-переписок».
  *
- * Держит постоянные MTProto-соединения для всех active-аккаунтов
- * (таблица sales_chat_accounts), сверяя БД ↔ память каждые RECONCILE_MS.
- * Для каждого аккаунта:
- *   - live-обработчик NewMessage пишет сообщения в реальном времени;
- *   - при backfill_status='pending' прогоняется полный бэкфилл истории.
+ * Плановая синхронизация переписок в 01:00 МСК + ручной запуск
+ * (через таблицу-очередь sales_chat_sync_runs). Каждый запуск проходит
+ * по всем active-аккаунтам и инкрементально дотягивает новые сообщения
+ * (первый запуск аккаунта — полная история).
  *
  * ПОЛНОСТЬЮ ИЗОЛИРОВАН от tgParser / tgOutreach / tgTranscribe и аккаунта «Лёши».
  */
 
 import { Api, type TelegramClient } from 'telegram';
-import { NewMessage, type NewMessageEvent } from 'telegram/events';
 import { createSalesChatClient } from '@/lib/salesChatAnalyzer/gramClient';
 import { unsealSession } from '@/lib/salesChatAnalyzer/session';
-import { backfillAccount, persistLiveMessage, type SalesChatAccountLite } from '@/lib/salesChatAnalyzer/capture';
-import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
+import { syncAccount } from '@/lib/salesChatAnalyzer/capture';
+import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown } from './_shared';
 
-const RECONCILE_MS = 15_000;
+const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
+/** Час МСК, после которого создаётся плановый запуск синхронизации. */
+const SCHEDULED_HOUR_MSK = 1;
 const WORKER_ID = `sales-chat-logger-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
-interface ConnectedAccount {
-  client: TelegramClient;
-  account: SalesChatAccountLite;
-  selfName: string;
+interface AccountRow {
+  id: string;
+  label: string | null;
+  tg_user_id: number | null;
+  session_sealed: string;
+  last_synced_at: string | null;
+}
+interface SyncRun {
+  id: string;
+  trigger: string;
 }
 
-const connected = new Map<string, ConnectedAccount>();
-const backfillsInFlight = new Set<string>();
-
+function mskNow(): Date {
+  return new Date(Date.now() + 3 * 60 * 60 * 1000);
+}
+function mskDateStr(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 function isAuthError(msg: string): boolean {
   return /AUTH_KEY_UNREGISTERED|SESSION_REVOKED|USER_DEACTIVATED|AUTH_KEY_DUPLICATED|UNAUTHORIZED/i.test(msg);
 }
-
 function selfDisplayName(me: unknown, fallback: string): string {
   if (me instanceof Api.User) {
     const name = [me.firstName, me.lastName].filter(Boolean).join(' ').trim();
@@ -42,176 +53,176 @@ function selfDisplayName(me: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Сбрасывает зависший backfill_status='running' в 'pending' после рестарта. */
+/** Возвращает зависшие запуски/аккаунты в очередь после рестарта. */
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const { data } = await db
-    .from('sales_chat_accounts')
-    .update({ backfill_status: 'pending' })
-    .eq('backfill_status', 'running')
-    .select('id');
-  if (data?.length) log('info', `Startup recovery: reset ${data.length} backfills to pending`);
+  await db.from('sales_chat_sync_runs').update({ status: 'pending' }).eq('status', 'running');
+  await db.from('sales_chat_accounts').update({ backfill_status: 'pending' }).eq('backfill_status', 'running');
 }
 
-async function markAuthError(accountId: string, message: string): Promise<void> {
+/** Создаёт плановый запуск на сегодня (МСК), если его ещё нет. */
+async function ensureScheduledRun(): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  await db
-    .from('sales_chat_accounts')
-    .update({ status: 'auth_error', last_error: message.slice(0, 500) })
-    .eq('id', accountId);
+  const msk = mskNow();
+  if (msk.getUTCHours() < SCHEDULED_HOUR_MSK) return;
+  const date = mskDateStr(msk);
+
+  const { data: existing } = await db
+    .from('sales_chat_sync_runs')
+    .select('id')
+    .eq('trigger', 'scheduled')
+    .eq('sync_date', date)
+    .maybeSingle();
+  if (existing) return;
+
+  const { error } = await db
+    .from('sales_chat_sync_runs')
+    .insert({ trigger: 'scheduled', sync_date: date, status: 'pending' });
+  // Уникальный индекс по (sync_date) where trigger='scheduled' защищает от гонок.
+  if (error && !/duplicate|unique/i.test(error.message)) {
+    log('warn', 'ensureScheduledRun insert failed', error);
+  } else if (!error) {
+    log('info', `Scheduled sync run created for ${date}`);
+  }
 }
 
-/** Фоновый бэкфилл истории аккаунта. */
-function startBackfill(entry: ConnectedAccount): void {
-  const { account, client, selfName } = entry;
-  if (backfillsInFlight.has(account.id)) return;
-  backfillsInFlight.add(account.id);
-
-  void (async () => {
-    const db = requireSupabaseAdmin(log);
-    try {
-      await db.from('sales_chat_accounts').update({ backfill_status: 'running' }).eq('id', account.id);
-      await backfillAccount({ admin: db, account, client, selfName, log });
-      await db.from('sales_chat_accounts').update({ backfill_status: 'done' }).eq('id', account.id);
-      log('info', `[${account.id}] backfill complete`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log('error', `[${account.id}] backfill failed`, err);
-      await db
-        .from('sales_chat_accounts')
-        .update({ backfill_status: 'error', last_error: msg.slice(0, 500) })
-        .eq('id', account.id);
-    } finally {
-      backfillsInFlight.delete(account.id);
-    }
-  })();
-}
-
-/** Подключает аккаунт: соединение, live-обработчик, бэкфилл при необходимости. */
-async function connectAccount(row: {
-  id: string;
-  label: string | null;
-  tg_user_id: number | null;
-  session_sealed: string;
-  backfill_status: string;
-}): Promise<void> {
+/** Атомарно забирает один pending-запуск. */
+async function claimRun(): Promise<SyncRun | null> {
   const db = requireSupabaseAdmin(log);
-  let client: TelegramClient;
+  const { data: pending } = await db
+    .from('sales_chat_sync_runs')
+    .select('id, trigger')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (!pending) return null;
+
+  const { data: claimed } = await db
+    .from('sales_chat_sync_runs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', pending.id)
+    .eq('status', 'pending')
+    .select('id, trigger')
+    .maybeSingle();
+  return (claimed as SyncRun) ?? null;
+}
+
+/** Синхронизирует один аккаунт; возвращает true при успехе. */
+async function syncOneAccount(acc: AccountRow): Promise<boolean> {
+  const db = requireSupabaseAdmin(log);
+  let client: TelegramClient | null = null;
   try {
-    client = createSalesChatClient(unsealSession(row.session_sealed));
+    await db.from('sales_chat_accounts').update({ backfill_status: 'running' }).eq('id', acc.id);
+
+    client = createSalesChatClient(unsealSession(acc.session_sealed));
     await client.connect();
-    if (!(await client.isUserAuthorized())) {
-      throw new Error('AUTH_KEY_UNREGISTERED: сессия недействительна');
+    if (!(await client.isUserAuthorized())) throw new Error('AUTH_KEY_UNREGISTERED: сессия недействительна');
+
+    let selfName = acc.label ?? 'Аккаунт';
+    try {
+      selfName = selfDisplayName(await client.getMe(), selfName);
+    } catch {
+      // мета не критична
     }
+
+    const sinceUnix = acc.last_synced_at
+      ? Math.floor(new Date(acc.last_synced_at).getTime() / 1000)
+      : 0;
+    // Точку отсчёта фиксируем ДО синка — сообщения, пришедшие во время синка,
+    // не потеряются (попадут в следующий запуск).
+    const startedAt = new Date().toISOString();
+
+    await syncAccount({
+      admin: db,
+      account: { id: acc.id, tg_user_id: acc.tg_user_id, label: acc.label },
+      client,
+      selfName,
+      sinceUnix,
+      log,
+    });
+
+    await db
+      .from('sales_chat_accounts')
+      .update({
+        backfill_status: 'done',
+        last_synced_at: startedAt,
+        last_connected_at: new Date().toISOString(),
+        last_error: null,
+      })
+      .eq('id', acc.id);
+    return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log('warn', `[${row.id}] connect failed: ${msg}`);
-    if (isAuthError(msg)) await markAuthError(row.id, msg);
-    return;
+    log('error', `[${acc.id}] sync failed`, err);
+    const patch: Record<string, unknown> = { backfill_status: 'error', last_error: msg.slice(0, 500) };
+    if (isAuthError(msg)) patch.status = 'auth_error';
+    await db.from('sales_chat_accounts').update(patch).eq('id', acc.id);
+    return false;
+  } finally {
+    if (client) await client.disconnect().catch(() => {});
   }
-
-  const account: SalesChatAccountLite = {
-    id: row.id,
-    tg_user_id: row.tg_user_id,
-    label: row.label,
-  };
-  let selfName = row.label ?? 'Аккаунт';
-  try {
-    selfName = selfDisplayName(await client.getMe(), selfName);
-  } catch {
-    // не критично
-  }
-
-  const entry: ConnectedAccount = { client, account, selfName };
-
-  // Live-обработчик: пишет каждое новое сообщение (входящее и исходящее).
-  client.addEventHandler(async (event: NewMessageEvent) => {
-    try {
-      const chat = await event.getChat();
-      await persistLiveMessage({ admin: db, account, chat, msg: event.message, selfName });
-    } catch (err) {
-      log('warn', `[${row.id}] live message failed`, err);
-    }
-  }, new NewMessage({}));
-
-  connected.set(row.id, entry);
-  await db
-    .from('sales_chat_accounts')
-    .update({ last_connected_at: new Date().toISOString(), last_error: null })
-    .eq('id', row.id);
-  log('info', `[${row.id}] connected (${selfName})`);
-
-  if (row.backfill_status === 'pending') startBackfill(entry);
 }
 
-async function disconnectAccount(accountId: string): Promise<void> {
-  const entry = connected.get(accountId);
-  if (!entry) return;
-  connected.delete(accountId);
-  await entry.client.disconnect().catch(() => {});
-  log('info', `[${accountId}] disconnected`);
-}
-
-/** Сверяет список active-аккаунтов в БД с реально подключёнными. */
-async function reconcile(): Promise<void> {
+/** Прогоняет синхронизацию по всем активным аккаунтам. */
+async function runSync(run: SyncRun): Promise<void> {
   const db = requireSupabaseAdmin(log);
-  const { data: rows, error } = await db
+  const { data: accounts } = await db
     .from('sales_chat_accounts')
-    .select('id,label,tg_user_id,session_sealed,backfill_status')
+    .select('id, label, tg_user_id, session_sealed, last_synced_at')
     .eq('status', 'active');
-  if (error) {
-    log('error', 'reconcile: failed to load accounts', error);
-    return;
+
+  const list = (accounts ?? []) as AccountRow[];
+  await db
+    .from('sales_chat_sync_runs')
+    .update({ accounts_total: list.length, accounts_done: 0 })
+    .eq('id', run.id);
+  log('info', `Sync run ${run.id} (${run.trigger}): ${list.length} accounts`);
+
+  let done = 0;
+  for (const acc of list) {
+    await syncOneAccount(acc);
+    done += 1;
+    await db.from('sales_chat_sync_runs').update({ accounts_done: done }).eq('id', run.id);
   }
 
-  const desired = new Set((rows ?? []).map((r) => r.id as string));
+  await db
+    .from('sales_chat_sync_runs')
+    .update({ status: 'done', finished_at: new Date().toISOString() })
+    .eq('id', run.id);
+  log('info', `Sync run ${run.id} done`);
+}
 
-  // Отключаем то, что больше не active.
-  for (const accountId of [...connected.keys()]) {
-    if (!desired.has(accountId)) await disconnectAccount(accountId);
+async function pollOnce(): Promise<boolean> {
+  await ensureScheduledRun();
+  const run = await claimRun();
+  if (!run) return false;
+  try {
+    await runSync(run);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log('error', `Sync run ${run.id} crashed`, err);
+    await requireSupabaseAdmin(log)
+      .from('sales_chat_sync_runs')
+      .update({ status: 'error', error_message: msg.slice(0, 500), finished_at: new Date().toISOString() })
+      .eq('id', run.id);
   }
-
-  // Подключаем новое; чиним разорванные соединения.
-  for (const row of rows ?? []) {
-    const existing = connected.get(row.id as string);
-    if (!existing) {
-      await connectAccount(row as Parameters<typeof connectAccount>[0]);
-      continue;
-    }
-    if (!existing.client.connected) {
-      try {
-        await existing.client.connect();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log('warn', `[${row.id}] reconnect failed: ${msg}`);
-        await disconnectAccount(row.id as string);
-        if (isAuthError(msg)) await markAuthError(row.id as string, msg);
-      }
-    }
-  }
+  return true;
 }
 
 async function main(): Promise<void> {
-  log('info', `Starting Sales Chat Logger worker (pid=${process.pid})`);
+  log('info', `Starting Sales Chat sync worker (pid=${process.pid})`);
   requireSupabaseAdmin(log);
   await startupRecovery();
 
   const shouldStop = setupGracefulShutdown(log);
-  log('info', `Reconcile loop started (${RECONCILE_MS}ms)`);
-
-  while (!shouldStop()) {
-    try {
-      await reconcile();
-    } catch (err) {
-      log('error', 'reconcile loop error', err);
-    }
-    await sleep(RECONCILE_MS);
-  }
-
-  log('info', 'Shutting down — disconnecting all accounts...');
-  for (const accountId of [...connected.keys()]) {
-    await disconnectAccount(accountId);
-  }
+  await pollLoop({
+    log,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    shouldStop,
+    pollOnce,
+    realtimeTables: ['sales_chat_sync_runs'],
+  });
   log('info', 'Worker stopped');
 }
 
