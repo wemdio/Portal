@@ -31,7 +31,23 @@
       "Bash(Select-Object -ExpandProperty Name)",
       "mcp__Claude_in_Chrome__navigate",
       "Bash(G:\\\\NodeJs\\\\npm.cmd run *)",
-      "Bash(git status *)"
+      "Bash(git status *)",
+      "Bash(Get-ChildItem -Path \"G:\\\\PycharmProjects\\\\Portal\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(curl -s \"https://api.telegram.org/bot8401764343:AAFsF2kRrAy19SukzHbQLqzqvS69Kujy25U/getWebhookInfo\")",
+      "mcp__Claude_in_Chrome__computer",
+      "Read(//c/Users/dimak/AppData/Roaming/Claude/local-agent-mode-sessions/skills-plugin/a903c7c0-4f00-43d8-bed0-374892e23f2b/ae35250f-3126-428c-8e77-04b7da1b6301/skills/xlsx/**)",
+      "Bash(python -c ' *)",
+      "Bash(Out-File -FilePath \"C:/Users/dimak/Downloads/xlsx_dump.txt\" -Encoding utf8)",
+      "Bash(Get-Content \"C:/Users/dimak/Downloads/xlsx_dump.txt\" -Encoding utf8)",
+      "Bash(Get-ChildItem -Recurse -Include \"*.ts\" -o -Include \"*.tsx\" -o -Include \"*.js\")",
+      "Bash(Select-Object -First 5)",
+      "Bash(Get-ChildItem -Path \"app/src\" -Recurse -Include \"*.tsx\" -o -Include \"*.ts\")",
+      "Bash(Select-String -Pattern \"extraction_type|startEnrich|CreateEnrichment\" -List)",
+      "Bash(Select-Object Filename)",
+      "Bash(npx tsc *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\dimak\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\G--PycharmProjects-Portal\\\\c07910ac-5986-437b-b877-65de03e699f5\\\\tasks\\\\bwtad9s7b.output\" -Encoding utf8 -Wait -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 30)"
     ]
   }
 }

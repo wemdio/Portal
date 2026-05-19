@@ -11,9 +11,15 @@ const JUNK_PATTERNS: RegExp[] = [
   /^title$/i, /^background$/i, /^slider$/i, /^slide$/i, /^hero$/i,
   /^подробнее$/i, /^читать$/i, /^смотреть$/i, /^узнать$/i,
   /^награда$/i, /^award$/i,
+  /^[0-9a-f]{6,}\s+\d/i, // CMS block/element IDs like "ced3ffbe 1 1"
+  /^otziv\d*$/i,          // CMS image filenames like "otziv3"
+  /^review\s*\d*$/i,      // alt="review1" artifacts
+  /^shape\s+\d+$/i,       // Figma/design "shape 4"
+  /^[a-z]{2,}\s+\d+[a-z]$/i, // "nutriciologiya sm@1x" style image names → caught by @
 ];
 
 const LOGO_PREFIX_RE = /^(?:лого(?:тип)?|logo)\s+/i;
+const REVIEW_PREFIX_RE = /^(?:review|otziv\w*|отзыв(?:\s+от)?)\s+/i;
 const DESCRIPTION_RE = /(?:клиент по|продвижен|кейс[аыов]*\s+с\s+описани|стратеги[яи]|результат|рекоменд|стать клиентом|видеоотзыв|мониторим|фильтруем|передаём|почему|юридическ|эффективнее|слайд|читать кейс|подробн|услуг[аи])/i;
 
 function isJunk(s: string): boolean {
@@ -23,6 +29,8 @@ function isJunk(s: string): boolean {
   if (DESCRIPTION_RE.test(s)) return true;
   if (/^https?:\/\//i.test(s)) return true;
   if (s.split(/\s+/).length > 8) return true;
+  if (/@/.test(s)) return true;  // filename artifacts like "sm@1x"
+  if (/%/.test(s)) return true;  // any percent: URL-encoded chars, "ppc%world"
   // CMS image hashes, design-tool exports, nav/CTA labels and marketing
   // service names are the dominant noise classes — reject them outright.
   if (isHashLike(s) || isDesignArtifact(s)) return true;
@@ -32,10 +40,16 @@ function isJunk(s: string): boolean {
 
 function cleanName(s: string): string {
   let cleaned = s.trim();
+  // Remove case/client label prefixes
   const casePrefix = /^(?:кейс|case|case study|клиент|проект|project)\s*[:—\-–]\s*(.+)$/i;
   const m = cleaned.match(casePrefix);
   if (m && m[1].trim()) cleaned = m[1].trim();
   cleaned = cleaned.replace(LOGO_PREFIX_RE, '').trim();
+  cleaned = cleaned.replace(REVIEW_PREFIX_RE, '').trim();
+  // Strip trailing CMS number suffixes: "friends 1", "bbdo n 1", "elama logo 1"
+  cleaned = cleaned.replace(/\s+(?:logo\s+)?\d{1,2}$/, '').trim();
+  // Strip trailing " n \d+" pattern (alt="brand n 1" from numbered logo walls)
+  cleaned = cleaned.replace(/\s+[nN]\s+\d+$/, '').trim();
   return cleaned;
 }
 
@@ -51,6 +65,7 @@ function nameFromSrc(src: string): string | null {
   if (name.length < 2 || name.length > 40) return null;
   if (/^(?:logo|img|image|icon|pic|photo|banner|bg|placeholder|default|noimage)\s*\d*$/i.test(name)) return null;
   if (isHashLike(name)) return null;
+  if (/logo/i.test(name)) return null; // "msslogo big" — logo image filenames
   return name;
 }
 
@@ -168,7 +183,7 @@ export function extractCustomers(html: string): string[] {
     $(CASE_CARD_SELECTOR).each((_, container) => {
       if (result.length >= CAP) return false;
       const heading = $(container).find('h2, h3, h4').first().text().trim();
-      if (heading) add(heading);
+      if (heading && !SECTION_HEADING_RE.test(heading)) add(heading);
       extractFromImages($, $(container), add);
     });
   }
