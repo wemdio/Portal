@@ -11,6 +11,12 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
+function buildReplySubject(subject?: string | null): string {
+  const trimmed = subject?.trim();
+  if (!trimmed) return 'Re:';
+  return /^re:/i.test(trimmed) ? trimmed : `Re: ${trimmed}`;
+}
+
 /**
  * POST /api/client/campaigns/[id]/replies/[emailId]/reply
  * Body: { body_text: string, cc?: string, bcc?: string }
@@ -60,6 +66,7 @@ export async function POST(
     await replyToEmail({
       reply_to_uuid: emailId,
       eaccount,
+      subject: buildReplySubject(original.subject),
       body: { text: validation.body_text! },
       ...(validation.cc ? { cc_address_email_list: validation.cc } : {}),
       ...(validation.bcc ? { bcc_address_email_list: validation.bcc } : {}),

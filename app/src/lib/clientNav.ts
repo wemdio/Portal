@@ -129,11 +129,19 @@ const monitoringGroup: ClientNavGroup = {
     },
     {
       id: 'replies',
-      label: 'Ответы и лиды',
-      labelEn: 'Replies & leads',
+      label: 'Ответы',
+      labelEn: 'Replies',
+      href: '/client/replies',
+      description: 'Ответы получателей по кампаниям',
+      descriptionEn: 'Recipient replies across campaigns',
+    },
+    {
+      id: 'leads',
+      label: 'Лиды',
+      labelEn: 'Leads',
       href: '/client/leads',
-      description: 'Ответы получателей и квалифицированные лиды',
-      descriptionEn: 'Recipient replies and qualified leads',
+      description: 'Диалоги, помеченные клиентом как лиды',
+      descriptionEn: 'Conversations marked as leads',
     },
     {
       id: 'reports',
