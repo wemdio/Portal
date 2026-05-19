@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
-import type { EmailSequenceV2LetterRow, EmailSequenceV2RunRow } from '@/types';
+import type { EmailSequenceV2LetterRow, EmailSequenceV2OutputLanguage, EmailSequenceV2RunRow } from '@/types';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 
 const VALUES_MODEL_OPTIONS = [
@@ -15,6 +15,14 @@ const WRITER_MODEL_OPTIONS = [
   { value: 'gpt-5.2', label: 'gpt-5.2 (качество писем)' },
   { value: 'gpt-4.1', label: 'gpt-4.1 (баланс)' },
   { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini (быстро)' },
+];
+
+// Язык, на котором инструмент пишет ценности и цепочку писем.
+// Входные данные (бриф, сегмент, правки) могут быть на любом из языков.
+const LANGUAGE_OPTIONS: Array<{ value: EmailSequenceV2OutputLanguage; label: string }> = [
+  { value: 'ru', label: '🇷🇺 Русский' },
+  { value: 'en', label: '🇬🇧 English' },
+  { value: 'pl', label: '🇵🇱 Polski' },
 ];
 
 const REQUEST_TIMEOUT_VALUES_MS = 5 * 60 * 1000;
@@ -266,6 +274,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
   const [notice, setNotice] = useState<string | null>(null);
   const [valuesModel, setValuesModel] = useState<string>(VALUES_MODEL_OPTIONS[0].value);
   const [writerModel, setWriterModel] = useState<string>(WRITER_MODEL_OPTIONS[0].value);
+  const [outputLanguage, setOutputLanguage] = useState<EmailSequenceV2OutputLanguage>('ru');
   const [briefFile, setBriefFile] = useState<File | null>(null);
   const [briefText, setBriefText] = useState<string>('');
   const [segmentText, setSegmentText] = useState<string>('');
@@ -292,6 +301,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     setPersonalizationOps(data.run.personalization_operators ?? '');
     setValuesModel(data.run.values_model ?? VALUES_MODEL_OPTIONS[0].value);
     setWriterModel(data.run.writer_model ?? WRITER_MODEL_OPTIONS[0].value);
+    setOutputLanguage(data.run.output_language ?? 'ru');
   }, []);
 
   useEffect(() => {
@@ -311,7 +321,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     try {
       const data = await authFetchJson<{ run: EmailSequenceV2RunRow }>('/api/tools/email-sequence-v2/runs', {
         method: 'POST',
-        body: JSON.stringify({ values_model: valuesModel, writer_model: writerModel }),
+        body: JSON.stringify({ values_model: valuesModel, writer_model: writerModel, output_language: outputLanguage }),
       });
       setRun(data.run);
       setLetters([]);
@@ -327,7 +337,26 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     } finally {
       setBusy(null);
     }
-  }, [loadRuns, showNotice, valuesModel, writerModel]);
+  }, [loadRuns, showNotice, valuesModel, writerModel, outputLanguage]);
+
+  // Смена языка вывода. Если запуск уже существует — сразу сохраняем выбор,
+  // чтобы он применился и к ценностям, и к генерации цепочки.
+  const changeLanguage = useCallback(
+    async (lang: EmailSequenceV2OutputLanguage) => {
+      setOutputLanguage(lang);
+      if (!run) return;
+      try {
+        const data = await authFetchJson<{ run: EmailSequenceV2RunRow }>(`/api/tools/email-sequence-v2/runs/${run.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ output_language: lang }),
+        });
+        setRun(data.run);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Ошибка');
+      }
+    },
+    [run],
+  );
 
   const resetForNewRun = useCallback(() => {
     setRun(null);
@@ -354,6 +383,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
         const fd = new FormData();
         fd.append('file', briefFile);
         fd.append('model', valuesModel);
+        fd.append('language', outputLanguage);
         const token = await getAccessToken();
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_VALUES_MS);
@@ -370,7 +400,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       } else {
         const fetchedRes = await authFetch(`/api/tools/email-sequence-v2/runs/${run.id}/extract-values`, {
           method: 'POST',
-          body: JSON.stringify({ text: briefText, model: valuesModel }),
+          body: JSON.stringify({ text: briefText, model: valuesModel, language: outputLanguage }),
         });
         res = fetchedRes;
       }
@@ -388,7 +418,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     } finally {
       setBusy(null);
     }
-  }, [briefFile, briefText, loadRuns, run, showNotice, valuesModel]);
+  }, [briefFile, briefText, loadRuns, run, showNotice, valuesModel, outputLanguage]);
 
   const saveStage2 = useCallback(async () => {
     if (!run) return;
@@ -442,7 +472,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       });
       const data = await authedFetchWithTimeout<{ run: EmailSequenceV2RunRow; letters: EmailSequenceV2LetterRow[] }>(
         `/api/tools/email-sequence-v2/runs/${run.id}/generate-letters`,
-        { method: 'POST', body: JSON.stringify({ model: writerModel }) },
+        { method: 'POST', body: JSON.stringify({ model: writerModel, language: outputLanguage }) },
         REQUEST_TIMEOUT_LETTERS_MS,
       );
       setRun(data.run);
@@ -453,7 +483,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
     } finally {
       setBusy(null);
     }
-  }, [customerEdits, personalizationOps, run, segmentText, showNotice, writerModel]);
+  }, [customerEdits, personalizationOps, run, segmentText, showNotice, writerModel, outputLanguage]);
 
   const saveLetter = useCallback(
     async (id: string, subject: string, body: string) => {
@@ -887,6 +917,19 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
             subtitle="Модель сгенерирует 4–6 писем по брифу, ценностям, сегменту и регламенту. Письма можно править, удалять и добавлять свои."
             right={
               <div className="flex items-end gap-3">
+                <label className="block">
+                  <div className="text-xs font-medium text-gray-600 mb-1">Язык цепочки</div>
+                  <select
+                    value={outputLanguage}
+                    onChange={(e) => changeLanguage(e.target.value as EmailSequenceV2OutputLanguage)}
+                    disabled={busy != null}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50"
+                  >
+                    {LANGUAGE_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </label>
                 <label className="block">
                   <div className="text-xs font-medium text-gray-600 mb-1">Модель писем</div>
                   <select

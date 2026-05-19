@@ -2,6 +2,8 @@
  * Реестр инструментов портала. Используется на странице /tools и в настройках видимости для пользователей.
  */
 
+import type { UserRole } from '@/types';
+
 /** Идентификаторы вкладок боковой панели, управляемых через admin */
 export const ALL_NAV_TAB_IDS = ['nav-tasks-board'] as const;
 export type NavTabId = (typeof ALL_NAV_TAB_IDS)[number];
@@ -47,12 +49,22 @@ export const ALL_TOOL_IDS = [
   'event-outreach',
   'reputation-finder',
   'our-bases',
+  'sales-chat-analyzer',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
 
 /** Tool IDs that are disabled by default (no visibility row = off). */
-export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['database-review'] as const;
+export const DEFAULT_OFF_TOOL_IDS: readonly ToolId[] = ['database-review', 'sales-chat-analyzer'] as const;
+
+/**
+ * Инструменты из DEFAULT_OFF_TOOL_IDS, которые всё же включены по умолчанию
+ * для перечисленных ролей. Per-user настройка в админке имеет приоритет.
+ */
+export const DEFAULT_ON_TOOL_IDS_BY_ROLE: Partial<Record<UserRole, readonly ToolId[]>> = {
+  technician: ['sales-chat-analyzer'],
+  admin: ['sales-chat-analyzer'],
+};
 
 export interface ToolConfig {
   id: ToolId;
@@ -314,6 +326,18 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/our-bases',
     accentColor: 'blue',
   },
+  'sales-chat-analyzer': {
+    id: 'sales-chat-analyzer',
+    title: 'Анализатор сейлз-переписок',
+    title_en: 'Sales chat analyzer',
+    description: 'Подключение Telegram-аккаунтов сейлз-менеджеров и запись всех их диалогов в базу.',
+    description_en: 'Connect sales managers’ Telegram accounts and log all their dialogs.',
+    href: '/tools/sales-chat-analyzer',
+    badge: 'Новое',
+    badge_en: 'New',
+    badgeVariant: 'emerald',
+    accentColor: 'emerald',
+  },
 };
 
 export interface ToolGroup {
@@ -326,7 +350,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',

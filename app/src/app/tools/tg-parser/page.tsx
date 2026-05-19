@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import {
@@ -17,8 +17,11 @@ import {
   Upload,
   Square,
   ScrollText,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
+import { useVirtualizer } from '@tanstack/react-virtual';
 
 import type { ParsedUser } from '@/lib/tgParser/types';
 import {
@@ -81,6 +84,296 @@ type TgParserLog = {
 };
 
 const API_ACCOUNTS = '/api/tools/tg-parser/accounts';
+
+/* ── Virtualized user table ── */
+
+function VirtualUserTable({ users }: { users: ParsedUser[] }) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const ROW_HEIGHT = 40;
+
+  const virtualizer = useVirtualizer({
+    count: users.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 20,
+  });
+
+  return (
+    <div ref={parentRef} className="overflow-x-auto max-h-[50vh] overflow-y-auto">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50 sticky top-0 z-10">
+          <tr>
+            {COLUMNS.map((col) => (
+              <th
+                key={col}
+                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
+              >
+                {col}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="bg-white relative" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((vRow) => {
+            const u = users[vRow.index];
+            return (
+              <tr
+                key={vRow.index}
+                className="hover:bg-gray-50 absolute w-full flex"
+                style={{
+                  height: ROW_HEIGHT,
+                  transform: `translateY(${vRow.start}px)`,
+                }}
+              >
+                {COLUMNS.map((col) => {
+                  const val = u[col];
+                  const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
+                  return (
+                    <td
+                      key={col}
+                      className="px-4 py-2 text-gray-700 max-w-[200px] truncate flex-none"
+                      style={{ width: 200, minWidth: 200 }}
+                    >
+                      {isLink && typeof val === 'string' && val.startsWith('http') ? (
+                        <a
+                          href={val}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline truncate block"
+                        >
+                          {val}
+                        </a>
+                      ) : (
+                        cellValue(val)
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ── Job card with lazy-loaded users ── */
+
+function JobCard({
+  job,
+  currentUserId,
+  exportingJobId,
+  stoppingJobId,
+  onExportCsv,
+  onExportExcel,
+  onRemove,
+  onStop,
+}: {
+  job: ParseJob;
+  currentUserId: string | null;
+  exportingJobId: string | null;
+  stoppingJobId: string | null;
+  onExportCsv: (job: ParseJob) => void;
+  onExportExcel: (job: ParseJob) => void;
+  onRemove: (id: string) => void;
+  onStop: (id: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [loadedUsers, setLoadedUsers] = useState<ParsedUser[] | null>(
+    job.users.length > 0 ? job.users : null,
+  );
+  const [usersLoading, setUsersLoading] = useState(false);
+
+  const canExpand = job.status === 'done' && job.userCount > 0;
+
+  const handleToggle = useCallback(async () => {
+    if (!canExpand) return;
+    const next = !expanded;
+    setExpanded(next);
+
+    if (next && !loadedUsers) {
+      setUsersLoading(true);
+      try {
+        const res = await authFetch(`/api/tools/tg-parser/jobs/${job.id}`);
+        if (res.ok) {
+          const { job: detail } = (await res.json()) as { job: { result_users: ParsedUser[] | null } };
+          setLoadedUsers(detail.result_users ?? []);
+        }
+      } catch {
+        /* ignore */
+      } finally {
+        setUsersLoading(false);
+      }
+    }
+  }, [canExpand, expanded, loadedUsers, job.id]);
+
+  const jobForExport = useMemo<ParseJob>(
+    () => (loadedUsers ? { ...job, users: loadedUsers } : job),
+    [job, loadedUsers],
+  );
+
+  return (
+    <div
+      className={`rounded-2xl border overflow-hidden ${
+        job.status === 'running'
+          ? 'border-blue-200 bg-blue-50/30'
+          : job.status === 'error'
+            ? 'border-red-200 bg-red-50/30'
+            : job.warning
+              ? 'border-amber-200 bg-amber-50/20'
+              : 'border-gray-200 bg-white'
+      }`}
+    >
+      <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1 flex-1">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            {canExpand && (
+              <button type="button" onClick={handleToggle} className="p-0.5 text-gray-400 hover:text-gray-700">
+                {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </button>
+            )}
+            {job.status === 'running' && (
+              <Loader2 className="h-4 w-4 animate-spin text-blue-600 shrink-0" />
+            )}
+            <span className="font-medium text-gray-900">{job.accountLabel}</span>
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${
+                currentUserId && job.userId === currentUserId
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-slate-100 text-slate-700'
+              }`}
+            >
+              {currentUserId && job.userId === currentUserId ? 'мой запуск' : 'чужой запуск'}
+            </span>
+            <span className="text-gray-500">
+              · {job.linkCount} {job.linkCount === 1 ? 'чат' : 'чатов'}
+            </span>
+            <span className="text-gray-400 text-xs truncate max-w-full" title={job.linksSummary}>
+              ({job.linksSummary})
+            </span>
+            {job.status === 'done' && job.userCount > 0 && (
+              <span className="text-gray-500 text-xs">
+                · {job.userCount.toLocaleString('ru-RU')} пользователей
+              </span>
+            )}
+          </div>
+          {job.status === 'error' && job.error && (
+            <p className="text-sm text-red-700">{job.error}</p>
+          )}
+          {job.status === 'done' && job.warning && (
+            <p className="text-sm text-amber-900/90">{job.warning}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {job.status === 'running' && currentUserId && job.userId === currentUserId && (
+            <button
+              type="button"
+              onClick={() => onStop(job.id)}
+              disabled={stoppingJobId === job.id}
+              className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+              title="Остановить задачу"
+            >
+              {stoppingJobId === job.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Square className="h-4 w-4" />
+              )}
+              Остановить
+            </button>
+          )}
+          {job.status === 'done' && job.userCount > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  if (loadedUsers) {
+                    onExportCsv(jobForExport);
+                  } else {
+                    void (async () => {
+                      const res = await authFetch(`/api/tools/tg-parser/jobs/${job.id}`);
+                      if (res.ok) {
+                        const { job: detail } = (await res.json()) as { job: { result_users: ParsedUser[] | null } };
+                        const users = detail.result_users ?? [];
+                        setLoadedUsers(users);
+                        onExportCsv({ ...job, users });
+                      }
+                    })();
+                  }
+                }}
+                disabled={exportingJobId === job.id}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+                CSV
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (loadedUsers) {
+                    onExportExcel(jobForExport);
+                  } else {
+                    void (async () => {
+                      const res = await authFetch(`/api/tools/tg-parser/jobs/${job.id}`);
+                      if (res.ok) {
+                        const { job: detail } = (await res.json()) as { job: { result_users: ParsedUser[] | null } };
+                        const users = detail.result_users ?? [];
+                        setLoadedUsers(users);
+                        onExportExcel({ ...job, users });
+                      }
+                    })();
+                  }
+                }}
+                disabled={exportingJobId === job.id}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                <FileSpreadsheet className="h-4 w-4" />
+                Excel
+              </button>
+            </>
+          )}
+          {job.status !== 'running' && currentUserId && job.userId === currentUserId && (
+            <button
+              type="button"
+              onClick={() => onRemove(job.id)}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+              title="Удалить запись из истории"
+            >
+              Скрыть
+            </button>
+          )}
+        </div>
+      </div>
+
+      {expanded && canExpand && (
+        <>
+          <div className="px-4 py-2 bg-gray-50/80 border-b border-gray-100">
+            <p className="text-sm text-gray-600">
+              Найдено пользователей:{' '}
+              <span className="font-semibold text-gray-900">{job.userCount.toLocaleString('ru-RU')}</span>
+            </p>
+          </div>
+          {usersLoading && (
+            <div className="flex items-center justify-center py-8 gap-2 text-sm text-gray-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Загрузка данных…
+            </div>
+          )}
+          {loadedUsers && loadedUsers.length > 0 && <VirtualUserTable users={loadedUsers} />}
+          {loadedUsers && loadedUsers.length === 0 && (
+            <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
+          )}
+        </>
+      )}
+
+      {!expanded && job.status === 'done' && job.userCount === 0 && (
+        <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
+      )}
+    </div>
+  );
+}
+
+/* ── Main page ── */
 
 export default function TgParserPage() {
   const [links, setLinks] = useState('');
@@ -343,7 +636,6 @@ export default function TgParserPage() {
     }
   }, [loadAccounts]);
 
-  // --- Parse: задачи в БД + отдельный worker (переживают перезагрузку страницы и рестарт portal) ---
   const runParse = useCallback(async () => {
     const linkList = links.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     if (linkList.length === 0) {
@@ -477,7 +769,7 @@ export default function TgParserPage() {
         }).join(',')
       );
       const csv = [header, ...rows].join('\n');
-      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
       const stamp = new Date(job.startedAt).toISOString().slice(0, 19).replace(/[:T]/g, '-');
       saveAs(blob, `tg-parser-${stamp}.csv`);
     } catch (e) {
@@ -1082,155 +1374,17 @@ export default function TgParserPage() {
           <div className="space-y-4">
             <h2 className="text-sm font-semibold text-gray-800">Задачи парсинга</h2>
             {parseJobs.map((job) => (
-              <div
+              <JobCard
                 key={job.id}
-                className={`rounded-2xl border overflow-hidden ${
-                  job.status === 'running'
-                    ? 'border-blue-200 bg-blue-50/30'
-                    : job.status === 'error'
-                      ? 'border-red-200 bg-red-50/30'
-                      : job.warning
-                        ? 'border-amber-200 bg-amber-50/20'
-                        : 'border-gray-200 bg-white'
-                }`}
-              >
-                <div className="p-4 border-b border-gray-200/80 flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      {job.status === 'running' && (
-                        <Loader2 className="h-4 w-4 animate-spin text-blue-600 shrink-0" />
-                      )}
-                      <span className="font-medium text-gray-900">{job.accountLabel}</span>
-                      <span
-                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${
-                          currentUserId && job.userId === currentUserId
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : 'bg-slate-100 text-slate-700'
-                        }`}
-                      >
-                        {currentUserId && job.userId === currentUserId ? 'мой запуск' : 'чужой запуск'}
-                      </span>
-                      <span className="text-gray-500">
-                        · {job.linkCount} {job.linkCount === 1 ? 'чат' : 'чатов'}
-                      </span>
-                      <span className="text-gray-400 text-xs truncate max-w-full" title={job.linksSummary}>
-                        ({job.linksSummary})
-                      </span>
-                    </div>
-                    {job.status === 'error' && job.error && (
-                      <p className="text-sm text-red-700">{job.error}</p>
-                    )}
-                    {job.status === 'done' && job.warning && (
-                      <p className="text-sm text-amber-900/90">{job.warning}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {job.status === 'running' && currentUserId && job.userId === currentUserId && (
-                      <button
-                        type="button"
-                        onClick={() => void stopParseJob(job.id)}
-                        disabled={stoppingJobId === job.id}
-                        className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                        title="Остановить задачу"
-                      >
-                        {stoppingJobId === job.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Square className="h-4 w-4" />
-                        )}
-                        Остановить
-                      </button>
-                    )}
-                    {job.status === 'done' && job.users.length > 0 && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => void exportJobCsv(job)}
-                          disabled={exportingJobId === job.id}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                        >
-                          <Download className="h-4 w-4" />
-                          CSV
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void exportJobExcel(job)}
-                          disabled={exportingJobId === job.id}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                        >
-                          <FileSpreadsheet className="h-4 w-4" />
-                          Excel
-                        </button>
-                      </>
-                    )}
-                    {job.status !== 'running' && currentUserId && job.userId === currentUserId && (
-                      <button
-                        type="button"
-                        onClick={() => void removeParseJob(job.id)}
-                        className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
-                        title="Удалить запись из истории"
-                      >
-                        Скрыть
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {job.status === 'done' && job.users.length > 0 && (
-                  <>
-                    <div className="px-4 py-2 bg-gray-50/80 border-b border-gray-100">
-                      <p className="text-sm text-gray-600">
-                        Найдено пользователей:{' '}
-                        <span className="font-semibold text-gray-900">{job.users.length}</span>
-                      </p>
-                    </div>
-                    <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
-                      <table className="min-w-full divide-y divide-gray-200 text-sm">
-                        <thead className="bg-gray-50 sticky top-0">
-                          <tr>
-                            {COLUMNS.map((col) => (
-                              <th
-                                key={col}
-                                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap"
-                              >
-                                {col}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200 bg-white">
-                          {job.users.map((u, i) => (
-                            <tr key={`${job.id}-${i}`} className="hover:bg-gray-50">
-                              {COLUMNS.map((col) => {
-                                const val = u[col];
-                                const isLink = col === 'Ссылка на источник' || col === 'Личный канал';
-                                return (
-                                  <td key={col} className="px-4 py-3 text-gray-700 max-w-[200px] truncate">
-                                    {isLink && typeof val === 'string' && val.startsWith('http') ? (
-                                      <a
-                                        href={val}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-blue-600 hover:underline truncate block"
-                                      >
-                                        {val}
-                                      </a>
-                                    ) : (
-                                      cellValue(val)
-                                    )}
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
-                )}
-                {job.status === 'done' && job.users.length === 0 && (
-                  <div className="p-4 text-sm text-gray-600">Контакты не найдены по заданным условиям.</div>
-                )}
-              </div>
+                job={job}
+                currentUserId={currentUserId}
+                exportingJobId={exportingJobId}
+                stoppingJobId={stoppingJobId}
+                onExportCsv={exportJobCsv}
+                onExportExcel={exportJobExcel}
+                onRemove={removeParseJob}
+                onStop={stopParseJob}
+              />
             ))}
           </div>
         )}

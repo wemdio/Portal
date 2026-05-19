@@ -56,7 +56,7 @@ function guessCompanyName(text: string): string | null {
 export function extractCompanyNameFromValuesHeader(values: string): string | null {
   const first = String(values ?? '').split('\n')[0]?.trim() ?? '';
   if (!first) return null;
-  const m = first.match(/^(?:ценности|values)\s+(.{2,160})$/i);
+  const m = first.match(/^(?:ценности|values|wartości)\s+(.{2,160})$/i);
   if (!m) return null;
   return m[1].trim().replace(/[«»"']/g, '').slice(0, 160);
 }

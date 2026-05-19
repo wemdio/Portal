@@ -2,10 +2,16 @@
  * Парсер ответа модели для «Цепочки писем 2.0».
  * Поддерживает два формата:
  * 1) Маркеры `---LETTER N---` (предпочтительно).
- * 2) Фолбэк: разбиение по строкам, начинающимся с `Тема:`.
+ * 2) Фолбэк: разбиение по строкам, начинающимся со слова темы.
+ *
+ * Слово темы локализовано под язык цепочки: `Тема:` (ru) / `Subject:` (en) /
+ * `Temat:` (pl) — распознаём все три варианта.
  *
  * Возвращает 4-6 писем с темой и телом.
  */
+
+/** Слово-маркер темы письма на поддерживаемых языках (ru/en/pl). */
+const SUBJECT_LABEL = 'Тема|Subject|Temat';
 
 export type ParsedLetter = {
   letter_index: number;
@@ -23,7 +29,7 @@ function splitSubject(content: string): { subject: string | null; body: string }
   const firstLineEnd = trimmed.indexOf('\n');
   const firstLine = firstLineEnd === -1 ? trimmed : trimmed.slice(0, firstLineEnd);
   const rest = firstLineEnd === -1 ? '' : trimmed.slice(firstLineEnd + 1);
-  const subjectMatch = firstLine.match(/^\s*Тема\s*:\s*(.+)\s*$/i);
+  const subjectMatch = firstLine.match(new RegExp(`^\\s*(?:${SUBJECT_LABEL})\\s*:\\s*(.+)\\s*$`, 'i'));
   if (subjectMatch) {
     return { subject: subjectMatch[1].trim(), body: rest.trim() };
   }
@@ -60,8 +66,11 @@ export function parseLettersFromModelOutput(raw: string): ParsedLetter[] {
     return dedupAndReindex(result);
   }
 
-  // Fallback: split on lines starting with "Тема:".
-  const blocks = text.split(/\n(?=\s*Тема\s*:)/i).map((b) => b.trim()).filter(Boolean);
+  // Fallback: split on lines starting with the subject label (ru/en/pl).
+  const blocks = text
+    .split(new RegExp(`\\n(?=\\s*(?:${SUBJECT_LABEL})\\s*:)`, 'i'))
+    .map((b) => b.trim())
+    .filter(Boolean);
   if (blocks.length >= 1) {
     return blocks.map((block, i) => {
       const { subject, body } = splitSubject(block);

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { callLLM } from '@/lib/emailSequenceV2/llm';
-import { PRIMER_PROMPT, TASK_PROMPT } from '@/lib/emailSequenceV2/prompts';
+import { getPrimerAck, getPrimerPrompt, getTaskPrompt, normalizeOutputLanguage } from '@/lib/emailSequenceV2/prompts';
 import { buildLetterGenerationContext } from '@/lib/emailSequenceV2/buildContext';
 import { parseLettersFromModelOutput } from '@/lib/emailSequenceV2/letterParser';
 import type { EmailSequenceV2RunRow } from '@/types';
@@ -40,9 +40,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   const route = req.nextUrl.pathname;
   const logMeta = { userId: user.id, requestId, route };
 
-  let body: { model?: string } = {};
+  let body: { model?: string; language?: string } = {};
   try {
-    body = (await req.json()) as { model?: string };
+    body = (await req.json()) as { model?: string; language?: string };
   } catch {
     body = {};
   }
@@ -68,6 +68,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   }
 
   const model = (body.model && body.model.trim()) || typedRun.writer_model || 'gpt-5.2';
+  const outputLanguage = normalizeOutputLanguage(body.language ?? typedRun.output_language);
 
   let tariffUsage: Awaited<ReturnType<typeof getClientTariffUsage>> | null = null;
   if (supabaseAdmin) {
@@ -104,6 +105,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     .update({
       status: 'generating_letters',
       writer_model: model,
+      output_language: outputLanguage,
       error_message: null,
     })
     .eq('id', runId);
@@ -121,10 +123,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     const raw = await callLLM({
       model,
       messages: [
-        { role: 'system', content: PRIMER_PROMPT },
+        { role: 'system', content: getPrimerPrompt(outputLanguage) },
         { role: 'user', content: userContext },
-        { role: 'assistant', content: 'Входящие данные обработаны. Жду команду.' },
-        { role: 'user', content: TASK_PROMPT },
+        { role: 'assistant', content: getPrimerAck(outputLanguage) },
+        { role: 'user', content: getTaskPrompt(outputLanguage) },
       ],
       temperature: 0.65,
       maxTokens: 6500,

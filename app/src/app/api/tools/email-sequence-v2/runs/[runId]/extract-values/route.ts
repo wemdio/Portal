@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { callLLM } from '@/lib/emailSequenceV2/llm';
-import { EXTRACT_VALUES_PROMPT } from '@/lib/emailSequenceV2/prompts';
+import { getExtractValuesPrompt, normalizeOutputLanguage } from '@/lib/emailSequenceV2/prompts';
 import { extractCompanyNameFromValuesHeader, extractTextFromBriefFile } from '@/lib/emailSequenceV2/briefExtractor';
 import { putMainS3Object } from '@/lib/mainS3Server';
 import { logError, logInfo } from '@/lib/loggerServer';
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   // Verify run ownership.
   const { data: run, error: runErr } = await supabase
     .from('email_sequence_v2_runs')
-    .select('id,user_id,values_model,company_name,brief_text,brief_file_name,brief_file_key')
+    .select('id,user_id,values_model,company_name,brief_text,brief_file_name,brief_file_key,output_language')
     .eq('id', runId)
     .single();
   if (runErr) return jsonError(runErr.message, runErr.code === 'PGRST116' ? 404 : 500);
@@ -48,21 +48,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   let briefFileName = run.brief_file_name ?? null;
   let briefFileKey = run.brief_file_key ?? null;
   let modelOverride: string | null = null;
+  let languageOverride: string | null = null;
 
   try {
     if (contentType.includes('application/json')) {
-      const body = (await req.json()) as { text?: string; model?: string };
+      const body = (await req.json()) as { text?: string; model?: string; language?: string };
       if (typeof body.text === 'string' && body.text.trim()) {
         briefText = body.text.trim();
         briefFileName = briefFileName ?? 'brief.txt';
       }
       if (typeof body.model === 'string') modelOverride = body.model.trim() || null;
+      if (typeof body.language === 'string') languageOverride = body.language.trim() || null;
     } else {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
       const text = formData.get('text') as string | null;
       const modelStr = formData.get('model') as string | null;
+      const languageStr = formData.get('language') as string | null;
       if (typeof modelStr === 'string') modelOverride = modelStr.trim() || null;
+      if (typeof languageStr === 'string') languageOverride = languageStr.trim() || null;
 
       if (file && file.size > 0) {
         const extracted = await extractTextFromBriefFile(file);
@@ -97,6 +101,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
   }
 
   const model = modelOverride ?? run.values_model ?? 'gpt-5.2';
+  const outputLanguage = normalizeOutputLanguage(languageOverride ?? run.output_language);
 
   await supabase
     .from('email_sequence_v2_runs')
@@ -106,6 +111,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
       brief_file_name: briefFileName,
       brief_file_key: briefFileKey,
       values_model: model,
+      output_language: outputLanguage,
       error_message: null,
     })
     .eq('id', runId);
@@ -125,7 +131,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ run
     const valuesText = await callLLM({
       model,
       messages: [
-        { role: 'system', content: EXTRACT_VALUES_PROMPT },
+        { role: 'system', content: getExtractValuesPrompt(outputLanguage) },
         {
           role: 'user',
           content: `Бриф компании:\n\n---\n${trimmedBrief}\n---\n\nИзвлеки ценности по инструкции выше.`,
