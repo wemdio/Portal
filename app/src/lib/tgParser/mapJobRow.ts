@@ -12,7 +12,8 @@ export type TgParserJobApiRow = {
     links_summary?: string;
   };
   account_id: string | null;
-  result_users: ParsedUser[] | null;
+  result_users?: ParsedUser[] | null;
+  user_count?: number;
   stop_reason: string | null;
   error_message: string | null;
   started_at: string | null;
@@ -30,6 +31,7 @@ export type ParseJobUi = {
   linksSummary: string;
   status: ParseJobStatus;
   users: ParsedUser[];
+  userCount: number;
   error?: string;
   warning?: string;
   startedAt: number;
@@ -51,6 +53,9 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
     warning = formatParseStopMessage(row.stop_reason, row.error_message ?? undefined);
   }
 
+  const users = Array.isArray(row.result_users) ? row.result_users : [];
+  const userCount = row.user_count ?? users.length;
+
   return {
     id: row.id,
     userId: row.user_id,
@@ -59,7 +64,8 @@ export function tgParserApiRowToUi(row: TgParserJobApiRow): ParseJobUi {
     linkCount: links.length,
     linksSummary: cfg.links_summary ?? '',
     status: uiStatus,
-    users: Array.isArray(row.result_users) ? row.result_users : [],
+    users,
+    userCount,
     error: row.error_message ?? undefined,
     warning,
     startedAt: new Date(row.started_at ?? row.created_at).getTime(),
