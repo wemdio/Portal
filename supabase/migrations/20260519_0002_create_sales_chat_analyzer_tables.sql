@@ -116,3 +116,12 @@ create trigger trg_sales_chat_dialogs_set_updated_at
 alter table public.sales_chat_accounts enable row level security;
 alter table public.sales_chat_dialogs enable row level security;
 alter table public.sales_chat_messages enable row level security;
+
+grant all on public.sales_chat_accounts to service_role;
+grant select, insert, update on public.sales_chat_accounts to authenticated;
+
+grant all on public.sales_chat_dialogs to service_role;
+grant select, insert, update on public.sales_chat_dialogs to authenticated;
+
+grant all on public.sales_chat_messages to service_role;
+grant select, insert, update on public.sales_chat_messages to authenticated;

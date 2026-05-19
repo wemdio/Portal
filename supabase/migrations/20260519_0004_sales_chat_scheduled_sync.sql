@@ -33,3 +33,6 @@ create unique index if not exists idx_sales_chat_sync_runs_scheduled_unique
 
 -- RLS включён без permissive-политик — доступ только через service role.
 alter table public.sales_chat_sync_runs enable row level security;
+
+grant all on public.sales_chat_sync_runs to service_role;
+grant select, insert, update on public.sales_chat_sync_runs to authenticated;
