@@ -637,31 +637,13 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-gray-900">Цепочки писем 2.0</h1>
-          </div>
-          <p className="text-sm text-gray-500 mt-1">
-            Загрузите бриф → получите ценности → опишите сегмент и правки → сгенерируйте цепочку и доредактируйте письма.
-          </p>
+      <div>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-gray-900">Цепочки писем 2.0</h1>
         </div>
-        <label className="block shrink-0">
-          <div className="text-xs font-medium text-gray-600 mb-1">Язык цепочки</div>
-          <select
-            value={outputLanguage}
-            onChange={(e) => changeLanguage(e.target.value as EmailSequenceV2OutputLanguage)}
-            disabled={busy != null}
-            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50"
-          >
-            {LANGUAGE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-          <div className="mt-1 text-[11px] text-gray-400 max-w-[220px]">
-            Ценности и письма будут на этом языке. Бриф можно загружать на любом.
-          </div>
-        </label>
+        <p className="text-sm text-gray-500 mt-1">
+          Загрузите бриф → получите ценности → опишите сегмент и правки → сгенерируйте цепочку и доредактируйте письма.
+        </p>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -935,6 +917,19 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
             subtitle="Модель сгенерирует 4–6 писем по брифу, ценностям, сегменту и регламенту. Письма можно править, удалять и добавлять свои."
             right={
               <div className="flex items-end gap-3">
+                <label className="block">
+                  <div className="text-xs font-medium text-gray-600 mb-1">Язык цепочки</div>
+                  <select
+                    value={outputLanguage}
+                    onChange={(e) => changeLanguage(e.target.value as EmailSequenceV2OutputLanguage)}
+                    disabled={busy != null}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400 disabled:opacity-50"
+                  >
+                    {LANGUAGE_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </label>
                 <label className="block">
                   <div className="text-xs font-medium text-gray-600 mb-1">Модель писем</div>
                   <select
