@@ -641,7 +641,7 @@ describe('Client Portal — empty new-user state', () => {
     expect(mockReadCampaignAnalyticsFromDb).not.toHaveBeenCalled();
   });
 
-  it('GET /leads returns items: [] when no forwarded leads', async () => {
+  it('GET /leads returns items: [] when no forwarded leads and no campaigns granted', async () => {
     const { GET } = await import('@/app/api/client/leads/route');
     const res = await GET(makeReq('http://x/api/client/leads'));
     expect((res as Response).status).toBe(200);
@@ -655,6 +655,67 @@ describe('Client Portal — empty new-user state', () => {
     expect(body.total).toBe(0);
     expect(body.limit).toBe(50);
     expect(body.offset).toBe(0);
+    expect(mockListEmails).not.toHaveBeenCalled();
+    expect(mockReadCampaignAnalyticsFromDb).not.toHaveBeenCalled();
+  });
+
+  it('GET /leads includes raw campaign replies even before they are forwarded as leads', async () => {
+    authState.accessRows = [
+      { resource_type: 'campaign', resource_id: ALLOWED_CAMPAIGN },
+    ];
+    mockReadCampaignAnalyticsFromDb.mockResolvedValueOnce({
+      campaigns: [{ id: ALLOWED_CAMPAIGN, name: 'Allowed Campaign' }],
+      lastSyncedAt: null,
+    });
+    mockListEmails.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'email-1',
+          campaign_id: ALLOWED_CAMPAIGN,
+          thread_id: 'thread-1',
+          lead: 'lead-1',
+          subject: 'Re: Intro',
+          body: { text: 'Interested, send details.' },
+          from_address_email: 'lead@example.com',
+          from_address_json: [{ address: 'lead@example.com', name: 'Lead Person' }],
+          timestamp_email: '2026-05-19T10:00:00.000Z',
+          ue_type: 2,
+          is_unread: 1,
+          ai_interest_value: 5,
+        },
+      ],
+      next_starting_after: null,
+    });
+
+    const { GET } = await import('@/app/api/client/leads/route');
+    const res = await GET(makeReq('http://x/api/client/leads?limit=30&offset=0'));
+
+    expect((res as Response).status).toBe(200);
+    expect(mockListEmails).toHaveBeenCalledWith(expect.objectContaining({
+      campaign_id: ALLOWED_CAMPAIGN,
+      ue_type: 2,
+      limit: 100,
+    }));
+    const body = (await (res as Response).json()) as {
+      items: Array<Record<string, unknown>>;
+      total: number;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      id: `reply:${ALLOWED_CAMPAIGN}:email-1`,
+      source: 'reply',
+      campaign_id: ALLOWED_CAMPAIGN,
+      campaign_name: 'Allowed Campaign',
+      lead_email: 'lead@example.com',
+      lead_name: 'Lead Person',
+      reply_subject: 'Re: Intro',
+      reply_body: 'Interested, send details.',
+      reply_timestamp: '2026-05-19T10:00:00.000Z',
+      email_id: 'email-1',
+      thread_id: 'thread-1',
+      is_unread: true,
+      ai_interest_value: 5,
+    });
   });
 
   it('GET /bases returns campaigns: [] when no campaigns granted', async () => {
